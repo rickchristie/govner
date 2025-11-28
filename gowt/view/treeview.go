@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -713,13 +714,13 @@ func (v TreeView) renderHeader() string {
 		colorIdx := v.animFrame % len(SpinnerColors)
 		spinnerStyle := lipgloss.NewStyle().Foreground(SpinnerColors[colorIdx])
 		runningStr := spinnerStyle.Render(fmt.Sprintf("%s %d", SpinnerFrames[frame], running))
-		elapsedStr := v.styles.elapsed.Render(fmt.Sprintf("(%.1fs)", elapsed))
+		elapsedStr := v.styles.elapsed.Render(fmt.Sprintf("(%s)", time.Duration(elapsed*float64(time.Second)).Round(time.Millisecond*100)))
 
 		header = statusIndicator + " " + v.styles.header.Render("GOWT") + "  " +
 			passedStr + "  " + failedStr + "  " + skippedStr + "  " + runningStr + "  " + elapsedStr
 	} else {
 		// Done: hide running count, show "Done (time)"
-		doneStr := v.styles.passed.Render(fmt.Sprintf("Done (%.1fs)", elapsed))
+		doneStr := v.styles.passed.Render(fmt.Sprintf("Done (%s)", time.Duration(elapsed*float64(time.Second)).Round(time.Millisecond*100)))
 
 		header = statusIndicator + " " + v.styles.header.Render("GOWT") + "  " +
 			passedStr + "  " + failedStr + "  " + skippedStr + "  " + doneStr
@@ -879,7 +880,7 @@ func (v TreeView) getRenderedSuffix(node *model.TestNode) string {
 
 	// Elapsed time
 	if node.Elapsed > 0 {
-		suffix += v.styles.elapsed.Render(fmt.Sprintf(" %.2fs", node.Elapsed))
+		suffix += v.styles.elapsed.Render(" " + time.Duration(node.Elapsed*float64(time.Second)).Round(time.Millisecond*10).String())
 	}
 
 	// Cache result
@@ -915,7 +916,7 @@ func (v TreeView) renderNode(node *model.TestNode, selected bool) string {
 		}
 	}
 	if node.Elapsed > 0 {
-		suffixWidth += 1 + 5 // " " + "X.XXs" (approximate)
+		suffixWidth += 1 + 9 // " " + elapsed time (e.g., "10h30m0s")
 	}
 
 	// Total width calculation
