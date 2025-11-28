@@ -2,7 +2,7 @@
 
 A terminal-based UI for running and viewing Go test results in real-time.
 
-![gowt demo](/gowt/demo.gif)
+![gowt demo](/gowt/docs/peek.gif)
 
 ## Features
 
