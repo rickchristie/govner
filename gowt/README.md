@@ -20,7 +20,13 @@ A terminal-based UI for running and viewing Go test results in real-time.
 go install github.com/rickchristie/govner/gowt@latest
 ```
 
-Make sure `$GOPATH/bin` (or `$HOME/go/bin`) is in your `PATH`.
+Make sure `$GOPATH/bin` is in your `PATH`. Add this to your shell profile (`~/.bashrc`, `~/.zshrc`, or `~/.profile`):
+
+```bash
+export PATH="$PATH:$(go env GOPATH)/bin"
+```
+
+Then reload your shell or run `source ~/.bashrc`.
 
 ## Usage
 
