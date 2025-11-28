@@ -10,10 +10,14 @@ import (
 func main() {
 	args := os.Args[1:]
 
-	// Check for help flag
+	// Check for help and version flags
 	for _, arg := range args {
 		if arg == "--help" || arg == "-h" {
 			printUsage()
+			return
+		}
+		if arg == "--version" || arg == "-v" {
+			fmt.Printf("gowt version %s\n", Version)
 			return
 		}
 	}
@@ -75,7 +79,7 @@ func runLiveMode(args []string) int {
 }
 
 func printUsage() {
-	fmt.Println("gowt - Go Test Watcher TUI")
+	fmt.Printf("gowt - Go Test Watcher TUI (v%s)\n", Version)
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Println("  gowt [packages]              Run go test with live TUI")
@@ -83,6 +87,7 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("Flags:")
 	fmt.Println("  --load, -l <file>   Load test results from a JSON file (go test -json output)")
+	fmt.Println("  --version, -v       Show version")
 	fmt.Println("  --help, -h          Show this help message")
 	fmt.Println()
 	fmt.Println("Examples:")
