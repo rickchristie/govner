@@ -54,6 +54,11 @@ type ShowHelpRequest struct{}
 
 func (ShowHelpRequest) isTreeViewRequest() {}
 
+// StopRequest is emitted when user wants to stop the running tests
+type StopRequest struct{}
+
+func (StopRequest) isTreeViewRequest() {}
+
 // FilterMode represents the current filter state
 type FilterMode int
 
@@ -122,8 +127,10 @@ type treeStyles struct {
 	barRemaining [21]string // "─" repeated 0-20 times, styled dim
 
 	// Pre-computed help bar widths (avoids lipgloss.Width() per frame)
-	helpBarWidthAll   int // Width of help bar when filter is "All"
-	helpBarWidthFocus int // Width of help bar when filter is "Focus"
+	helpBarWidthAll        int // Width of help bar when filter is "All" (not running)
+	helpBarWidthFocus      int // Width of help bar when filter is "Focus" (not running)
+	helpBarWidthAllRun     int // Width of help bar when filter is "All" (running)
+	helpBarWidthFocusRun   int // Width of help bar when filter is "Focus" (running)
 }
 
 func defaultTreeStyles() treeStyles {
@@ -154,6 +161,8 @@ func defaultTreeStyles() treeStyles {
 	// Pre-compute help bar widths (avoids lipgloss.Width() per frame)
 	helpBarAll := "[Space All]  [Arrows Navigate]  [↵ Logs]  [r Rerun]  [? Help]  [q Quit]"
 	helpBarFocus := "[Space Focus]  [Arrows Navigate]  [↵ Logs]  [r Rerun]  [? Help]  [q Quit]"
+	helpBarAllRun := "[Space All]  [Arrows Navigate]  [↵ Logs]  [s Stop]  [? Help]  [q Quit]"
+	helpBarFocusRun := "[Space Focus]  [Arrows Navigate]  [↵ Logs]  [s Stop]  [? Help]  [q Quit]"
 
 	return treeStyles{
 		header: lipgloss.NewStyle().
@@ -198,8 +207,10 @@ func defaultTreeStyles() treeStyles {
 		barRemaining: barRemaining,
 
 		// Pre-computed help bar widths
-		helpBarWidthAll:   lipgloss.Width(helpBarAll),
-		helpBarWidthFocus: lipgloss.Width(helpBarFocus),
+		helpBarWidthAll:      lipgloss.Width(helpBarAll),
+		helpBarWidthFocus:    lipgloss.Width(helpBarFocus),
+		helpBarWidthAllRun:   lipgloss.Width(helpBarAllRun),
+		helpBarWidthFocusRun: lipgloss.Width(helpBarFocusRun),
 	}
 }
 
@@ -289,6 +300,7 @@ type treeKeyMap struct {
 	Filter       key.Binding
 	Rerun        key.Binding
 	RerunFailed  key.Binding
+	Stop         key.Binding
 	Quit         key.Binding
 	Top          key.Binding
 	Bottom       key.Binding
@@ -307,6 +319,7 @@ var treeKeys = treeKeyMap{
 	Filter:       key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "filter")),
 	Rerun:        key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rerun")),
 	RerunFailed:  key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rerun failed")),
+	Stop:         key.NewBinding(key.WithKeys("s", "S"), key.WithHelp("s", "stop")),
 	Quit:         key.NewBinding(key.WithKeys("q", "Q", "ctrl+c"), key.WithHelp("q", "quit")),
 	Top:          key.NewBinding(key.WithKeys("g", "ctrl+home"), key.WithHelp("g", "top")),
 	Bottom:       key.NewBinding(key.WithKeys("G", "ctrl+end"), key.WithHelp("G", "bottom")),
@@ -392,6 +405,11 @@ func (v TreeView) Update(msg tea.Msg) (TreeView, tea.Cmd, TreeViewRequest) {
 
 		case key.Matches(msg, treeKeys.RerunFailed):
 			request = RerunFailedRequest{}
+
+		case key.Matches(msg, treeKeys.Stop):
+			if v.running {
+				request = StopRequest{}
+			}
 
 		case key.Matches(msg, treeKeys.Quit):
 			request = QuitRequest{}
@@ -731,16 +749,24 @@ func (v TreeView) renderHeader() string {
 
 func (v TreeView) renderHelpBar() string {
 	filterText := fmt.Sprintf("[Space %s]", v.filter)
-	help := filterText + "  [Arrows Navigate]  [↵ Logs]  [r Rerun]  [? Help]  [q Quit]"
-	helpRendered := v.styles.helpBar.Render(help)
-
-	// Use pre-computed help bar width based on filter mode
+	var help string
 	var helpWidth int
-	if v.filter == FilterFocus {
-		helpWidth = v.styles.helpBarWidthFocus
+	if v.running {
+		help = filterText + "  [Arrows Navigate]  [↵ Logs]  [s Stop]  [? Help]  [q Quit]"
+		if v.filter == FilterFocus {
+			helpWidth = v.styles.helpBarWidthFocusRun
+		} else {
+			helpWidth = v.styles.helpBarWidthAllRun
+		}
 	} else {
-		helpWidth = v.styles.helpBarWidthAll
+		help = filterText + "  [Arrows Navigate]  [↵ Logs]  [r Rerun]  [? Help]  [q Quit]"
+		if v.filter == FilterFocus {
+			helpWidth = v.styles.helpBarWidthFocus
+		} else {
+			helpWidth = v.styles.helpBarWidthAll
+		}
 	}
+	helpRendered := v.styles.helpBar.Render(help)
 
 	// Add scroll info (similar to LogView)
 	scrollInfo := ""

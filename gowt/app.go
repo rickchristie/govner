@@ -561,6 +561,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Show rerun confirmation modal
 				a.showRerunModal = true
 				a.rerunModalChoice = 1 // Default to "No"
+
+			case view.StopRequest:
+				// Stop the running tests
+				if a.stream != nil {
+					a.stream.Kill()
+				}
+				a.running = false
+				a.tree.Elapsed = time.Since(a.startTime).Seconds()
+				a.treeView = a.treeView.SetData(a.tree)
+				a.treeView = a.treeView.SetRunning(false)
 			}
 		}
 
