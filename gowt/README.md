@@ -134,8 +134,9 @@ The `c` key in log view copies test output to your clipboard. Supported clipboar
 - **macOS**: `pbcopy` (built-in)
 - **Windows/WSL**: `clip.exe` (built-in)
 
-## Notice
-- Vibe-coded with Claude Code.
+## Special Thanks
+
+Vibe-coded with Claude Code.
 
 ## License
 
