@@ -5,6 +5,7 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/rickchristie/govner/gowt/meta"
 )
 
 func main() {
@@ -17,7 +18,7 @@ func main() {
 			return
 		}
 		if arg == "--version" || arg == "-v" {
-			fmt.Printf("gowt version %s\n", Version)
+			fmt.Printf("gowt version %s\n", meta.Version)
 			return
 		}
 	}
@@ -79,7 +80,7 @@ func runLiveMode(args []string) int {
 }
 
 func printUsage() {
-	fmt.Printf("gowt - Go Test Watcher TUI (v%s)\n", Version)
+	fmt.Printf("gowt - Go Test Watcher TUI (v%s)\n", meta.Version)
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Println("  gowt [packages]              Run go test with live TUI")

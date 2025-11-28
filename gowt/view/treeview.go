@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/rickchristie/govner/gowt/meta"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -734,13 +735,13 @@ func (v TreeView) renderHeader() string {
 		runningStr := spinnerStyle.Render(fmt.Sprintf("%s %d", SpinnerFrames[frame], running))
 		elapsedStr := v.styles.elapsed.Render(fmt.Sprintf("(%s)", time.Duration(elapsed*float64(time.Second)).Round(time.Millisecond*100)))
 
-		header = statusIndicator + " " + v.styles.header.Render("GOWT") + "  " +
+		header = statusIndicator + " " + v.styles.header.Render("GOWT") + " " + v.styles.elapsed.Render(meta.Version) + "  " +
 			passedStr + "  " + failedStr + "  " + skippedStr + "  " + runningStr + "  " + elapsedStr
 	} else {
 		// Done: hide running count, show "Done (time)"
 		doneStr := v.styles.passed.Render(fmt.Sprintf("Done (%s)", time.Duration(elapsed*float64(time.Second)).Round(time.Millisecond*100)))
 
-		header = statusIndicator + " " + v.styles.header.Render("GOWT") + "  " +
+		header = statusIndicator + " " + v.styles.header.Render("GOWT") + " " + v.styles.elapsed.Render(meta.Version) + "  " +
 			passedStr + "  " + failedStr + "  " + skippedStr + "  " + doneStr
 	}
 

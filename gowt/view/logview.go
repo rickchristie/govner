@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/rickchristie/govner/gowt/meta"
 	model "github.com/rickchristie/govner/gowt/model"
 )
 
@@ -812,7 +813,7 @@ func (v LogView) View() string {
 
 func (v LogView) renderHeader() string {
 	if v.node == nil {
-		return v.styles.header.Render(IconCharGear + " GOWT")
+		return v.styles.header.Render(IconCharGear+" GOWT") + " " + v.styles.helpBar.Render(meta.Version)
 	}
 
 	var logo string
@@ -828,7 +829,7 @@ func (v LogView) renderHeader() string {
 	statusIndicator := v.renderStatusIcon(v.node.Status)
 	path := model.ShortPath(v.node.FullPath)
 
-	return logo + " " + v.styles.header.Render("GOWT") + "  " + statusIndicator + " " + path
+	return logo + " " + v.styles.header.Render("GOWT") + " " + v.styles.helpBar.Render(meta.Version) + "  " + statusIndicator + " " + path
 }
 
 func (v LogView) renderHelpBar() string {
