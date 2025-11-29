@@ -1,6 +1,7 @@
 # gowt - Go Test Watcher TUI
 
-A terminal-based UI for running and viewing Go test results in real-time.
+A terminal-based UI for running and viewing Go test results and logs in real-time.
+
 Vibe-coded with Claude Code. Useful when you have thousands of tests to run.
 
 ![gowt demo](/gowt/docs/peek.gif)
