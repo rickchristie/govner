@@ -79,6 +79,9 @@ var (
 
 	// Raw spinner frames (no color, for selected rows)
 	SpinnerRaw [10]string
+
+	// Pre-rendered gear icons with spinner colors: [colorIndex] = rendered string
+	SpinnerGearRendered [12]string
 )
 
 func init() {
@@ -119,6 +122,12 @@ func init() {
 			SpinnerRenderedCompact[frame][colorIdx] = style.Render(SpinnerFrames[frame])
 		}
 	}
+
+	// Pre-render gear icons with spinner colors
+	for colorIdx := 0; colorIdx < len(SpinnerColors); colorIdx++ {
+		style := lipgloss.NewStyle().Foreground(SpinnerColors[colorIdx])
+		SpinnerGearRendered[colorIdx] = style.Render(IconCharGear)
+	}
 }
 
 // GetSpinnerIcon returns the pre-rendered spinner icon for the given animation frame.
@@ -148,6 +157,5 @@ func GetSpinnerIconRaw(animFrame int) string {
 // Used in the header during test runs.
 func GetSpinnerGear(animFrame int) string {
 	colorIdx := animFrame % len(SpinnerColors)
-	style := lipgloss.NewStyle().Foreground(SpinnerColors[colorIdx])
-	return style.Render(IconCharGear)
+	return SpinnerGearRendered[colorIdx]
 }
