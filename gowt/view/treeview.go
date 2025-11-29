@@ -1111,6 +1111,13 @@ func (v TreeView) renderProgressBar(passed, failed, skipped, total, width int) s
 	skippedW := (skipped * width) / total
 	remaining := width - passedW - failedW - skippedW
 
+	// Clamp values to valid array bounds [0, width] to prevent panics
+	// from edge cases like count inconsistencies or rounding issues
+	passedW = max(0, min(passedW, width))
+	failedW = max(0, min(failedW, width))
+	skippedW = max(0, min(skippedW, width))
+	remaining = max(0, min(remaining, width))
+
 	// Use pre-rendered bar segments - no Repeat() or Render() calls
 	return v.styles.barPassed[passedW] +
 		v.styles.barFailed[failedW] +
