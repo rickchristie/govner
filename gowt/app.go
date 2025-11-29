@@ -99,6 +99,10 @@ type App struct {
 	logRerunModalChoice int             // 0 = Yes, 1 = No
 	logRerunNode        *model.TestNode // The test to rerun
 
+	// Stop confirmation modal
+	showStopModal   bool
+	stopModalChoice int // 0 = Yes, 1 = No
+
 	// Run generation counter to distinguish between test runs
 	runGen int
 }
@@ -375,6 +379,54 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Continue processing non-keyboard messages (events, ticks, etc.)
 	}
 
+	// Handle stop modal keyboard input (but don't block other message types)
+	if a.showStopModal {
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+			switch keyMsg.String() {
+			case "left", "h":
+				a.stopModalChoice = 0 // Yes
+				return a, nil
+			case "right", "l":
+				a.stopModalChoice = 1 // No
+				return a, nil
+			case "enter":
+				if a.stopModalChoice == 0 {
+					// Stop the running tests
+					a.showStopModal = false
+					if a.stream != nil {
+						a.stream.Kill()
+					}
+					a.running = false
+					a.tree.Elapsed = time.Since(a.startTime).Seconds()
+					a.treeView = a.treeView.SetData(a.tree)
+					a.treeView = a.treeView.SetRunning(false)
+					a.treeView = a.treeView.SetStopped(true)
+					return a, nil
+				}
+				// Cancel - hide modal
+				a.showStopModal = false
+				return a, nil
+			case "y", "Y":
+				a.showStopModal = false
+				if a.stream != nil {
+					a.stream.Kill()
+				}
+				a.running = false
+				a.tree.Elapsed = time.Since(a.startTime).Seconds()
+				a.treeView = a.treeView.SetData(a.tree)
+				a.treeView = a.treeView.SetRunning(false)
+				a.treeView = a.treeView.SetStopped(true)
+				return a, nil
+			case "n", "N", "esc":
+				a.showStopModal = false
+				return a, nil
+			}
+			// Ignore other keys while modal is open
+			return a, nil
+		}
+		// Continue processing non-keyboard messages (events, ticks, etc.)
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
@@ -565,15 +617,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.rerunModalChoice = 1 // Default to "No"
 
 			case view.StopRequest:
-				// Stop the running tests
-				if a.stream != nil {
-					a.stream.Kill()
-				}
-				a.running = false
-				a.tree.Elapsed = time.Since(a.startTime).Seconds()
-				a.treeView = a.treeView.SetData(a.tree)
-				a.treeView = a.treeView.SetRunning(false)
-				a.treeView = a.treeView.SetStopped(true)
+				// Show stop confirmation modal
+				a.showStopModal = true
+				a.stopModalChoice = 1 // Default to "No"
 			}
 		}
 
@@ -689,6 +735,17 @@ func (a App) View() string {
 			content,
 			"Rerun this test?",
 			a.logRerunModalChoice == 0, // yesSelected
+			a.width,
+			a.height,
+		)
+	}
+
+	// Overlay stop confirmation modal if shown
+	if a.showStopModal {
+		content = view.RenderConfirmModal(
+			content,
+			"Stop running tests?",
+			a.stopModalChoice == 0, // yesSelected
 			a.width,
 			a.height,
 		)
