@@ -496,6 +496,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.tree = model.NewTestTree()
 		a.treeView = a.treeView.SetData(a.tree)
 		a.treeView = a.treeView.SetRunning(true)
+		a.treeView = a.treeView.SetStopped(false)
 		a.startTime = time.Now()
 		a.running = true
 		a.stderrPkg = ""
@@ -511,6 +512,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.tree = model.NewTestTree()
 		a.treeView = a.treeView.SetData(a.tree)
 		a.treeView = a.treeView.SetRunning(true)
+		a.treeView = a.treeView.SetStopped(false)
 		a.startTime = time.Now()
 		a.running = true
 		a.stderrPkg = ""
@@ -571,6 +573,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.tree.Elapsed = time.Since(a.startTime).Seconds()
 				a.treeView = a.treeView.SetData(a.tree)
 				a.treeView = a.treeView.SetRunning(false)
+				a.treeView = a.treeView.SetStopped(true)
 			}
 		}
 

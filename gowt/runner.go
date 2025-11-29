@@ -6,6 +6,7 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"syscall"
 
 	model "github.com/rickchristie/govner/gowt/model"
 )
@@ -77,6 +78,8 @@ func (r *RealTestRunner) CleanCache() error {
 // startCommand creates and starts a command, returning an EventStream
 func (r *RealTestRunner) startCommand(args []string) (EventStream, error) {
 	cmd := exec.Command("go", args...)
+	// Create a new process group so we can kill all child processes
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -139,7 +142,14 @@ func (s *realEventStream) Done() <-chan TestResult {
 // Kill implements EventStream.Kill
 func (s *realEventStream) Kill() error {
 	if s.cmd != nil && s.cmd.Process != nil {
-		err := s.cmd.Process.Kill()
+		// Kill the entire process group (negative PID) to kill all child processes
+		pgid, err := syscall.Getpgid(s.cmd.Process.Pid)
+		if err == nil {
+			syscall.Kill(-pgid, syscall.SIGKILL)
+		} else {
+			// Fallback to killing just the process
+			s.cmd.Process.Kill()
+		}
 		s.cmd.Wait() // Clean up zombie process
 		return err
 	}

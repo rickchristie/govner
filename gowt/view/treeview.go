@@ -89,6 +89,7 @@ type TreeView struct {
 	ready        bool
 	styles       treeStyles
 	running      bool // Whether tests are still running
+	stopped      bool // Whether tests were stopped by user
 	animFrame    int  // Animation frame for spinner
 	selectorAnim int  // Animation frame for selector (0 = no animation)
 	expanded     bool // Track if tree is in expanded state (for toggle)
@@ -264,6 +265,12 @@ func (v TreeView) getVisibleNodes() []*model.TestNode {
 // SetRunning sets whether tests are still running
 func (v TreeView) SetRunning(running bool) TreeView {
 	v.running = running
+	return v
+}
+
+// SetStopped sets whether tests were stopped by user
+func (v TreeView) SetStopped(stopped bool) TreeView {
+	v.stopped = stopped
 	return v
 }
 
@@ -738,11 +745,17 @@ func (v TreeView) renderHeader() string {
 		header = statusIndicator + " " + v.styles.header.Render("GOWT") + " " + v.styles.elapsed.Render(meta.Version) + "  " +
 			passedStr + "  " + failedStr + "  " + skippedStr + "  " + runningStr + "  " + elapsedStr
 	} else {
-		// Done: hide running count, show "Done (time)"
-		doneStr := v.styles.passed.Render(fmt.Sprintf("Done (%s)", time.Duration(elapsed*float64(time.Second)).Round(time.Millisecond*100)))
+		// Not running: show "Stopped" (red) or "Done" (green)
+		var statusStr string
+		elapsedFmt := time.Duration(elapsed * float64(time.Second)).Round(time.Millisecond * 100)
+		if v.stopped {
+			statusStr = v.styles.failed.Render(fmt.Sprintf("Stopped (%s)", elapsedFmt))
+		} else {
+			statusStr = v.styles.passed.Render(fmt.Sprintf("Done (%s)", elapsedFmt))
+		}
 
 		header = statusIndicator + " " + v.styles.header.Render("GOWT") + " " + v.styles.elapsed.Render(meta.Version) + "  " +
-			passedStr + "  " + failedStr + "  " + skippedStr + "  " + doneStr
+			passedStr + "  " + failedStr + "  " + skippedStr + "  " + statusStr
 	}
 
 	return header
