@@ -826,10 +826,14 @@ func (v LogView) renderHeader() string {
 		logo = IconGearPassed // Pre-rendered green gear
 	}
 
+	// Build test counts string (completed/total) from node's subtree counts
+	completed := v.node.PassedCount + v.node.FailedCount + v.node.SkippedCount
+	countsStr := fmt.Sprintf("(%d/%d)", completed, v.node.TotalCount)
+
 	statusIndicator := v.renderStatusIcon(v.node.Status)
 	path := model.ShortPath(v.node.FullPath)
 
-	return logo + " " + v.styles.header.Render("GOWT") + " " + v.styles.helpBar.Render(meta.Version) + "  " + statusIndicator + " " + path
+	return logo + " " + v.styles.header.Render("GOWT") + " " + v.styles.helpBar.Render(meta.Version) + " " + v.styles.helpBar.Render(countsStr) + " " + statusIndicator + " " + path
 }
 
 func (v LogView) renderHelpBar() string {
