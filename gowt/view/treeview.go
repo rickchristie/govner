@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/rickchristie/govner/gowt/meta"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
+	"github.com/rickchristie/govner/gowt/meta"
 	model "github.com/rickchristie/govner/gowt/model"
+	"github.com/rickchristie/govner/gowt/util"
 )
 
 // TreeViewRequest represents a request from TreeView to the controller
@@ -97,6 +98,11 @@ type TreeView struct {
 	// Cache for visible nodes to avoid repeated sort+flatten
 	cachedNodes      []*model.TestNode // Cached result of getVisibleNodes()
 	cachedNodesValid bool              // Whether cache is valid
+
+	// Search state
+	searchMode    bool           // Whether search input mode is active
+	searchQuery   string         // Current search query (empty = no filtering)
+	searchMatches map[*model.TestNode]int // Match index for each node (-1 = no direct match but has matching descendant)
 }
 
 type treeStyles struct {
@@ -133,6 +139,9 @@ type treeStyles struct {
 	helpBarWidthFocus      int // Width of help bar when filter is "Focus" (not running)
 	helpBarWidthAllRun     int // Width of help bar when filter is "All" (running)
 	helpBarWidthFocusRun   int // Width of help bar when filter is "Focus" (running)
+
+	// Search highlighting
+	searchHighlight lipgloss.Style // Yellow background for matched text
 }
 
 func defaultTreeStyles() treeStyles {
@@ -213,6 +222,11 @@ func defaultTreeStyles() treeStyles {
 		helpBarWidthFocus:    lipgloss.Width(helpBarFocus),
 		helpBarWidthAllRun:   lipgloss.Width(helpBarAllRun),
 		helpBarWidthFocusRun: lipgloss.Width(helpBarFocusRun),
+
+		// Search highlighting
+		searchHighlight: lipgloss.NewStyle().
+			Background(lipgloss.Color("220")).
+			Foreground(lipgloss.Color("0")),
 	}
 }
 
@@ -248,7 +262,7 @@ func (v TreeView) refreshCache() TreeView {
 	if v.cachedNodesValid {
 		return v
 	}
-	v.cachedNodes = v.computeVisibleNodes()
+	v.cachedNodes, v.searchMatches = v.computeVisibleNodes()
 	v.cachedNodesValid = true
 	return v
 }
@@ -259,7 +273,8 @@ func (v TreeView) getVisibleNodes() []*model.TestNode {
 	if v.cachedNodesValid {
 		return v.cachedNodes
 	}
-	return v.computeVisibleNodes()
+	nodes, _ := v.computeVisibleNodes()
+	return nodes
 }
 
 // SetRunning sets whether tests are still running
@@ -316,6 +331,7 @@ type treeKeyMap struct {
 	PageUp       key.Binding
 	PageDown     key.Binding
 	Help         key.Binding
+	Search       key.Binding
 }
 
 var treeKeys = treeKeyMap{
@@ -335,6 +351,7 @@ var treeKeys = treeKeyMap{
 	PageUp:       key.NewBinding(key.WithKeys("pgup", "ctrl+u", "ctrl+U")),
 	PageDown:     key.NewBinding(key.WithKeys("pgdown", "ctrl+d", "ctrl+D")),
 	Help:         key.NewBinding(key.WithKeys("?")),
+	Search:       key.NewBinding(key.WithKeys("/")),
 }
 
 // Update implements tea.Model and returns (model, cmd, request)
@@ -356,12 +373,65 @@ func (v TreeView) Update(msg tea.Msg) (TreeView, tea.Cmd, TreeViewRequest) {
 		}
 
 	case tea.KeyMsg:
+		// Handle search mode input
+		if v.searchMode {
+			switch msg.Type {
+			case tea.KeyEsc:
+				// Exit search mode, clear search
+				v.searchMode = false
+				v.searchQuery = ""
+				v.cachedNodesValid = false
+				v.cursor = 0
+				v.scrollTop = 0
+				return v, cmd, request
+
+			case tea.KeyEnter:
+				// Confirm search, exit input mode but keep filter
+				v.searchMode = false
+				return v, cmd, request
+
+			case tea.KeyBackspace:
+				if len(v.searchQuery) > 0 {
+					v.searchQuery = v.searchQuery[:len(v.searchQuery)-1]
+					v.cachedNodesValid = false
+					v.cursor = 0
+					v.scrollTop = 0
+				}
+				return v, cmd, request
+
+			case tea.KeyRunes:
+				v.searchQuery += string(msg.Runes)
+				v.cachedNodesValid = false
+				v.cursor = 0
+				v.scrollTop = 0
+				return v, cmd, request
+			}
+			return v, cmd, request
+		}
+
 		// Ensure cache is valid before reading
 		v = v.refreshCache()
 		nodes := v.cachedNodes
 		oldCursor := v.cursor
 
 		switch {
+		case key.Matches(msg, treeKeys.Search):
+			// Enter search mode (or restart if already filtering)
+			v.searchMode = true
+			v.searchQuery = ""
+			v.cachedNodesValid = false
+			return v, cmd, request
+
+		case msg.Type == tea.KeyEsc:
+			// Clear search if active
+			if v.searchQuery != "" {
+				v.searchQuery = ""
+				v.cachedNodesValid = false
+				v.cursor = 0
+				v.scrollTop = 0
+				return v, cmd, request
+			}
+
 		case key.Matches(msg, treeKeys.Help):
 			request = ShowHelpRequest{}
 
@@ -513,17 +583,23 @@ func (v TreeView) selectNode(target *model.TestNode) TreeView {
 }
 
 // computeVisibleNodes computes the visible nodes list (expensive - use cache when possible)
-func (v TreeView) computeVisibleNodes() []*model.TestNode {
+// Returns nodes and optional search matches map (nil if not searching)
+func (v TreeView) computeVisibleNodes() ([]*model.TestNode, map[*model.TestNode]int) {
+	// Search filtering takes precedence
+	if v.searchQuery != "" {
+		return v.flattenSearchMatches()
+	}
+
 	if v.filter == FilterAll {
 		// Sort packages by done count (descending) so completed tests bubble up
-		return v.flattenSortedByDone()
+		return v.flattenSortedByDone(), nil
 	}
 
 	// FilterFocus: show failed + running tests and their parents
 	// Only show if there are failures or running tests
 	_, failed, _, running, _ := v.tree.ComputeAllStats()
 	if failed == 0 && running == 0 {
-		return nil // Nothing to focus on
+		return nil, nil // Nothing to focus on
 	}
 
 	// Collect focus-relevant packages and sort them:
@@ -547,6 +623,64 @@ func (v TreeView) computeVisibleNodes() []*model.TestNode {
 	for _, pkg := range focusPackages {
 		result = append(result, flattenFocusNodesSorted(pkg)...)
 	}
+	return result, nil
+}
+
+// flattenSearchMatches returns nodes that match the search query or have matching descendants.
+// Also returns a map of match indices for highlighting (>= 0 for direct match, -1 for ancestor).
+func (v TreeView) flattenSearchMatches() ([]*model.TestNode, map[*model.TestNode]int) {
+	// Initialize match map
+	matches := make(map[*model.TestNode]int)
+
+	// Collect matching packages first
+	var matchingPkgs []*model.TestNode
+	for _, pkg := range v.tree.Packages {
+		if pkg.Name == "" {
+			continue
+		}
+		if hasSearchMatch(pkg, v.searchQuery, matches) {
+			matchingPkgs = append(matchingPkgs, pkg)
+		}
+	}
+
+	// Sort packages alphabetically for stable ordering
+	sort.Slice(matchingPkgs, func(i, j int) bool {
+		return matchingPkgs[i].Name < matchingPkgs[j].Name
+	})
+
+	// Flatten sorted packages
+	var result []*model.TestNode
+	for _, pkg := range matchingPkgs {
+		result = append(result, flattenSearchNode(pkg, v.searchQuery, matches)...)
+	}
+	return result, matches
+}
+
+// flattenSearchNode flattens a node and its matching descendants
+func flattenSearchNode(node *model.TestNode, query string, matches map[*model.TestNode]int) []*model.TestNode {
+	var result []*model.TestNode
+
+	// Include this node if it matches or has matching descendants
+	if _, hasMatch := matches[node]; hasMatch {
+		result = append(result, node)
+
+		// Collect matching children and sort for stable ordering
+		var matchingChildren []*model.TestNode
+		for _, child := range node.Children {
+			if _, childHasMatch := matches[child]; childHasMatch {
+				matchingChildren = append(matchingChildren, child)
+			}
+		}
+		sort.Slice(matchingChildren, func(i, j int) bool {
+			return matchingChildren[i].Name < matchingChildren[j].Name
+		})
+
+		// Flatten sorted children
+		for _, child := range matchingChildren {
+			result = append(result, flattenSearchNode(child, query, matches)...)
+		}
+	}
+
 	return result
 }
 
@@ -576,6 +710,30 @@ func isFocusRelevant(node *model.TestNode) bool {
 		node.Status == model.StatusRunning ||
 		node.FailedCount > 0 ||
 		node.RunningCount > 0
+}
+
+// hasSearchMatch returns true if node or any descendant matches the search query.
+// Records match indices in the matches map: >= 0 for direct match, -1 for ancestor of match.
+func hasSearchMatch(node *model.TestNode, query string, matches map[*model.TestNode]int) bool {
+	directMatch := false
+	if idx := strings.Index(node.Name, query); idx >= 0 {
+		matches[node] = idx
+		directMatch = true
+	}
+
+	childMatch := false
+	for _, child := range node.Children {
+		if hasSearchMatch(child, query, matches) {
+			childMatch = true
+		}
+	}
+
+	// If no direct match but has matching descendants, mark as ancestor (-1)
+	if !directMatch && childMatch {
+		matches[node] = -1
+	}
+
+	return directMatch || childMatch
 }
 
 // flattenFocusNodesSorted flattens focus nodes with children sorted by focus priority
@@ -740,7 +898,7 @@ func (v TreeView) renderHeader() string {
 		colorIdx := v.animFrame % len(SpinnerColors)
 		spinnerStyle := lipgloss.NewStyle().Foreground(SpinnerColors[colorIdx])
 		runningStr := spinnerStyle.Render(fmt.Sprintf("%s %d", SpinnerFrames[frame], running))
-		elapsedStr := v.styles.elapsed.Render(fmt.Sprintf("(%s)", time.Duration(elapsed*float64(time.Second)).Round(time.Millisecond*100)))
+		elapsedStr := v.styles.elapsed.Render(fmt.Sprintf("(%s)", util.FormatDuration(elapsed)))
 
 		header = statusIndicator + " " + v.styles.header.Render("GOWT") + " " + v.styles.elapsed.Render(meta.Version) + "  " +
 			passedStr + "  " + failedStr + "  " + skippedStr + "  " + runningStr + "  " + elapsedStr
@@ -762,25 +920,56 @@ func (v TreeView) renderHeader() string {
 }
 
 func (v TreeView) renderHelpBar() string {
-	filterText := fmt.Sprintf("[Space %s]", v.filter)
-	var help string
+	var helpRendered string
 	var helpWidth int
-	if v.running {
-		help = filterText + "  [Arrows Navigate]  [↵ Logs]  [s Stop]  [? Help]  [q Quit]"
-		if v.filter == FilterFocus {
-			helpWidth = v.styles.helpBarWidthFocusRun
-		} else {
-			helpWidth = v.styles.helpBarWidthAllRun
+
+	// Search mode has its own help bar
+	if v.searchMode {
+		searchPrefix := v.styles.helpBar.Render("/")
+		searchQuery := v.searchQuery
+		cursor := lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Render("█")
+
+		// Count matches (only when query is not empty)
+		var matchInfo string
+		if v.searchQuery != "" {
+			nodes := v.getVisibleNodes()
+			if len(nodes) > 0 {
+				matchInfo = fmt.Sprintf(" [%d matches]", len(nodes))
+			} else {
+				matchInfo = " [no matches]"
+			}
 		}
+
+		hint := v.styles.helpBar.Render("  [Enter Confirm]  [Esc Cancel]")
+		helpRendered = searchPrefix + searchQuery + cursor + v.styles.helpBar.Render(matchInfo) + hint
+		helpWidth = lipgloss.Width("/" + searchQuery + "█" + matchInfo + "  [Enter Confirm]  [Esc Cancel]")
+	} else if v.searchQuery != "" {
+		// Search is active (filtering), show clear option
+		matchInfo := fmt.Sprintf("[%d matches]", len(v.getVisibleNodes()))
+		help := "[Esc Clear]  [/ New Search]  [Arrows Navigate]  [↵ Logs]  [? Help]"
+		helpRendered = v.styles.helpBar.Render(matchInfo + "  " + help)
+		helpWidth = lipgloss.Width(matchInfo + "  " + help)
 	} else {
-		help = filterText + "  [Arrows Navigate]  [↵ Logs]  [r Rerun]  [? Help]  [q Quit]"
-		if v.filter == FilterFocus {
-			helpWidth = v.styles.helpBarWidthFocus
+		// Normal mode
+		filterText := fmt.Sprintf("[Space %s]", v.filter)
+		var help string
+		if v.running {
+			help = filterText + "  [/ Search]  [Arrows Navigate]  [↵ Logs]  [s Stop]  [? Help]  [q Quit]"
+			if v.filter == FilterFocus {
+				helpWidth = v.styles.helpBarWidthFocusRun + 12 // +12 for "  [/ Search]"
+			} else {
+				helpWidth = v.styles.helpBarWidthAllRun + 12
+			}
 		} else {
-			helpWidth = v.styles.helpBarWidthAll
+			help = filterText + "  [/ Search]  [Arrows Navigate]  [↵ Logs]  [r Rerun]  [? Help]  [q Quit]"
+			if v.filter == FilterFocus {
+				helpWidth = v.styles.helpBarWidthFocus + 12
+			} else {
+				helpWidth = v.styles.helpBarWidthAll + 12
+			}
 		}
+		helpRendered = v.styles.helpBar.Render(help)
 	}
-	helpRendered := v.styles.helpBar.Render(help)
 
 	// Add scroll info (similar to LogView)
 	scrollInfo := ""
@@ -879,8 +1068,14 @@ func (v TreeView) renderTree() string {
 // For truncated names, returns freshly styled truncated name.
 func (v TreeView) getRenderedName(node *model.TestNode, selected bool, displayName string) string {
 	// Selected rows use plain name (selection style applied separately)
+	// Don't apply search highlighting on selected row - selection provides visual feedback
 	if selected {
 		return displayName
+	}
+
+	// Apply search highlighting if active (non-selected rows only)
+	if v.searchQuery != "" {
+		return v.highlightSearchMatch(node, displayName, node.Parent == nil)
 	}
 	// Tests don't need package styling
 	if node.Parent != nil {
@@ -895,6 +1090,45 @@ func (v TreeView) getRenderedName(node *model.TestNode, selected bool, displayNa
 		node.RenderedName = v.styles.packageName.Render(node.Name)
 	}
 	return node.RenderedName
+}
+
+// highlightSearchMatch highlights the search query in the display name (non-selected rows only)
+// Uses pre-computed match index from searchMatches map
+func (v TreeView) highlightSearchMatch(node *model.TestNode, displayName string, isPackage bool) string {
+	// Look up pre-computed match index (-1 means ancestor only, no direct match)
+	idx, ok := v.searchMatches[node]
+	if !ok || idx < 0 {
+		// No direct match (ancestor of match), return styled but not highlighted
+		if isPackage {
+			return v.styles.packageName.Render(displayName)
+		}
+		return displayName
+	}
+
+	// Check if match is within displayName bounds (might be truncated)
+	queryLen := len(v.searchQuery)
+	if idx+queryLen > len(displayName) {
+		// Match extends beyond truncated displayName
+		if isPackage {
+			return v.styles.packageName.Render(displayName)
+		}
+		return displayName
+	}
+
+	// Split into before, match, after
+	before := displayName[:idx]
+	match := displayName[idx : idx+queryLen]
+	after := displayName[idx+queryLen:]
+
+	// Apply styles
+	highlightedMatch := v.styles.searchHighlight.Render(match)
+
+	if isPackage {
+		// Package: apply package style to non-match parts
+		return v.styles.packageName.Render(before) + highlightedMatch + v.styles.packageName.Render(after)
+	}
+	// Test: just highlight the match
+	return before + highlightedMatch + after
 }
 
 // getRenderedSuffix returns cached suffix (stats + progress + elapsed).
@@ -920,7 +1154,7 @@ func (v TreeView) getRenderedSuffix(node *model.TestNode) string {
 
 	// Elapsed time
 	if node.Elapsed > 0 {
-		suffix += v.styles.elapsed.Render(" " + time.Duration(node.Elapsed*float64(time.Second)).Round(time.Millisecond*10).String())
+		suffix += v.styles.elapsed.Render(" " + util.FormatDuration(node.Elapsed))
 	}
 
 	// Cache result
