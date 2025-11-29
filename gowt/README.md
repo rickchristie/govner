@@ -1,6 +1,7 @@
 # gowt - Go Test Watcher TUI
 
 A terminal-based UI for running and viewing Go test results in real-time.
+Vibe-coded with Claude Code. Useful when you have thousands of tests to run.
 
 ![gowt demo](/gowt/docs/peek.gif)
 
@@ -139,10 +140,6 @@ The `c` key in log view copies test output to your clipboard. Supported clipboar
 - **X11**: `xclip` or `xsel` (install with `sudo apt install xclip`)
 - **macOS**: `pbcopy` (built-in)
 - **Windows/WSL**: `clip.exe` (built-in)
-
-## Special Thanks
-
-Vibe-coded with Claude Code.
 
 ## License
 
