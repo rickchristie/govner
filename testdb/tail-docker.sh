@@ -1,0 +1,1 @@
+docker logs --follow --tail 100 govner-testdb-ct
