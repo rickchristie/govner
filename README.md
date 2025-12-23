@@ -22,4 +22,20 @@ export PATH="$PATH:$(go env GOPATH)/bin"
 
 ---
 
+### [sandb](./sandb/) - AI Sandbox
+
+Drop-in Docker sandbox for AI coding assistants with network isolation and domain whitelisting.
+
+Supports Claude Code, GitHub Copilot CLI, and other CLI-based AI assistants. All network traffic is routed through a Squid proxy that only allows whitelisted domains (AI APIs, GitHub, npm, Go proxy).
+
+```bash
+cp -r sandb/ /path/to/your/project/
+sandb/install.sh
+sandb/cli/build.sh
+sandb/proxy/start.sh
+sandb/shell.sh
+```
+
+---
+
 *More tools coming soon.*
