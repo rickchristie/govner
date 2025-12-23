@@ -1,0 +1,133 @@
+● Creating a VS Code Extension - Summary
+
+  Quick Steps
+
+  1. Install Prerequisites
+  npm install -g yo generator-code
+  2. Scaffold the Extension
+  yo code
+  2. Choose: TypeScript or JavaScript, extension name, etc.
+  3. Project Structure
+  my-extension/
+  ├── package.json      # Extension manifest (commands, activation events)
+  ├── src/
+  │   └── extension.ts  # Main entry point (activate/deactivate functions)
+  └── tsconfig.json
+  4. Develop & Test
+    - Press F5 in VS Code to launch Extension Development Host
+    - Make changes, reload window to test
+  5. Package & Publish (optional)
+  npm install -g vsce
+  vsce package        # Creates .vsix file
+  vsce publish        # Publishes to marketplace
+
+  ---
+  Workspace-Only Extension
+
+  Yes, you can! Two approaches:
+
+  Option 1: Local .vsix Installation (Recommended for private use)
+
+  1. Package your extension: vsce package
+  2. Install only in this workspace via command palette: Extensions: Install from VSIX...
+  3. The extension is installed globally but you control where you use it
+
+  Option 2: Workspace Folder Extension (Development mode)
+
+  Put your extension in .vscode/extensions/ folder of your workspace and run in debug mode. However, VS Code doesn't natively support "workspace-scoped" extensions.
+
+  Option 3: Activation Condition
+
+  In package.json, use activationEvents to only activate when specific files/folders exist:
+  {
+    "activationEvents": [
+      "workspaceContains:**/go-rukita-be/**"
+    ]
+  }
+
+  This way the extension only activates when it detects it's in your specific workspace.
+
+  ---
+  Want me to help you scaffold a basic extension for this workspace?
+
+> Okay, so can we develop first in .vscode/extensions/ - then after everything is working, publish? 
+
+● Yes, You Can - Here's the Workflow
+
+  Development in Workspace
+
+  You can develop locally, but not directly in .vscode/extensions/ - that folder is for installed extensions. Instead:
+
+  Recommended Local Development Setup
+
+  go-rukita-be/
+  ├── .vscode/
+  │   └── my-extension/        # Your extension source here
+  │       ├── package.json
+  │       ├── src/
+  │       │   └── extension.ts
+  │       └── tsconfig.json
+
+  Development Workflow
+
+  1. Create the extension folder
+  mkdir -p .vscode/my-extension
+  cd .vscode/my-extension
+  yo code   # or manually create files
+  2. Develop & Test
+    - Open .vscode/my-extension folder in a separate VS Code window
+    - Press F5 to launch Extension Development Host
+    - Your main workspace opens with the extension loaded
+  3. When Ready to Publish
+  cd .vscode/my-extension
+  vsce package    # Creates my-extension-0.0.1.vsix
+  vsce publish    # Publish to marketplace
+  4. Or move to separate repo
+  mv .vscode/my-extension ~/projects/my-extension
+  cd ~/projects/my-extension
+  git init
+  # ... continue development there
+
+  Quick Tip
+
+  Add to .gitignore if you don't want to commit the extension source:
+  .vscode/my-extension/
+
+  ---
+  Want me to scaffold a basic extension in .vscode/ for you to start with?
+
+> When I launch Extension Development Host, all my other VsCode windows suddenly have the extension installed?
+So I can develop in another VsCode window, but test the extension in this workspace? 
+
+● No - It's Sandboxed
+
+  The Extension Development Host is isolated. Here's how it works:
+
+  ┌─────────────────────────────┐     ┌─────────────────────────────┐
+  │  VS Code Window 1           │     │  Extension Dev Host         │
+  │  (Your extension source)    │     │  (Test window)              │
+  │                             │     │                             │
+  │  - Edit extension code      │ F5  │  - Your extension ACTIVE    │
+  │  - Extension NOT active     │ ──► │  - Opens your workspace     │
+  │  - Normal VS Code           │     │  - Sandboxed instance       │
+  └─────────────────────────────┘     └─────────────────────────────┘
+
+  ┌─────────────────────────────┐
+  │  VS Code Window 2, 3, etc   │
+  │  (Other projects)           │
+  │                             │
+  │  - Extension NOT installed  │
+  │  - Completely unaffected    │
+  └─────────────────────────────┘
+
+  Your Workflow
+
+  Yes, exactly what you described:
+
+  1. Window A: Open extension folder (.vscode/my-extension/) - write code here
+  2. Press F5: Opens Extension Development Host
+  3. Dev Host Window: Opens go-rukita-be workspace with your extension running
+  4. Test the extension in the Dev Host
+  5. Make changes in Window A → Reload Dev Host (Ctrl+R or Cmd+R)
+
+  Your other VS Code windows remain completely unaffected. The extension only exists in the Dev Host until you package and install it
