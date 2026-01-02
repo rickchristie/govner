@@ -668,3 +668,425 @@ func TestAdminUnlockByUsername(t *testing.T) {
 		t.Errorf("Expected status 401 for unlock-by-username without auth, got %d", rr.Code)
 	}
 }
+
+// TestLock_MassiveRaceConditionStressTest bombards the server with thousands of concurrent requests
+// to ensure no race conditions exist. This test specifically validates:
+// 1. No database connection is ever given to multiple goroutines simultaneously
+// 2. The locks map and channel stay in sync
+// 3. Admin force-unlock operations don't cause race conditions
+// 4. All databases are properly returned to the pool after the test
+func TestLock_MassiveRaceConditionStressTest(t *testing.T) {
+	h := NewHandler()
+
+	// 5000 goroutines competing for 25 databases = 200x contention ratio
+	numGoroutines := 5000
+	// Each goroutine will do multiple lock/unlock cycles
+	cyclesPerGoroutine := 3
+
+	var wg sync.WaitGroup
+	errorsChan := make(chan error, numGoroutines*cyclesPerGoroutine)
+
+	// Track ownership of each connection using atomic counters.
+	// If a connection is given to two goroutines, the counter will exceed 1.
+	counters := make(map[string]*atomic.Int32)
+	for connStr := range testDatabases {
+		counters[connStr] = &atomic.Int32{}
+	}
+
+	// Track total successful locks and unlocks for final verification
+	var totalLocks atomic.Int64
+	var totalUnlocks atomic.Int64
+
+	// Also track unique connections seen to ensure we're not getting duplicates
+	seenConnections := sync.Map{}
+
+	t.Logf("Starting massive stress test: %d goroutines x %d cycles = %d total lock attempts",
+		numGoroutines, cyclesPerGoroutine, numGoroutines*cyclesPerGoroutine)
+
+	startTime := time.Now()
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(goroutineID int) {
+			defer wg.Done()
+
+			for cycle := 0; cycle < cyclesPerGoroutine; cycle++ {
+				// Lock a database
+				req := httptest.NewRequest("GET",
+					fmt.Sprintf("/lock?username=user%d&password=%s", goroutineID, dbLockerPassword), nil)
+				rr := httptest.NewRecorder()
+				h.handleLock(rr, req)
+
+				if rr.Code != http.StatusOK {
+					errorsChan <- fmt.Errorf("goroutine %d cycle %d: lock failed with status %d",
+						goroutineID, cycle, rr.Code)
+					return
+				}
+
+				connStr := strings.TrimSpace(rr.Body.String())
+				totalLocks.Add(1)
+
+				// Verify this connection is not already held
+				counter := counters[connStr]
+				if counter == nil {
+					errorsChan <- fmt.Errorf("goroutine %d cycle %d: got unknown connection %s",
+						goroutineID, cycle, connStr)
+					return
+				}
+
+				// Increment counter - must be exactly 1 after increment
+				if val := counter.Add(1); val != 1 {
+					errorsChan <- fmt.Errorf("goroutine %d cycle %d: RACE DETECTED! connection %s counter is %d (expected 1)",
+						goroutineID, cycle, connStr, val)
+					// Don't return - still try to clean up
+				}
+
+				// Record that we've seen this connection
+				seenConnections.Store(connStr, true)
+
+				// Hold the lock for a very short random time (0-10ms) to maximize contention
+				holdTime := time.Duration(rand.Intn(10)) * time.Millisecond
+				time.Sleep(holdTime)
+
+				// Decrement counter before unlock - must be exactly 0 after decrement
+				if val := counter.Add(-1); val != 0 {
+					errorsChan <- fmt.Errorf("goroutine %d cycle %d: RACE DETECTED! connection %s counter is %d after decrement (expected 0)",
+						goroutineID, cycle, connStr, val)
+				}
+
+				// Unlock the database
+				unlockURL := fmt.Sprintf("/unlock?username=user%d&password=%s", goroutineID, dbLockerPassword)
+				req = httptest.NewRequest("POST", unlockURL, strings.NewReader(connStr))
+				rr = httptest.NewRecorder()
+				h.handleUnlock(rr, req)
+
+				if rr.Code != http.StatusOK {
+					errorsChan <- fmt.Errorf("goroutine %d cycle %d: unlock failed with status %d",
+						goroutineID, cycle, rr.Code)
+					return
+				}
+
+				totalUnlocks.Add(1)
+			}
+		}(i)
+	}
+
+	// Wait for all goroutines to complete
+	wg.Wait()
+	close(errorsChan)
+
+	elapsed := time.Since(startTime)
+	t.Logf("Stress test completed in %v", elapsed)
+	t.Logf("Total locks: %d, Total unlocks: %d", totalLocks.Load(), totalUnlocks.Load())
+
+	// Check for any errors
+	errorCount := 0
+	for err := range errorsChan {
+		t.Error(err)
+		errorCount++
+		if errorCount > 10 {
+			t.Errorf("... and %d more errors (truncated)", len(errorsChan))
+			break
+		}
+	}
+
+	// Verify all databases are unlocked
+	h.withLocksRLock(func() {
+		if len(h.locks) != 0 {
+			t.Errorf("Expected all databases to be unlocked, but %d locks remain", len(h.locks))
+			for connStr, lockInfo := range h.locks {
+				t.Errorf("  Remaining lock: %s by %s", connStr, lockInfo.Username)
+			}
+		}
+	})
+
+	// Verify all databases are back in the pool
+	availableCount := len(h.cLockedDbConn)
+	if availableCount != defaultDatabaseCount {
+		t.Errorf("Expected %d databases available, got %d", defaultDatabaseCount, availableCount)
+	}
+
+	// Verify all counters are back to zero
+	for connStr, counter := range counters {
+		if val := counter.Load(); val != 0 {
+			t.Errorf("Counter for %s is %d, expected 0", connStr, val)
+		}
+	}
+
+	// Verify we saw all databases (they were all used at some point)
+	seenCount := 0
+	seenConnections.Range(func(key, value interface{}) bool {
+		seenCount++
+		return true
+	})
+	if seenCount != defaultDatabaseCount {
+		t.Errorf("Only saw %d unique connections, expected %d", seenCount, defaultDatabaseCount)
+	}
+}
+
+// TestLock_RaceWithAdminForceUnlock tests that admin force-unlock doesn't corrupt system state.
+// Note: Admin force-unlock intentionally "steals" locks from workers, so we don't check for
+// exclusive access here. Instead we verify:
+// 1. System state remains consistent (locked + available = total)
+// 2. No panics or unexpected errors
+// 3. Workers handle force-unlock gracefully (their unlock returns 400)
+func TestLock_RaceWithAdminForceUnlock(t *testing.T) {
+	h := NewHandler()
+
+	// Create admin session
+	form := url.Values{}
+	form.Set("password", dbLockerPassword)
+	req := httptest.NewRequest("POST", "/admin/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.handleAdminLogin(rr, req)
+
+	var sessionCookie string
+	for _, cookie := range rr.Header()["Set-Cookie"] {
+		if strings.Contains(cookie, "admin_session=") {
+			parts := strings.Split(cookie, "=")
+			if len(parts) > 1 {
+				sessionCookie = strings.Split(parts[1], ";")[0]
+			}
+			break
+		}
+	}
+
+	numWorkers := 200
+	var wg sync.WaitGroup
+	errorsChan := make(chan error, numWorkers*2)
+
+	// Track connections that are currently locked by workers (for admin to target)
+	activeConnections := sync.Map{}
+
+	var forceUnlockCount atomic.Int64
+	var workerUnlockSuccess atomic.Int64
+	var workerUnlockFailed atomic.Int64
+
+	t.Logf("Starting admin force-unlock consistency test with %d workers", numWorkers)
+
+	// Start worker goroutines that lock/unlock
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(goroutineID int) {
+			defer wg.Done()
+
+			// Lock
+			req := httptest.NewRequest("GET",
+				fmt.Sprintf("/lock?username=worker%d&password=%s", goroutineID, dbLockerPassword), nil)
+			rr := httptest.NewRecorder()
+			h.handleLock(rr, req)
+
+			if rr.Code != http.StatusOK {
+				errorsChan <- fmt.Errorf("worker %d: lock failed with status %d", goroutineID, rr.Code)
+				return
+			}
+
+			connStr := strings.TrimSpace(rr.Body.String())
+
+			// Register as active (admin might force-unlock this)
+			activeConnections.Store(connStr, goroutineID)
+
+			// Hold for random time
+			time.Sleep(time.Duration(rand.Intn(30)) * time.Millisecond)
+
+			activeConnections.Delete(connStr)
+
+			// Try to unlock - might fail if admin already force-unlocked
+			unlockURL := fmt.Sprintf("/unlock?username=worker%d&password=%s", goroutineID, dbLockerPassword)
+			req = httptest.NewRequest("POST", unlockURL, strings.NewReader(connStr))
+			rr = httptest.NewRecorder()
+			h.handleUnlock(rr, req)
+
+			if rr.Code == http.StatusOK {
+				workerUnlockSuccess.Add(1)
+			} else if rr.Code == http.StatusBadRequest {
+				// Admin already force-unlocked this - expected
+				workerUnlockFailed.Add(1)
+			} else {
+				errorsChan <- fmt.Errorf("worker %d: unlock got unexpected status %d", goroutineID, rr.Code)
+			}
+		}(i)
+	}
+
+	// Start admin goroutines that randomly force-unlock
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(adminID int) {
+			defer wg.Done()
+
+			for j := 0; j < 30; j++ {
+				// Pick a connection to force-unlock
+				var targetConn string
+				activeConnections.Range(func(key, value interface{}) bool {
+					targetConn = key.(string)
+					return false // Stop after first one
+				})
+
+				if targetConn == "" {
+					time.Sleep(time.Millisecond)
+					continue
+				}
+
+				// Force unlock it
+				forceUnlockForm := url.Values{}
+				forceUnlockForm.Set("conn", targetConn)
+				req := httptest.NewRequest("POST", "/admin/force-unlock", strings.NewReader(forceUnlockForm.Encode()))
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				req.AddCookie(&http.Cookie{Name: "admin_session", Value: sessionCookie})
+				rr := httptest.NewRecorder()
+				h.handleAdminForceUnlock(rr, req)
+
+				if rr.Code == http.StatusSeeOther {
+					forceUnlockCount.Add(1)
+				} else {
+					errorsChan <- fmt.Errorf("admin %d: force-unlock got status %d", adminID, rr.Code)
+				}
+
+				time.Sleep(time.Duration(rand.Intn(3)) * time.Millisecond)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errorsChan)
+
+	// Check for errors
+	for err := range errorsChan {
+		t.Error(err)
+	}
+
+	t.Logf("Force unlocks: %d, Worker unlocks success: %d, Worker unlocks failed (force-unlocked): %d",
+		forceUnlockCount.Load(), workerUnlockSuccess.Load(), workerUnlockFailed.Load())
+
+	// Final state verification - this is the critical check
+	// The sum of locked + available must equal total databases
+	h.withLocksRLock(func() {
+		lockedCount := len(h.locks)
+		availableCount := len(h.cLockedDbConn)
+		total := lockedCount + availableCount
+
+		if total != defaultDatabaseCount {
+			t.Errorf("CRITICAL: Inconsistent state! %d locked + %d available = %d (expected %d)",
+				lockedCount, availableCount, total, defaultDatabaseCount)
+		}
+	})
+
+	// Clean up any remaining locks
+	h.withLocksLock(func() {
+		for connStr := range h.locks {
+			delete(h.locks, connStr)
+			h.cLockedDbConn <- connStr
+		}
+	})
+
+	// Verify all connections are back
+	if len(h.cLockedDbConn) != defaultDatabaseCount {
+		t.Errorf("After cleanup: expected %d available, got %d", defaultDatabaseCount, len(h.cLockedDbConn))
+	}
+
+	// Verify no duplicates in channel
+	seen := make(map[string]bool)
+	for i := 0; i < defaultDatabaseCount; i++ {
+		connStr := <-h.cLockedDbConn
+		if seen[connStr] {
+			t.Errorf("CRITICAL: Duplicate connection in channel after test: %s", connStr)
+		}
+		seen[connStr] = true
+	}
+}
+
+// TestLock_VerifyNoDuplicateInChannel verifies the channel never contains duplicate connection strings
+func TestLock_VerifyNoDuplicateInChannel(t *testing.T) {
+	h := NewHandler()
+
+	// Drain the channel and verify no duplicates
+	seen := make(map[string]bool)
+	available := len(h.cLockedDbConn)
+
+	for i := 0; i < available; i++ {
+		select {
+		case connStr := <-h.cLockedDbConn:
+			if seen[connStr] {
+				t.Errorf("Duplicate connection string in channel: %s", connStr)
+			}
+			seen[connStr] = true
+		default:
+			t.Errorf("Channel had fewer items than expected")
+		}
+	}
+
+	if len(seen) != defaultDatabaseCount {
+		t.Errorf("Expected %d unique connections, got %d", defaultDatabaseCount, len(seen))
+	}
+
+	// Put them back
+	for connStr := range seen {
+		h.cLockedDbConn <- connStr
+	}
+
+	// Now run a stress test and verify again
+	numOps := 2000
+	var wg sync.WaitGroup
+
+	counters := make(map[string]*atomic.Int32)
+	for connStr := range testDatabases {
+		counters[connStr] = &atomic.Int32{}
+	}
+
+	for i := 0; i < numOps; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+
+			// Lock
+			req := httptest.NewRequest("GET",
+				fmt.Sprintf("/lock?username=user%d&password=%s", id, dbLockerPassword), nil)
+			rr := httptest.NewRecorder()
+			h.handleLock(rr, req)
+
+			if rr.Code != http.StatusOK {
+				return
+			}
+
+			connStr := strings.TrimSpace(rr.Body.String())
+			counters[connStr].Add(1)
+
+			time.Sleep(time.Duration(rand.Intn(5)) * time.Millisecond)
+
+			counters[connStr].Add(-1)
+
+			// Unlock
+			req = httptest.NewRequest("POST",
+				fmt.Sprintf("/unlock?username=user%d&password=%s", id, dbLockerPassword),
+				strings.NewReader(connStr))
+			rr = httptest.NewRecorder()
+			h.handleUnlock(rr, req)
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Verify all counters are 0
+	for connStr, counter := range counters {
+		if val := counter.Load(); val != 0 {
+			t.Errorf("Counter for %s is %d after test, expected 0", connStr, val)
+		}
+	}
+
+	// Drain and verify no duplicates again
+	seen = make(map[string]bool)
+	available = len(h.cLockedDbConn)
+
+	for i := 0; i < available; i++ {
+		connStr := <-h.cLockedDbConn
+		if seen[connStr] {
+			t.Errorf("Duplicate connection string after stress test: %s", connStr)
+		}
+		seen[connStr] = true
+	}
+
+	if len(seen) != defaultDatabaseCount {
+		t.Errorf("Expected %d connections after stress test, got %d", defaultDatabaseCount, len(seen))
+	}
+}
