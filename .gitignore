@@ -1,3 +1,9 @@
 .claude/
 .vscode/
-/gowt/gowt
+
+# Gowt development files.
+gowt/gowt
+
+# Pgflock development files.
+pgflock/.pgflock/
+pgflock/pgflock
