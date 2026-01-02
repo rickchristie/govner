@@ -129,6 +129,18 @@ Connect to a database via psql. Example:
 pgflock connect 5432 tester1
 ```
 
+### `pgflock tail [port]`
+
+Streams logs from a PostgreSQL container (equivalent to `docker logs --follow --tail 100`). If no port is specified, uses the starting port from config.
+
+```bash
+# Tail logs from the first instance (default port)
+pgflock tail
+
+# Tail logs from a specific instance
+pgflock tail 5433
+```
+
 ## Client Library
 
 Use the client library in your test code:

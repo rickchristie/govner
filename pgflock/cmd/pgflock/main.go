@@ -159,6 +159,28 @@ var connectCmd = &cobra.Command{
 	},
 }
 
+var tailCmd = &cobra.Command{
+	Use:   "tail [port]",
+	Short: "Tail Docker container logs",
+	Long:  `Streams logs from a PostgreSQL container. If no port is specified, uses the starting port from config.`,
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, _, err := loadConfig()
+		if err != nil {
+			return err
+		}
+
+		port := cfg.StartingPort
+		if len(args) > 0 {
+			if _, err := fmt.Sscanf(args[0], "%d", &port); err != nil {
+				return fmt.Errorf("invalid port: %s", args[0])
+			}
+		}
+
+		return tailContainerLogs(cfg, port)
+	},
+}
+
 func init() {
 	rootCmd.PersistentFlags().StringVar(&configDir, "config", "",
 		"Path to .pgflock directory (default: ./.pgflock)")
@@ -175,6 +197,7 @@ func init() {
 	rootCmd.AddCommand(downCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(connectCmd)
+	rootCmd.AddCommand(tailCmd)
 }
 
 func main() {
@@ -513,4 +536,14 @@ func healthCheck(port int) (string, error) {
 		return "", err
 	}
 	return string(req), nil
+}
+
+func tailContainerLogs(cfg *config.Config, port int) error {
+	containerName := cfg.ContainerName(port)
+
+	cmd := exec.Command("docker", "logs", "--follow", "--tail", "100", containerName)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	return cmd.Run()
 }
