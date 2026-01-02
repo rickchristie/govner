@@ -23,6 +23,7 @@ docker rmi -f "${IMAGE_NAME}" 2>/dev/null || true
 # Build fresh image
 echo "Building AI CLI Sandbox image..."
 docker build \
+    --no-cache \
     --build-arg USER_UID=$(id -u) \
     --build-arg USER_GID=$(id -g) \
     -t "${IMAGE_NAME}" \

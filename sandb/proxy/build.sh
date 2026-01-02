@@ -21,6 +21,7 @@ docker rmi -f "${IMAGE_NAME}" 2>/dev/null || true
 # Build fresh image
 echo "Building AI Sandbox Squid Proxy image..."
 docker build \
+    --no-cache \
     -t "${IMAGE_NAME}" \
     "${SCRIPT_DIR}"
 

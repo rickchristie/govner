@@ -57,7 +57,8 @@ ENV PATH=/home/user/.local/bin:/home/user/.npm-global/bin:$PATH
 # ============================================================================
 # Claude Code installation (native - enables auto-updates)
 # ============================================================================
-RUN curl -fsSL https://claude.ai/install.sh | bash
+RUN curl -fsSL https://claude.ai/install.sh | bash && \
+    /home/user/.local/bin/claude install
 
 # ============================================================================
 # GitHub Copilot CLI installation (optional)

@@ -81,6 +81,16 @@ sandb/cli/build.sh
 
 The `install.sh` script automatically detects your host's Go version and updates the Dockerfile.
 
+## Updating Claude Code and Copilot CLI
+
+Because the container runs behind a strict proxy, Claude Code and Copilot CLI cannot auto-update themselves. To update these tools, rebuild the CLI image:
+
+```bash
+sandb/cli/build.sh
+```
+
+Or use the VS Code task: **AI: Build CLI**
+
 ## Architecture
 
 ```
