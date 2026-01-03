@@ -258,6 +258,7 @@ func runUp(cfg *config.Config) error {
 	var server *http.Server
 	var handler *locker.Handler
 	var stateUpdateChan chan *locker.State
+	var lockerErrChan <-chan error
 	var startupErr error
 
 	// Set up quit callback (called only during startup cancel)
@@ -329,7 +330,7 @@ func runUp(cfg *config.Config) error {
 
 		stateUpdateChan = make(chan *locker.State, 10)
 		var err error
-		server, handler, err = locker.StartServer(cfg, stateUpdateChan)
+		server, handler, lockerErrChan, err = locker.StartServer(cfg, stateUpdateChan)
 		if err != nil {
 			loadingProgressChan <- tui.LoadingProgress{
 				Step:  tui.StepFailed,
@@ -339,9 +340,10 @@ func runUp(cfg *config.Config) error {
 			return
 		}
 
-		// Set handler and state channel on model
+		// Set handler, state channel, and locker error channel on model
 		model.SetHandler(handler)
 		model.SetStateChan(stateUpdateChan)
+		model.SetLockerErrChan(lockerErrChan)
 
 		// Set up restart callback (now that handler is available)
 		model.SetOnRestart(func() <-chan tui.LoadingProgress {

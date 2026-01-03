@@ -16,7 +16,23 @@ const (
 	ConfirmQuit
 	ConfirmUnlock
 	ConfirmRestart
+	ConfirmLockerDied // Modal shown when locker server dies
 )
+
+// HealthStatus represents the health of a component
+type HealthStatus int
+
+const (
+	HealthUnknown HealthStatus = iota
+	HealthOK
+	HealthDown
+)
+
+// ContainerHealth tracks the health of a PostgreSQL container
+type ContainerHealth struct {
+	Port   int
+	Status HealthStatus
+}
 
 // DatabaseInfo represents a database in the pool
 type DatabaseInfo struct {
@@ -45,6 +61,12 @@ type Model struct {
 	quitting         bool
 	showAllDatabases bool
 	allDatabases     []DatabaseInfo
+
+	// Health monitoring
+	lockerHealth     HealthStatus
+	containerHealth  []ContainerHealth
+	lockerErrChan    <-chan error
+	lockerDiedError  error // Stores the error when locker dies
 
 	// Animation state
 	lockedAnimator *LockedAnimator
@@ -94,6 +116,12 @@ func NewModel(cfg *config.Config, loadingProgressChan <-chan LoadingProgress) *M
 	// Collect instance ports for startup animation
 	instancePorts := cfg.InstancePorts()
 
+	// Initialize container health tracking
+	containerHealth := make([]ContainerHealth, len(instancePorts))
+	for i, port := range instancePorts {
+		containerHealth[i] = ContainerHealth{Port: port, Status: HealthUnknown}
+	}
+
 	return &Model{
 		cfg:                 cfg,
 		handler:             nil, // Set later via SetHandler
@@ -102,6 +130,8 @@ func NewModel(cfg *config.Config, loadingProgressChan <-chan LoadingProgress) *M
 		selectedIdx:         0,
 		confirm:             ConfirmNone,
 		allDatabases:        allDbs,
+		lockerHealth:        HealthUnknown,
+		containerHealth:     containerHealth,
 		lockedAnimator:      NewLockedAnimator(),
 		copyShimmer:         NewCopyShimmer(),
 		lockTimeoutBar:      NewProgressBar(WithWidth(10), WithColors(ColorAmber, ColorBorder)),
@@ -141,6 +171,45 @@ func (m *Model) SetOnQuit(fn func()) {
 // The callback should start the shutdown process and return a progress channel.
 func (m *Model) SetOnShutdown(fn func() <-chan LoadingProgress) {
 	m.onShutdown = fn
+}
+
+// SetLockerErrChan sets the channel for locker server errors.
+func (m *Model) SetLockerErrChan(errChan <-chan error) {
+	m.lockerErrChan = errChan
+	m.lockerHealth = HealthOK // Assume healthy when set
+}
+
+// SetContainerHealthy marks a container as healthy.
+func (m *Model) SetContainerHealthy(port int) {
+	for i := range m.containerHealth {
+		if m.containerHealth[i].Port == port {
+			m.containerHealth[i].Status = HealthOK
+			return
+		}
+	}
+}
+
+// SetAllContainersHealthy marks all containers as healthy.
+func (m *Model) SetAllContainersHealthy() {
+	for i := range m.containerHealth {
+		m.containerHealth[i].Status = HealthOK
+	}
+}
+
+// healthyContainerCount returns the number of healthy containers.
+func (m *Model) healthyContainerCount() int {
+	count := 0
+	for _, c := range m.containerHealth {
+		if c.Status == HealthOK {
+			count++
+		}
+	}
+	return count
+}
+
+// totalContainerCount returns the total number of containers.
+func (m *Model) totalContainerCount() int {
+	return len(m.containerHealth)
 }
 
 // StartShutdown transitions to the shutdown loading screen.

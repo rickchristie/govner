@@ -100,6 +100,24 @@ var (
 	ErrorStyle = lipgloss.NewStyle().
 			Foreground(ColorCoral).
 			Bold(true)
+
+	// === Health Status Styles ===
+
+	// Healthy status (green checkmark)
+	HealthyStyle = lipgloss.NewStyle().
+			Foreground(ColorLime)
+
+	// Unhealthy status (red cross)
+	UnhealthyStyle = lipgloss.NewStyle().
+			Foreground(ColorCoral)
+
+	// Partial health status (amber warning)
+	PartialHealthStyle = lipgloss.NewStyle().
+				Foreground(ColorAmber)
+
+	// Status label style (dim text for "locker", "pg")
+	StatusLabelStyle = lipgloss.NewStyle().
+				Foreground(ColorTextDim)
 )
 
 // GetLockedCountStyle returns the appropriate style for locked count based on animation frame.

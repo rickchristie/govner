@@ -159,39 +159,40 @@ func (m *Model) renderMainView() []string {
 	return lines
 }
 
-// renderHeader renders: 🐑 pgflock ✓ 2 instances ● 3/25 locked ○ 22 free  [view toggle]
+// renderHeader renders: 🐑 pgflock    locker ✓  🛢️ 2/2 ✓  💤 Sleeping  ○ 16 free
 func (m *Model) renderHeader(width int) string {
-	var parts []string
+	// Brand logo (extra spacing after)
+	brand := TitleStyle.Render(SheepEmoji + " pgflock")
 
-	// Brand
-	parts = append(parts, TitleStyle.Render(SheepEmoji+" pgflock"))
+	// Build status parts with consistent spacing
+	var statusParts []string
 
-	// Instances
-	instanceText := fmt.Sprintf("%s %d instances", IconCheckmark, m.instanceCount())
-	parts = append(parts, InstancesStyle.Render(instanceText))
+	// Live status: locker ✓  🛢️ 2/2 ✓
+	statusParts = append(statusParts, m.renderLiveStatus())
 
 	// Locked count - show sleeping when none locked, animated when locked
 	if m.lockedCount() == 0 {
-		parts = append(parts, DimStyle.Render(SleepingEmoji+" Sleeping"))
+		statusParts = append(statusParts, DimStyle.Render(SleepingEmoji+" Sleeping"))
 	} else {
 		lockedIcon := m.lockedAnimator.Icon()
 		lockedStyle := GetLockedCountStyle(m.lockedAnimator.Frame())
 		lockedText := lockedStyle.Render(fmt.Sprintf("%s %d", lockedIcon, m.lockedCount()))
 		totalText := DimStyle.Render(fmt.Sprintf("/%d locked", m.totalCount()))
-		parts = append(parts, lockedText+totalText)
+		statusParts = append(statusParts, lockedText+totalText)
 	}
 
 	// Free count
 	freeText := fmt.Sprintf("%s %d free", IconFree, m.freeCount())
-	parts = append(parts, FreeCountStyle.Render(freeText))
+	statusParts = append(statusParts, FreeCountStyle.Render(freeText))
 
 	// Waiting (if any)
 	if m.waitingCount() > 0 {
 		waitingText := fmt.Sprintf("%s %d waiting", IconFarmer, m.waitingCount())
-		parts = append(parts, WaitingCountStyle.Render(waitingText))
+		statusParts = append(statusParts, WaitingCountStyle.Render(waitingText))
 	}
 
-	leftContent := strings.Join(parts, "  ")
+	// Join: logo (4 spaces) status parts (2 spaces between each)
+	leftContent := brand + "    " + strings.Join(statusParts, "  ")
 	leftWidth := lipglossWidth(leftContent)
 
 	// View toggle at right: "All Databases (10) | Locked Databases"
@@ -214,6 +215,45 @@ func (m *Model) renderHeader(width int) string {
 	}
 
 	return leftContent + strings.Repeat(" ", paddingWidth) + viewToggle
+}
+
+// renderLiveStatus renders the live status indicators: locker ✓   🛢️ 2/2 ✓
+func (m *Model) renderLiveStatus() string {
+	var parts []string
+
+	// Locker status
+	lockerLabel := StatusLabelStyle.Render("locker")
+	var lockerIcon string
+	switch m.lockerHealth {
+	case HealthOK:
+		lockerIcon = HealthyStyle.Render(IconCheckmark)
+	case HealthDown:
+		lockerIcon = UnhealthyStyle.Render(IconCross)
+	default:
+		lockerIcon = DimStyle.Render("?")
+	}
+	parts = append(parts, lockerLabel+" "+lockerIcon)
+
+	// Container status: 🛢️ 2/2 ✓ or 🛢️ 1/2 ⚠ or 🛢️ 0/2 ✗
+	healthy := m.healthyContainerCount()
+	total := m.totalContainerCount()
+	containerLabel := IconDatabase
+	containerCount := fmt.Sprintf("%d/%d", healthy, total)
+
+	var containerIcon string
+	if healthy == total && total > 0 {
+		containerIcon = HealthyStyle.Render(IconCheckmark)
+		containerCount = HealthyStyle.Render(containerCount)
+	} else if healthy == 0 {
+		containerIcon = UnhealthyStyle.Render(IconCross)
+		containerCount = UnhealthyStyle.Render(containerCount)
+	} else {
+		containerIcon = PartialHealthStyle.Render(IconWarning)
+		containerCount = PartialHealthStyle.Render(containerCount)
+	}
+	parts = append(parts, containerLabel+"  "+containerCount+" "+containerIcon)
+
+	return strings.Join(parts, "  ")
 }
 
 // renderSectionHeader renders a horizontal line extending to terminal width
@@ -532,6 +572,8 @@ func (m *Model) renderModal() string {
 			return UnlockModal(db.DBName, db.LockInfo.Marker, duration)
 		}
 		return UnlockModal("unknown", "unknown", "0s")
+	case ConfirmLockerDied:
+		return LockerDiedModal(m.lockerDiedError)
 	}
 	return ""
 }

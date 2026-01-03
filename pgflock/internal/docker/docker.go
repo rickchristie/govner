@@ -213,7 +213,7 @@ func waitForPostgresLogs(ctx context.Context, containerName string, port int) er
 		// Check for bind error (this appears before ready message if port is taken)
 		if strings.Contains(postInitLogs, bindErrorMsg) {
 			log.Error().Int("port", port).Msg("waitForPostgresLogs: port already in use")
-			return fmt.Errorf("port %d is already in use by another process", port)
+			return fmt.Errorf("container failed to start, run: docker logs %s", containerName)
 		}
 
 		// Check for success after init
@@ -225,7 +225,7 @@ func waitForPostgresLogs(ctx context.Context, containerName string, port int) er
 		// Check if container exited
 		if !isContainerRunning(containerName) {
 			log.Error().Int("port", port).Msg("waitForPostgresLogs: container exited")
-			return fmt.Errorf("container %s exited unexpectedly", containerName)
+			return fmt.Errorf("container failed to start, run: docker logs %s", containerName)
 		}
 
 		log.Debug().Int("port", port).Int("attempt", attempt).Msg("waitForPostgresLogs: waiting for ready after init...")

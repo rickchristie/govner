@@ -141,6 +141,61 @@ func UnlockModal(dbName, marker string, duration string) string {
 	})
 }
 
+// LockerDiedModal returns the locker died modal.
+func LockerDiedModal(err error) string {
+	errMsg := "Unknown error"
+	if err != nil {
+		errMsg = err.Error()
+	}
+
+	body := []string{
+		"The locker server has stopped unexpectedly.",
+		"",
+		"Error: " + errMsg,
+		"",
+		"Check logs: .pgflock/up.log",
+	}
+
+	return RenderModalSingleButton(ModalConfig{
+		Title:       "Locker Server Died",
+		Body:        body,
+		ConfirmText: "Quit",
+		CancelText:  "",
+	})
+}
+
+// RenderModalSingleButton renders a modal with only a confirm button.
+func RenderModalSingleButton(cfg ModalConfig) string {
+	var b strings.Builder
+
+	// Title with warning emoji
+	title := IconCross + " " + cfg.Title
+	b.WriteString(modalTitleStyle.Render(title))
+	b.WriteString("\n\n")
+
+	// Divider
+	divider := strings.Repeat(BorderLightH, 40)
+	b.WriteString(modalDividerStyle.Render(divider))
+	b.WriteString("\n\n")
+
+	// Body lines
+	for _, line := range cfg.Body {
+		b.WriteString(modalBodyStyle.Render(line))
+		b.WriteString("\n")
+	}
+
+	// Divider
+	b.WriteString("\n")
+	b.WriteString(modalDividerStyle.Render(divider))
+	b.WriteString("\n")
+
+	// Single button
+	confirm := modalConfirmStyle.Render("[Enter " + cfg.ConfirmText + "]")
+	b.WriteString(modalButtonsStyle.Render(confirm))
+
+	return modalBoxStyle.Render(b.String())
+}
+
 // pluralize returns singular or plural form based on count.
 func pluralize(count int, singular, plural string) string {
 	if count == 1 {

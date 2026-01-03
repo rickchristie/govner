@@ -64,9 +64,11 @@ const (
 	// Status icons
 	IconCheckmark      = "✓"
 	IconCross          = "✗"
+	IconWarning        = "⚠"
 	IconFree           = "○"
 	IconFarmer         = "🧑‍🌾"
 	IconSelectionArrow = "▶"
+	IconDatabase       = "🛢️"
 
 	// LOCKED animation icons (5-frame cycle)
 	IconLockedFrame0 = "◉" // filled circle

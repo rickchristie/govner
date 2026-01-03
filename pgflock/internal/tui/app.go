@@ -7,8 +7,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/rickchristie/govner/pgflock/internal/docker"
 	"github.com/rickchristie/govner/pgflock/internal/locker"
 )
+
+// Health check interval
+const HealthCheckInterval = 5 * time.Second
 
 // Message types
 type (
@@ -43,6 +47,19 @@ type (
 	// errMsg is sent when an error occurs
 	errMsg struct {
 		err error
+	}
+
+	// lockerErrMsg is sent when the locker server encounters an error
+	lockerErrMsg struct {
+		err error
+	}
+
+	// healthCheckTickMsg is sent periodically to check container health
+	healthCheckTickMsg time.Time
+
+	// healthCheckResultMsg is sent with the results of a health check
+	healthCheckResultMsg struct {
+		containerHealth []ContainerHealth
 	}
 )
 
@@ -91,6 +108,46 @@ func (m *Model) waitForLoadingProgress() tea.Cmd {
 			return nil
 		}
 		return loadingProgressMsg{progress: progress}
+	}
+}
+
+// waitForLockerError waits for locker server errors
+func (m *Model) waitForLockerError() tea.Cmd {
+	return func() tea.Msg {
+		if m.lockerErrChan == nil {
+			return nil
+		}
+		err, ok := <-m.lockerErrChan
+		if !ok {
+			return nil
+		}
+		return lockerErrMsg{err: err}
+	}
+}
+
+// healthCheckTick sends periodic health check messages
+func (m *Model) healthCheckTick() tea.Cmd {
+	return tea.Tick(HealthCheckInterval, func(t time.Time) tea.Msg {
+		return healthCheckTickMsg(t)
+	})
+}
+
+// doHealthCheck performs the actual health check in a goroutine
+func (m *Model) doHealthCheck() tea.Cmd {
+	cfg := m.cfg
+	return func() tea.Msg {
+		health := make([]ContainerHealth, len(cfg.InstancePorts()))
+		for i, port := range cfg.InstancePorts() {
+			health[i] = ContainerHealth{
+				Port:   port,
+				Status: HealthDown, // Default to down
+			}
+			// Check if container is running and PostgreSQL is responding
+			if docker.PostgresStatus(cfg, port) {
+				health[i].Status = HealthOK
+			}
+		}
+		return healthCheckResultMsg{containerHealth: health}
 	}
 }
 
@@ -145,6 +202,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Adjust scroll offset for new terminal size
+		m.adjustScrollOffset(m.getCurrentListSize())
 		return m, nil
 
 	case stateUpdateMsg:
@@ -241,6 +300,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.copyShimmer.Stop()
 		return m, nil
 
+	case lockerErrMsg:
+		// Locker server died - show modal
+		m.lockerHealth = HealthDown
+		m.lockerDiedError = msg.err
+		m.confirm = ConfirmLockerDied
+		return m, nil
+
+	case healthCheckTickMsg:
+		// Trigger health check in background
+		if !m.showingLoading {
+			return m, tea.Batch(m.healthCheckTick(), m.doHealthCheck())
+		}
+		return m, nil
+
+	case healthCheckResultMsg:
+		// Update container health status
+		m.containerHealth = msg.containerHealth
+		return m, nil
+
 	case errMsg:
 		m.err = msg.err
 		return m, nil
@@ -260,6 +338,9 @@ func (m *Model) handleLoadingComplete() (tea.Model, tea.Cmd) {
 	// Startup/Restart mode: transition to main view
 	m.showingLoading = false
 
+	// Mark all containers as healthy since they just started successfully
+	m.SetAllContainersHealthy()
+
 	// Refresh state after restart
 	if m.handler != nil {
 		m.state = m.handler.GetState()
@@ -271,6 +352,15 @@ func (m *Model) handleLoadingComplete() (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.waitForStateUpdate())
 	}
 	cmds = append(cmds, m.tick(), m.animationTick())
+
+	// Start locker error listener
+	if m.lockerErrChan != nil {
+		cmds = append(cmds, m.waitForLockerError())
+	}
+
+	// Start health check ticker
+	cmds = append(cmds, m.healthCheckTick())
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -327,6 +417,8 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showAllDatabases = !m.showAllDatabases
 		m.selectedIdx = 0
 		m.scrollOffset = 0
+		// Ensure scroll offset is valid for the new view
+		m.adjustScrollOffset(m.getCurrentListSize())
 		return m, nil
 
 	case "up", "k":
@@ -453,6 +545,14 @@ func (m *Model) executeConfirmedAction() (tea.Model, tea.Cmd) {
 			)
 		}
 		return m, nil
+
+	case ConfirmLockerDied:
+		// Locker server died - quit the application
+		m.quitting = true
+		if m.onQuit != nil {
+			m.onQuit()
+		}
+		return m, tea.Quit
 	}
 
 	return m, nil
