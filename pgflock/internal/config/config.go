@@ -19,6 +19,7 @@ type Config struct {
 	DatabasesPerInstance int    `yaml:"databases_per_instance"`
 	TmpfsSize            string `yaml:"tmpfs_size"`
 	ShmSize              string `yaml:"shm_size"`
+	CPULimit             string `yaml:"cpu_limit,omitempty"` // CPU limit per container (e.g., "2.0"), empty for no limit
 
 	// dblocker settings
 	LockerPort     int `yaml:"locker_port"`
@@ -83,6 +84,7 @@ func DefaultConfig() *Config {
 		DatabasesPerInstance: 10,
 		TmpfsSize:            "1024m",
 		ShmSize:              "1g",
+		CPULimit:             "", // Empty = no CPU limit
 		LockerPort:           9191,
 		AutoUnlockMins:       5,
 		PGUsername:           "tester",

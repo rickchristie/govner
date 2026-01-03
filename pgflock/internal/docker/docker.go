@@ -17,6 +17,9 @@ import (
 func BuildImage(cfg *config.Config, configDir string) error {
 	imageName := cfg.ImageName()
 
+	// Delete existing image first (like testdb's build-docker.sh)
+	_ = exec.Command("docker", "rmi", imageName).Run()
+
 	cmd := exec.Command("docker", "build", "--no-cache", "-t", imageName, configDir)
 	cmd.Stdout = nil // Will be set by caller if needed
 	cmd.Stderr = nil
@@ -26,12 +29,19 @@ func BuildImage(cfg *config.Config, configDir string) error {
 		return fmt.Errorf("docker build failed: %w\n%s", err, string(output))
 	}
 
+	// Clean up dangling images after build
+	_ = exec.Command("docker", "system", "prune", "-f").Run()
+
 	return nil
 }
 
 // BuildImageWithOutput builds the image and streams output live
 func BuildImageWithOutput(cfg *config.Config, configDir string) error {
 	imageName := cfg.ImageName()
+
+	// Delete existing image first (like testdb's build-docker.sh)
+	fmt.Println("Removing existing image...")
+	_ = exec.Command("docker", "rmi", imageName).Run()
 
 	cmd := exec.Command("docker", "build", "--no-cache", "-t", imageName, configDir)
 	cmd.Stdout = os.Stdout
@@ -43,6 +53,10 @@ func BuildImageWithOutput(cfg *config.Config, configDir string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("docker build failed: %w\n%s", err, stderrBuf.String())
 	}
+
+	// Clean up dangling images after build
+	fmt.Println("Cleaning up dangling images...")
+	_ = exec.Command("docker", "system", "prune", "-f").Run()
 
 	return nil
 }
@@ -63,12 +77,20 @@ func RunContainers(cfg *config.Config) error {
 			"--net=host",
 			"--tmpfs", fmt.Sprintf("/var/lib/postgresql/data:rw,noexec,nosuid,size=%s", cfg.TmpfsSize),
 			"--shm-size", cfg.ShmSize,
+		}
+
+		// Add CPU limit if configured
+		if cfg.CPULimit != "" {
+			args = append(args, "--cpus", cfg.CPULimit)
+		}
+
+		args = append(args,
 			"-e", fmt.Sprintf("NUM_TEST_DBS=%d", cfg.DatabasesPerInstance),
 			"-e", fmt.Sprintf("PGPORT=%d", port),
 			imageName,
 			"postgres", "-c", fmt.Sprintf("port=%d", port),
 			"-c", "config_file=/etc/postgresql/postgresql.conf",
-		}
+		)
 
 		cmd := exec.Command("docker", args...)
 		output, err := cmd.CombinedOutput()
@@ -97,6 +119,9 @@ func StopContainers(cfg *config.Config) error {
 		cmd = exec.Command("docker", "rm", containerName)
 		_ = cmd.Run() // Ignore error on rm
 	}
+
+	// Clean up dangling containers and images (like testdb's stop-docker.sh)
+	_ = exec.Command("docker", "system", "prune", "-f").Run()
 
 	if len(errs) > 0 {
 		return fmt.Errorf("errors stopping containers:\n%s", strings.Join(errs, "\n"))

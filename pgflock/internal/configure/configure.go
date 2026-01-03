@@ -54,6 +54,9 @@ func Run(configDir string) (*config.Config, error) {
 	// shm-size
 	cfg.ShmSize = promptString(reader, "shm-size (e.g., 1g, 512m)", cfg.ShmSize)
 
+	// CPU limit
+	cfg.CPULimit = promptString(reader, "CPU limit per container (e.g., 2.0, empty for no limit)", cfg.CPULimit)
+
 	// Locker port
 	cfg.LockerPort = promptInt(reader, "Locker port", cfg.LockerPort)
 
