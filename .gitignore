@@ -1,5 +1,6 @@
 .claude/
-.vscode/
+.vscode/*
+!.vscode/tasks.json
 
 # Gowt development files.
 gowt/gowt

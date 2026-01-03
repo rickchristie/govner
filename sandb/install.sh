@@ -149,6 +149,7 @@ AI_TASKS="[
             \"echo\": true,
             \"focus\": true,
             \"panel\": \"new\",
+            \"group\": \"ai-shell\",
             \"close\": true,
             \"reveal\": \"always\",
             \"showReuseMessage\": false

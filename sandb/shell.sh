@@ -111,5 +111,5 @@ else
 
     echo "========================"
     echo ""
-    docker exec -it ${ENV_ARGS} "${CONTAINER_NAME}" bash
+    docker exec -it ${ENV_ARGS} "${CONTAINER_NAME}" bash || true
 fi

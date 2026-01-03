@@ -151,12 +151,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = msg.state
 		m.updateAllDatabasesLockStatus()
 
-		// Adjust selection if it's out of bounds (for locked view)
-		if !m.showAllDatabases && m.state != nil && m.selectedIdx >= len(m.state.Locks) {
-			m.selectedIdx = len(m.state.Locks) - 1
-			if m.selectedIdx < 0 {
-				m.selectedIdx = 0
+		// Adjust selection and scroll if out of bounds (for locked view)
+		if !m.showAllDatabases && m.state != nil {
+			maxIdx := len(m.state.Locks) - 1
+			if maxIdx < 0 {
+				maxIdx = 0
 			}
+			if m.selectedIdx > maxIdx {
+				m.selectedIdx = maxIdx
+			}
+			// Reset scroll offset when content shrinks significantly
+			m.adjustScrollOffset(len(m.state.Locks))
 		}
 		return m, m.waitForStateUpdate()
 
@@ -165,6 +170,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.handler != nil {
 			m.state = m.handler.GetState()
 			m.updateAllDatabasesLockStatus()
+
+			// Adjust selection and scroll if out of bounds (for locked view)
+			if !m.showAllDatabases && m.state != nil {
+				maxIdx := len(m.state.Locks) - 1
+				if maxIdx < 0 {
+					maxIdx = 0
+				}
+				if m.selectedIdx > maxIdx {
+					m.selectedIdx = maxIdx
+				}
+				// Reset scroll offset when content shrinks
+				m.adjustScrollOffset(len(m.state.Locks))
+			}
 		}
 		return m, m.tick()
 
@@ -314,6 +332,8 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "up", "k":
 		if m.selectedIdx > 0 {
 			m.selectedIdx--
+			// Adjust scroll offset to keep selection visible
+			m.adjustScrollOffset(m.getCurrentListSize())
 		}
 		return m, nil
 
@@ -321,6 +341,8 @@ func (m *Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		maxIdx := m.getMaxSelectionIndex()
 		if m.selectedIdx < maxIdx {
 			m.selectedIdx++
+			// Adjust scroll offset to keep selection visible
+			m.adjustScrollOffset(m.getCurrentListSize())
 		}
 		return m, nil
 	}

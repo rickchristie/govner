@@ -102,14 +102,29 @@ func (m *Model) renderMainView() []string {
 		}
 	} else {
 		// Scrollable content area
-		// Ensure scroll offset keeps selected item visible
-		m.ensureSelectedVisible(totalContentLines, contentAreaHeight)
+		// Note: scroll offset is adjusted in Update(), not View() to keep View pure
+
+		// Clamp scroll offset for safety (in case of race or stale state)
+		scrollOffset := m.scrollOffset
+		if scrollOffset < 0 {
+			scrollOffset = 0
+		}
+		maxOffset := totalContentLines - contentAreaHeight
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		if scrollOffset > maxOffset {
+			scrollOffset = maxOffset
+		}
 
 		// Apply scroll offset - show only visible portion
-		startIdx := m.scrollOffset
-		endIdx := m.scrollOffset + contentAreaHeight
+		startIdx := scrollOffset
+		endIdx := scrollOffset + contentAreaHeight
 		if endIdx > totalContentLines {
 			endIdx = totalContentLines
+		}
+		if startIdx > totalContentLines {
+			startIdx = totalContentLines
 		}
 
 		// Add visible content lines
@@ -126,41 +141,22 @@ func (m *Model) renderMainView() []string {
 	}
 
 	// FIXED: Footer separator + help bar
+	// Use the clamped scroll offset for accurate scroll indicator
+	scrollOffsetForHelp := m.scrollOffset
+	if scrollOffsetForHelp < 0 {
+		scrollOffsetForHelp = 0
+	}
+	maxOffsetForHelp := totalContentLines - contentAreaHeight
+	if maxOffsetForHelp < 0 {
+		maxOffsetForHelp = 0
+	}
+	if scrollOffsetForHelp > maxOffsetForHelp {
+		scrollOffsetForHelp = maxOffsetForHelp
+	}
 	lines = append(lines, m.renderSectionHeader(width))
-	lines = append(lines, m.renderHelpBar(width, totalContentLines, contentAreaHeight))
+	lines = append(lines, m.renderHelpBar(width, totalContentLines, contentAreaHeight, scrollOffsetForHelp))
 
 	return lines
-}
-
-// ensureSelectedVisible adjusts scroll offset to keep selected item visible
-func (m *Model) ensureSelectedVisible(totalLines, visibleHeight int) {
-	if totalLines <= visibleHeight {
-		// No scrolling needed, reset offset
-		m.scrollOffset = 0
-		return
-	}
-
-	// If selected is above visible area, scroll up
-	if m.selectedIdx < m.scrollOffset {
-		m.scrollOffset = m.selectedIdx
-	}
-
-	// If selected is below visible area, scroll down
-	if m.selectedIdx >= m.scrollOffset+visibleHeight {
-		m.scrollOffset = m.selectedIdx - visibleHeight + 1
-	}
-
-	// Clamp scroll offset
-	maxOffset := totalLines - visibleHeight
-	if maxOffset < 0 {
-		maxOffset = 0
-	}
-	if m.scrollOffset > maxOffset {
-		m.scrollOffset = maxOffset
-	}
-	if m.scrollOffset < 0 {
-		m.scrollOffset = 0
-	}
 }
 
 // renderHeader renders: 🐑 pgflock ✓ 2 instances ● 3/25 locked ○ 22 free  [view toggle]
@@ -302,7 +298,7 @@ func (m *Model) renderEmptyState() string {
 }
 
 // renderHelpBar renders the help bar at the bottom with sheep at far right
-func (m *Model) renderHelpBar(width, totalLines, visibleHeight int) string {
+func (m *Model) renderHelpBar(width, totalLines, visibleHeight, scrollOffset int) string {
 	var parts []string
 
 	parts = append(parts, renderHelpKey("q", "Quit"))
@@ -343,11 +339,11 @@ func (m *Model) renderHelpBar(width, totalLines, visibleHeight int) string {
 		maxOffset := totalLines - visibleHeight
 		scrollPercent := 0
 		if maxOffset > 0 {
-			scrollPercent = (m.scrollOffset * 100) / maxOffset
+			scrollPercent = (scrollOffset * 100) / maxOffset
 		}
 		// Show current line range and percentage
-		startLine := m.scrollOffset + 1
-		endLine := m.scrollOffset + visibleHeight
+		startLine := scrollOffset + 1
+		endLine := scrollOffset + visibleHeight
 		if endLine > totalLines {
 			endLine = totalLines
 		}

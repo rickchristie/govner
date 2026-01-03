@@ -224,6 +224,57 @@ func (m *Model) getMaxSelectionIndex() int {
 	return len(m.state.Locks) - 1
 }
 
+// getCurrentListSize returns the number of items in the current view
+func (m *Model) getCurrentListSize() int {
+	if m.showAllDatabases {
+		return len(m.allDatabases)
+	}
+	if m.state == nil {
+		return 0
+	}
+	return len(m.state.Locks)
+}
+
+// adjustScrollOffset ensures scrollOffset is valid for the given content size.
+// This should be called from Update() whenever content changes.
+func (m *Model) adjustScrollOffset(totalItems int) {
+	// Calculate visible height based on current terminal size
+	height := m.height
+	if height <= 0 {
+		height = 24
+	}
+	visibleHeight := height - 4 // header (2) + footer (2)
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+
+	// If all content fits, no scrolling needed
+	if totalItems <= visibleHeight {
+		m.scrollOffset = 0
+		return
+	}
+
+	// Ensure selected item is visible
+	if m.selectedIdx < m.scrollOffset {
+		m.scrollOffset = m.selectedIdx
+	}
+	if m.selectedIdx >= m.scrollOffset+visibleHeight {
+		m.scrollOffset = m.selectedIdx - visibleHeight + 1
+	}
+
+	// Clamp scroll offset to valid range
+	maxOffset := totalItems - visibleHeight
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.scrollOffset > maxOffset {
+		m.scrollOffset = maxOffset
+	}
+	if m.scrollOffset < 0 {
+		m.scrollOffset = 0
+	}
+}
+
 // lockedCount returns the number of locked databases
 func (m *Model) lockedCount() int {
 	if m.state == nil {

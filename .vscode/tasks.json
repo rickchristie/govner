@@ -1,0 +1,157 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "AI: Build Proxy",
+      "type": "shell",
+      "command": "${workspaceFolder}/sandb/proxy/build.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "clear": false,
+        "echo": true,
+        "focus": false,
+        "panel": "dedicated",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "AI: Build CLI",
+      "type": "shell",
+      "command": "${workspaceFolder}/sandb/cli/build.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "clear": false,
+        "echo": true,
+        "focus": false,
+        "panel": "dedicated",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "AI: Start Proxy",
+      "type": "shell",
+      "command": "${workspaceFolder}/sandb/proxy/start.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "clear": false,
+        "close": true,
+        "echo": true,
+        "focus": false,
+        "panel": "dedicated",
+        "reveal": "silent",
+        "showReuseMessage": false
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "AI: Stop Proxy",
+      "type": "shell",
+      "command": "${workspaceFolder}/sandb/proxy/stop.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "clear": false,
+        "echo": true,
+        "focus": false,
+        "panel": "dedicated",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "AI: Stop CLI",
+      "type": "shell",
+      "command": "${workspaceFolder}/sandb/stop-cli.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "clear": false,
+        "echo": true,
+        "focus": false,
+        "panel": "dedicated",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "AI: Shell",
+      "type": "shell",
+      "command": "${workspaceFolder}/sandb/shell.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "clear": true,
+        "echo": true,
+        "focus": true,
+        "panel": "new",
+        "group": "ai-shell",
+        "close": true,
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "runOptions": {
+        "instanceLimit": 99,
+        "reevaluateOnRerun": true
+      },
+      "problemMatcher": [],
+      "isBackground": true
+    },
+    {
+      "label": "AI: Doctor",
+      "type": "shell",
+      "command": "${workspaceFolder}/sandb/shell.sh -c '${workspaceFolder}/sandb/doctor.sh'",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "clear": true,
+        "echo": true,
+        "focus": true,
+        "panel": "dedicated",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "pgflock: Build",
+      "type": "shell",
+      "command": "go build -o ${workspaceFolder}/pgflock/pgflock ${workspaceFolder}/pgflock/cmd/pgflock && notify-send 'pgflock' 'Build complete' || { notify-send 'pgflock' 'Build failed'; read -p 'Press Enter to close...'; exit 1; }",
+      "options": {
+        "cwd": "${workspaceFolder}/pgflock"
+      },
+      "presentation": {
+        "clear": true,
+        "echo": true,
+        "focus": false,
+        "panel": "dedicated",
+        "reveal": "silent",
+        "close": true,
+        "showReuseMessage": false
+      },
+      "problemMatcher": "$go",
+      "isBackground": false
+    }
+  ]
+}
