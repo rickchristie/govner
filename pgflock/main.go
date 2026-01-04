@@ -380,14 +380,8 @@ func runUp(cfg *config.Config) error {
 			go func() {
 				defer close(restartChan)
 
-				// Step 1: Unlock all databases
-				restartChan <- tui.LoadingProgress{
-					Step:    tui.StepStoppingContainers,
-					Message: "Unlocking all databases...",
-				}
-				handler.UnlockAll()
-
-				// Step 2: Stop containers
+				// Step 1: Stop containers first to prevent race conditions
+				// (tests can't acquire new locks on stopped databases)
 				restartChan <- tui.LoadingProgress{
 					Step:    tui.StepStoppingContainers,
 					Message: "Stopping containers...",
@@ -399,6 +393,13 @@ func runUp(cfg *config.Config) error {
 					}
 					return
 				}
+
+				// Step 2: Unlock all databases after containers are stopped
+				restartChan <- tui.LoadingProgress{
+					Step:    tui.StepStoppingContainers,
+					Message: "Unlocking all databases...",
+				}
+				handler.UnlockAll()
 
 				// Step 3: Start containers
 				restartChan <- tui.LoadingProgress{
