@@ -61,6 +61,11 @@ type (
 	healthCheckResultMsg struct {
 		containerHealth []ContainerHealth
 	}
+
+	// restartRequestMsg is sent when HTTP API requests a restart
+	restartRequestMsg struct {
+		responseChan chan error
+	}
 )
 
 // Init initializes the TUI model
@@ -122,6 +127,20 @@ func (m *Model) waitForLockerError() tea.Cmd {
 			return nil
 		}
 		return lockerErrMsg{err: err}
+	}
+}
+
+// waitForRestartRequest waits for restart requests from HTTP API
+func (m *Model) waitForRestartRequest() tea.Cmd {
+	return func() tea.Msg {
+		if m.restartRequestChan == nil {
+			return nil
+		}
+		req, ok := <-m.restartRequestChan
+		if !ok {
+			return nil
+		}
+		return restartRequestMsg{responseChan: req.ResponseChan}
 	}
 }
 
@@ -281,6 +300,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Check if failed
 		if m.loadingScreen.IsFailed() {
+			// Notify HTTP API caller about failure if this was an API-triggered restart
+			if m.pendingRestartResponse != nil {
+				m.pendingRestartResponse <- msg.progress.Error
+				m.pendingRestartResponse = nil
+			}
 			// Stay in loading view showing error
 			return m, nil
 		}
@@ -319,6 +343,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.containerHealth = msg.containerHealth
 		return m, nil
 
+	case restartRequestMsg:
+		// HTTP API requested a restart
+		if m.onRestart != nil {
+			// Store the response channel to notify HTTP API when done
+			m.pendingRestartResponse = msg.responseChan
+			progressChan := m.onRestart()
+			m.StartRestart(progressChan)
+			// Start loading screen ticks and progress listener
+			return m, tea.Batch(
+				m.loadingTick(),
+				m.loadingProgressTick(),
+				m.waitForLoadingProgress(),
+			)
+		}
+		// No restart handler, send error response
+		if msg.responseChan != nil {
+			msg.responseChan <- fmt.Errorf("restart not available")
+		}
+		return m, m.waitForRestartRequest()
+
 	case errMsg:
 		m.err = msg.err
 		return m, nil
@@ -347,6 +391,12 @@ func (m *Model) handleLoadingComplete() (tea.Model, tea.Cmd) {
 		m.updateAllDatabasesLockStatus()
 	}
 
+	// If this was an HTTP API-triggered restart, notify the caller
+	if m.pendingRestartResponse != nil {
+		m.pendingRestartResponse <- nil // Success
+		m.pendingRestartResponse = nil
+	}
+
 	var cmds []tea.Cmd
 	if m.stateChan != nil {
 		cmds = append(cmds, m.waitForStateUpdate())
@@ -360,6 +410,11 @@ func (m *Model) handleLoadingComplete() (tea.Model, tea.Cmd) {
 
 	// Start health check ticker
 	cmds = append(cmds, m.healthCheckTick())
+
+	// Start listening for HTTP API restart requests
+	if m.restartRequestChan != nil {
+		cmds = append(cmds, m.waitForRestartRequest())
+	}
 
 	return m, tea.Batch(cmds...)
 }

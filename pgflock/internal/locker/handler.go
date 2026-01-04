@@ -15,6 +15,11 @@ import (
 	"github.com/rickchristie/govner/pgflock/internal/config"
 )
 
+// RestartRequest represents a restart request from HTTP API to TUI
+type RestartRequest struct {
+	ResponseChan chan error // TUI sends completion status here
+}
+
 // Handler manages the HTTP endpoints and state
 type Handler struct {
 	cfg                   *config.Config
@@ -27,8 +32,7 @@ type Handler struct {
 	autoUnlockDuration    time.Duration
 	stateUpdateChan       chan<- *State
 	waitingCount          atomic.Int32
-	restartCallback       func() error
-	restartMu             sync.Mutex
+	restartRequestChan    chan RestartRequest // Channel for restart requests to TUI
 }
 
 // NewHandler creates a new Handler instance
@@ -487,11 +491,14 @@ func (h *Handler) UnlockAll() int {
 	return len(unlockedDbs)
 }
 
-// SetRestartCallback sets the callback function to be called when restart is requested
-func (h *Handler) SetRestartCallback(callback func() error) {
-	h.restartMu.Lock()
-	defer h.restartMu.Unlock()
-	h.restartCallback = callback
+// SetRestartRequestChan sets the channel for sending restart requests to TUI
+func (h *Handler) SetRestartRequestChan(ch chan RestartRequest) {
+	h.restartRequestChan = ch
+}
+
+// RestartRequestChan returns the restart request channel
+func (h *Handler) RestartRequestChan() chan RestartRequest {
+	return h.restartRequestChan
 }
 
 func (h *Handler) handleRestart(resp http.ResponseWriter, req *http.Request) {
@@ -506,27 +513,35 @@ func (h *Handler) handleRestart(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	h.restartMu.Lock()
-	callback := h.restartCallback
-	h.restartMu.Unlock()
-
-	if callback == nil {
-		http.Error(resp, "Restart not available (no callback configured)", http.StatusServiceUnavailable)
+	if h.restartRequestChan == nil {
+		http.Error(resp, "Restart not available (TUI not connected)", http.StatusServiceUnavailable)
 		return
 	}
 
 	log.Info().Msg("RESTART requested via HTTP API")
 
-	// Execute the restart callback (this blocks until restart is complete)
-	if err := callback(); err != nil {
-		log.Error().Err(err).Msg("Restart failed")
-		http.Error(resp, fmt.Sprintf("Restart failed: %v", err), http.StatusInternalServerError)
-		return
-	}
+	// Create response channel for this request
+	responseChan := make(chan error, 1)
 
-	resp.Header().Set("Content-Type", "application/json")
-	resp.WriteHeader(http.StatusOK)
-	fmt.Fprintf(resp, `{"status":"ok","message":"Restart completed successfully"}`)
+	// Try to send restart request to TUI (non-blocking)
+	select {
+	case h.restartRequestChan <- RestartRequest{ResponseChan: responseChan}:
+		// Request sent, now wait for TUI to complete restart
+		err := <-responseChan
+		if err != nil {
+			log.Error().Err(err).Msg("Restart failed")
+			http.Error(resp, fmt.Sprintf("Restart failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		resp.Header().Set("Content-Type", "application/json")
+		resp.WriteHeader(http.StatusOK)
+		fmt.Fprintf(resp, `{"status":"ok","message":"Restart completed successfully"}`)
+
+	default:
+		// TUI is not ready to accept restart (already restarting or not listening)
+		http.Error(resp, "Restart already in progress", http.StatusConflict)
+	}
 }
 
 func (h *Handler) handleUnlockAll(resp http.ResponseWriter, req *http.Request) {

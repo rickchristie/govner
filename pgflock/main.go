@@ -368,33 +368,10 @@ func runUp(cfg *config.Config) error {
 		model.SetStateChan(stateUpdateChan)
 		model.SetLockerErrChan(lockerErrChan)
 
-		// Set up HTTP API restart callback
-		handler.SetRestartCallback(func() error {
-			// Step 1: Unlock all databases
-			handler.UnlockAll()
-
-			// Step 2: Stop containers
-			if err := docker.StopContainers(cfg); err != nil {
-				return fmt.Errorf("failed to stop containers: %w", err)
-			}
-
-			// Step 3: Start containers
-			if err := docker.RunContainers(cfg); err != nil {
-				return fmt.Errorf("failed to start containers: %w", err)
-			}
-
-			// Step 4: Wait for PostgreSQL
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
-
-			for _, port := range cfg.InstancePorts() {
-				if err := docker.WaitForPostgresOnPort(ctx, cfg, port); err != nil {
-					return fmt.Errorf("PostgreSQL on port %d not ready: %w", port, err)
-				}
-			}
-
-			return nil
-		})
+		// Set up restart request channel for HTTP API -> TUI communication
+		restartRequestChan := make(chan locker.RestartRequest)
+		handler.SetRestartRequestChan(restartRequestChan)
+		model.SetRestartRequestChan(restartRequestChan)
 
 		// Set up restart callback (now that handler is available)
 		model.SetOnRestart(func() <-chan tui.LoadingProgress {

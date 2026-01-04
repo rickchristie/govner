@@ -87,6 +87,10 @@ type Model struct {
 	onRestart  func() <-chan LoadingProgress   // Called for restart with loading screen
 	onQuit     func()                          // Called for immediate quit (startup cancel)
 	onShutdown func() <-chan LoadingProgress   // Called for graceful shutdown with loading screen
+
+	// HTTP API restart handling
+	restartRequestChan     <-chan locker.RestartRequest // Channel for restart requests from HTTP API
+	pendingRestartResponse chan error                   // Response channel for current restart request
 }
 
 // NewModel creates a new TUI model for startup mode.
@@ -177,6 +181,11 @@ func (m *Model) SetOnShutdown(fn func() <-chan LoadingProgress) {
 func (m *Model) SetLockerErrChan(errChan <-chan error) {
 	m.lockerErrChan = errChan
 	m.lockerHealth = HealthOK // Assume healthy when set
+}
+
+// SetRestartRequestChan sets the channel for restart requests from HTTP API.
+func (m *Model) SetRestartRequestChan(ch <-chan locker.RestartRequest) {
+	m.restartRequestChan = ch
 }
 
 // SetContainerHealthy marks a container as healthy.

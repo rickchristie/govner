@@ -979,33 +979,49 @@ func TestUnlockAllEndpoint(t *testing.T) {
 func TestRestartEndpoint(t *testing.T) {
 	h := newTestHandler()
 
-	// Test restart without callback configured
+	// Test restart without channel configured
 	req := httptest.NewRequest("POST", "/restart?marker=admin&password="+testPassword, nil)
 	rr := httptest.NewRecorder()
 	h.handleRestart(rr, req)
 
 	if rr.Code != http.StatusServiceUnavailable {
-		t.Errorf("Expected 503 when no callback configured, got %d", rr.Code)
+		t.Errorf("Expected 503 when no channel configured, got %d", rr.Code)
 	}
 
-	// Set up a mock restart callback
-	restartCalled := false
-	h.SetRestartCallback(func() error {
-		restartCalled = true
-		return nil
-	})
+	// Set up restart request channel (simulating TUI)
+	restartRequestChan := make(chan RestartRequest)
+	h.SetRestartRequestChan(restartRequestChan)
 
-	// Test restart with callback
+	// Start a goroutine to handle restart requests (simulating TUI)
+	restartCalled := make(chan bool, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := <-restartRequestChan
+		restartCalled <- true
+		req.ResponseChan <- nil // Success
+	}()
+
+	// Give the goroutine time to start blocking on the channel
+	time.Sleep(10 * time.Millisecond)
+
+	// Test restart with channel
 	req = httptest.NewRequest("POST", "/restart?marker=admin&password="+testPassword, nil)
 	rr = httptest.NewRecorder()
 	h.handleRestart(rr, req)
+
+	// Wait for handler goroutine to complete
+	<-done
 
 	if rr.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	if !restartCalled {
-		t.Error("Restart callback was not called")
+	select {
+	case <-restartCalled:
+		// Good, restart was called
+	default:
+		t.Error("Restart request was not received by TUI")
 	}
 
 	// Verify response
@@ -1023,7 +1039,10 @@ func TestRestartEndpoint(t *testing.T) {
 
 func TestRestartEndpointAuthRequired(t *testing.T) {
 	h := newTestHandler()
-	h.SetRestartCallback(func() error { return nil })
+
+	// Set up restart request channel (simulating TUI)
+	restartRequestChan := make(chan RestartRequest)
+	h.SetRestartRequestChan(restartRequestChan)
 
 	// Test without password
 	req := httptest.NewRequest("POST", "/restart?marker=admin", nil)
@@ -1050,6 +1069,24 @@ func TestRestartEndpointAuthRequired(t *testing.T) {
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("Expected 405 for GET, got %d", rr.Code)
+	}
+}
+
+func TestRestartEndpointConflict(t *testing.T) {
+	h := newTestHandler()
+
+	// Set up restart request channel but DON'T start a receiver
+	// This simulates TUI not being ready (e.g., already restarting)
+	restartRequestChan := make(chan RestartRequest)
+	h.SetRestartRequestChan(restartRequestChan)
+
+	// Try to restart when no one is listening - should get 409 Conflict
+	req := httptest.NewRequest("POST", "/restart?marker=admin&password="+testPassword, nil)
+	rr := httptest.NewRecorder()
+	h.handleRestart(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Errorf("Expected 409 when TUI not listening, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
