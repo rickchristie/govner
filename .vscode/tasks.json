@@ -137,7 +137,7 @@
     {
       "label": "pgflock: Build",
       "type": "shell",
-      "command": "go build -o ${workspaceFolder}/pgflock/pgflock ${workspaceFolder}/pgflock/cmd/pgflock && notify-send 'pgflock' 'Build complete' || { notify-send 'pgflock' 'Build failed'; read -p 'Press Enter to close...'; exit 1; }",
+      "command": "go build -o ${workspaceFolder}/pgflock/pgflock ${workspaceFolder}/pgflock && notify-send 'pgflock' 'Build complete' || { notify-send 'pgflock' 'Build failed'; read -p 'Press Enter to close...'; exit 1; }",
       "options": {
         "cwd": "${workspaceFolder}/pgflock"
       },
@@ -148,6 +148,25 @@
         "panel": "dedicated",
         "reveal": "silent",
         "close": true,
+        "showReuseMessage": false
+      },
+      "problemMatcher": "$go",
+      "isBackground": false
+    },
+    {
+      "label": "gowt: Test Current Package",
+      "type": "shell",
+      "command": "go clean -testcache && gowt .",
+      "options": {
+        "cwd": "${fileDirname}"
+      },
+      "presentation": {
+        "clear": true,
+        "echo": true,
+        "focus": true,
+        "panel": "dedicated",
+        "group": "test",
+        "reveal": "always",
         "showReuseMessage": false
       },
       "problemMatcher": "$go",

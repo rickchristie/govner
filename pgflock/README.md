@@ -28,7 +28,7 @@
 ## Installation
 
 ```bash
-go install github.com/rickchristie/govner/pgflock/cmd/pgflock@latest
+go install github.com/rickchristie/govner/pgflock@latest
 ```
 
 Make sure `$GOPATH/bin` is in your `PATH`. Add this to your shell profile (`~/.bashrc`, `~/.zshrc`, or `~/.profile`):
