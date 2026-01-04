@@ -59,6 +59,7 @@ type (
 
 	// healthCheckResultMsg is sent with the results of a health check
 	healthCheckResultMsg struct {
+		lockerHealthy   bool
 		containerHealth []ContainerHealth
 	}
 
@@ -66,6 +67,31 @@ type (
 	restartRequestMsg struct {
 		responseChan chan error
 	}
+
+	// healthStatusStartMsg signals the start of a health check cycle
+	healthStatusStartMsg struct{}
+
+	// healthStatusCheckingMsg signals checking a specific target
+	healthStatusCheckingMsg struct {
+		target string // e.g., "locker" or ":9090"
+	}
+
+	// healthStatusResultMsg signals the result of checking a target
+	healthStatusResultMsg struct {
+		target  string // e.g., "locker" or ":9090"
+		healthy bool
+	}
+
+	// healthStatusCompleteMsg signals all health checks are complete
+	healthStatusCompleteMsg struct {
+		allHealthy bool
+	}
+
+	// sheepAnimationTickMsg is sent for sheep animation updates
+	sheepAnimationTickMsg struct{}
+
+	// healthStatusClearMsg clears the health status message after a delay
+	healthStatusClearMsg struct{}
 )
 
 // Init initializes the TUI model
@@ -152,9 +178,22 @@ func (m *Model) healthCheckTick() tea.Cmd {
 }
 
 // doHealthCheck performs the actual health check in a goroutine
+// Checks locker first, then all containers, ensuring minimum display time for animation
 func (m *Model) doHealthCheck() tea.Cmd {
 	cfg := m.cfg
+	handler := m.handler
 	return func() tea.Msg {
+		startTime := time.Now()
+
+		// Check locker health first (if handler is available)
+		lockerHealthy := false
+		if handler != nil {
+			// Try to get state - if it works, locker is healthy
+			state := handler.GetState()
+			lockerHealthy = state != nil
+		}
+
+		// Check container health
 		health := make([]ContainerHealth, len(cfg.InstancePorts()))
 		for i, port := range cfg.InstancePorts() {
 			health[i] = ContainerHealth{
@@ -166,8 +205,32 @@ func (m *Model) doHealthCheck() tea.Cmd {
 				health[i].Status = HealthOK
 			}
 		}
-		return healthCheckResultMsg{containerHealth: health}
+
+		// Ensure minimum display time so animation is visible
+		elapsed := time.Since(startTime)
+		if elapsed < HealthCheckMinDisplayTime {
+			time.Sleep(HealthCheckMinDisplayTime - elapsed)
+		}
+
+		return healthCheckResultMsg{
+			lockerHealthy:   lockerHealthy,
+			containerHealth: health,
+		}
 	}
+}
+
+// sheepAnimationTick sends periodic tick messages for sheep animation
+func (m *Model) sheepAnimationTick() tea.Cmd {
+	return tea.Tick(SheepAnimationInterval, func(t time.Time) tea.Msg {
+		return sheepAnimationTickMsg{}
+	})
+}
+
+// healthStatusClear sends a message after delay to clear health status
+func (m *Model) healthStatusClear() tea.Cmd {
+	return tea.Tick(HealthStatusHoldTime, func(t time.Time) tea.Msg {
+		return healthStatusClearMsg{}
+	})
 }
 
 // tick sends periodic tick messages (1 second) for time display updates
@@ -332,15 +395,67 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case healthCheckTickMsg:
-		// Trigger health check in background
+		// Trigger health check in background with status updates
 		if !m.showingLoading {
-			return m, tea.Batch(m.healthCheckTick(), m.doHealthCheck())
+			// Start the health check cycle - show generic checking status
+			m.healthStatusMsg = "Checking"
+			m.sheepState = SheepRunning
+			m.sheepFrame = 0
+			// Note: next health check tick is scheduled after results arrive (5s gap between checks)
+			return m, tea.Batch(m.doHealthCheck(), m.sheepAnimationTick())
 		}
 		return m, nil
 
 	case healthCheckResultMsg:
 		// Update container health status
 		m.containerHealth = msg.containerHealth
+
+		// Update locker health from check result
+		if msg.lockerHealthy {
+			m.lockerHealth = HealthOK
+		} else {
+			m.lockerHealth = HealthDown
+		}
+
+		// Determine status message in priority order: locker first, then containers
+		// Check locker health first
+		if !msg.lockerHealthy {
+			m.healthStatusMsg = "Locker unreachable"
+			m.sheepState = SheepDistressed
+			m.sheepFrame = 0
+			// Schedule next health check after 5s interval
+			return m, tea.Batch(m.sheepAnimationTick(), m.healthCheckTick())
+		}
+
+		// Check container health (find first unhealthy container)
+		for _, c := range msg.containerHealth {
+			if c.Status != HealthOK {
+				m.healthStatusMsg = fmt.Sprintf("Timeout: :%d", c.Port)
+				m.sheepState = SheepStartled
+				// Schedule next health check after 5s interval
+				return m, m.healthCheckTick()
+			}
+		}
+
+		// All healthy!
+		m.healthStatusMsg = IconCheckmark + " All healthy"
+		m.sheepState = SheepIdle
+		// Schedule next health check after 5s interval (keep message visible until next check)
+		return m, m.healthCheckTick()
+
+	case sheepAnimationTickMsg:
+		// Advance sheep animation frame
+		if m.sheepState == SheepRunning || m.sheepState == SheepDistressed {
+			m.sheepFrame++
+			return m, m.sheepAnimationTick()
+		}
+		return m, nil
+
+	case healthStatusClearMsg:
+		// Clear the health status message if still showing success
+		if m.sheepState == SheepIdle && m.healthStatusMsg == IconCheckmark+" All healthy" {
+			m.healthStatusMsg = ""
+		}
 		return m, nil
 
 	case restartRequestMsg:

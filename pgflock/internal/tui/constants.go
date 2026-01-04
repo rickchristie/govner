@@ -12,7 +12,7 @@ const (
 	LockedAnimationInterval = 100 * time.Millisecond
 
 	// Copy shimmer effect
-	CopyShimmerInterval = 50 * time.Millisecond // shimmer speed (fast metallic sheen)
+	CopyShimmerInterval = 50 * time.Millisecond  // shimmer speed (fast metallic sheen)
 	CopyShimmerDuration = 2500 * time.Millisecond // total display time
 
 	// Startup animation
@@ -21,6 +21,21 @@ const (
 
 	// UI refresh rate
 	TickInterval = time.Second
+
+	// Health status animation
+	SheepAnimationInterval    = 100 * time.Millisecond  // match startup animation speed
+	HealthStatusHoldTime      = 1500 * time.Millisecond // how long to show success message
+	HealthCheckMinDisplayTime = 2000 * time.Millisecond // minimum time to show "Checking..." state
+)
+
+// SheepState represents the sheep animation state in the footer
+type SheepState int
+
+const (
+	SheepIdle       SheepState = iota // 🐑 (peaceful, default)
+	SheepRunning                      // 🐑· animation (pacing during health check)
+	SheepStartled                     // ⚡🐑 (timeout/warning)
+	SheepDistressed                   // 🐑💦 animation (error state)
 )
 
 // The Twilight Meadow color palette
@@ -116,4 +131,21 @@ func CopyShimmerColors() []lipgloss.Color {
 		ColorLime,    // frame 3
 		ColorEmerald, // frame 4
 	}
+}
+
+// Sheep animation frames for running/checking (dots pulse around stationary sheep)
+// Similar to startup screen animation style
+var SheepRunningFrames = []string{
+	"· 🐑 ·",
+	"· 🐑 · ·",
+	"· 🐑 · · ·",
+	"· 🐑 · ·",
+}
+
+// Sheep animation frames for distressed sheep (trembling + sweat)
+var SheepDistressedFrames = []string{
+	"🐑💦",  // sweat + left
+	" 🐑💦", // sweat + right (shake)
+	"🐑 💦", // drop falling + left
+	" 🐑",   // right
 }

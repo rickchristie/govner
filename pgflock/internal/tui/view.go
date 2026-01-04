@@ -159,10 +159,12 @@ func (m *Model) renderMainView() []string {
 	return lines
 }
 
-// renderHeader renders: 🐑 pgflock    locker ✓  🛢️ 2/2 ✓  💤 Sleeping  ○ 16 free
+// renderHeader renders: 🐑 pgflock  [tester]  locker ✓  🛢️ 2/2 ✓  💤 Sleeping  ○ 16 free
 func (m *Model) renderHeader(width int) string {
-	// Brand logo (extra spacing after)
+	// Brand logo + docker name prefix
 	brand := TitleStyle.Render(SheepEmoji + " pgflock")
+	dockerPrefix := MarkerStyle.Render("[" + m.cfg.DockerNamePrefix + "]")
+	brandWithPrefix := brand + "  " + dockerPrefix
 
 	// Build status parts with consistent spacing
 	var statusParts []string
@@ -191,8 +193,8 @@ func (m *Model) renderHeader(width int) string {
 		statusParts = append(statusParts, WaitingCountStyle.Render(waitingText))
 	}
 
-	// Join: logo (4 spaces) status parts (2 spaces between each)
-	leftContent := brand + "    " + strings.Join(statusParts, "  ")
+	// Join: brand+prefix (2 spaces) status parts (2 spaces between each)
+	leftContent := brandWithPrefix + "  " + strings.Join(statusParts, "  ")
 	leftWidth := lipglossWidth(leftContent)
 
 	// View toggle at right: "All Databases (10) | Locked Databases"
@@ -337,7 +339,7 @@ func (m *Model) renderEmptyState() string {
 	return line1 + "\n" + line2 + "\n" + line3
 }
 
-// renderHelpBar renders the help bar at the bottom with sheep at far right
+// renderHelpBar renders the help bar at the bottom with health status and sheep at far right
 func (m *Model) renderHelpBar(width, totalLines, visibleHeight, scrollOffset int) string {
 	var parts []string
 
@@ -370,8 +372,8 @@ func (m *Model) renderHelpBar(width, totalLines, visibleHeight, scrollOffset int
 	leftContent := strings.Join(parts, "  ")
 	leftWidth := lipglossWidth(leftContent)
 
-	// Build right side: scroll indicator + sheep
-	var rightContent string
+	// Build right side: scroll indicator (optional) + health status + sheep
+	var rightParts []string
 
 	// Add scroll indicator if content is scrollable
 	if totalLines > visibleHeight {
@@ -388,11 +390,18 @@ func (m *Model) renderHelpBar(width, totalLines, visibleHeight, scrollOffset int
 			endLine = totalLines
 		}
 		scrollInfo := DimStyle.Render(fmt.Sprintf("%d-%d/%d %d%%", startLine, endLine, totalLines, scrollPercent))
-		rightContent = scrollInfo + "  " + SheepEmoji
-	} else {
-		rightContent = SheepEmoji
+		rightParts = append(rightParts, scrollInfo)
 	}
 
+	// Add health status message if any
+	if m.healthStatusMsg != "" {
+		rightParts = append(rightParts, m.renderHealthStatus())
+	}
+
+	// Add animated sheep
+	rightParts = append(rightParts, m.renderSheep())
+
+	rightContent := strings.Join(rightParts, "  ")
 	rightWidth := lipglossWidth(rightContent)
 
 	// Calculate padding between left and right
@@ -402,6 +411,46 @@ func (m *Model) renderHelpBar(width, totalLines, visibleHeight, scrollOffset int
 	}
 
 	return leftContent + strings.Repeat(" ", paddingWidth) + rightContent
+}
+
+// renderHealthStatus renders the current health status message with appropriate styling
+func (m *Model) renderHealthStatus() string {
+	switch m.sheepState {
+	case SheepIdle:
+		// Healthy - lime green
+		return HealthyStyle.Render(m.healthStatusMsg)
+	case SheepRunning:
+		// Checking - dim text
+		return DimStyle.Render(m.healthStatusMsg)
+	case SheepStartled:
+		// Warning/timeout - amber
+		return PartialHealthStyle.Render(m.healthStatusMsg)
+	case SheepDistressed:
+		// Error - coral red
+		return UnhealthyStyle.Render(m.healthStatusMsg)
+	default:
+		return DimStyle.Render(m.healthStatusMsg)
+	}
+}
+
+// renderSheep renders the animated sheep based on current state
+func (m *Model) renderSheep() string {
+	switch m.sheepState {
+	case SheepRunning:
+		// Pacing sheep with dust
+		frames := SheepRunningFrames
+		return frames[m.sheepFrame%len(frames)]
+	case SheepStartled:
+		// Startled sheep with lightning
+		return "⚡🐑"
+	case SheepDistressed:
+		// Trembling sheep with sweat
+		frames := SheepDistressedFrames
+		return frames[m.sheepFrame%len(frames)]
+	default:
+		// Idle peaceful sheep
+		return SheepEmoji
+	}
 }
 
 // renderHelpKey renders a help item like "[q Quit]"

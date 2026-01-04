@@ -68,6 +68,11 @@ type Model struct {
 	lockerErrChan    <-chan error
 	lockerDiedError  error // Stores the error when locker dies
 
+	// Health status display (footer)
+	healthStatusMsg string     // Current status message to display
+	sheepState      SheepState // Current sheep animation state
+	sheepFrame      int        // Animation frame index
+
 	// Animation state
 	lockedAnimator *LockedAnimator
 	copyShimmer    *CopyShimmer
