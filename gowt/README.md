@@ -2,7 +2,7 @@
 
 A terminal-based UI for running and viewing Go test results and logs in real-time.
 
-Vibe-coded with Claude Code. Useful when you have thousands of tests to run.
+Useful when you have thousands of tests to run.
 
 ![gowt demo](/gowt/docs/peek.gif)
 
@@ -145,3 +145,7 @@ The `c` key in log view copies test output to your clipboard. Supported clipboar
 ## License
 
 MIT License - see [LICENSE](../LICENSE) for details.
+
+## ✨ Made with Claude
+
+🛠️ Built together with [Claude Code](https://claude.ai/code)

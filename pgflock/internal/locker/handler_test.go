@@ -1,6 +1,7 @@
 package locker
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -867,9 +868,10 @@ func TestLock_VerifyNoDuplicateInChannel(t *testing.T) {
 func TestHealthCheck(t *testing.T) {
 	h := newTestHandler()
 
-	// Lock a few databases
-	for i := 0; i < 3; i++ {
-		req := httptest.NewRequest("GET", "/lock?marker=testuser&password="+testPassword, nil)
+	// Lock a few databases with different markers
+	markers := []string{"test-alpha", "test-beta", "test-gamma"}
+	for _, marker := range markers {
+		req := httptest.NewRequest("GET", "/lock?marker="+marker+"&password="+testPassword, nil)
 		rr := httptest.NewRecorder()
 		h.handleLockNoReset(rr, req)
 	}
@@ -883,12 +885,171 @@ func TestHealthCheck(t *testing.T) {
 		t.Errorf("Expected status 200, got %d", rr.Code)
 	}
 
-	body := rr.Body.String()
-	if !strings.Contains(body, `"status":"ok"`) {
-		t.Errorf("Expected status ok in response, got %s", body)
+	// Parse JSON response
+	var response HealthCheckResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Failed to parse JSON response: %v", err)
 	}
-	if !strings.Contains(body, `"locked":3`) {
-		t.Errorf("Expected locked:3 in response, got %s", body)
+
+	// Verify basic counts
+	if response.Status != "ok" {
+		t.Errorf("Expected status 'ok', got %s", response.Status)
+	}
+	if response.LockedDatabases != 3 {
+		t.Errorf("Expected 3 locked databases, got %d", response.LockedDatabases)
+	}
+	if response.TotalDatabases != defaultDatabaseCount {
+		t.Errorf("Expected %d total databases, got %d", defaultDatabaseCount, response.TotalDatabases)
+	}
+	if response.FreeDatabases != defaultDatabaseCount-3 {
+		t.Errorf("Expected %d free databases, got %d", defaultDatabaseCount-3, response.FreeDatabases)
+	}
+
+	// Verify lock details are present
+	if len(response.Locks) != 3 {
+		t.Errorf("Expected 3 lock entries, got %d", len(response.Locks))
+	}
+
+	// Verify each lock has required fields
+	for _, lock := range response.Locks {
+		if lock.ConnString == "" {
+			t.Error("Lock missing conn_string")
+		}
+		if lock.Marker == "" {
+			t.Error("Lock missing marker")
+		}
+		if lock.LockedAt == "" {
+			t.Error("Lock missing locked_at timestamp")
+		}
+		if lock.DurationSeconds < 0 {
+			t.Errorf("Lock has negative duration: %d", lock.DurationSeconds)
+		}
+	}
+}
+
+func TestUnlockAllEndpoint(t *testing.T) {
+	h := newTestHandler()
+
+	// Lock several databases
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest("GET", fmt.Sprintf("/lock?marker=user%d&password=%s", i, testPassword), nil)
+		rr := httptest.NewRecorder()
+		h.handleLockNoReset(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("Lock %d failed", i)
+		}
+	}
+
+	// Verify we have 5 locks
+	h.withLocksRLock(func() {
+		if len(h.locks) != 5 {
+			t.Errorf("Expected 5 locks, got %d", len(h.locks))
+		}
+	})
+
+	// Call unlock-all endpoint
+	req := httptest.NewRequest("POST", "/unlock-all?marker=admin&password="+testPassword, nil)
+	rr := httptest.NewRecorder()
+	h.handleUnlockAll(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify response
+	var response struct {
+		Status   string `json:"status"`
+		Unlocked int    `json:"unlocked"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Failed to parse response: %v", err)
+	}
+	if response.Unlocked != 5 {
+		t.Errorf("Expected 5 unlocked, got %d", response.Unlocked)
+	}
+
+	// Verify all locks are released
+	h.withLocksRLock(func() {
+		if len(h.locks) != 0 {
+			t.Errorf("Expected 0 locks after unlock-all, got %d", len(h.locks))
+		}
+	})
+}
+
+func TestRestartEndpoint(t *testing.T) {
+	h := newTestHandler()
+
+	// Test restart without callback configured
+	req := httptest.NewRequest("POST", "/restart?marker=admin&password="+testPassword, nil)
+	rr := httptest.NewRecorder()
+	h.handleRestart(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("Expected 503 when no callback configured, got %d", rr.Code)
+	}
+
+	// Set up a mock restart callback
+	restartCalled := false
+	h.SetRestartCallback(func() error {
+		restartCalled = true
+		return nil
+	})
+
+	// Test restart with callback
+	req = httptest.NewRequest("POST", "/restart?marker=admin&password="+testPassword, nil)
+	rr = httptest.NewRecorder()
+	h.handleRestart(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	if !restartCalled {
+		t.Error("Restart callback was not called")
+	}
+
+	// Verify response
+	var response struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Failed to parse response: %v", err)
+	}
+	if response.Status != "ok" {
+		t.Errorf("Expected status 'ok', got %s", response.Status)
+	}
+}
+
+func TestRestartEndpointAuthRequired(t *testing.T) {
+	h := newTestHandler()
+	h.SetRestartCallback(func() error { return nil })
+
+	// Test without password
+	req := httptest.NewRequest("POST", "/restart?marker=admin", nil)
+	rr := httptest.NewRecorder()
+	h.handleRestart(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("Expected 401 without password, got %d", rr.Code)
+	}
+
+	// Test with wrong password
+	req = httptest.NewRequest("POST", "/restart?marker=admin&password=wrongpass", nil)
+	rr = httptest.NewRecorder()
+	h.handleRestart(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("Expected 401 with wrong password, got %d", rr.Code)
+	}
+
+	// Test with GET instead of POST
+	req = httptest.NewRequest("GET", "/restart?marker=admin&password="+testPassword, nil)
+	rr = httptest.NewRecorder()
+	h.handleRestart(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("Expected 405 for GET, got %d", rr.Code)
 	}
 }
 

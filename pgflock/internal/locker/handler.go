@@ -1,6 +1,7 @@
 package locker
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +27,8 @@ type Handler struct {
 	autoUnlockDuration    time.Duration
 	stateUpdateChan       chan<- *State
 	waitingCount          atomic.Int32
+	restartCallback       func() error
+	restartMu             sync.Mutex
 }
 
 // NewHandler creates a new Handler instance
@@ -95,6 +98,10 @@ func (h *Handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 		h.handleForceUnlock(resp, req)
 	case "/unlock-by-marker":
 		h.handleUnlockByMarker(resp, req)
+	case "/restart":
+		h.handleRestart(resp, req)
+	case "/unlock-all":
+		h.handleUnlockAll(resp, req)
 	default:
 		http.NotFound(resp, req)
 	}
@@ -225,16 +232,38 @@ func (h *Handler) handleUnlock(resp http.ResponseWriter, req *http.Request) {
 }
 
 func (h *Handler) handleHealthCheck(resp http.ResponseWriter, req *http.Request) {
-	var locked, free int
+	now := time.Now()
+	var locks []LockInfoJSON
+
 	h.withLocksRLock(func() {
-		locked = len(h.locks)
+		for _, lockInfo := range h.locks {
+			locks = append(locks, LockInfoJSON{
+				ConnString:      lockInfo.ConnString,
+				Marker:          lockInfo.Marker,
+				LockedAt:        lockInfo.LockedAt.Format(time.RFC3339),
+				DurationSeconds: int64(now.Sub(lockInfo.LockedAt).Seconds()),
+			})
+		}
 	})
-	free = len(h.cLockedDbConn)
-	waiting := int(h.waitingCount.Load())
+
+	// Sort locks by duration (longest first)
+	sort.Slice(locks, func(i, j int) bool {
+		return locks[i].DurationSeconds > locks[j].DurationSeconds
+	})
+
+	response := HealthCheckResponse{
+		Status:            "ok",
+		TotalDatabases:    len(h.testDatabases),
+		LockedDatabases:   len(locks),
+		FreeDatabases:     len(h.cLockedDbConn),
+		WaitingRequests:   int(h.waitingCount.Load()),
+		AutoUnlockMinutes: h.cfg.AutoUnlockMins,
+		Locks:             locks,
+	}
 
 	resp.Header().Set("Content-Type", "application/json")
 	resp.WriteHeader(http.StatusOK)
-	fmt.Fprintf(resp, `{"status":"ok","locked":%d,"free":%d,"waiting":%d}`, locked, free, waiting)
+	json.NewEncoder(resp).Encode(response)
 }
 
 func (h *Handler) handleForceUnlock(resp http.ResponseWriter, req *http.Request) {
@@ -456,4 +485,65 @@ func (h *Handler) UnlockAll() int {
 	}
 
 	return len(unlockedDbs)
+}
+
+// SetRestartCallback sets the callback function to be called when restart is requested
+func (h *Handler) SetRestartCallback(callback func() error) {
+	h.restartMu.Lock()
+	defer h.restartMu.Unlock()
+	h.restartCallback = callback
+}
+
+func (h *Handler) handleRestart(resp http.ResponseWriter, req *http.Request) {
+	_, valid := h.validateAuth(req)
+	if !valid {
+		http.Error(resp, "Invalid marker or password", http.StatusUnauthorized)
+		return
+	}
+
+	if req.Method != "POST" {
+		http.Error(resp, "Method not allowed, use POST", http.StatusMethodNotAllowed)
+		return
+	}
+
+	h.restartMu.Lock()
+	callback := h.restartCallback
+	h.restartMu.Unlock()
+
+	if callback == nil {
+		http.Error(resp, "Restart not available (no callback configured)", http.StatusServiceUnavailable)
+		return
+	}
+
+	log.Info().Msg("RESTART requested via HTTP API")
+
+	// Execute the restart callback (this blocks until restart is complete)
+	if err := callback(); err != nil {
+		log.Error().Err(err).Msg("Restart failed")
+		http.Error(resp, fmt.Sprintf("Restart failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	resp.Header().Set("Content-Type", "application/json")
+	resp.WriteHeader(http.StatusOK)
+	fmt.Fprintf(resp, `{"status":"ok","message":"Restart completed successfully"}`)
+}
+
+func (h *Handler) handleUnlockAll(resp http.ResponseWriter, req *http.Request) {
+	_, valid := h.validateAuth(req)
+	if !valid {
+		http.Error(resp, "Invalid marker or password", http.StatusUnauthorized)
+		return
+	}
+
+	if req.Method != "POST" {
+		http.Error(resp, "Method not allowed, use POST", http.StatusMethodNotAllowed)
+		return
+	}
+
+	count := h.UnlockAll()
+
+	resp.Header().Set("Content-Type", "application/json")
+	resp.WriteHeader(http.StatusOK)
+	fmt.Fprintf(resp, `{"status":"ok","unlocked":%d}`, count)
 }

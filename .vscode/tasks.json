@@ -162,6 +162,47 @@
       },
       "presentation": {
         "clear": true,
+        "close": true,
+        "echo": true,
+        "focus": true,
+        "panel": "dedicated",
+        "group": "test",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": "$go",
+      "isBackground": false
+    },
+    {
+      "label": "gowt: Test All pgflock",
+      "type": "shell",
+      "command": "go clean -testcache && gowt ./...",
+      "options": {
+        "cwd": "${workspaceFolder}/pgflock"
+      },
+      "presentation": {
+        "clear": true,
+        "close": true,
+        "echo": true,
+        "focus": true,
+        "panel": "dedicated",
+        "group": "test",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": "$go",
+      "isBackground": false
+    },
+    {
+      "label": "gowt: Test All gowt",
+      "type": "shell",
+      "command": "go clean -testcache && gowt ./...",
+      "options": {
+        "cwd": "${workspaceFolder}/gowt"
+      },
+      "presentation": {
+        "clear": true,
+        "close": true,
         "echo": true,
         "focus": true,
         "panel": "dedicated",

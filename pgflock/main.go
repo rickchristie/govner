@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -181,6 +183,26 @@ var tailCmd = &cobra.Command{
 	},
 }
 
+var restartCmd = &cobra.Command{
+	Use:   "restart",
+	Short: "Restart the database pool via HTTP API",
+	Long: `Restarts the database pool by calling the locker server's restart endpoint.
+This unlocks all databases and restarts the PostgreSQL containers.
+
+Useful for recovering from stuck tests or when running in automated environments
+where the TUI is not available (e.g., AI agents in Docker containers).
+
+Requires pgflock to be running (started with 'pgflock up').`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, _, err := loadConfig()
+		if err != nil {
+			return err
+		}
+
+		return restartViaAPI(cfg)
+	},
+}
+
 func init() {
 	rootCmd.PersistentFlags().StringVar(&configDir, "config", "",
 		"Path to .pgflock directory (default: ./.pgflock)")
@@ -198,6 +220,7 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(connectCmd)
 	rootCmd.AddCommand(tailCmd)
+	rootCmd.AddCommand(restartCmd)
 }
 
 func main() {
@@ -344,6 +367,34 @@ func runUp(cfg *config.Config) error {
 		model.SetHandler(handler)
 		model.SetStateChan(stateUpdateChan)
 		model.SetLockerErrChan(lockerErrChan)
+
+		// Set up HTTP API restart callback
+		handler.SetRestartCallback(func() error {
+			// Step 1: Unlock all databases
+			handler.UnlockAll()
+
+			// Step 2: Stop containers
+			if err := docker.StopContainers(cfg); err != nil {
+				return fmt.Errorf("failed to stop containers: %w", err)
+			}
+
+			// Step 3: Start containers
+			if err := docker.RunContainers(cfg); err != nil {
+				return fmt.Errorf("failed to start containers: %w", err)
+			}
+
+			// Step 4: Wait for PostgreSQL
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+
+			for _, port := range cfg.InstancePorts() {
+				if err := docker.WaitForPostgresOnPort(ctx, cfg, port); err != nil {
+					return fmt.Errorf("PostgreSQL on port %d not ready: %w", port, err)
+				}
+			}
+
+			return nil
+		})
 
 		// Set up restart callback (now that handler is available)
 		model.SetOnRestart(func() <-chan tui.LoadingProgress {
@@ -548,4 +599,26 @@ func tailContainerLogs(cfg *config.Config, port int) error {
 	cmd.Stderr = os.Stderr
 
 	return cmd.Run()
+}
+
+func restartViaAPI(cfg *config.Config) error {
+	reqURL := fmt.Sprintf("http://localhost:%d/restart?marker=cli&password=%s",
+		cfg.LockerPort, url.QueryEscape(cfg.Password))
+
+	fmt.Println("Restarting database pool...")
+
+	resp, err := http.Post(reqURL, "text/plain", nil)
+	if err != nil {
+		return fmt.Errorf("failed to connect to locker server: %w\n\nMake sure 'pgflock up' is running", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("restart failed: %s", string(body))
+	}
+
+	fmt.Println("Restart completed successfully")
+	return nil
 }

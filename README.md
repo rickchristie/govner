@@ -22,6 +22,18 @@ export PATH="$PATH:$(go env GOPATH)/bin"
 
 ---
 
+### [pgflock](./pgflock/) - PostgreSQL Test Database Pool
+
+![pgflock demo](/pgflock/doc/peek.gif)
+
+Spawn, lock, and control memory-backed PostgreSQL databases for testing backend code. Features a beautiful TUI for monitoring database usage in real-time.
+
+```bash
+go install github.com/rickchristie/govner/pgflock@latest
+```
+
+---
+
 ### [sandb](./sandb/) - AI Sandbox
 
 Drop-in Docker sandbox for AI coding assistants with network isolation and domain whitelisting.
@@ -35,7 +47,3 @@ sandb/cli/build.sh
 sandb/proxy/start.sh
 sandb/shell.sh
 ```
-
----
-
-*More tools coming soon.*

@@ -50,6 +50,7 @@
 package client
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -151,4 +152,124 @@ func HealthCheck(lockerPort int) error {
 	}
 
 	return nil
+}
+
+// LockInfo contains information about a locked database.
+type LockInfo struct {
+	ConnString      string `json:"conn_string"`
+	Marker          string `json:"marker"`
+	LockedAt        string `json:"locked_at"`
+	DurationSeconds int64  `json:"duration_seconds"`
+}
+
+// Status contains the full state of the locker server.
+type Status struct {
+	Status            string     `json:"status"`
+	TotalDatabases    int        `json:"total"`
+	LockedDatabases   int        `json:"locked"`
+	FreeDatabases     int        `json:"free"`
+	WaitingRequests   int        `json:"waiting"`
+	AutoUnlockMinutes int        `json:"auto_unlock_minutes"`
+	Locks             []LockInfo `json:"locks"`
+}
+
+// GetStatus returns the full state of the locker server, including details about
+// all locked databases.
+//
+// This is useful for monitoring and debugging, especially for AI agents that need
+// to understand why tests might be slow or blocked.
+//
+// Parameters:
+//   - lockerPort: The port where the locker server is running (default: 9191)
+//
+// The returned Status includes:
+//   - Total, locked, free, and waiting database counts
+//   - Auto-unlock timeout configuration
+//   - List of all locked databases with marker, timestamp, and duration
+func GetStatus(lockerPort int) (*Status, error) {
+	reqURL := fmt.Sprintf("http://localhost:%d/health-check", lockerPort)
+
+	resp, err := http.Get(reqURL)
+	if err != nil {
+		return nil, fmt.Errorf("locker not responding: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("locker unhealthy: status %d", resp.StatusCode)
+	}
+
+	var status Status
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &status, nil
+}
+
+// Restart triggers a full restart of the database pool.
+//
+// This unlocks all databases and restarts the PostgreSQL containers. Use this
+// to recover from stuck tests or when the database pool is in an inconsistent state.
+//
+// This function blocks until the restart is complete, which may take 30+ seconds
+// depending on the number of instances.
+//
+// Parameters:
+//   - lockerPort: The port where the locker server is running (default: 9191)
+//   - password: The locker password from your pgflock configuration
+//
+// Note: This is a disruptive operation that will interrupt any running tests.
+func Restart(lockerPort int, password string) error {
+	reqURL := fmt.Sprintf("http://localhost:%d/restart?marker=client&password=%s",
+		lockerPort, url.QueryEscape(password))
+
+	resp, err := http.Post(reqURL, "text/plain", nil)
+	if err != nil {
+		return fmt.Errorf("failed to connect to locker: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("restart failed: %s", string(body))
+	}
+
+	return nil
+}
+
+// UnlockAll releases all locked databases without restarting containers.
+//
+// This is a less disruptive alternative to [Restart] when you just need to
+// release stuck locks but the containers are healthy.
+//
+// Parameters:
+//   - lockerPort: The port where the locker server is running (default: 9191)
+//   - password: The locker password from your pgflock configuration
+//
+// Returns the number of databases that were unlocked.
+func UnlockAll(lockerPort int, password string) (int, error) {
+	reqURL := fmt.Sprintf("http://localhost:%d/unlock-all?marker=client&password=%s",
+		lockerPort, url.QueryEscape(password))
+
+	resp, err := http.Post(reqURL, "text/plain", nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to connect to locker: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("unlock-all failed: %s", string(body))
+	}
+
+	var result struct {
+		Status   string `json:"status"`
+		Unlocked int    `json:"unlocked"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return result.Unlocked, nil
 }

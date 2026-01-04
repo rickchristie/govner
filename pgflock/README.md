@@ -141,6 +141,16 @@ pgflock tail
 pgflock tail 5433
 ```
 
+### `pgflock restart`
+
+Restarts the database pool via HTTP API. This unlocks all databases and restarts PostgreSQL containers. Useful for recovering from stuck tests or when running in automated environments where the TUI is not available (e.g., AI agents in Docker containers).
+
+```bash
+pgflock restart
+```
+
+Requires `pgflock up` to be running. This command calls the locker server's `/restart` endpoint.
+
 ## Client Library
 
 Use the client library in your test code:
@@ -165,9 +175,30 @@ func TestSomething(t *testing.T) {
 }
 ```
 
+### Additional Client Functions
+
+```go
+// Check locker health
+err := client.HealthCheck(9191)
+
+// Get full status with lock details (useful for debugging)
+status, err := client.GetStatus(9191)
+fmt.Printf("Locked: %d, Free: %d\n", status.LockedDatabases, status.FreeDatabases)
+for _, lock := range status.Locks {
+    fmt.Printf("  %s locked by %s for %ds\n", lock.ConnString, lock.Marker, lock.DurationSeconds)
+}
+
+// Restart the database pool (unlocks all + restarts containers)
+// WARNING! This will interrupt other parallel tests you have running!
+err = client.Restart(9191, "pgflock")
+
+// Just unlock all databases without restarting containers
+count, err := client.UnlockAll(9191, "pgflock")
+```
+
 ### HTTP API
 
-The locker server exposes these endpoints:
+The locker server exposes these endpoints. All endpoints except health-check require authentication via `password` query parameter.
 
 **Lock a database:**
 ```
@@ -181,11 +212,54 @@ POST /unlock?marker=<marker>&password=<password>
 Body: <connection-string>
 ```
 
-**Health check:**
+**Health check (with full state):**
 ```
 GET /health-check
 ```
-Returns: `{"status":"ok","locked":N,"free":N,"waiting":N}`
+Returns detailed state including all locked databases:
+```json
+{
+  "status": "ok",
+  "total": 20,
+  "locked": 3,
+  "free": 17,
+  "waiting": 0,
+  "auto_unlock_minutes": 5,
+  "locks": [
+    {
+      "conn_string": "postgresql://...",
+      "marker": "TestUserCreate",
+      "locked_at": "2024-01-15T10:30:00Z",
+      "duration_seconds": 45
+    }
+  ]
+}
+```
+
+**Unlock all databases:**
+```
+POST /unlock-all?marker=<marker>&password=<password>
+```
+Returns: `{"status":"ok","unlocked":N}`
+
+**Restart database pool:**
+```
+POST /restart?marker=<marker>&password=<password>
+```
+Unlocks all databases and restarts PostgreSQL containers. Blocks until restart is complete.
+Returns: `{"status":"ok","message":"Restart completed successfully"}`
+
+**Force unlock a specific database:**
+```
+POST /force-unlock?marker=<marker>&password=<password>
+Body: <connection-string>
+```
+
+**Unlock by marker:**
+```
+POST /unlock-by-marker?marker=<marker>&password=<password>&target=<target-marker>
+```
+Unlocks all databases locked by the specified target marker.
 
 ## Configuration
 
@@ -233,3 +307,7 @@ With `instance_count: 2` and `starting_port: 5432`, pgflock creates two PostgreS
 ## License
 
 MIT License - see [LICENSE](../LICENSE) for details.
+
+## ✨ Made with Claude
+
+🛠️ Built together with [Claude Code](https://claude.ai/code)
