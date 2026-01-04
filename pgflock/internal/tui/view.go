@@ -269,12 +269,22 @@ func (m *Model) renderLockedDatabases() string {
 		return m.renderEmptyState()
 	}
 
+	// Calculate max column widths for alignment
+	maxDbPortWidth := 0
+	for _, lock := range m.state.Locks {
+		dbName, port := parseConnString(lock.ConnString)
+		width := len(dbName) + 1 + len(port) // "dbname:port"
+		if width > maxDbPortWidth {
+			maxDbPortWidth = width
+		}
+	}
+
 	var b strings.Builder
 	for i, lock := range m.state.Locks {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(m.renderDatabaseRow(i, lock.ConnString, true, &lock))
+		b.WriteString(m.renderDatabaseRow(i, lock.ConnString, true, &lock, maxDbPortWidth))
 	}
 	return b.String()
 }
@@ -285,20 +295,38 @@ func (m *Model) renderAllDatabases() string {
 		return EmptyStateStyle.Render("(no databases configured)")
 	}
 
+	// Calculate max column widths for alignment
+	maxDbPortWidth := 0
+	for _, db := range m.allDatabases {
+		dbName, port := parseConnString(db.ConnString)
+		width := len(dbName) + 1 + len(port) // "dbname:port"
+		if width > maxDbPortWidth {
+			maxDbPortWidth = width
+		}
+	}
+
 	var b strings.Builder
 	for i, db := range m.allDatabases {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(m.renderDatabaseRow(i, db.ConnString, db.IsLocked, db.LockInfo))
+		b.WriteString(m.renderDatabaseRow(i, db.ConnString, db.IsLocked, db.LockInfo, maxDbPortWidth))
 	}
 	return b.String()
 }
 
-// renderDatabaseRow renders a single database row
-func (m *Model) renderDatabaseRow(idx int, connStr string, isLocked bool, lockInfo *locker.LockInfo) string {
+// renderDatabaseRow renders a single database row with column alignment
+func (m *Model) renderDatabaseRow(idx int, connStr string, isLocked bool, lockInfo *locker.LockInfo, maxDbPortWidth int) string {
 	isSelected := idx == m.selectedIdx
 	dbName, port := parseConnString(connStr)
+	portDb := port + ":" + dbName // port first for cleaner alignment
+
+	// Pad to align columns
+	padding := maxDbPortWidth - len(portDb)
+	if padding < 0 {
+		padding = 0
+	}
+	padStr := strings.Repeat(" ", padding)
 
 	// Status and details
 	var statusPart string
@@ -323,12 +351,12 @@ func (m *Model) renderDatabaseRow(idx int, connStr string, isLocked bool, lockIn
 
 	// Apply row style - background must cover arrow and db identifier together
 	if isSelected {
-		// Selected row: apply background to entire "▶ dbname:port" as one styled unit
-		selectablePart := IconSelectionArrow + " " + dbName + ":" + port
+		// Selected row: apply background to entire "▶ port:dbname" as one styled unit
+		selectablePart := IconSelectionArrow + " " + portDb + padStr
 		return RowSelectedStyle.Render(selectablePart) + "  " + statusPart
 	}
-	// Normal row: add spacing to align with padded selected row (extra space for right padding)
-	return RowNormalStyle.Render("   "+dbName) + PortStyle.Render(":"+port) + "   " + statusPart
+	// Normal row: add spacing to align with padded selected row
+	return RowNormalStyle.Render("   ") + PortStyle.Render(port) + RowNormalStyle.Render(":"+dbName) + padStr + "   " + statusPart
 }
 
 // renderEmptyState renders the peaceful flock message
