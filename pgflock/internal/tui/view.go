@@ -156,10 +156,15 @@ func (m *Model) renderMainView() []string {
 	lines = append(lines, m.renderSectionHeader(width))
 	lines = append(lines, m.renderHelpBar(width, totalContentLines, contentAreaHeight, scrollOffsetForHelp))
 
+	// Truncate all lines to terminal width to prevent wrapping/scrolling
+	for i, line := range lines {
+		lines[i] = truncateLine(line, width)
+	}
+
 	return lines
 }
 
-// renderHeader renders: 🐑 pgflock  [tester]  locker ✓  🛢️ 2/2 ✓  💤 Sleeping  ○ 16 free
+// renderHeader renders: 🐑 pgflock  [tester]  💤 Sleeping  ○ 16 free
 func (m *Model) renderHeader(width int) string {
 	// Brand logo + docker name prefix
 	brand := TitleStyle.Render(SheepEmoji + " pgflock")
@@ -168,9 +173,6 @@ func (m *Model) renderHeader(width int) string {
 
 	// Build status parts with consistent spacing
 	var statusParts []string
-
-	// Live status: locker ✓  🛢️ 2/2 ✓
-	statusParts = append(statusParts, m.renderLiveStatus())
 
 	// Locked count - show sleeping when none locked, animated when locked
 	if m.lockedCount() == 0 {
@@ -400,7 +402,7 @@ func (m *Model) renderHelpBar(width, totalLines, visibleHeight, scrollOffset int
 	leftContent := strings.Join(parts, "  ")
 	leftWidth := lipglossWidth(leftContent)
 
-	// Build right side: scroll indicator (optional) + health status + sheep
+	// Build right side: scroll indicator (optional) + locker status + health status + sheep
 	var rightParts []string
 
 	// Add scroll indicator if content is scrollable
@@ -420,6 +422,9 @@ func (m *Model) renderHelpBar(width, totalLines, visibleHeight, scrollOffset int
 		scrollInfo := DimStyle.Render(fmt.Sprintf("%d-%d/%d %d%%", startLine, endLine, totalLines, scrollPercent))
 		rightParts = append(rightParts, scrollInfo)
 	}
+
+	// Add locker status (locker ✓  🛢️ 2/2 ✓)
+	rightParts = append(rightParts, m.renderLiveStatus())
 
 	// Add health status message if any
 	if m.healthStatusMsg != "" {
@@ -596,6 +601,13 @@ func overlayLine(bg, modal string, leftPad, totalWidth int) string {
 		rightText := ""
 		currentWidth := 0
 		for _, r := range plainBg {
+			// Zero-width characters don't count toward width
+			if isZeroWidth(r) {
+				if currentWidth >= rightStart {
+					rightText += string(r)
+				}
+				continue
+			}
 			charWidth := 1
 			if isWideChar(r) {
 				charWidth = 2
@@ -613,11 +625,63 @@ func overlayLine(bg, modal string, leftPad, totalWidth int) string {
 	return b.String()
 }
 
+// truncateLine truncates a line to fit within the given width, preserving ANSI codes.
+func truncateLine(s string, maxWidth int) string {
+	var b strings.Builder
+	currentWidth := 0
+	inEscape := false
+
+	for _, r := range s {
+		// Handle ANSI escape sequences - pass through without counting
+		if r == '\x1b' {
+			inEscape = true
+			b.WriteRune(r)
+			continue
+		}
+		if inEscape {
+			b.WriteRune(r)
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+
+		// Skip zero-width characters
+		if isZeroWidth(r) {
+			b.WriteRune(r)
+			continue
+		}
+
+		// Calculate character width
+		charWidth := 1
+		if isWideChar(r) {
+			charWidth = 2
+		}
+
+		// Stop if we'd exceed max width
+		if currentWidth+charWidth > maxWidth {
+			break
+		}
+
+		b.WriteRune(r)
+		currentWidth += charWidth
+	}
+
+	// Add ANSI reset if we were in an escape sequence or had styling
+	// This ensures styles don't bleed to the next line
+	return b.String()
+}
+
 // truncateToWidth truncates a string to fit within a given visible width.
 func truncateToWidth(s string, maxWidth int) string {
 	var b strings.Builder
 	currentWidth := 0
 	for _, r := range s {
+		// Zero-width characters don't count toward width
+		if isZeroWidth(r) {
+			b.WriteRune(r)
+			continue
+		}
 		charWidth := 1
 		if isWideChar(r) {
 			charWidth = 2
@@ -743,6 +807,11 @@ func (m *Model) renderLoadingView() string {
 		topPadding = 0
 	}
 
+	// Truncate all lines to terminal width to prevent wrapping/scrolling
+	for i, line := range lines {
+		lines[i] = truncateLine(line, width)
+	}
+
 	// Build final output with vertical centering
 	var b strings.Builder
 	for i := 0; i < topPadding; i++ {
@@ -828,6 +897,10 @@ func lipglossWidth(s string) int {
 			}
 			continue
 		}
+		// Skip zero-width characters (variation selectors, ZWJ, etc.)
+		if isZeroWidth(r) {
+			continue
+		}
 		// Emojis and other wide characters take 2 cells
 		if isWideChar(r) {
 			width += 2
@@ -838,22 +911,33 @@ func lipglossWidth(s string) int {
 	return width
 }
 
+// isZeroWidth returns true if the rune has zero display width
+func isZeroWidth(r rune) bool {
+	// Variation selectors
+	if r >= 0xFE00 && r <= 0xFE0F {
+		return true
+	}
+	// Zero Width Joiner and related
+	if r == 0x200D || r == 0x200B || r == 0x200C || r == 0x200E || r == 0x200F {
+		return true
+	}
+	// Combining diacritical marks
+	if r >= 0x0300 && r <= 0x036F {
+		return true
+	}
+	return false
+}
+
 // isWideChar returns true if the rune is a wide character (takes 2 cells)
 func isWideChar(r rune) bool {
-	// Common emoji ranges
+	// True emoji ranges (these render as 2 cells)
 	if r >= 0x1F300 && r <= 0x1F9FF { // Miscellaneous Symbols and Pictographs, Emoticons, etc.
 		return true
 	}
-	if r >= 0x2600 && r <= 0x26FF { // Miscellaneous Symbols
+	if r >= 0x1F600 && r <= 0x1F64F { // Emoticons
 		return true
 	}
-	if r >= 0x2700 && r <= 0x27BF { // Dingbats
-		return true
-	}
-	if r >= 0x2300 && r <= 0x23FF { // Miscellaneous Technical (includes ⏳)
-		return true
-	}
-	if r >= 0x2B50 && r <= 0x2B55 { // Stars, circles
+	if r >= 0x1F680 && r <= 0x1F6FF { // Transport and Map Symbols
 		return true
 	}
 	// CJK characters

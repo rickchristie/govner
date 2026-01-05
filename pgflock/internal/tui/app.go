@@ -438,7 +438,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// All healthy!
-		m.healthStatusMsg = IconCheckmark + " All healthy"
+		m.healthStatusMsg = "All healthy " + IconCheckmark
 		m.sheepState = SheepIdle
 		// Schedule next health check after 5s interval (keep message visible until next check)
 		return m, m.healthCheckTick()
@@ -453,7 +453,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case healthStatusClearMsg:
 		// Clear the health status message if still showing success
-		if m.sheepState == SheepIdle && m.healthStatusMsg == IconCheckmark+" All healthy" {
+		if m.sheepState == SheepIdle && m.healthStatusMsg == "All healthy "+IconCheckmark {
 			m.healthStatusMsg = ""
 		}
 		return m, nil
