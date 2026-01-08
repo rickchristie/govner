@@ -38,8 +38,36 @@ func main() {
 		}
 	}
 
+	// Check for --clean-cache flag
+	for _, arg := range args {
+		if arg == "--clean-cache" {
+			if err := cleanCache(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error cleaning cache: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("Cache cleaned successfully")
+			return
+		}
+	}
+
+	// Check for --legacy flag
+	legacy := false
+	var filteredArgs []string
+	for _, arg := range args {
+		if arg == "--legacy" || arg == "-L" {
+			legacy = true
+		} else {
+			filteredArgs = append(filteredArgs, arg)
+		}
+	}
+
 	// Live mode: run go test with TUI
-	exitCode := runLiveMode(args)
+	var exitCode int
+	if legacy {
+		exitCode = runLegacyMode(filteredArgs)
+	} else {
+		exitCode = runTwoPhaseMode(filteredArgs)
+	}
 	os.Exit(exitCode)
 }
 
@@ -60,8 +88,8 @@ func runLoadMode(path string) error {
 	return nil
 }
 
-// runLiveMode runs tests with the live TUI
-func runLiveMode(args []string) int {
+// runLegacyMode runs tests with the legacy single-phase mode
+func runLegacyMode(args []string) int {
 	runner := NewRealTestRunner()
 	app := NewLiveApp(args, runner)
 	p := tea.NewProgram(app, tea.WithAltScreen())
@@ -79,21 +107,81 @@ func runLiveMode(args []string) int {
 	return 0
 }
 
+// runTwoPhaseMode runs tests with two-phase execution (build then test)
+func runTwoPhaseMode(args []string) int {
+	// Check that test2json is available
+	if err := CheckTest2JsonAvailable(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v\nFalling back to legacy mode\n", err)
+		return runLegacyMode(args)
+	}
+
+	// Parse arguments
+	parsed := ParseArgs(args)
+
+	// Convert test flags to -test.* format for the binary
+	testFlags := ConvertToTestFlags(parsed.TestFlags)
+
+	// Create two-phase runner
+	twoPhase, err := NewTwoPhaseRunner(parsed.Patterns, parsed.BuildFlags, testFlags)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating runner: %v\n", err)
+		return 1
+	}
+
+	// Create legacy runner for single test reruns
+	runner := NewRealTestRunner()
+
+	app := NewTwoPhaseApp(twoPhase, runner)
+	p := tea.NewProgram(app, tea.WithAltScreen())
+
+	finalModel, err := p.Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error running app: %v\n", err)
+		return 1
+	}
+
+	// Return the exit code from tests
+	if finalApp, ok := finalModel.(App); ok {
+		return finalApp.exitCode
+	}
+	return 0
+}
+
+// cleanCache removes all cached test binaries
+func cleanCache() error {
+	// Create a temporary runner just to get the temp dir path
+	twoPhase, err := NewTwoPhaseRunner([]string{"./..."}, nil, nil)
+	if err != nil {
+		return err
+	}
+	return twoPhase.CleanTempDir()
+}
+
 func printUsage() {
 	fmt.Printf("gowt - Go Test Watcher TUI (v%s)\n", meta.Version)
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  gowt [packages]              Run go test with live TUI")
+	fmt.Println("  gowt [packages]              Run go test with live TUI (two-phase mode)")
+	fmt.Println("  gowt --legacy [packages]     Run go test with live TUI (legacy mode)")
 	fmt.Println("  gowt --load <file>           Load and view test results from JSON file")
+	fmt.Println("  gowt --clean-cache           Remove cached test binaries")
 	fmt.Println()
 	fmt.Println("Flags:")
+	fmt.Println("  --legacy, -L        Use legacy single-phase mode (go test -json directly)")
+	fmt.Println("  --clean-cache       Remove cached test binaries from temp directory")
 	fmt.Println("  --load, -l <file>   Load test results from a JSON file (go test -json output)")
 	fmt.Println("  --version, -v       Show version")
 	fmt.Println("  --help, -h          Show this help message")
 	fmt.Println()
+	fmt.Println("Two-Phase Mode (default):")
+	fmt.Println("  Phase 1: Build all test binaries in parallel")
+	fmt.Println("  Phase 2: Run tests sequentially (alphabetically)")
+	fmt.Println("  Benefits: Faster builds, no resource contention, predictable ordering")
+	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  gowt ./...                   Run all tests with TUI")
-	fmt.Println("  gowt -v ./pkg/...            Run tests with verbose flag")
+	fmt.Println("  gowt -race ./pkg/...         Run tests with race detector")
+	fmt.Println("  gowt --legacy ./...          Use legacy single-phase mode")
 	fmt.Println("  gowt --load results.json     View saved test results")
 	fmt.Println("  go test -json ./... > results.json && gowt -l results.json")
 }

@@ -83,6 +83,14 @@ type App struct {
 	runner TestRunner
 	stream EventStream // Current test run's event stream
 
+	// Two-phase mode (nil = legacy mode)
+	twoPhase     *TwoPhaseRunner
+	phase        Phase
+	buildTotal   int
+	buildDone    int
+	buildErrors  []BuildError
+	buildChan    <-chan BuildProgressMsg // Channel for build progress
+
 	// Stderr package tracking
 	stderrPkg string // Current package for stderr output
 
@@ -122,7 +130,7 @@ func NewApp(tree *model.TestTree) App {
 	}
 }
 
-// NewLiveApp creates a new app that will run tests live
+// NewLiveApp creates a new app that will run tests live (legacy mode)
 func NewLiveApp(args []string, runner TestRunner) App {
 	tree := model.NewTestTree()
 	tv := view.NewTreeView()
@@ -139,6 +147,28 @@ func NewLiveApp(args []string, runner TestRunner) App {
 		testArgs:  args,
 		startTime: time.Now(),
 		runner:    runner,
+		phase:     PhaseLegacy,
+	}
+}
+
+// NewTwoPhaseApp creates a new app that uses two-phase test execution
+func NewTwoPhaseApp(twoPhase *TwoPhaseRunner, runner TestRunner) App {
+	tree := model.NewTestTree()
+	tv := view.NewTreeView()
+	tv = tv.SetData(tree)
+	tv = tv.SetRunning(true)
+
+	return App{
+		screen:    ScreenTree,
+		treeView:  tv,
+		logView:   view.NewLogView(),
+		helpView:  view.NewHelpView(),
+		tree:      tree,
+		running:   true,
+		startTime: time.Now(),
+		runner:    runner,
+		twoPhase:  twoPhase,
+		phase:     PhaseDiscovery,
 	}
 }
 
@@ -147,11 +177,98 @@ func (a App) Init() tea.Cmd {
 		return nil
 	}
 
-	// Start the test command
+	// Two-phase mode: start with discovery
+	if a.twoPhase != nil {
+		return tea.Batch(
+			a.startDiscovery(),
+			a.tickCmd(),
+		)
+	}
+
+	// Legacy mode: start the test command directly
 	return tea.Batch(
 		a.startTests(),
 		a.tickCmd(),
 	)
+}
+
+// startDiscovery begins the package discovery phase
+func (a *App) startDiscovery() tea.Cmd {
+	return func() tea.Msg {
+		packages, err := a.twoPhase.DiscoverPackages()
+		return PackagesDiscoveredMsg{Packages: packages, Err: err}
+	}
+}
+
+// startBuildPhase begins parallel building of test binaries
+func (a *App) startBuildPhase(packages []string) tea.Cmd {
+	return func() tea.Msg {
+		// Start building - this returns immediately with a channel
+		buildChan := a.twoPhase.Build(packages)
+
+		// Wait for first progress message
+		msg, ok := <-buildChan
+		if !ok {
+			// Channel closed, no packages to build
+			return BuildCompleteMsg{
+				Binaries: a.twoPhase.GetBinaries(),
+				Errors:   nil,
+			}
+		}
+		return msg
+	}
+}
+
+// waitForBuildProgress waits for the next build progress message
+func (a *App) waitForBuildProgress() tea.Cmd {
+	if a.buildChan == nil {
+		return nil
+	}
+
+	return func() tea.Msg {
+		msg, ok := <-a.buildChan
+		if !ok {
+			// Channel closed, build complete
+			return BuildCompleteMsg{
+				Binaries: a.twoPhase.GetBinaries(),
+				Errors:   a.buildErrors,
+			}
+		}
+		return msg
+	}
+}
+
+// startTestPhase begins sequential test execution
+func (a *App) startTestPhase() tea.Cmd {
+	return func() tea.Msg {
+		binaries := a.twoPhase.GetBinaries()
+		if len(binaries) == 0 {
+			// No binaries to run (all builds failed)
+			return TestDoneMsg{ExitCode: 1, RunGen: a.runGen}
+		}
+
+		// Get sorted package list
+		packages := make([]string, 0, len(binaries))
+		for pkg := range binaries {
+			packages = append(packages, pkg)
+		}
+		// Sort for consistent ordering
+		sortStrings(packages)
+
+		stream := a.twoPhase.Run(packages, binaries)
+		return TestStartedMsg{Stream: stream}
+	}
+}
+
+// sortStrings sorts a slice of strings in place
+func sortStrings(s []string) {
+	for i := 0; i < len(s)-1; i++ {
+		for j := i + 1; j < len(s); j++ {
+			if s[i] > s[j] {
+				s[i], s[j] = s[j], s[i]
+			}
+		}
+	}
 }
 
 // startTests starts the go test command
@@ -239,6 +356,11 @@ func (a *App) startRerun() tea.Cmd {
 			a.stream.Kill()
 		}
 
+		// Kill two-phase runner if active
+		if a.twoPhase != nil {
+			a.twoPhase.Kill()
+		}
+
 		// Clean test cache
 		err := a.runner.CleanCache()
 		return CacheCleanedMsg{Err: err}
@@ -267,6 +389,11 @@ func (a *App) startLogRerun() tea.Cmd {
 		// Kill current test process if running
 		if a.stream != nil {
 			a.stream.Kill()
+		}
+
+		// Kill two-phase runner if active
+		if a.twoPhase != nil {
+			a.twoPhase.Kill()
 		}
 
 		// Clean test cache
@@ -396,11 +523,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if a.stream != nil {
 						a.stream.Kill()
 					}
+					if a.twoPhase != nil {
+						a.twoPhase.Kill()
+					}
 					a.running = false
+					a.phase = PhaseDone
 					a.tree.Elapsed = time.Since(a.startTime).Seconds()
 					a.treeView = a.treeView.SetData(a.tree)
 					a.treeView = a.treeView.SetRunning(false)
 					a.treeView = a.treeView.SetStopped(true)
+					a.treeView = a.treeView.SetBuildProgress(0, 0)
 					return a, nil
 				}
 				// Cancel - hide modal
@@ -411,11 +543,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if a.stream != nil {
 					a.stream.Kill()
 				}
+				if a.twoPhase != nil {
+					a.twoPhase.Kill()
+				}
 				a.running = false
+				a.phase = PhaseDone
 				a.tree.Elapsed = time.Since(a.startTime).Seconds()
 				a.treeView = a.treeView.SetData(a.tree)
 				a.treeView = a.treeView.SetRunning(false)
 				a.treeView = a.treeView.SetStopped(true)
+				a.treeView = a.treeView.SetBuildProgress(0, 0)
 				return a, nil
 			case "n", "N", "esc":
 				a.showStopModal = false
@@ -431,6 +568,82 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
+
+	case PackagesDiscoveredMsg:
+		if msg.Err != nil {
+			// Discovery failed - show error and stop
+			a.running = false
+			a.exitCode = 1
+			a.phase = PhaseDone
+			a.treeView = a.treeView.SetRunning(false)
+			// TODO: Show error to user
+			break
+		}
+
+		if len(msg.Packages) == 0 {
+			// No packages with tests found
+			a.running = false
+			a.phase = PhaseDone
+			a.treeView = a.treeView.SetRunning(false)
+			break
+		}
+
+		// Start build phase
+		a.phase = PhaseBuild
+		a.buildTotal = len(msg.Packages)
+		a.buildDone = 0
+		a.buildErrors = nil
+		a.buildChan = a.twoPhase.Build(msg.Packages)
+		a.treeView = a.treeView.SetBuildProgress(a.buildDone, a.buildTotal)
+		cmds = append(cmds, a.waitForBuildProgress())
+
+	case BuildProgressMsg:
+		a.buildDone = msg.Completed
+		a.treeView = a.treeView.SetBuildProgress(a.buildDone, a.buildTotal)
+
+		if msg.Err != nil {
+			a.buildErrors = append(a.buildErrors, BuildError{
+				Package: msg.Package,
+				Stderr:  msg.Stderr,
+			})
+			// Emit build error to tree for display
+			a.tree.ProcessEvent(model.TestEvent{
+				Action:  "build-output",
+				Package: msg.Package,
+				Output:  msg.Stderr,
+			})
+			a.tree.ProcessEvent(model.TestEvent{
+				Action:  "build-fail",
+				Package: msg.Package,
+			})
+			a.treeView = a.treeView.SetData(a.tree)
+		}
+
+		// Check if build is complete
+		if a.buildDone >= a.buildTotal {
+			// Build phase complete, start test phase
+			cmds = append(cmds, a.startTestPhase())
+		} else {
+			// Continue waiting for more build progress
+			cmds = append(cmds, a.waitForBuildProgress())
+		}
+
+	case BuildCompleteMsg:
+		// Build phase is done (this is sent when channel closes)
+		a.phase = PhaseTest
+		a.treeView = a.treeView.SetBuildProgress(0, 0) // Clear build progress
+
+		if len(msg.Binaries) == 0 {
+			// All builds failed
+			a.running = false
+			a.exitCode = 1
+			a.phase = PhaseDone
+			a.treeView = a.treeView.SetRunning(false)
+			break
+		}
+
+		// Start test phase
+		cmds = append(cmds, a.startTestPhase())
 
 	case TestStartedMsg:
 		// Test command started, store stream and begin waiting for events
@@ -552,7 +765,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.startTime = time.Now()
 		a.running = true
 		a.stderrPkg = ""
-		cmds = append(cmds, a.startTests(), a.tickCmd())
+
+		// Two-phase mode: reset runner and restart from discovery
+		if a.twoPhase != nil {
+			a.twoPhase.Reset()
+			a.phase = PhaseDiscovery
+			a.buildDone = 0
+			a.buildTotal = 0
+			a.buildErrors = nil
+			a.buildChan = nil
+			a.treeView = a.treeView.SetBuildProgress(0, 0)
+			cmds = append(cmds, a.startDiscovery(), a.tickCmd())
+		} else {
+			// Legacy mode
+			cmds = append(cmds, a.startTests(), a.tickCmd())
+		}
 
 	case LogCacheCleanedMsg:
 		if msg.Err != nil {

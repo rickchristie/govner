@@ -95,6 +95,10 @@ type TreeView struct {
 	selectorAnim int  // Animation frame for selector (0 = no animation)
 	expanded     bool // Track if tree is in expanded state (for toggle)
 
+	// Build phase progress (two-phase mode)
+	buildDone  int // Number of packages built
+	buildTotal int // Total packages to build
+
 	// Cache for visible nodes to avoid repeated sort+flatten
 	cachedNodes      []*model.TestNode // Cached result of getVisibleNodes()
 	cachedNodesValid bool              // Whether cache is valid
@@ -293,6 +297,13 @@ func (v TreeView) SetStopped(stopped bool) TreeView {
 // Use this for tick updates where only the elapsed time changes.
 func (v TreeView) SetElapsed(elapsed float64) TreeView {
 	v.tree.Elapsed = elapsed
+	return v
+}
+
+// SetBuildProgress updates the build phase progress display
+func (v TreeView) SetBuildProgress(done, total int) TreeView {
+	v.buildDone = done
+	v.buildTotal = total
 	return v
 }
 
@@ -862,6 +873,11 @@ func getIndent(depth int) string {
 }
 
 func (v TreeView) renderHeader() string {
+	// Build phase: show build progress instead of test stats
+	if v.buildTotal > 0 {
+		return v.renderBuildHeader()
+	}
+
 	// Get pre-computed stats (O(1) - counts are maintained incrementally)
 	passed, failed, skipped, running, cached := v.tree.ComputeAllStats()
 	elapsed := v.tree.Elapsed
@@ -917,6 +933,21 @@ func (v TreeView) renderHeader() string {
 	}
 
 	return header
+}
+
+// renderBuildHeader renders the header during build phase
+func (v TreeView) renderBuildHeader() string {
+	statusIndicator := GetSpinnerGear(v.animFrame)
+	elapsed := v.tree.Elapsed
+
+	// Build progress bar
+	progressBar := v.renderProgressBar(v.buildDone, 0, 0, v.buildTotal, 20)
+	progressStr := fmt.Sprintf("Building [%s] %d/%d packages", progressBar, v.buildDone, v.buildTotal)
+
+	elapsedStr := v.styles.elapsed.Render(fmt.Sprintf("(%s)", util.FormatDuration(elapsed)))
+
+	return statusIndicator + " " + v.styles.header.Render("GOWT") + " " + v.styles.elapsed.Render(meta.Version) + "  " +
+		progressStr + "  " + elapsedStr
 }
 
 func (v TreeView) renderHelpBar() string {
