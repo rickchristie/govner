@@ -4,21 +4,23 @@
 
 ```mermaid
 flowchart LR
-    project["📁 Your<br/>Project"]
-
-    subgraph container["🐳 Sandboxed Container"]
-        ai["🤖 AI Assistants<br/><small>Claude Code · Copilot CLI</small>"]
+    subgraph host["🖥️ Host Network"]
+        proxy["🛡️ Squid Proxy<br/><small>localhost:3128</small>"]
+        services["🗄️ Local Services<br/><small>Postgres · Redis · etc.</small>"]
     end
 
-    proxy["🛡️ Squid Proxy<br/><small>Domain Whitelist</small>"]
+    subgraph container["🐳 Sandboxed Container <small>(bridge network)</small>"]
+        ai["🤖 AI Assistants<br/><small>Claude Code · Copilot CLI</small>"]
+        socat["🔌 socat<br/><small>port forwarding</small>"]
+    end
 
     allowed["✅ anthropic.com<br/>github.com<br/>npmjs.org"]
     blocked["🚫 All Other<br/>Domains"]
 
-    project -.->|"mount"| ai
     ai -->|"all traffic"| proxy
     proxy --> allowed
     proxy -.-> blocked
+    socat <-.->|"localhost:5432"| services
 ```
 
 Download `sandb/` to any Go project to run AI coding assistants in a secure, isolated Docker environment where network access is restricted to only whitelisted domains.
@@ -113,6 +115,12 @@ Or use the VS Code task: **AI: Build CLI**
 
 ## Architecture
 
+The sandbox uses two Docker containers with different network modes:
+
+**Squid Proxy** runs on `--network=host`, sharing ports with your host machine. This allows the proxy to be accessible from both the CLI container and any other containers on your system at `localhost:3128`.
+
+**CLI Container** runs on a bridge network with no direct internet access. All HTTP/HTTPS traffic is forced through the proxy via `HTTP_PROXY` environment variables. The container can access host services via `host.docker.internal` using socat port forwarding.
+
 ```
 Host Machine
 +-- Squid Proxy (--network=host, localhost:3128)
@@ -122,6 +130,7 @@ Host Machine
 +-- CLI Container (bridge network, sandboxed)
     +-- HTTP_PROXY -> host:3128
     +-- No direct internet access
+    +-- socat -> host.docker.internal (for local services)
     +-- Go + Node.js + Claude Code + Copilot CLI
     +-- Workspace mounted at same path as host
 ```
@@ -165,10 +174,13 @@ acl allowed_domains dstdomain files.pythonhosted.org
 
 ### Port Forwarding to Host Services
 
-Edit `cli/entrypoint.sh` to forward ports from container to host:
+If your AI assistant needs to access local services (e.g., PostgreSQL, Redis, or other databases running on your host), you can use socat to forward ports from the container to your host machine.
+
+**Configuration file:** `cli/entrypoint.sh`
+
+Edit the file and uncomment/modify the socat section:
 
 ```bash
-# Uncomment and modify the run_socat function:
 run_socat() {
     local port=$1
     local name=$2
@@ -182,7 +194,13 @@ run_socat 5432 "postgres" &
 run_socat 6379 "redis" &
 ```
 
-This allows container code to access `localhost:5432` which forwards to the host's PostgreSQL.
+This allows code inside the container to connect to `localhost:5432`, which forwards to the host's PostgreSQL.
+
+**After modifying socat settings, rebuild the CLI image:**
+
+```bash
+sandb/cli/build.sh
+```
 
 ### Container Management from Proxy
 

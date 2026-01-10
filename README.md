@@ -38,21 +38,23 @@ go install github.com/rickchristie/govner/pgflock@latest
 
 ```mermaid
 flowchart LR
-    project["📁 Your<br/>Project"]
-
-    subgraph container["🐳 Sandboxed Container"]
-        ai["🤖 AI Assistants<br/><small>Claude Code · Copilot CLI</small>"]
+    subgraph host["🖥️ Host Network"]
+        proxy["🛡️ Squid Proxy<br/><small>localhost:3128</small>"]
+        services["🗄️ Local Services<br/><small>Postgres · Redis · etc.</small>"]
     end
 
-    proxy["🛡️ Squid Proxy<br/><small>Domain Whitelist</small>"]
+    subgraph container["🐳 Sandboxed Container <small>(bridge network)</small>"]
+        ai["🤖 AI Assistants<br/><small>Claude Code · Copilot CLI</small>"]
+        socat["🔌 socat<br/><small>port forwarding</small>"]
+    end
 
     allowed["✅ anthropic.com<br/>github.com<br/>npmjs.org"]
     blocked["🚫 All Other<br/>Domains"]
 
-    project -.->|"mount"| ai
     ai -->|"all traffic"| proxy
     proxy --> allowed
     proxy -.-> blocked
+    socat <-.->|"localhost:5432"| services
 ```
 
 Drop-in Docker sandbox for AI coding assistants with network isolation and domain whitelisting.
