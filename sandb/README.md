@@ -2,7 +2,26 @@
 
 **Drop-in Docker sandbox for AI coding assistants with network isolation and domain whitelisting.**
 
-Copy this `sandb/` directory to any Go project to run AI coding assistants in a secure, isolated Docker environment where network access is restricted to only whitelisted domains.
+```mermaid
+flowchart LR
+    project["📁 Your<br/>Project"]
+
+    subgraph container["🐳 Sandboxed Container"]
+        ai["🤖 AI Assistants<br/><small>Claude Code · Copilot CLI</small>"]
+    end
+
+    proxy["🛡️ Squid Proxy<br/><small>Domain Whitelist</small>"]
+
+    allowed["✅ anthropic.com<br/>github.com<br/>npmjs.org"]
+    blocked["🚫 All Other<br/>Domains"]
+
+    project -.->|"mount"| ai
+    ai -->|"all traffic"| proxy
+    proxy --> allowed
+    proxy -.-> blocked
+```
+
+Download `sandb/` to any Go project to run AI coding assistants in a secure, isolated Docker environment where network access is restricted to only whitelisted domains.
 
 > **Note:** The folder can be renamed (e.g., `sandb`, `_sandb`, `.ai-sandbox`). All scripts automatically detect the folder name.
 
@@ -32,10 +51,11 @@ To add support for other CLI-based AI assistants:
 
 ## Quick Start
 
-### 1. Copy to Your Project
+### 1. Download to Your Project
 
 ```bash
-cp -r sandb/ /path/to/your/project/
+# Run from your project directory
+curl -sL https://github.com/rickchristie/govner/archive/refs/heads/main.tar.gz | tar -xz --strip-components=1 govner-main/sandb
 ```
 
 ### 2. Install and Build
