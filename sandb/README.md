@@ -4,23 +4,23 @@
 
 ```mermaid
 flowchart LR
-    subgraph host["🖥️ Host Network"]
-        proxy["🛡️ Squid Proxy<br/><small>localhost:3128</small>"]
-        services["🗄️ Local Services<br/><small>Postgres · Redis · etc.</small>"]
+    subgraph host["Host Network"]
+        proxy["Squid Proxy<br/>localhost:3128"]
+        services["Local Services<br/>Postgres, Redis"]
     end
 
-    subgraph container["🐳 Sandboxed Container <small>(bridge network)</small>"]
-        ai["🤖 AI Assistants<br/><small>Claude Code · Copilot CLI</small>"]
-        socat["🔌 socat<br/><small>port forwarding</small>"]
+    subgraph container["Sandboxed Container"]
+        ai["AI Assistants<br/>Claude, Copilot"]
+        socat["socat"]
     end
 
-    allowed["✅ anthropic.com<br/>github.com<br/>npmjs.org"]
-    blocked["🚫 All Other<br/>Domains"]
+    allowed["✅ Allowed<br/>anthropic.com<br/>github.com<br/>npmjs.org"]
+    blocked["🚫 Blocked"]
 
     ai -->|"all traffic"| proxy
     proxy --> allowed
     proxy -.-> blocked
-    socat <-.->|"localhost:5432"| services
+    socat <-.->|"port forward"| services
 ```
 
 Download `sandb/` to any Go project to run AI coding assistants in a secure, isolated Docker environment where network access is restricted to only whitelisted domains.
