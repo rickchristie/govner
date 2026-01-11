@@ -123,7 +123,15 @@ func (t *TestTree) ProcessEvent(event TestEvent) bool {
 		t.appendOutput(pkgNode, event.Output)
 		return false // Log-only, no visual change
 	case "build-fail":
+		prevStatus := pkgNode.Status
 		pkgNode.Status = StatusFailed
+		pkgNode.SuffixCacheValid = false
+		// Decrement running if was running, increment failed
+		if prevStatus == StatusRunning {
+			t.propagateCountDelta(pkgNode, -1, "running")
+		}
+		t.propagateCountDelta(pkgNode, 1, "failed")
+		t.propagateStatus(pkgNode)
 		return true // Status change
 	}
 
