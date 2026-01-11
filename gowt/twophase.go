@@ -585,12 +585,12 @@ func (s *singleTestEventStream) run() {
 func CheckTest2JsonAvailable() error {
 	cmd := exec.Command("go", "tool", "test2json", "-h")
 	if err := cmd.Run(); err != nil {
-		// test2json -h returns exit code 2 but still indicates it exists
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			if exitErr.ExitCode() == 2 {
-				return nil // -h flag causes exit 2, but tool exists
-			}
+		// If we get an ExitError, the tool exists but returned non-zero
+		// (test2json -h returns exit code 1 or 2 depending on Go version)
+		if _, ok := err.(*exec.ExitError); ok {
+			return nil // Tool exists, just returned non-zero for -h
 		}
+		// Other errors (e.g., command not found)
 		return fmt.Errorf("go tool test2json not available: %w", err)
 	}
 	return nil

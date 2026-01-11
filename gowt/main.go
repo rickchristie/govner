@@ -3,6 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"regexp"
+	"strconv"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/rickchristie/govner/gowt/meta"
@@ -109,10 +113,20 @@ func runLegacyMode(args []string) int {
 
 // runTwoPhaseMode runs tests with two-phase execution (build then test)
 func runTwoPhaseMode(args []string) int {
+	// Check Go version (require 1.10+ for test2json)
+	if err := checkGoVersion(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+
 	// Check that test2json is available
 	if err := CheckTest2JsonAvailable(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: %v\nFalling back to legacy mode\n", err)
-		return runLegacyMode(args)
+		fmt.Fprintln(os.Stderr, "Error: go tool test2json is not available.")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "This tool should be included with Go 1.10+. If you have Go installed")
+		fmt.Fprintln(os.Stderr, "but test2json is missing, your Go installation may be incomplete.")
+		fmt.Fprintln(os.Stderr, "Try reinstalling Go from https://go.dev/dl/")
+		return 1
 	}
 
 	// Parse arguments
@@ -184,4 +198,30 @@ func printUsage() {
 	fmt.Println("  gowt --legacy ./...          Use legacy single-phase mode")
 	fmt.Println("  gowt --load results.json     View saved test results")
 	fmt.Println("  go test -json ./... > results.json && gowt -l results.json")
+}
+
+// checkGoVersion verifies that Go 1.10+ is installed (required for test2json)
+func checkGoVersion() error {
+	cmd := exec.Command("go", "version")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("Go is not installed or not in PATH")
+	}
+
+	// Parse version from output like "go version go1.21.0 linux/amd64"
+	versionStr := strings.TrimSpace(string(output))
+	re := regexp.MustCompile(`go(\d+)\.(\d+)`)
+	matches := re.FindStringSubmatch(versionStr)
+	if len(matches) < 3 {
+		return fmt.Errorf("unable to parse Go version from: %s", versionStr)
+	}
+
+	major, _ := strconv.Atoi(matches[1])
+	minor, _ := strconv.Atoi(matches[2])
+
+	if major < 1 || (major == 1 && minor < 10) {
+		return fmt.Errorf("Go 1.10+ is required (found go%d.%d)", major, minor)
+	}
+
+	return nil
 }

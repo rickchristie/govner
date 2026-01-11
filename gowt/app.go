@@ -308,33 +308,58 @@ func (a *App) waitForEvents() tea.Cmd {
 	return func() tea.Msg {
 		// First, try non-blocking reads to drain any pending events
 		select {
-		case event := <-events:
-			return TestEventMsg{Event: event, RunGen: runGen}
-		case line := <-stderr:
-			return StderrMsg{Line: line, RunGen: runGen}
+		case event, ok := <-events:
+			if ok {
+				return TestEventMsg{Event: event, RunGen: runGen}
+			}
+			// Channel closed, fall through to blocking wait for done
+		case line, ok := <-stderr:
+			if ok {
+				return StderrMsg{Line: line, RunGen: runGen}
+			}
+			// Channel closed, fall through to blocking wait for done
 		default:
 			// No pending events, now do a blocking wait
 		}
 
 		// Blocking wait - all channels
-		select {
-		case event := <-events:
-			return TestEventMsg{Event: event, RunGen: runGen}
-		case line := <-stderr:
-			return StderrMsg{Line: line, RunGen: runGen}
-		case result := <-done:
-			// Before returning done, drain any remaining events
-			for {
-				select {
-				case event := <-events:
-					// Process this event directly on the tree
-					// (We can only return one message)
-					a.tree.ProcessEvent(event)
-				case <-stderr:
-					// Ignore remaining stderr after done
-				default:
-					// No more events, return done
-					return TestDoneMsg{Err: result.Err, ExitCode: result.ExitCode, RunGen: runGen}
+		// Use for loop to handle closed channels properly
+		for {
+			select {
+			case event, ok := <-events:
+				if ok {
+					return TestEventMsg{Event: event, RunGen: runGen}
+				}
+				// Channel closed, set to nil so it won't be selected again
+				events = nil
+			case line, ok := <-stderr:
+				if ok {
+					return StderrMsg{Line: line, RunGen: runGen}
+				}
+				// Channel closed, set to nil so it won't be selected again
+				stderr = nil
+			case result := <-done:
+				// Before returning done, drain any remaining events
+				for {
+					select {
+					case event, ok := <-events:
+						if !ok {
+							events = nil
+							continue
+						}
+						// Process this event directly on the tree
+						// (We can only return one message)
+						a.tree.ProcessEvent(event)
+					case _, ok := <-stderr:
+						if !ok {
+							stderr = nil
+							continue
+						}
+						// Ignore remaining stderr after done
+					default:
+						// No more events, return done
+						return TestDoneMsg{Err: result.Err, ExitCode: result.ExitCode, RunGen: runGen}
+					}
 				}
 			}
 		}
@@ -622,6 +647,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Check if build is complete
 		if a.buildDone >= a.buildTotal {
 			// Build phase complete, start test phase
+			a.phase = PhaseTest
+			a.treeView = a.treeView.SetBuildProgress(0, 0) // Clear build progress
 			cmds = append(cmds, a.startTestPhase())
 		} else {
 			// Continue waiting for more build progress
@@ -684,6 +711,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		a.running = false
+		a.phase = PhaseDone
 		a.exitCode = msg.ExitCode
 		// Update elapsed time one final time
 		a.tree.Elapsed = time.Since(a.startTime).Seconds()
