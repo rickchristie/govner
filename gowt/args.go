@@ -160,9 +160,9 @@ func ParseArgs(args []string) ParsedArgs {
 		i++
 	}
 
-	// Default pattern if none specified
+	// Default pattern if none specified (matches go test behavior: current package only)
 	if len(result.Patterns) == 0 {
-		result.Patterns = []string{"./..."}
+		result.Patterns = []string{"."}
 	}
 
 	return result

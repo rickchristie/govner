@@ -154,6 +154,25 @@
       "isBackground": false
     },
     {
+      "label": "gowt: Build",
+      "type": "shell",
+      "command": "go build -o ${workspaceFolder}/gowt/gowt ${workspaceFolder}/gowt && notify-send 'gowt' 'Build complete' || { notify-send 'gowt' 'Build failed'; read -p 'Press Enter to close...'; exit 1; }",
+      "options": {
+        "cwd": "${workspaceFolder}/gowt"
+      },
+      "presentation": {
+        "clear": true,
+        "echo": true,
+        "focus": false,
+        "panel": "dedicated",
+        "reveal": "silent",
+        "close": true,
+        "showReuseMessage": false
+      },
+      "problemMatcher": "$go",
+      "isBackground": false
+    },
+    {
       "label": "gowt: Test Current Package",
       "type": "shell",
       "command": "go clean -testcache && gowt .",
