@@ -67,18 +67,9 @@ func Run(configDir string) (*config.Config, error) {
 
 	// Extensions - show existing as default
 	existingExts := strings.Join(cfg.Extensions, ",")
-	extStr := promptString(reader, "Extensions (comma-separated, e.g., postgis,pg_trgm)", existingExts)
-	if extStr != "" {
-		exts := strings.Split(extStr, ",")
-		cfg.Extensions = make([]string, 0, len(exts))
-		for _, ext := range exts {
-			ext = strings.TrimSpace(ext)
-			if ext != "" {
-				cfg.Extensions = append(cfg.Extensions, ext)
-			}
-		}
-	} else {
-		cfg.Extensions = nil
+	extStr := promptString(reader, "Extensions (comma-separated, e.g., postgis,pg_trgm; [] for none)", existingExts)
+	if parsed := parseExtensions(extStr); parsed != nil {
+		cfg.Extensions = parsed
 	}
 
 	// Postgres version
@@ -166,4 +157,27 @@ func promptInt(reader *bufio.Reader, prompt string, defaultVal int) int {
 		return defaultVal
 	}
 	return val
+}
+
+// parseExtensions parses the user input for extensions.
+// Returns the parsed extensions slice.
+// - "[]" means explicitly no extensions (returns empty slice)
+// - "" means keep the default (returns nil to signal "use default")
+// - "ext1,ext2" returns the parsed extensions
+func parseExtensions(input string) []string {
+	if input == "[]" {
+		return []string{}
+	}
+	if input == "" {
+		return nil
+	}
+	exts := strings.Split(input, ",")
+	result := make([]string, 0, len(exts))
+	for _, ext := range exts {
+		ext = strings.TrimSpace(ext)
+		if ext != "" {
+			result = append(result, ext)
+		}
+	}
+	return result
 }
