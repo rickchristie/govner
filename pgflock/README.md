@@ -23,6 +23,7 @@
 - Postgres instance and databases that run within docker, using memory filesystem so it's fast, and safe for SSD.
 - Control over the number of docker instances, number of databases within each docker instances.
 - Lock server so your parallel tests don't step over each other, you can grant each individual test direct control over database.
+- **Instant auto-unlock when your test process dies.** Panics, timeouts, `Ctrl+C`, `kill` — the lock is released the moment the process exits. No more waiting for stale locks to expire.
 - Beautiful TUI where you can monitor your database harness usages in real-time.
 
 ## Installation
@@ -175,6 +176,20 @@ func TestSomething(t *testing.T) {
 }
 ```
 
+### Auto-unlock on process death (v2)
+
+Starting from v2, `client.Lock` keeps a streaming HTTP connection open to the server. The open connection **is** the lock. When your test process exits for any reason — panic, timeout, `Ctrl+C`, `kill -9` — the OS closes all connections and the server releases the locks instantly. No heartbeat, no polling, no stale locks blocking your team.
+
+If you use [goleak](https://pkg.go.dev/go.uber.org/goleak) or similar tools that check for leaked goroutines, call `client.CloseAll()` in `TestMain` after all tests complete:
+
+```go
+func TestMain(m *testing.M) {
+    code := m.Run()
+    client.CloseAll()
+    os.Exit(code)
+}
+```
+
 ### Additional Client Functions
 
 ```go
@@ -200,11 +215,11 @@ count, err := client.UnlockAll(9191, "pgflock")
 
 The locker server exposes these endpoints. All endpoints except health-check require authentication via `password` query parameter.
 
-**Lock a database:**
+**Lock a database (streaming, v2):**
 ```
 GET /lock?marker=<marker>&password=<password>
 ```
-Returns: Connection string (blocks until database available)
+Returns: Connection string (newline-terminated), then keeps the connection open. The response includes `X-PGFlock-Version: 2` header. Closing the connection releases the lock.
 
 **Unlock a database:**
 ```
@@ -296,13 +311,16 @@ With `instance_count: 2` and `starting_port: 5432`, pgflock creates two PostgreS
 2. **Lock Request**: When a test calls `Lock()`:
    - Waits for an available database from the pool
    - Resets the database (DROP + CREATE from test_template)
-   - Returns the connection string
+   - Returns the connection string over a streaming HTTP connection that stays open
 
 3. **Unlock Request**: When a test calls `Unlock()`:
-   - Returns the database to the available pool
+   - Closes the streaming connection
+   - Server detects the closed connection and returns the database to the pool
    - Next waiting lock request receives it
 
-4. **Auto-unlock**: Databases locked for too long (default: 5 minutes) are automatically unlocked.
+4. **Process death**: If the test process crashes, is killed, or times out, the OS closes all TCP connections. The server detects every dropped connection and releases the corresponding locks immediately — no polling or heartbeat needed.
+
+5. **Auto-unlock**: As a safety net, locks held longer than `auto_unlock_minutes` (default: 5 minutes) are released automatically.
 
 ## License
 
