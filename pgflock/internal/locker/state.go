@@ -1,6 +1,7 @@
 package locker
 
 import (
+	"context"
 	"time"
 )
 
@@ -19,6 +20,9 @@ type LockInfo struct {
 	ConnString string
 	Marker     string
 	LockedAt   time.Time
+	// cancel is non-nil for streaming (v2) locks. Calling it signals the streaming
+	// handler to stop blocking and release the lock. Used by ForceUnlock, UnlockAll, etc.
+	cancel context.CancelFunc
 }
 
 // LockInfoJSON is the JSON representation of LockInfo for API responses

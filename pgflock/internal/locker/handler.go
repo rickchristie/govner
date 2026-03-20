@@ -1,6 +1,7 @@
 package locker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/rickchristie/govner/pgflock/internal/config"
 )
+
+const serverVersion = "2"
 
 // RestartRequest represents a restart request from HTTP API to TUI
 type RestartRequest struct {
@@ -32,7 +35,11 @@ type Handler struct {
 	autoUnlockDuration    time.Duration
 	stateUpdateChan       chan<- *State
 	waitingCount          atomic.Int32
-	restartRequestChan    chan RestartRequest // Channel for restart requests to TUI
+	restartRequestChan    chan RestartRequest
+
+	// resetDatabase is the function used to reset a database before handing it to a client.
+	// Defaults to ResetDatabase. Overridable in tests to skip actual Postgres operations.
+	resetDatabase func(cfg *config.Config, connStr string) error
 }
 
 // NewHandler creates a new Handler instance
@@ -61,6 +68,7 @@ func NewHandlerWithCleanupInterval(cfg *config.Config, stateUpdateChan chan<- *S
 		cleanupTickerInterval: cleanupInterval,
 		autoUnlockDuration:    time.Duration(cfg.AutoUnlockMins) * time.Minute,
 		stateUpdateChan:       stateUpdateChan,
+		resetDatabase:         ResetDatabase,
 	}
 
 	// Initially all databases are available
@@ -68,7 +76,7 @@ func NewHandlerWithCleanupInterval(cfg *config.Config, stateUpdateChan chan<- *S
 		h.cLockedDbConn <- connStr
 	}
 
-	// Start cleanup routine for expired locks
+	// Safety-net cleanup for any locks that somehow lose their cancel func
 	go h.cleanupExpiredLocks()
 
 	return h
@@ -126,6 +134,16 @@ func (h *Handler) validateAuth(req *http.Request) (string, bool) {
 	return marker, true
 }
 
+// handleLock acquires a database lock using a streaming connection.
+//
+// The response writes the connection string (newline-terminated) and then keeps
+// the connection open. The open connection IS the lock — when the client closes
+// it (explicit unlock or process death), the server's request context is
+// cancelled, waking the handler which then releases the lock immediately.
+//
+// WriteTimeout on the HTTP server enforces the auto-unlock duration: if the
+// connection remains open longer than auto_unlock_minutes, the server closes it,
+// cancelling the handler and releasing the lock.
 func (h *Handler) handleLock(resp http.ResponseWriter, req *http.Request) {
 	marker, valid := h.validateAuth(req)
 	if !valid {
@@ -133,44 +151,84 @@ func (h *Handler) handleLock(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Increment waiting count
 	h.waitingCount.Add(1)
 	h.sendStateUpdate()
-	defer func() {
-		h.waitingCount.Add(-1)
-		h.sendStateUpdate()
-	}()
 
-	// Wait for a database to be freed or request context to be cancelled
 	select {
 	case connStr := <-h.cLockedDbConn:
-		// Reset the database before giving it to the client
-		if err := ResetDatabase(h.cfg, connStr); err != nil {
-			// If reset fails, return the database to the pool and report error
+		// Decrement waiting count now that we have a database
+		h.waitingCount.Add(-1)
+		h.sendStateUpdate()
+
+		if err := h.resetDatabase(h.cfg, connStr); err != nil {
 			h.cLockedDbConn <- connStr
 			log.Error().Err(err).Str("connStr", connStr).Msg("Failed to reset database")
 			http.Error(resp, fmt.Sprintf("Failed to reset database: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		// Record the lock
+		// lockCtx enforces auto-unlock: if the lock is held longer than
+		// autoUnlockDuration the context times out, waking the select below and
+		// releasing the lock. External callers (ForceUnlock, UnlockAll, handleUnlock)
+		// cancel the context early to release the lock on demand.
+		lockCtx, lockCancel := context.WithTimeout(context.Background(), h.autoUnlockDuration)
+
 		h.withLocksLock(func() {
 			h.locks[connStr] = &LockInfo{
 				ConnString: connStr,
 				Marker:     marker,
 				LockedAt:   time.Now(),
+				cancel:     lockCancel,
 			}
 		})
 
-		_, err := resp.Write([]byte(connStr))
-		if err != nil {
-			log.Error().Err(err).Msg("Failed to write response")
+		// Send version header and connection string. The connection stays open
+		// after this — the open connection is what holds the lock.
+		resp.Header().Set("X-PGFlock-Version", serverVersion)
+		resp.WriteHeader(http.StatusOK)
+		fmt.Fprintf(resp, "%s\n", connStr)
+		if f, ok := resp.(http.Flusher); ok {
+			f.Flush()
+		}
+
+		// Disable any server-level write deadline for this streaming connection.
+		// Auto-unlock is handled by lockCtx timeout above, not by connection I/O deadlines.
+		rc := http.NewResponseController(resp)
+		if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+			log.Debug().Err(err).Msg("Could not clear write deadline (non-fatal)")
 		}
 
 		log.Info().Str("connStr", connStr).Str("marker", marker).Msg("LOCK")
 		h.sendStateUpdate()
 
+		// Block until either the client disconnects or an external force-unlock
+		// cancels lockCtx.
+		select {
+		case <-req.Context().Done():
+		case <-lockCtx.Done():
+		}
+
+		// Release the lock if it hasn't already been released by the external caller
+		// (ForceUnlock/UnlockAll/handleUnlock remove it from the map before cancelling).
+		var released bool
+		h.withLocksLock(func() {
+			if _, exists := h.locks[connStr]; exists {
+				delete(h.locks, connStr)
+				released = true
+			}
+		})
+
+		if released {
+			h.cLockedDbConn <- connStr
+			log.Info().Str("connStr", connStr).Str("marker", marker).Msg("UNLOCK (connection closed)")
+			h.sendStateUpdate()
+		}
+
+		lockCancel() // always clean up the context
+
 	case <-req.Context().Done():
+		h.waitingCount.Add(-1)
+		h.sendStateUpdate()
 		http.Error(resp, "Request cancelled or timed out", http.StatusRequestTimeout)
 		log.Warn().Str("marker", marker).Msg("Lock request cancelled or timed out")
 	}
@@ -183,13 +241,11 @@ func (h *Handler) handleUnlock(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Expect POST method with connection string in body
 	if req.Method != "POST" {
 		http.Error(resp, "Method not allowed, use POST", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Read connection string from request body
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
 		http.Error(resp, "Failed to read request body", http.StatusBadRequest)
@@ -207,7 +263,6 @@ func (h *Handler) handleUnlock(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Check if this database is actually locked
 	var lockInfo *LockInfo
 	var exists bool
 	h.withLocksLock(func() {
@@ -222,8 +277,14 @@ func (h *Handler) handleUnlock(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Return the database to the available pool
+	// Return to pool before cancelling so the streaming handler sees released=false
+	// and skips its own pool return, avoiding a double-send.
 	h.cLockedDbConn <- connStr
+
+	// Wake the streaming handler (if any) so it exits cleanly.
+	if lockInfo.cancel != nil {
+		lockInfo.cancel()
+	}
 
 	log.Info().Str("connStr", connStr).Str("marker", lockInfo.Marker).Msg("UNLOCK")
 	h.sendStateUpdate()
@@ -294,28 +355,14 @@ func (h *Handler) handleForceUnlock(resp http.ResponseWriter, req *http.Request)
 		return
 	}
 
-	var lockInfo *LockInfo
-	var exists bool
-	h.withLocksLock(func() {
-		lockInfo, exists = h.locks[connStr]
-		if exists {
-			delete(h.locks, connStr)
-		}
-	})
-
-	if !exists {
+	if h.ForceUnlock(connStr) {
+		resp.WriteHeader(http.StatusOK)
+		resp.Write([]byte("Database force unlocked"))
+	} else {
 		log.Info().Str("connStr", connStr).Msg("FORCE-UNLOCK attempted on unlocked database")
 		resp.WriteHeader(http.StatusOK)
 		resp.Write([]byte("Database was not locked"))
-		return
 	}
-
-	h.cLockedDbConn <- connStr
-	log.Info().Str("connStr", connStr).Str("originalMarker", lockInfo.Marker).Msg("FORCE-UNLOCK")
-	h.sendStateUpdate()
-
-	resp.WriteHeader(http.StatusOK)
-	resp.Write([]byte("Database force unlocked"))
 }
 
 func (h *Handler) handleUnlockByMarker(resp http.ResponseWriter, req *http.Request) {
@@ -336,28 +383,18 @@ func (h *Handler) handleUnlockByMarker(resp http.ResponseWriter, req *http.Reque
 		return
 	}
 
-	var unlockedDbs []string
-	h.withLocksLock(func() {
-		for connStr, lockInfo := range h.locks {
-			if lockInfo.Marker == targetMarker {
-				delete(h.locks, connStr)
-				unlockedDbs = append(unlockedDbs, connStr)
-			}
-		}
-	})
+	count := h.UnlockByMarker(targetMarker)
 
-	for _, connStr := range unlockedDbs {
-		h.cLockedDbConn <- connStr
-	}
-
-	log.Info().Str("marker", targetMarker).Int("count", len(unlockedDbs)).Msg("UNLOCK-BY-MARKER")
+	log.Info().Str("marker", targetMarker).Int("count", count).Msg("UNLOCK-BY-MARKER")
 	h.sendStateUpdate()
 
 	resp.WriteHeader(http.StatusOK)
-	fmt.Fprintf(resp, "Unlocked %d databases", len(unlockedDbs))
+	fmt.Fprintf(resp, "Unlocked %d databases", count)
 }
 
-// cleanupExpiredLocks automatically unlocks databases after the configured timeout
+// cleanupExpiredLocks is a safety-net for any locks that somehow lack a cancel
+// func (e.g. created by tests or edge cases). Normal v2 streaming locks are
+// released immediately when their connection closes or via cancel().
 func (h *Handler) cleanupExpiredLocks() {
 	ticker := time.NewTicker(h.cleanupTickerInterval)
 	defer ticker.Stop()
@@ -368,11 +405,11 @@ func (h *Handler) cleanupExpiredLocks() {
 
 		h.withLocksLock(func() {
 			for connStr, lockInfo := range h.locks {
-				if now.Sub(lockInfo.LockedAt) > h.autoUnlockDuration {
+				if lockInfo.cancel == nil && now.Sub(lockInfo.LockedAt) > h.autoUnlockDuration {
 					delete(h.locks, connStr)
 					unlocked = append(unlocked, connStr)
 					log.Info().Str("connStr", connStr).Str("marker", lockInfo.Marker).
-						Dur("duration", h.autoUnlockDuration).Msg("AUTO-UNLOCK")
+						Dur("duration", h.autoUnlockDuration).Msg("AUTO-UNLOCK (safety-net)")
 				}
 			}
 		})
@@ -426,69 +463,84 @@ func (h *Handler) GetState() *State {
 	}
 }
 
+// cancelAndRelease removes the lock from the map, returns the database to the pool,
+// and cancels the streaming handler. It is the shared implementation for all
+// force-release operations (ForceUnlock, UnlockByMarker, UnlockAll).
+// Must NOT be called with locksMu held.
+func (h *Handler) cancelAndRelease(connStr string, lockInfo *LockInfo) {
+	h.cLockedDbConn <- connStr
+	if lockInfo.cancel != nil {
+		lockInfo.cancel()
+	}
+}
+
 // ForceUnlock unlocks a database without going through HTTP (for TUI use)
 func (h *Handler) ForceUnlock(connStr string) bool {
-	var exists bool
+	var lockInfo *LockInfo
 	h.withLocksLock(func() {
-		_, exists = h.locks[connStr]
+		var exists bool
+		lockInfo, exists = h.locks[connStr]
 		if exists {
 			delete(h.locks, connStr)
+		} else {
+			lockInfo = nil
 		}
 	})
 
-	if exists {
-		h.cLockedDbConn <- connStr
-		log.Info().Str("connStr", connStr).Msg("TUI FORCE-UNLOCK")
-		h.sendStateUpdate()
+	if lockInfo == nil {
+		return false
 	}
 
-	return exists
+	h.cancelAndRelease(connStr, lockInfo)
+	log.Info().Str("connStr", connStr).Msg("TUI FORCE-UNLOCK")
+	h.sendStateUpdate()
+	return true
 }
 
 // UnlockByMarker unlocks all databases by marker (for TUI use)
 func (h *Handler) UnlockByMarker(marker string) int {
-	var unlockedDbs []string
+	released := make(map[string]*LockInfo)
 	h.withLocksLock(func() {
 		for connStr, lockInfo := range h.locks {
 			if lockInfo.Marker == marker {
+				released[connStr] = lockInfo
 				delete(h.locks, connStr)
-				unlockedDbs = append(unlockedDbs, connStr)
 			}
 		}
 	})
 
-	for _, connStr := range unlockedDbs {
-		h.cLockedDbConn <- connStr
+	for connStr, lockInfo := range released {
+		h.cancelAndRelease(connStr, lockInfo)
 	}
 
-	if len(unlockedDbs) > 0 {
-		log.Info().Str("marker", marker).Int("count", len(unlockedDbs)).Msg("TUI UNLOCK-BY-MARKER")
+	if len(released) > 0 {
+		log.Info().Str("marker", marker).Int("count", len(released)).Msg("TUI UNLOCK-BY-MARKER")
 		h.sendStateUpdate()
 	}
 
-	return len(unlockedDbs)
+	return len(released)
 }
 
 // UnlockAll unlocks all databases (for restart)
 func (h *Handler) UnlockAll() int {
-	var unlockedDbs []string
+	released := make(map[string]*LockInfo)
 	h.withLocksLock(func() {
-		for connStr := range h.locks {
-			unlockedDbs = append(unlockedDbs, connStr)
-			delete(h.locks, connStr)
+		for connStr, lockInfo := range h.locks {
+			released[connStr] = lockInfo
 		}
+		h.locks = make(map[string]*LockInfo)
 	})
 
-	for _, connStr := range unlockedDbs {
-		h.cLockedDbConn <- connStr
+	for connStr, lockInfo := range released {
+		h.cancelAndRelease(connStr, lockInfo)
 	}
 
-	if len(unlockedDbs) > 0 {
-		log.Info().Int("count", len(unlockedDbs)).Msg("UNLOCK-ALL")
+	if len(released) > 0 {
+		log.Info().Int("count", len(released)).Msg("UNLOCK-ALL")
 		h.sendStateUpdate()
 	}
 
-	return len(unlockedDbs)
+	return len(released)
 }
 
 // SetRestartRequestChan sets the channel for sending restart requests to TUI
@@ -520,13 +572,10 @@ func (h *Handler) handleRestart(resp http.ResponseWriter, req *http.Request) {
 
 	log.Info().Msg("RESTART requested via HTTP API")
 
-	// Create response channel for this request
 	responseChan := make(chan error, 1)
 
-	// Try to send restart request to TUI (non-blocking)
 	select {
 	case h.restartRequestChan <- RestartRequest{ResponseChan: responseChan}:
-		// Request sent, now wait for TUI to complete restart
 		err := <-responseChan
 		if err != nil {
 			log.Error().Err(err).Msg("Restart failed")
@@ -539,7 +588,6 @@ func (h *Handler) handleRestart(resp http.ResponseWriter, req *http.Request) {
 		fmt.Fprintf(resp, `{"status":"ok","message":"Restart completed successfully"}`)
 
 	default:
-		// TUI is not ready to accept restart (already restarting or not listening)
 		http.Error(resp, "Restart already in progress", http.StatusConflict)
 	}
 }

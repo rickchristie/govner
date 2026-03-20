@@ -27,9 +27,9 @@ func StartServer(cfg *config.Config, stateUpdateChan chan<- *State) (*http.Serve
 	}
 
 	server := &http.Server{
-		Handler:        handler,
-		ReadTimeout:    10 * time.Minute,
-		WriteTimeout:   10 * time.Minute,
+		Handler: handler,
+		// No WriteTimeout: streaming lock connections are intentionally long-lived.
+		// Auto-unlock is enforced per-lock via context.WithTimeout inside handleLock.
 		MaxHeaderBytes: 1 << 20,
 	}
 

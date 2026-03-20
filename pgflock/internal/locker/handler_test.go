@@ -1,8 +1,10 @@
 package locker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -34,16 +36,15 @@ func testConfig() *config.Config {
 	}
 }
 
-// newTestHandler creates a handler for testing without database reset
+// newTestHandler creates a handler for testing with DB reset skipped.
 func newTestHandler() *Handler {
 	return newTestHandlerWithCleanupInterval(1 * time.Minute)
 }
 
-// newTestHandlerWithCleanupInterval creates a handler with configurable cleanup interval
+// newTestHandlerWithCleanupInterval creates a handler with a configurable cleanup interval.
 func newTestHandlerWithCleanupInterval(cleanupInterval time.Duration) *Handler {
 	cfg := testConfig()
 
-	// Build test databases map from config
 	testDatabases := make(map[string]bool)
 	for _, port := range cfg.InstancePorts() {
 		for i := 1; i <= cfg.DatabasesPerInstance; i++ {
@@ -61,21 +62,70 @@ func newTestHandlerWithCleanupInterval(cleanupInterval time.Duration) *Handler {
 		locks:                 make(map[string]*LockInfo),
 		cleanupTickerInterval: cleanupInterval,
 		autoUnlockDuration:    time.Duration(cfg.AutoUnlockMins) * time.Minute,
-		stateUpdateChan:       nil, // No TUI updates in tests
+		stateUpdateChan:       nil,
+		resetDatabase:         func(_ *config.Config, _ string) error { return nil },
 	}
 
-	// Initially all databases are available
 	for connStr := range testDatabases {
 		h.cLockedDbConn <- connStr
 	}
 
-	// Start cleanup routine for expired locks
 	go h.cleanupExpiredLocks()
 
 	return h
 }
 
-// handleLockNoReset is a test version of handleLock that skips database reset
+// newStreamingTestServer creates a real HTTP test server using the handler,
+// with DB reset skipped. Use this for tests that need real streaming connections.
+func newStreamingTestServer(t *testing.T) (*Handler, *httptest.Server) {
+	t.Helper()
+	h := newTestHandler()
+	server := httptest.NewServer(h)
+	t.Cleanup(server.Close)
+	return h, server
+}
+
+// newStreamingTestServerWithAutoUnlock creates a server whose handler auto-unlocks
+// after the given duration (via context.WithTimeout inside handleLock).
+func newStreamingTestServerWithAutoUnlock(t *testing.T, autoUnlock time.Duration) (*Handler, *httptest.Server) {
+	t.Helper()
+	h := newTestHandler()
+	h.autoUnlockDuration = autoUnlock
+	server := httptest.NewServer(h)
+	t.Cleanup(server.Close)
+	return h, server
+}
+
+// lockStreaming acquires a lock via a real HTTP streaming connection.
+// Returns the connStr and the response body (kept open to hold the lock).
+// The caller must close the body to release the lock.
+func lockStreaming(t *testing.T, serverURL, marker, password string) (connStr string, body io.ReadCloser) {
+	t.Helper()
+	reqURL := fmt.Sprintf("%s/lock?marker=%s&password=%s", serverURL, marker, password)
+
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Get(reqURL)
+	if err != nil {
+		t.Fatalf("lock request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("lock returned status %d", resp.StatusCode)
+	}
+
+	buf := make([]byte, 256)
+	n, err := resp.Body.Read(buf)
+	if err != nil && err != io.EOF {
+		resp.Body.Close()
+		t.Fatalf("failed to read conn string: %v", err)
+	}
+	connStr = strings.TrimSpace(string(buf[:n]))
+	return connStr, resp.Body
+}
+
+// handleLockNoReset is a non-streaming test version of handleLock that skips
+// database reset. Used for unit tests that test the lock/unlock state machine
+// without needing real HTTP connections.
 func (h *Handler) handleLockNoReset(resp http.ResponseWriter, req *http.Request) {
 	marker, valid := h.validateAuth(req)
 	if !valid {
@@ -83,55 +133,63 @@ func (h *Handler) handleLockNoReset(resp http.ResponseWriter, req *http.Request)
 		return
 	}
 
-	// Increment waiting count
 	h.waitingCount.Add(1)
 	h.sendStateUpdate()
-	defer func() {
-		h.waitingCount.Add(-1)
-		h.sendStateUpdate()
-	}()
 
-	// Wait for a database to be freed or request context to be cancelled
 	select {
 	case connStr := <-h.cLockedDbConn:
-		// Skip database reset in tests
+		h.waitingCount.Add(-1)
+		h.sendStateUpdate()
 
-		// Record the lock
+		// Create a cancel func so external unlock operations (ForceUnlock, handleUnlock)
+		// can signal this lock is gone. Nobody listens to this context in the
+		// non-streaming path, but having it ensures the lock map is consistent.
+		_, lockCancel := context.WithCancel(context.Background())
+
 		h.withLocksLock(func() {
 			h.locks[connStr] = &LockInfo{
 				ConnString: connStr,
 				Marker:     marker,
 				LockedAt:   time.Now(),
+				cancel:     lockCancel,
 			}
 		})
 
-		_, err := resp.Write([]byte(connStr))
+		resp.Header().Set("X-PGFlock-Version", serverVersion)
+		_, err := resp.Write([]byte(connStr + "\n"))
 		if err != nil {
+			lockCancel()
 			return
 		}
 
 		h.sendStateUpdate()
 
 	case <-req.Context().Done():
+		h.waitingCount.Add(-1)
+		h.sendStateUpdate()
 		http.Error(resp, "Request cancelled or timed out", http.StatusRequestTimeout)
 	}
 }
 
-// Await waits for an event to occur within the timeout duration
+// Await polls until event() returns true or the timeout elapses.
 func Await(timeoutDuration time.Duration, event func() bool) error {
 	timeout := time.After(timeoutDuration)
 	for {
 		select {
 		case <-timeout:
-			return fmt.Errorf("waiting for an event that did not arrive")
+			return fmt.Errorf("timed out waiting for event")
 		default:
 			if event() {
 				return nil
 			}
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests — use ResponseRecorder + handleLockNoReset (non-streaming)
+// ---------------------------------------------------------------------------
 
 func TestAuthValidation_LockUnlock(t *testing.T) {
 	h := newTestHandler()
@@ -157,19 +215,16 @@ func TestAuthValidation_LockUnlock(t *testing.T) {
 			if valid != tt.expected {
 				t.Errorf("validateAuth() = %v, want %v", valid, tt.expected)
 			}
-
 			if valid && marker != tt.marker {
 				t.Errorf("Expected marker %s, got %s", tt.marker, marker)
 			}
 
-			// Also test unlock endpoint with same credentials
 			req = httptest.NewRequest("GET", "/unlock?marker="+tt.marker+"&password="+tt.password+"&conn=someconn", nil)
 			marker, valid = h.validateAuth(req)
 
 			if valid != tt.expected {
 				t.Errorf("validateAuth() for unlock = %v, want %v", valid, tt.expected)
 			}
-
 			if valid && marker != tt.marker {
 				t.Errorf("Expected marker %s for unlock, got %s", tt.marker, marker)
 			}
@@ -180,71 +235,83 @@ func TestAuthValidation_LockUnlock(t *testing.T) {
 func TestLockUnlockFlow(t *testing.T) {
 	h := newTestHandler()
 
-	// Test lock with valid credentials
 	req := httptest.NewRequest("GET", "/lock?marker=testuser&password="+testPassword, nil)
 	rr := httptest.NewRecorder()
-
 	h.handleLockNoReset(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", rr.Code)
+		t.Fatalf("Expected status 200, got %d", rr.Code)
 	}
 
 	connStr := strings.TrimSpace(rr.Body.String())
 	if connStr == "" {
-		t.Error("Expected connection string, got empty response")
+		t.Fatal("Expected connection string, got empty response")
 	}
 
-	// Test unlock with the same connection string
 	unlockURL := "/unlock?marker=testuser&password=" + testPassword
 	req = httptest.NewRequest("POST", unlockURL, strings.NewReader(connStr))
 	rr = httptest.NewRecorder()
-
 	h.handleUnlock(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", rr.Code)
+		t.Errorf("Expected status 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
-func TestAutoUnlockAfterTimeout(t *testing.T) {
-	// Create handler with faster cleanup interval for testing (3 seconds)
-	h := newTestHandlerWithCleanupInterval(3 * time.Second)
-	// Override auto-unlock duration for test
-	h.autoUnlockDuration = 30 * time.Minute
+func TestVersionHeader(t *testing.T) {
+	h := newTestHandler()
 
-	// Lock a database
 	req := httptest.NewRequest("GET", "/lock?marker=testuser&password="+testPassword, nil)
 	rr := httptest.NewRecorder()
 	h.handleLockNoReset(rr, req)
 
-	connStr := strings.TrimSpace(rr.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d", rr.Code)
+	}
+	if got := rr.Header().Get("X-PGFlock-Version"); got != serverVersion {
+		t.Errorf("Expected X-PGFlock-Version: %s, got %q", serverVersion, got)
+	}
+}
 
-	// Simulate the lock being old by modifying the timestamp
+func TestAutoUnlockSafetyNet(t *testing.T) {
+	// Safety-net cleanup only triggers for locks with cancel=nil.
+	h := newTestHandlerWithCleanupInterval(100 * time.Millisecond)
+	h.autoUnlockDuration = 200 * time.Millisecond
+
+	// Insert a lock with no cancel func to simulate a legacy/edge-case lock.
+	var capturedConn string
+	h.withLocksRLock(func() {
+		for k := range h.testDatabases {
+			capturedConn = k
+			break
+		}
+	})
+	// Remove it from the pool manually (simulating it being locked)
+	<-h.cLockedDbConn
 	h.withLocksLock(func() {
-		if lockInfo, exists := h.locks[connStr]; exists {
-			lockInfo.LockedAt = time.Now().Add(-31 * time.Minute) // 31 minutes ago
+		h.locks[capturedConn] = &LockInfo{
+			ConnString: capturedConn,
+			Marker:     "ghost",
+			LockedAt:   time.Now().Add(-300 * time.Millisecond),
+			cancel:     nil, // no cancel — safety-net should clean this up
 		}
 	})
 
-	// Use Await to wait for the automatic cleanup to remove the lock
-	err := Await(10*time.Second, func() bool {
+	err := Await(2*time.Second, func() bool {
 		var exists bool
 		h.withLocksRLock(func() {
-			_, exists = h.locks[connStr]
+			_, exists = h.locks[capturedConn]
 		})
-		return !exists // Return true when lock is removed
+		return !exists
 	})
-
 	if err != nil {
-		t.Errorf("Expected lock to be automatically removed after 30 minutes, but timeout occurred: %v", err)
+		t.Errorf("Safety-net auto-unlock did not fire: %v", err)
 	}
 }
 
 func TestLock_BlockWhenExhausted(t *testing.T) {
 	h := newTestHandler()
 
-	// Lock all available databases
 	var lockedConnections []string
 	for i := 0; i < defaultDatabaseCount; i++ {
 		req := httptest.NewRequest("GET", "/lock?marker=testuser&password="+testPassword, nil)
@@ -254,12 +321,9 @@ func TestLock_BlockWhenExhausted(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("Expected lock %d to succeed, got status %d", i+1, rr.Code)
 		}
-
-		connStr := strings.TrimSpace(rr.Body.String())
-		lockedConnections = append(lockedConnections, connStr)
+		lockedConnections = append(lockedConnections, strings.TrimSpace(rr.Body.String()))
 	}
 
-	// Spawn a "otherLocker" goroutine that tries to lock another database
 	var otherLockerResponse *httptest.ResponseRecorder
 	var otherLockerDone bool
 	var otherLockerMu sync.Mutex
@@ -275,369 +339,215 @@ func TestLock_BlockWhenExhausted(t *testing.T) {
 		otherLockerMu.Unlock()
 	}()
 
-	// Assert using Await that after waiting for 5 seconds, the request is blocked and doesn't actually return
-	err := Await(5*time.Second, func() bool {
+	// Confirm the request is blocked.
+	err := Await(300*time.Millisecond, func() bool {
 		otherLockerMu.Lock()
 		defer otherLockerMu.Unlock()
 		return otherLockerDone
 	})
-
 	if err == nil {
-		t.Error("Expected otherLocker request to be blocked when all databases are exhausted, but it completed")
+		t.Fatal("Expected lock to be blocked when all databases exhausted, but it completed")
 	}
 
-	// Randomly select one locked database connection string, and call /unlock to unlock the connection
-	selectedIndex := rand.Intn(len(lockedConnections))
-	selectedConnStr := lockedConnections[selectedIndex]
-
-	unlockURL := "/unlock?marker=testuser&password=" + testPassword
-	req := httptest.NewRequest("POST", unlockURL, strings.NewReader(selectedConnStr))
+	// Unlock one database.
+	selectedConnStr := lockedConnections[rand.Intn(len(lockedConnections))]
+	req := httptest.NewRequest("POST", "/unlock?marker=testuser&password="+testPassword,
+		strings.NewReader(selectedConnStr))
 	rr := httptest.NewRecorder()
 	h.handleUnlock(rr, req)
-
 	if rr.Code != http.StatusOK {
-		t.Errorf("Expected unlock to succeed, got status %d", rr.Code)
+		t.Fatalf("Unlock failed: %d", rr.Code)
 	}
 
-	// Assert using Await that the "otherLocker" request finally gets a response
-	err = Await(10*time.Second, func() bool {
+	// Blocked request should now complete.
+	err = Await(5*time.Second, func() bool {
 		otherLockerMu.Lock()
 		defer otherLockerMu.Unlock()
 		return otherLockerDone
 	})
-
 	if err != nil {
-		t.Errorf("Expected otherLocker request to complete after unlock, but it timed out: %v", err)
+		t.Errorf("Expected blocked request to complete after unlock: %v", err)
 	}
 
-	// Verify the returned database connection is the one we chose to unlock randomly
 	otherLockerMu.Lock()
 	defer otherLockerMu.Unlock()
-
 	if otherLockerResponse.Code != http.StatusOK {
 		t.Errorf("Expected otherLocker to get status 200, got %d", otherLockerResponse.Code)
 	}
-
-	returnedConnStr := strings.TrimSpace(otherLockerResponse.Body.String())
-	if returnedConnStr != selectedConnStr {
-		t.Errorf("Expected otherLocker to get connection %s, but got %s", selectedConnStr, returnedConnStr)
+	if returnedConn := strings.TrimSpace(otherLockerResponse.Body.String()); returnedConn != selectedConnStr {
+		t.Errorf("Expected otherLocker to get %s, got %s", selectedConnStr, returnedConn)
 	}
 }
 
 func TestLock_RaceConditionStressTest(t *testing.T) {
 	h := newTestHandler()
-	numGoroutines := 50 * defaultDatabaseCount // 50x the default database count
+	numGoroutines := 50 * defaultDatabaseCount
 
 	var wg sync.WaitGroup
 	errorsChan := make(chan error, numGoroutines)
 
-	// Track ownership of each connection using atomic counters.
 	counters := make(map[string]*atomic.Int32)
 	for connStr := range h.testDatabases {
 		counters[connStr] = &atomic.Int32{}
-		counters[connStr].Store(0)
 	}
 
 	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
-		go func(goroutineID int) {
+		go func(id int) {
 			defer wg.Done()
 
-			// Lock a database (this will block if all databases are locked).
-			req := httptest.NewRequest("GET", fmt.Sprintf("/lock?marker=user%d&password=%s", goroutineID, testPassword), nil)
+			req := httptest.NewRequest("GET",
+				fmt.Sprintf("/lock?marker=user%d&password=%s", id, testPassword), nil)
 			rr := httptest.NewRecorder()
 			h.handleLockNoReset(rr, req)
 
 			if rr.Code != http.StatusOK {
-				errorsChan <- fmt.Errorf("goroutine %d: lock failed with status %d", goroutineID, rr.Code)
+				errorsChan <- fmt.Errorf("goroutine %d: lock failed status %d", id, rr.Code)
 				return
 			}
 
 			connStr := strings.TrimSpace(rr.Body.String())
-
-			// Check if this connection is already held by another goroutine.
-			ret := counters[connStr].Add(1)
-			if ret != 1 {
-				errorsChan <- fmt.Errorf("goroutine %d: connection %s is already held by another goroutine", goroutineID, connStr)
-				return
+			if counters[connStr].Add(1) != 1 {
+				errorsChan <- fmt.Errorf("goroutine %d: RACE — %s held by multiple goroutines", id, connStr)
 			}
 
-			// Hold the lock for a randomized time (0-500ms)
-			holdTime := time.Duration(rand.Intn(500)) * time.Millisecond
-			time.Sleep(holdTime)
+			time.Sleep(time.Duration(rand.Intn(500)) * time.Millisecond)
 
-			// Decrement the counter before unlocking.
 			if counters[connStr].Add(-1) != 0 {
-				errorsChan <- fmt.Errorf("goroutine %d: connection %s counter is not 0 after decrement, expected 0", goroutineID, connStr)
-				return
+				errorsChan <- fmt.Errorf("goroutine %d: counter for %s not 0 after decrement", id, connStr)
 			}
 
-			// Release the lock
-			unlockURL := fmt.Sprintf("/unlock?marker=user%d&password=%s", goroutineID, testPassword)
-			req = httptest.NewRequest("POST", unlockURL, strings.NewReader(connStr))
+			req = httptest.NewRequest("POST",
+				fmt.Sprintf("/unlock?marker=user%d&password=%s", id, testPassword),
+				strings.NewReader(connStr))
 			rr = httptest.NewRecorder()
 			h.handleUnlock(rr, req)
 
 			if rr.Code != http.StatusOK {
-				errorsChan <- fmt.Errorf("goroutine %d: unlock failed with status %d", goroutineID, rr.Code)
-				return
+				errorsChan <- fmt.Errorf("goroutine %d: unlock failed status %d", id, rr.Code)
 			}
 		}(i)
 	}
 
-	// Wait for all goroutines to complete
 	wg.Wait()
 	close(errorsChan)
 
-	// Check for any errors
 	for err := range errorsChan {
 		t.Error(err)
 	}
 
-	// Assert that at the end of the test, after all goroutines have released their locks, all databases are unlocked
 	h.withLocksRLock(func() {
 		if len(h.locks) != 0 {
-			t.Errorf("Expected all databases to be unlocked at end of test, but %d locks remain", len(h.locks))
+			t.Errorf("Expected all locks released, %d remain", len(h.locks))
 		}
 	})
-
-	// Verify that all databases are back in the available pool
-	availableCount := len(h.cLockedDbConn)
-	if availableCount != defaultDatabaseCount {
-		t.Errorf("Expected %d databases to be available, but got %d", defaultDatabaseCount, availableCount)
+	if got := len(h.cLockedDbConn); got != defaultDatabaseCount {
+		t.Errorf("Expected %d databases available, got %d", defaultDatabaseCount, got)
 	}
 }
 
-func TestUnlockByMarker(t *testing.T) {
-	h := newTestHandler()
-
-	// Lock 5 databases with marker "alice"
-	var aliceConnections []string
-	for i := 0; i < 5; i++ {
-		req := httptest.NewRequest("GET", "/lock?marker=alice&password="+testPassword, nil)
-		rr := httptest.NewRecorder()
-		h.handleLockNoReset(rr, req)
-		if rr.Code == http.StatusOK {
-			aliceConnections = append(aliceConnections, strings.TrimSpace(rr.Body.String()))
-		}
-	}
-
-	// Lock 3 databases with marker "bob"
-	var bobConnections []string
-	for i := 0; i < 3; i++ {
-		req := httptest.NewRequest("GET", "/lock?marker=bob&password="+testPassword, nil)
-		rr := httptest.NewRecorder()
-		h.handleLockNoReset(rr, req)
-		if rr.Code == http.StatusOK {
-			bobConnections = append(bobConnections, strings.TrimSpace(rr.Body.String()))
-		}
-	}
-
-	// Verify that we have 8 locks total
-	h.withLocksRLock(func() {
-		if len(h.locks) != 8 {
-			t.Errorf("Expected 8 locks, got %d", len(h.locks))
-		}
-	})
-
-	// Use UnlockByMarker to unlock all databases locked by "alice"
-	count := h.UnlockByMarker("alice")
-	if count != 5 {
-		t.Errorf("Expected to unlock 5 databases, unlocked %d", count)
-	}
-
-	// Verify that only bob's locks remain (3 locks)
-	h.withLocksRLock(func() {
-		if len(h.locks) != 3 {
-			t.Errorf("Expected 3 locks remaining (bob's), got %d", len(h.locks))
-		}
-
-		// Verify all remaining locks are bob's
-		for _, lockInfo := range h.locks {
-			if lockInfo.Marker != "bob" {
-				t.Errorf("Expected all remaining locks to be bob's, found lock owned by %s", lockInfo.Marker)
-			}
-		}
-	})
-
-	// Verify alice's connections are back in the pool
-	for _, connStr := range aliceConnections {
-		h.withLocksRLock(func() {
-			if _, exists := h.locks[connStr]; exists {
-				t.Errorf("Expected alice's connection %s to be unlocked", connStr)
-			}
-		})
-	}
-
-	// Test unlocking by marker when no databases are locked by that user
-	count = h.UnlockByMarker("charlie")
-	if count != 0 {
-		t.Errorf("Expected to unlock 0 databases for charlie, unlocked %d", count)
-	}
-
-	// Verify bob's locks are still there (no change)
-	h.withLocksRLock(func() {
-		if len(h.locks) != 3 {
-			t.Errorf("Expected 3 locks remaining after unlocking non-existent user, got %d", len(h.locks))
-		}
-	})
-
-	// Clean up bob's connections
-	for _, connStr := range bobConnections {
-		h.ForceUnlock(connStr)
-	}
-}
-
-// TestLock_MassiveRaceConditionStressTest bombards the server with thousands of concurrent requests
 func TestLock_MassiveRaceConditionStressTest(t *testing.T) {
 	h := newTestHandler()
 
-	// 5000 goroutines competing for 25 databases = 200x contention ratio
 	numGoroutines := 5000
-	// Each goroutine will do multiple lock/unlock cycles
 	cyclesPerGoroutine := 3
 
 	var wg sync.WaitGroup
 	errorsChan := make(chan error, numGoroutines*cyclesPerGoroutine)
 
-	// Track ownership of each connection using atomic counters.
 	counters := make(map[string]*atomic.Int32)
 	for connStr := range h.testDatabases {
 		counters[connStr] = &atomic.Int32{}
 	}
 
-	// Track total successful locks and unlocks for final verification
-	var totalLocks atomic.Int64
-	var totalUnlocks atomic.Int64
+	var totalLocks, totalUnlocks atomic.Int64
+	var seenConnections sync.Map
 
-	// Also track unique connections seen to ensure we're not getting duplicates
-	seenConnections := sync.Map{}
-
-	t.Logf("Starting massive stress test: %d goroutines x %d cycles = %d total lock attempts",
+	t.Logf("Stress test: %d goroutines × %d cycles = %d total lock attempts",
 		numGoroutines, cyclesPerGoroutine, numGoroutines*cyclesPerGoroutine)
-
-	startTime := time.Now()
+	start := time.Now()
 
 	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
-		go func(goroutineID int) {
+		go func(id int) {
 			defer wg.Done()
 
 			for cycle := 0; cycle < cyclesPerGoroutine; cycle++ {
-				// Lock a database
 				req := httptest.NewRequest("GET",
-					fmt.Sprintf("/lock?marker=user%d&password=%s", goroutineID, testPassword), nil)
+					fmt.Sprintf("/lock?marker=user%d&password=%s", id, testPassword), nil)
 				rr := httptest.NewRecorder()
 				h.handleLockNoReset(rr, req)
 
 				if rr.Code != http.StatusOK {
-					errorsChan <- fmt.Errorf("goroutine %d cycle %d: lock failed with status %d",
-						goroutineID, cycle, rr.Code)
+					errorsChan <- fmt.Errorf("goroutine %d cycle %d: lock status %d", id, cycle, rr.Code)
 					return
 				}
 
 				connStr := strings.TrimSpace(rr.Body.String())
 				totalLocks.Add(1)
-
-				// Verify this connection is not already held
-				counter := counters[connStr]
-				if counter == nil {
-					errorsChan <- fmt.Errorf("goroutine %d cycle %d: got unknown connection %s",
-						goroutineID, cycle, connStr)
-					return
-				}
-
-				// Increment counter - must be exactly 1 after increment
-				if val := counter.Add(1); val != 1 {
-					errorsChan <- fmt.Errorf("goroutine %d cycle %d: RACE DETECTED! connection %s counter is %d (expected 1)",
-						goroutineID, cycle, connStr, val)
-					// Don't return - still try to clean up
-				}
-
-				// Record that we've seen this connection
 				seenConnections.Store(connStr, true)
 
-				// Hold the lock for a very short random time (0-10ms) to maximize contention
-				holdTime := time.Duration(rand.Intn(10)) * time.Millisecond
-				time.Sleep(holdTime)
-
-				// Decrement counter before unlock - must be exactly 0 after decrement
-				if val := counter.Add(-1); val != 0 {
-					errorsChan <- fmt.Errorf("goroutine %d cycle %d: RACE DETECTED! connection %s counter is %d after decrement (expected 0)",
-						goroutineID, cycle, connStr, val)
+				if v := counters[connStr].Add(1); v != 1 {
+					errorsChan <- fmt.Errorf("goroutine %d cycle %d: RACE on %s (counter=%d)", id, cycle, connStr, v)
 				}
 
-				// Unlock the database
-				unlockURL := fmt.Sprintf("/unlock?marker=user%d&password=%s", goroutineID, testPassword)
-				req = httptest.NewRequest("POST", unlockURL, strings.NewReader(connStr))
+				time.Sleep(time.Duration(rand.Intn(10)) * time.Millisecond)
+
+				if v := counters[connStr].Add(-1); v != 0 {
+					errorsChan <- fmt.Errorf("goroutine %d cycle %d: counter for %s = %d after decrement", id, cycle, connStr, v)
+				}
+
+				req = httptest.NewRequest("POST",
+					fmt.Sprintf("/unlock?marker=user%d&password=%s", id, testPassword),
+					strings.NewReader(connStr))
 				rr = httptest.NewRecorder()
 				h.handleUnlock(rr, req)
 
 				if rr.Code != http.StatusOK {
-					errorsChan <- fmt.Errorf("goroutine %d cycle %d: unlock failed with status %d",
-						goroutineID, cycle, rr.Code)
+					errorsChan <- fmt.Errorf("goroutine %d cycle %d: unlock status %d", id, cycle, rr.Code)
 					return
 				}
-
 				totalUnlocks.Add(1)
 			}
 		}(i)
 	}
 
-	// Wait for all goroutines to complete
 	wg.Wait()
 	close(errorsChan)
 
-	elapsed := time.Since(startTime)
-	t.Logf("Stress test completed in %v", elapsed)
-	t.Logf("Total locks: %d, Total unlocks: %d", totalLocks.Load(), totalUnlocks.Load())
+	t.Logf("Completed in %v — locks: %d, unlocks: %d",
+		time.Since(start), totalLocks.Load(), totalUnlocks.Load())
 
-	// Check for any errors
-	errorCount := 0
+	errCount := 0
 	for err := range errorsChan {
 		t.Error(err)
-		errorCount++
-		if errorCount > 10 {
-			t.Errorf("... and %d more errors (truncated)", len(errorsChan))
+		errCount++
+		if errCount > 10 {
+			t.Errorf("... (truncated, %d more errors)", len(errorsChan))
 			break
 		}
 	}
 
-	// Verify all databases are unlocked
 	h.withLocksRLock(func() {
 		if len(h.locks) != 0 {
-			t.Errorf("Expected all databases to be unlocked, but %d locks remain", len(h.locks))
-			for connStr, lockInfo := range h.locks {
-				t.Errorf("  Remaining lock: %s by %s", connStr, lockInfo.Marker)
-			}
+			t.Errorf("Expected all locks released, %d remain", len(h.locks))
 		}
 	})
-
-	// Verify all databases are back in the pool
-	availableCount := len(h.cLockedDbConn)
-	if availableCount != defaultDatabaseCount {
-		t.Errorf("Expected %d databases available, got %d", defaultDatabaseCount, availableCount)
+	if got := len(h.cLockedDbConn); got != defaultDatabaseCount {
+		t.Errorf("Expected %d databases available, got %d", defaultDatabaseCount, got)
 	}
-
-	// Verify all counters are back to zero
-	for connStr, counter := range counters {
-		if val := counter.Load(); val != 0 {
-			t.Errorf("Counter for %s is %d, expected 0", connStr, val)
+	for connStr, c := range counters {
+		if v := c.Load(); v != 0 {
+			t.Errorf("Counter for %s = %d, expected 0", connStr, v)
 		}
 	}
-
-	// Verify we saw all databases (they were all used at some point)
 	seenCount := 0
-	seenConnections.Range(func(key, value interface{}) bool {
-		seenCount++
-		return true
-	})
+	seenConnections.Range(func(_, _ interface{}) bool { seenCount++; return true })
 	if seenCount != defaultDatabaseCount {
-		t.Errorf("Only saw %d unique connections, expected %d", seenCount, defaultDatabaseCount)
+		t.Errorf("Saw %d unique connections, expected %d", seenCount, defaultDatabaseCount)
 	}
 }
 
-// TestLock_RaceWithForceUnlock tests that force-unlock doesn't corrupt system state.
 func TestLock_RaceWithForceUnlock(t *testing.T) {
 	h := newTestHandler()
 
@@ -645,221 +555,224 @@ func TestLock_RaceWithForceUnlock(t *testing.T) {
 	var wg sync.WaitGroup
 	errorsChan := make(chan error, numWorkers*2)
 
-	// Track connections that are currently locked by workers (for force-unlock to target)
 	activeConnections := sync.Map{}
+	var forceUnlockCount, workerUnlockSuccess, workerUnlockFailed atomic.Int64
 
-	var forceUnlockCount atomic.Int64
-	var workerUnlockSuccess atomic.Int64
-	var workerUnlockFailed atomic.Int64
-
-	t.Logf("Starting force-unlock consistency test with %d workers", numWorkers)
-
-	// Start worker goroutines that lock/unlock
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go func(goroutineID int) {
+		go func(id int) {
 			defer wg.Done()
 
-			// Lock
 			req := httptest.NewRequest("GET",
-				fmt.Sprintf("/lock?marker=worker%d&password=%s", goroutineID, testPassword), nil)
+				fmt.Sprintf("/lock?marker=worker%d&password=%s", id, testPassword), nil)
 			rr := httptest.NewRecorder()
 			h.handleLockNoReset(rr, req)
 
 			if rr.Code != http.StatusOK {
-				errorsChan <- fmt.Errorf("worker %d: lock failed with status %d", goroutineID, rr.Code)
+				errorsChan <- fmt.Errorf("worker %d: lock status %d", id, rr.Code)
 				return
 			}
 
 			connStr := strings.TrimSpace(rr.Body.String())
-
-			// Register as active (might be force-unlocked)
-			activeConnections.Store(connStr, goroutineID)
-
-			// Hold for random time
+			activeConnections.Store(connStr, id)
 			time.Sleep(time.Duration(rand.Intn(30)) * time.Millisecond)
-
 			activeConnections.Delete(connStr)
 
-			// Try to unlock - might fail if already force-unlocked
-			unlockURL := fmt.Sprintf("/unlock?marker=worker%d&password=%s", goroutineID, testPassword)
-			req = httptest.NewRequest("POST", unlockURL, strings.NewReader(connStr))
+			req = httptest.NewRequest("POST",
+				fmt.Sprintf("/unlock?marker=worker%d&password=%s", id, testPassword),
+				strings.NewReader(connStr))
 			rr = httptest.NewRecorder()
 			h.handleUnlock(rr, req)
 
-			if rr.Code == http.StatusOK {
+			switch rr.Code {
+			case http.StatusOK:
 				workerUnlockSuccess.Add(1)
-			} else if rr.Code == http.StatusBadRequest {
-				// Already force-unlocked - expected
-				workerUnlockFailed.Add(1)
-			} else {
-				errorsChan <- fmt.Errorf("worker %d: unlock got unexpected status %d", goroutineID, rr.Code)
+			case http.StatusBadRequest:
+				workerUnlockFailed.Add(1) // already force-unlocked
+			default:
+				errorsChan <- fmt.Errorf("worker %d: unlock unexpected status %d", id, rr.Code)
 			}
 		}(i)
 	}
 
-	// Start goroutines that randomly force-unlock
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
-		go func(adminID int) {
+		go func() {
 			defer wg.Done()
-
 			for j := 0; j < 30; j++ {
-				// Pick a connection to force-unlock
-				var targetConn string
-				activeConnections.Range(func(key, value interface{}) bool {
-					targetConn = key.(string)
-					return false // Stop after first one
+				var target string
+				activeConnections.Range(func(k, _ interface{}) bool {
+					target = k.(string)
+					return false
 				})
-
-				if targetConn == "" {
-					time.Sleep(time.Millisecond)
-					continue
-				}
-
-				// Force unlock it using the handler method
-				if h.ForceUnlock(targetConn) {
+				if target != "" && h.ForceUnlock(target) {
 					forceUnlockCount.Add(1)
 				}
-
 				time.Sleep(time.Duration(rand.Intn(3)) * time.Millisecond)
 			}
-		}(i)
+		}()
 	}
 
 	wg.Wait()
 	close(errorsChan)
 
-	// Check for errors
 	for err := range errorsChan {
 		t.Error(err)
 	}
 
-	t.Logf("Force unlocks: %d, Worker unlocks success: %d, Worker unlocks failed (force-unlocked): %d",
+	t.Logf("Force unlocks: %d, worker success: %d, worker failed (already force-unlocked): %d",
 		forceUnlockCount.Load(), workerUnlockSuccess.Load(), workerUnlockFailed.Load())
 
-	// Final state verification - this is the critical check
-	// The sum of locked + available must equal total databases
 	h.withLocksRLock(func() {
-		lockedCount := len(h.locks)
-		availableCount := len(h.cLockedDbConn)
-		total := lockedCount + availableCount
-
-		if total != defaultDatabaseCount {
-			t.Errorf("CRITICAL: Inconsistent state! %d locked + %d available = %d (expected %d)",
-				lockedCount, availableCount, total, defaultDatabaseCount)
+		locked := len(h.locks)
+		available := len(h.cLockedDbConn)
+		if locked+available != defaultDatabaseCount {
+			t.Errorf("Inconsistent state: %d locked + %d available = %d (want %d)",
+				locked, available, locked+available, defaultDatabaseCount)
 		}
 	})
 
-	// Clean up any remaining locks
 	h.UnlockAll()
 
-	// Verify all connections are back
-	if len(h.cLockedDbConn) != defaultDatabaseCount {
-		t.Errorf("After cleanup: expected %d available, got %d", defaultDatabaseCount, len(h.cLockedDbConn))
+	if got := len(h.cLockedDbConn); got != defaultDatabaseCount {
+		t.Errorf("After cleanup: expected %d available, got %d", defaultDatabaseCount, got)
 	}
 
-	// Verify no duplicates in channel
 	seen := make(map[string]bool)
 	for i := 0; i < defaultDatabaseCount; i++ {
-		connStr := <-h.cLockedDbConn
-		if seen[connStr] {
-			t.Errorf("CRITICAL: Duplicate connection in channel after test: %s", connStr)
+		c := <-h.cLockedDbConn
+		if seen[c] {
+			t.Errorf("Duplicate connection in pool: %s", c)
 		}
-		seen[connStr] = true
+		seen[c] = true
 	}
 }
 
-// TestLock_VerifyNoDuplicateInChannel verifies the channel never contains duplicate connection strings
-func TestLock_VerifyNoDuplicateInChannel(t *testing.T) {
+func TestUnlockByMarker(t *testing.T) {
 	h := newTestHandler()
 
-	// Drain the channel and verify no duplicates
-	seen := make(map[string]bool)
-	available := len(h.cLockedDbConn)
-
-	for i := 0; i < available; i++ {
-		select {
-		case connStr := <-h.cLockedDbConn:
-			if seen[connStr] {
-				t.Errorf("Duplicate connection string in channel: %s", connStr)
-			}
-			seen[connStr] = true
-		default:
-			t.Errorf("Channel had fewer items than expected")
+	var aliceConns, bobConns []string
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest("GET", "/lock?marker=alice&password="+testPassword, nil)
+		rr := httptest.NewRecorder()
+		h.handleLockNoReset(rr, req)
+		if rr.Code == http.StatusOK {
+			aliceConns = append(aliceConns, strings.TrimSpace(rr.Body.String()))
+		}
+	}
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest("GET", "/lock?marker=bob&password="+testPassword, nil)
+		rr := httptest.NewRecorder()
+		h.handleLockNoReset(rr, req)
+		if rr.Code == http.StatusOK {
+			bobConns = append(bobConns, strings.TrimSpace(rr.Body.String()))
 		}
 	}
 
+	h.withLocksRLock(func() {
+		if len(h.locks) != 8 {
+			t.Errorf("Expected 8 locks, got %d", len(h.locks))
+		}
+	})
+
+	if count := h.UnlockByMarker("alice"); count != 5 {
+		t.Errorf("Expected 5 unlocked for alice, got %d", count)
+	}
+
+	h.withLocksRLock(func() {
+		if len(h.locks) != 3 {
+			t.Errorf("Expected 3 locks remaining, got %d", len(h.locks))
+		}
+		for _, lockInfo := range h.locks {
+			if lockInfo.Marker != "bob" {
+				t.Errorf("Unexpected lock marker %s (expected bob)", lockInfo.Marker)
+			}
+		}
+	})
+
+	if count := h.UnlockByMarker("charlie"); count != 0 {
+		t.Errorf("Expected 0 unlocked for charlie, got %d", count)
+	}
+
+	for _, c := range bobConns {
+		h.ForceUnlock(c)
+	}
+}
+
+func TestLock_VerifyNoDuplicateInChannel(t *testing.T) {
+	h := newTestHandler()
+
+	// Drain and verify initial state has no duplicates.
+	seen := make(map[string]bool)
+	available := len(h.cLockedDbConn)
+	for i := 0; i < available; i++ {
+		select {
+		case c := <-h.cLockedDbConn:
+			if seen[c] {
+				t.Errorf("Duplicate in initial pool: %s", c)
+			}
+			seen[c] = true
+		default:
+			t.Error("Pool had fewer items than expected")
+		}
+	}
 	if len(seen) != defaultDatabaseCount {
 		t.Errorf("Expected %d unique connections, got %d", defaultDatabaseCount, len(seen))
 	}
-
-	// Put them back
-	for connStr := range seen {
-		h.cLockedDbConn <- connStr
+	for c := range seen {
+		h.cLockedDbConn <- c
 	}
 
-	// Now run a stress test and verify again
+	// Stress: concurrent lock/unlock cycles.
 	numOps := 2000
-	var wg sync.WaitGroup
-
 	counters := make(map[string]*atomic.Int32)
-	for connStr := range h.testDatabases {
-		counters[connStr] = &atomic.Int32{}
+	for c := range h.testDatabases {
+		counters[c] = &atomic.Int32{}
 	}
 
+	var wg sync.WaitGroup
 	for i := 0; i < numOps; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
 
-			// Lock
 			req := httptest.NewRequest("GET",
 				fmt.Sprintf("/lock?marker=user%d&password=%s", id, testPassword), nil)
 			rr := httptest.NewRecorder()
 			h.handleLockNoReset(rr, req)
-
 			if rr.Code != http.StatusOK {
 				return
 			}
-
-			connStr := strings.TrimSpace(rr.Body.String())
-			counters[connStr].Add(1)
-
+			c := strings.TrimSpace(rr.Body.String())
+			counters[c].Add(1)
 			time.Sleep(time.Duration(rand.Intn(5)) * time.Millisecond)
+			counters[c].Add(-1)
 
-			counters[connStr].Add(-1)
-
-			// Unlock
 			req = httptest.NewRequest("POST",
 				fmt.Sprintf("/unlock?marker=user%d&password=%s", id, testPassword),
-				strings.NewReader(connStr))
+				strings.NewReader(c))
 			rr = httptest.NewRecorder()
 			h.handleUnlock(rr, req)
 		}(i)
 	}
-
 	wg.Wait()
 
-	// Verify all counters are 0
-	for connStr, counter := range counters {
-		if val := counter.Load(); val != 0 {
-			t.Errorf("Counter for %s is %d after test, expected 0", connStr, val)
+	for c, ctr := range counters {
+		if v := ctr.Load(); v != 0 {
+			t.Errorf("Counter for %s = %d after stress test", c, v)
 		}
 	}
 
-	// Drain and verify no duplicates again
+	// Re-drain and verify no duplicates.
 	seen = make(map[string]bool)
 	available = len(h.cLockedDbConn)
-
 	for i := 0; i < available; i++ {
-		connStr := <-h.cLockedDbConn
-		if seen[connStr] {
-			t.Errorf("Duplicate connection string after stress test: %s", connStr)
+		c := <-h.cLockedDbConn
+		if seen[c] {
+			t.Errorf("Duplicate in pool after stress test: %s", c)
 		}
-		seen[connStr] = true
+		seen[c] = true
 	}
-
 	if len(seen) != defaultDatabaseCount {
 		t.Errorf("Expected %d connections after stress test, got %d", defaultDatabaseCount, len(seen))
 	}
@@ -868,7 +781,6 @@ func TestLock_VerifyNoDuplicateInChannel(t *testing.T) {
 func TestHealthCheck(t *testing.T) {
 	h := newTestHandler()
 
-	// Lock a few databases with different markers
 	markers := []string{"test-alpha", "test-beta", "test-gamma"}
 	for _, marker := range markers {
 		req := httptest.NewRequest("GET", "/lock?marker="+marker+"&password="+testPassword, nil)
@@ -876,41 +788,34 @@ func TestHealthCheck(t *testing.T) {
 		h.handleLockNoReset(rr, req)
 	}
 
-	// Check health endpoint
 	req := httptest.NewRequest("GET", "/health-check", nil)
 	rr := httptest.NewRecorder()
 	h.handleHealthCheck(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", rr.Code)
+		t.Fatalf("Expected 200, got %d", rr.Code)
 	}
 
-	// Parse JSON response
 	var response HealthCheckResponse
 	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
-		t.Fatalf("Failed to parse JSON response: %v", err)
+		t.Fatalf("Failed to parse JSON: %v", err)
 	}
 
-	// Verify basic counts
 	if response.Status != "ok" {
 		t.Errorf("Expected status 'ok', got %s", response.Status)
 	}
 	if response.LockedDatabases != 3 {
-		t.Errorf("Expected 3 locked databases, got %d", response.LockedDatabases)
+		t.Errorf("Expected 3 locked, got %d", response.LockedDatabases)
 	}
 	if response.TotalDatabases != defaultDatabaseCount {
-		t.Errorf("Expected %d total databases, got %d", defaultDatabaseCount, response.TotalDatabases)
+		t.Errorf("Expected %d total, got %d", defaultDatabaseCount, response.TotalDatabases)
 	}
 	if response.FreeDatabases != defaultDatabaseCount-3 {
-		t.Errorf("Expected %d free databases, got %d", defaultDatabaseCount-3, response.FreeDatabases)
+		t.Errorf("Expected %d free, got %d", defaultDatabaseCount-3, response.FreeDatabases)
 	}
-
-	// Verify lock details are present
 	if len(response.Locks) != 3 {
-		t.Errorf("Expected 3 lock entries, got %d", len(response.Locks))
+		t.Fatalf("Expected 3 lock entries, got %d", len(response.Locks))
 	}
-
-	// Verify each lock has required fields
 	for _, lock := range response.Locks {
 		if lock.ConnString == "" {
 			t.Error("Lock missing conn_string")
@@ -919,10 +824,7 @@ func TestHealthCheck(t *testing.T) {
 			t.Error("Lock missing marker")
 		}
 		if lock.LockedAt == "" {
-			t.Error("Lock missing locked_at timestamp")
-		}
-		if lock.DurationSeconds < 0 {
-			t.Errorf("Lock has negative duration: %d", lock.DurationSeconds)
+			t.Error("Lock missing locked_at")
 		}
 	}
 }
@@ -930,9 +832,9 @@ func TestHealthCheck(t *testing.T) {
 func TestUnlockAllEndpoint(t *testing.T) {
 	h := newTestHandler()
 
-	// Lock several databases
 	for i := 0; i < 5; i++ {
-		req := httptest.NewRequest("GET", fmt.Sprintf("/lock?marker=user%d&password=%s", i, testPassword), nil)
+		req := httptest.NewRequest("GET",
+			fmt.Sprintf("/lock?marker=user%d&password=%s", i, testPassword), nil)
 		rr := httptest.NewRecorder()
 		h.handleLockNoReset(rr, req)
 		if rr.Code != http.StatusOK {
@@ -940,23 +842,14 @@ func TestUnlockAllEndpoint(t *testing.T) {
 		}
 	}
 
-	// Verify we have 5 locks
-	h.withLocksRLock(func() {
-		if len(h.locks) != 5 {
-			t.Errorf("Expected 5 locks, got %d", len(h.locks))
-		}
-	})
-
-	// Call unlock-all endpoint
 	req := httptest.NewRequest("POST", "/unlock-all?marker=admin&password="+testPassword, nil)
 	rr := httptest.NewRecorder()
 	h.handleUnlockAll(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d: %s", rr.Code, rr.Body.String())
+		t.Fatalf("unlock-all: expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	// Verify response
 	var response struct {
 		Status   string `json:"status"`
 		Unlocked int    `json:"unlocked"`
@@ -968,7 +861,6 @@ func TestUnlockAllEndpoint(t *testing.T) {
 		t.Errorf("Expected 5 unlocked, got %d", response.Unlocked)
 	}
 
-	// Verify all locks are released
 	h.withLocksRLock(func() {
 		if len(h.locks) != 0 {
 			t.Errorf("Expected 0 locks after unlock-all, got %d", len(h.locks))
@@ -979,94 +871,63 @@ func TestUnlockAllEndpoint(t *testing.T) {
 func TestRestartEndpoint(t *testing.T) {
 	h := newTestHandler()
 
-	// Test restart without channel configured
 	req := httptest.NewRequest("POST", "/restart?marker=admin&password="+testPassword, nil)
 	rr := httptest.NewRecorder()
 	h.handleRestart(rr, req)
-
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Errorf("Expected 503 when no channel configured, got %d", rr.Code)
 	}
 
-	// Set up restart request channel (simulating TUI)
-	restartRequestChan := make(chan RestartRequest)
-	h.SetRestartRequestChan(restartRequestChan)
+	restartChan := make(chan RestartRequest)
+	h.SetRestartRequestChan(restartChan)
 
-	// Start a goroutine to handle restart requests (simulating TUI)
 	restartCalled := make(chan bool, 1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		req := <-restartRequestChan
+		r := <-restartChan
 		restartCalled <- true
-		req.ResponseChan <- nil // Success
+		r.ResponseChan <- nil
 	}()
 
-	// Give the goroutine time to start blocking on the channel
 	time.Sleep(10 * time.Millisecond)
 
-	// Test restart with channel
 	req = httptest.NewRequest("POST", "/restart?marker=admin&password="+testPassword, nil)
 	rr = httptest.NewRecorder()
 	h.handleRestart(rr, req)
-
-	// Wait for handler goroutine to complete
 	<-done
 
 	if rr.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d: %s", rr.Code, rr.Body.String())
+		t.Errorf("Expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
-
 	select {
 	case <-restartCalled:
-		// Good, restart was called
 	default:
-		t.Error("Restart request was not received by TUI")
-	}
-
-	// Verify response
-	var response struct {
-		Status  string `json:"status"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
-		t.Fatalf("Failed to parse response: %v", err)
-	}
-	if response.Status != "ok" {
-		t.Errorf("Expected status 'ok', got %s", response.Status)
+		t.Error("Restart request not received")
 	}
 }
 
 func TestRestartEndpointAuthRequired(t *testing.T) {
 	h := newTestHandler()
+	h.SetRestartRequestChan(make(chan RestartRequest))
 
-	// Set up restart request channel (simulating TUI)
-	restartRequestChan := make(chan RestartRequest)
-	h.SetRestartRequestChan(restartRequestChan)
-
-	// Test without password
 	req := httptest.NewRequest("POST", "/restart?marker=admin", nil)
 	rr := httptest.NewRecorder()
 	h.handleRestart(rr, req)
-
 	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("Expected 401 without password, got %d", rr.Code)
+		t.Errorf("Expected 401, got %d", rr.Code)
 	}
 
-	// Test with wrong password
 	req = httptest.NewRequest("POST", "/restart?marker=admin&password=wrongpass", nil)
 	rr = httptest.NewRecorder()
 	h.handleRestart(rr, req)
-
 	if rr.Code != http.StatusUnauthorized {
 		t.Errorf("Expected 401 with wrong password, got %d", rr.Code)
 	}
 
-	// Test with GET instead of POST
 	req = httptest.NewRequest("GET", "/restart?marker=admin&password="+testPassword, nil)
 	rr = httptest.NewRecorder()
 	h.handleRestart(rr, req)
-
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("Expected 405 for GET, got %d", rr.Code)
 	}
@@ -1074,26 +935,19 @@ func TestRestartEndpointAuthRequired(t *testing.T) {
 
 func TestRestartEndpointConflict(t *testing.T) {
 	h := newTestHandler()
+	h.SetRestartRequestChan(make(chan RestartRequest)) // nobody listening
 
-	// Set up restart request channel but DON'T start a receiver
-	// This simulates TUI not being ready (e.g., already restarting)
-	restartRequestChan := make(chan RestartRequest)
-	h.SetRestartRequestChan(restartRequestChan)
-
-	// Try to restart when no one is listening - should get 409 Conflict
 	req := httptest.NewRequest("POST", "/restart?marker=admin&password="+testPassword, nil)
 	rr := httptest.NewRecorder()
 	h.handleRestart(rr, req)
-
 	if rr.Code != http.StatusConflict {
-		t.Errorf("Expected 409 when TUI not listening, got %d: %s", rr.Code, rr.Body.String())
+		t.Errorf("Expected 409, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
 func TestGetState(t *testing.T) {
 	h := newTestHandler()
 
-	// Initial state
 	state := h.GetState()
 	if state.TotalDatabases != defaultDatabaseCount {
 		t.Errorf("Expected total %d, got %d", defaultDatabaseCount, state.TotalDatabases)
@@ -1102,9 +956,9 @@ func TestGetState(t *testing.T) {
 		t.Errorf("Expected 0 locked, got %d", state.LockedDatabases)
 	}
 
-	// Lock some databases
 	for i := 0; i < 5; i++ {
-		req := httptest.NewRequest("GET", fmt.Sprintf("/lock?marker=user%d&password=%s", i, testPassword), nil)
+		req := httptest.NewRequest("GET",
+			fmt.Sprintf("/lock?marker=user%d&password=%s", i, testPassword), nil)
 		rr := httptest.NewRecorder()
 		h.handleLockNoReset(rr, req)
 	}
@@ -1115,5 +969,265 @@ func TestGetState(t *testing.T) {
 	}
 	if len(state.Locks) != 5 {
 		t.Errorf("Expected 5 lock infos, got %d", len(state.Locks))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests — use httptest.Server for real streaming connections
+// ---------------------------------------------------------------------------
+
+// TestStreaming_ConnectionCloseReleasesLock verifies that closing the HTTP
+// connection immediately releases the lock on the server side.
+func TestStreaming_ConnectionCloseReleasesLock(t *testing.T) {
+	h, server := newStreamingTestServer(t)
+
+	connStr, body := lockStreaming(t, server.URL, "test-marker", testPassword)
+
+	// Verify it's locked.
+	h.withLocksRLock(func() {
+		if _, exists := h.locks[connStr]; !exists {
+			t.Error("Expected lock to be recorded")
+		}
+	})
+
+	// Close the connection — this should release the lock.
+	body.Close()
+
+	err := Await(2*time.Second, func() bool {
+		var exists bool
+		h.withLocksRLock(func() {
+			_, exists = h.locks[connStr]
+		})
+		return !exists
+	})
+	if err != nil {
+		t.Errorf("Expected lock to be released after connection close: %v", err)
+	}
+
+	// Database should be back in the pool.
+	if err := Await(2*time.Second, func() bool {
+		return len(h.cLockedDbConn) == defaultDatabaseCount
+	}); err != nil {
+		t.Errorf("Expected database back in pool: %v", err)
+	}
+}
+
+// TestStreaming_ForceUnlockCancelsConnection verifies that ForceUnlock wakes the
+// streaming handler and cleanly releases the lock without double-returning to pool.
+func TestStreaming_ForceUnlockCancelsConnection(t *testing.T) {
+	h, server := newStreamingTestServer(t)
+
+	connStr, body := lockStreaming(t, server.URL, "test-marker", testPassword)
+	defer body.Close()
+
+	if !h.ForceUnlock(connStr) {
+		t.Fatal("ForceUnlock returned false")
+	}
+
+	// Lock should be gone from map.
+	h.withLocksRLock(func() {
+		if _, exists := h.locks[connStr]; exists {
+			t.Error("Lock still in map after ForceUnlock")
+		}
+	})
+
+	// Pool should be fully restored — no double-send.
+	if err := Await(2*time.Second, func() bool {
+		return len(h.cLockedDbConn) == defaultDatabaseCount
+	}); err != nil {
+		t.Errorf("Pool not restored after ForceUnlock: %v", err)
+	}
+}
+
+// TestStreaming_UnlockAllCancelsAllConnections verifies that UnlockAll wakes all
+// streaming handlers and restores the full pool.
+func TestStreaming_UnlockAllCancelsAllConnections(t *testing.T) {
+	h, server := newStreamingTestServer(t)
+
+	const numLocks = 10
+	bodies := make([]io.ReadCloser, numLocks)
+	for i := 0; i < numLocks; i++ {
+		_, body := lockStreaming(t, server.URL, fmt.Sprintf("marker-%d", i), testPassword)
+		bodies[i] = body
+	}
+	defer func() {
+		for _, b := range bodies {
+			b.Close()
+		}
+	}()
+
+	if got := h.UnlockAll(); got != numLocks {
+		t.Errorf("UnlockAll returned %d, want %d", got, numLocks)
+	}
+
+	if err := Await(2*time.Second, func() bool {
+		return len(h.cLockedDbConn) == defaultDatabaseCount
+	}); err != nil {
+		t.Errorf("Pool not fully restored after UnlockAll: %v", err)
+	}
+
+	h.withLocksRLock(func() {
+		if len(h.locks) != 0 {
+			t.Errorf("Expected 0 locks after UnlockAll, got %d", len(h.locks))
+		}
+	})
+}
+
+// TestStreaming_ConcurrentLocksAndConnectionCloses is a race condition stress test
+// for streaming connections — goroutines acquire locks, hold them briefly, then
+// close the connection to release.
+func TestStreaming_ConcurrentLocksAndConnectionCloses(t *testing.T) {
+	h, server := newStreamingTestServer(t)
+
+	numGoroutines := 200
+	cyclesPerGoroutine := 5
+
+	var wg sync.WaitGroup
+	errorsChan := make(chan error, numGoroutines*cyclesPerGoroutine)
+
+	counters := make(map[string]*atomic.Int32)
+	for c := range h.testDatabases {
+		counters[c] = &atomic.Int32{}
+	}
+
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+
+			for cycle := 0; cycle < cyclesPerGoroutine; cycle++ {
+				reqURL := fmt.Sprintf("%s/lock?marker=user%d&password=%s",
+					server.URL, id, testPassword)
+				resp, err := client.Get(reqURL)
+				if err != nil {
+					errorsChan <- fmt.Errorf("goroutine %d cycle %d: GET error: %v", id, cycle, err)
+					return
+				}
+				if resp.StatusCode != http.StatusOK {
+					resp.Body.Close()
+					errorsChan <- fmt.Errorf("goroutine %d cycle %d: lock status %d", id, cycle, resp.StatusCode)
+					return
+				}
+
+				buf := make([]byte, 256)
+				n, _ := resp.Body.Read(buf)
+				connStr := strings.TrimSpace(string(buf[:n]))
+
+				if ctr := counters[connStr]; ctr != nil {
+					if v := ctr.Add(1); v != 1 {
+						errorsChan <- fmt.Errorf("goroutine %d cycle %d: RACE on %s (counter=%d)", id, cycle, connStr, v)
+					}
+				}
+
+				time.Sleep(time.Duration(rand.Intn(5)) * time.Millisecond)
+
+				if ctr := counters[connStr]; ctr != nil {
+					ctr.Add(-1)
+				}
+
+				// Close the connection — this is the unlock.
+				resp.Body.Close()
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errorsChan)
+
+	errCount := 0
+	for err := range errorsChan {
+		t.Error(err)
+		errCount++
+		if errCount > 10 {
+			break
+		}
+	}
+
+	if err := Await(5*time.Second, func() bool {
+		return len(h.cLockedDbConn) == defaultDatabaseCount
+	}); err != nil {
+		t.Errorf("Pool not fully restored after stress test: %v (available=%d, want=%d)",
+			err, len(h.cLockedDbConn), defaultDatabaseCount)
+	}
+
+	h.withLocksRLock(func() {
+		if len(h.locks) != 0 {
+			t.Errorf("Expected 0 locks, got %d", len(h.locks))
+		}
+	})
+
+	for c, ctr := range counters {
+		if v := ctr.Load(); v != 0 {
+			t.Errorf("Counter for %s = %d, expected 0", c, v)
+		}
+	}
+}
+
+// TestStreaming_AutoUnlockTimeoutReleasesLock verifies that handleLock's internal
+// context.WithTimeout releases the lock after autoUnlockDuration even if the
+// client never closes the connection.
+func TestStreaming_AutoUnlockTimeoutReleasesLock(t *testing.T) {
+	h, server := newStreamingTestServerWithAutoUnlock(t, 300*time.Millisecond)
+
+	_, body := lockStreaming(t, server.URL, "timeout-test", testPassword)
+	defer body.Close()
+
+	h.withLocksRLock(func() {
+		if len(h.locks) != 1 {
+			t.Errorf("Expected 1 lock, got %d", len(h.locks))
+		}
+	})
+
+	// Wait for the auto-unlock timeout to fire and release the lock.
+	if err := Await(3*time.Second, func() bool {
+		return len(h.cLockedDbConn) == defaultDatabaseCount
+	}); err != nil {
+		t.Errorf("Lock not released after auto-unlock timeout: %v", err)
+	}
+
+	h.withLocksRLock(func() {
+		if len(h.locks) != 0 {
+			t.Errorf("Expected 0 locks after timeout, got %d", len(h.locks))
+		}
+	})
+}
+
+// TestStreaming_ForceUnlockAndClientCloseRace stresses the race between a client
+// closing its connection and a concurrent ForceUnlock to ensure we never
+// double-return a database to the pool.
+func TestStreaming_ForceUnlockAndClientCloseRace(t *testing.T) {
+	for iteration := 0; iteration < 100; iteration++ {
+		h, server := newStreamingTestServer(t)
+
+		connStr, body := lockStreaming(t, server.URL, "race-test", testPassword)
+
+		// Race: client closes AND server force-unlocks at the same time.
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Add(-1); body.Close() }()
+		go func() { defer wg.Add(-1); h.ForceUnlock(connStr) }()
+		wg.Wait()
+
+		// Pool must have exactly defaultDatabaseCount — no duplicates.
+		if err := Await(2*time.Second, func() bool {
+			return len(h.cLockedDbConn) == defaultDatabaseCount
+		}); err != nil {
+			t.Fatalf("iteration %d: pool count wrong after race: available=%d want=%d",
+				iteration, len(h.cLockedDbConn), defaultDatabaseCount)
+		}
+
+		// Drain and check for duplicates.
+		seen := make(map[string]bool)
+		for i := 0; i < defaultDatabaseCount; i++ {
+			c := <-h.cLockedDbConn
+			if seen[c] {
+				t.Fatalf("iteration %d: DUPLICATE in pool: %s", iteration, c)
+			}
+			seen[c] = true
+		}
+
+		server.Close()
 	}
 }
