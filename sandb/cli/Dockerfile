@@ -29,7 +29,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     netcat-openbsd \
     ca-certificates \
     xz-utils \
+    ripgrep \
+    fd-find \
+    jq \
+    # Build dependencies for bubblewrap (required by OpenAI Codex CLI)
+    build-essential \
+    meson \
+    ninja-build \
+    pkg-config \
+    libcap-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Build and install bubblewrap v0.11.0 from source (Codex CLI requires --argv0 support)
+# Debian bookworm ships an older version without this flag
+RUN BWRAP_VERSION=0.11.0 && \
+    BWRAP_TARBALL="bubblewrap-${BWRAP_VERSION}.tar.xz" && \
+    curl -Lo "/tmp/${BWRAP_TARBALL}" \
+        "https://github.com/containers/bubblewrap/releases/download/v${BWRAP_VERSION}/${BWRAP_TARBALL}" && \
+    echo "988fd6b232dafa04b8b8198723efeaccdb3c6aa9c1c7936219d5791a8b7a8646  /tmp/${BWRAP_TARBALL}" | sha256sum -c && \
+    mkdir -p /tmp/bwrap-build && cd /tmp/bwrap-build && \
+    tar -xf "/tmp/${BWRAP_TARBALL}" && \
+    cd "bubblewrap-${BWRAP_VERSION}" && \
+    meson setup _builddir --prefix=/usr/local && \
+    meson compile -C _builddir && \
+    meson install -C _builddir && \
+    ln -sf /usr/local/bin/bwrap /usr/bin/bwrap && \
+    rm -rf /tmp/bwrap-build "/tmp/${BWRAP_TARBALL}"
 
 # ============================================================================
 # User setup - matching host UID/GID for file permissions
@@ -41,7 +66,7 @@ RUN groupadd --gid ${USER_GID} user 2>/dev/null || true && \
     mkdir -p /go && chown -R user:user /go
 
 # Setup directories for user
-RUN mkdir -p /home/user/.claude /home/user/.copilot /home/user/.npm-global /home/user/.config /home/user/.local/bin && \
+RUN mkdir -p /home/user/.claude /home/user/.copilot /home/user/.codex /home/user/.npm-global /home/user/.config /home/user/.local/bin && \
     chown -R user:user /home/user
 
 # Copy entrypoint
@@ -64,6 +89,11 @@ RUN curl -fsSL https://claude.ai/install.sh | bash && \
 # GitHub Copilot CLI installation (optional)
 # ============================================================================
 RUN npm install -g @github/copilot
+
+# ============================================================================
+# OpenAI Codex CLI installation (requires bubblewrap for sandboxing)
+# ============================================================================
+RUN npm install -g @openai/codex
 
 # ============================================================================
 # Proxy environment variables

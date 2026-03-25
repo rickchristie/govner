@@ -41,10 +41,10 @@ Download `sandb/` to any Go project to run AI coding assistants in a secure, iso
 |-----------|--------|-------|
 | **Claude Code** | Supported | Native install with auto-updates. Uses `--dangerously-skip-permissions` (safe in sandbox). |
 | **GitHub Copilot CLI** | Supported | Requires fine-grained PAT with "Copilot Requests" permission. Uses `--allow-all-tools`. |
+| **OpenAI Codex CLI** | Supported | Requires `OPENAI_API_KEY`. Uses `--dangerously-bypass-approvals-and-sandbox`. Bubblewrap sandbox built from source. |
 | **Cursor** | Not supported | IDE-based, cannot run in container. |
 | **Windsurf** | Not supported | IDE-based, cannot run in container. |
 | **Aider** | Possible | Not pre-installed. Add to Dockerfile and whitelist required API domains. |
-| **OpenAI Codex CLI** | Possible | Not pre-installed. Uncomment OpenAI domains in `proxy/squid.conf`. |
 
 To add support for other CLI-based AI assistants:
 1. Install the tool in `cli/Dockerfile`
@@ -82,6 +82,7 @@ sandb/shell.sh
 claude                    # Interactive Claude Code
 claude "your prompt"      # One-shot mode
 copilot -p "your prompt"  # GitHub Copilot CLI
+codex "your prompt"       # OpenAI Codex CLI
 
 go build ./...            # Build Go project
 go test ./...             # Run tests
@@ -143,6 +144,8 @@ sandb/
 |   +-- Dockerfile      # CLI container (Go + Node.js + AI tools)
 |   +-- build.sh        # Build CLI image
 |   +-- entrypoint.sh   # Container entrypoint (socat examples commented)
+|   +-- seccomp-bwrap.json    # Custom seccomp profile for bubblewrap
+|   +-- generate-seccomp.sh   # Regenerate seccomp profile after Docker updates
 +-- proxy/
 |   +-- Dockerfile      # Squid proxy container
 |   +-- build.sh        # Build proxy image
@@ -275,8 +278,9 @@ Default allowed domains in `proxy/squid.conf`:
 
 | Category | Domains |
 |----------|---------|
-| Claude/Anthropic | `*.anthropic.com`, `statsig.anthropic.com` |
-| GitHub | `github.com`, `api.github.com` |
+| Claude/Anthropic | `*.anthropic.com`, `platform.claude.com`, `statsig.anthropic.com` |
+| OpenAI | `*.openai.com`, `*.chatgpt.com` |
+| GitHub | `github.com`, `api.github.com`, `raw.githubusercontent.com` |
 | GitHub Copilot | `copilot-proxy.githubusercontent.com`, `*.githubcopilot.com` |
 | NPM | `registry.npmjs.org` |
 | Telemetry | `collector.github.com`, `default.exp-tas.com` |
@@ -295,6 +299,7 @@ These domains are intentionally NOT whitelisted:
 |---------|---------|
 | `--cap-drop=ALL` | Drop all Linux capabilities |
 | `--security-opt=no-new-privileges` | Prevent privilege escalation |
+| Custom seccomp profile | Allows bubblewrap (bwrap) for Codex CLI sandboxing |
 | Bridge network | No direct host network access |
 | Squid proxy | HTTP/HTTPS whitelist only |
 | Read-only mounts | Git hooks, caches mounted read-only |
@@ -327,9 +332,23 @@ Default mounts configured in `start-cli.sh`:
 | `~/.claude` | `/home/user/.claude` | Claude Code config |
 | `~/.claude.json` | `/home/user/.claude.json` | Claude Code auth |
 | `~/.copilot` | `/home/user/.copilot` | Copilot chat history + PAT |
+| `~/.codex` | `/home/user/.codex` | Codex CLI config |
 | `~/.gitconfig` | `/home/user/.gitconfig:ro` | Git identity |
 | `$GOPATH/pkg/mod` | `/go/pkg/mod:ro` | Go module cache (read-only) |
 | `~/.cache/go-build` | `/home/user/.cache/go-build` | Go build cache |
+
+## OpenAI Codex CLI Setup
+
+Codex CLI uses an OpenAI API key:
+
+1. Add to your shell profile (`~/.bashrc` or `~/.zshrc`):
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+2. Source and restart shell
+
+The key is automatically resolved from environment variables, `.env.local`, or your login shell profile.
 
 ## GitHub Copilot Setup
 

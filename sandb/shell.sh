@@ -34,16 +34,16 @@ if [ -n "${TERM_PROGRAM_VERSION}" ]; then
     ENV_ARGS="${ENV_ARGS} -e TERM_PROGRAM_VERSION=${TERM_PROGRAM_VERSION}"
 fi
 
-# If running from VS Code with Claude Code extension
-if [ "${TERM_PROGRAM}" = "vscode" ] && [ -n "${CLAUDE_CODE_SSE_PORT}" ]; then
-    ENV_ARGS="${ENV_ARGS} -e CLAUDECODE=1"
-    ENV_ARGS="${ENV_ARGS} -e CLAUDE_CODE_ENTRYPOINT=cli"
-    ENV_ARGS="${ENV_ARGS} -e ENABLE_IDE_INTEGRATION=true"
-else
-    # Fall back to inherited values if available
-    [ -n "${CLAUDECODE}" ] && ENV_ARGS="${ENV_ARGS} -e CLAUDECODE=${CLAUDECODE}"
-    [ -n "${CLAUDE_CODE_ENTRYPOINT}" ] && ENV_ARGS="${ENV_ARGS} -e CLAUDE_CODE_ENTRYPOINT=${CLAUDE_CODE_ENTRYPOINT}"
-    [ -n "${ENABLE_IDE_INTEGRATION}" ] && ENV_ARGS="${ENV_ARGS} -e ENABLE_IDE_INTEGRATION=${ENABLE_IDE_INTEGRATION}"
+# IDE Integration: NOT forwarding CLAUDECODE env var into container.
+# Claude Code sets CLAUDECODE=1 to detect nested sessions, but the container
+# is an isolated sandbox (not a nested session). Forwarding it causes:
+#   "Error: Claude Code cannot be launched inside another Claude Code session."
+# When IDE relay is implemented (see notes below), revisit this.
+if [ -n "${CLAUDE_CODE_ENTRYPOINT}" ]; then
+    ENV_ARGS="${ENV_ARGS} -e CLAUDE_CODE_ENTRYPOINT=${CLAUDE_CODE_ENTRYPOINT}"
+fi
+if [ -n "${ENABLE_IDE_INTEGRATION}" ]; then
+    ENV_ARGS="${ENV_ARGS} -e ENABLE_IDE_INTEGRATION=${ENABLE_IDE_INTEGRATION}"
 fi
 
 # GitHub Copilot CLI authentication (PAT-based)
@@ -59,6 +59,32 @@ elif [ -f "${COPILOT_TOKEN_FILE}" ]; then
     fi
 fi
 
+# OpenAI Codex CLI authentication
+# Try env var first, then fall back to .env.local, then login shell resolution
+ENV_LOCAL="${WORKSPACE_DIR}/.env.local"
+if [ -z "${OPENAI_API_KEY}" ]; then
+    if [ -f "${ENV_LOCAL}" ]; then
+        eval "$(grep -E '^OPENAI_API_KEY=' "${ENV_LOCAL}")"
+    fi
+fi
+if [ -z "${OPENAI_API_KEY}" ]; then
+    _USER_SHELL="${SHELL:-/bin/bash}"
+    _RESOLVED_KEY="$("${_USER_SHELL}" -ilc 'echo "${OPENAI_API_KEY}"' 2>/dev/null | tail -1)"
+    unset _USER_SHELL
+    if [ -n "${_RESOLVED_KEY}" ]; then
+        OPENAI_API_KEY="${_RESOLVED_KEY}"
+        {
+            grep -v -E '^OPENAI_API_KEY=' "${ENV_LOCAL}" 2>/dev/null || true
+            echo "OPENAI_API_KEY=${OPENAI_API_KEY}"
+        } > "${ENV_LOCAL}.tmp" && mv "${ENV_LOCAL}.tmp" "${ENV_LOCAL}"
+        chmod 600 "${ENV_LOCAL}"
+    fi
+    unset _RESOLVED_KEY
+fi
+if [ -n "${OPENAI_API_KEY}" ]; then
+    ENV_ARGS="${ENV_ARGS} -e OPENAI_API_KEY=${OPENAI_API_KEY}"
+fi
+
 # VS Code git integration
 if [ -n "${VSCODE_GIT_IPC_HANDLE}" ]; then
     ENV_ARGS="${ENV_ARGS} -e VSCODE_GIT_IPC_HANDLE=${VSCODE_GIT_IPC_HANDLE}"
@@ -67,6 +93,12 @@ fi
 # Pass Claude Code SSE port
 if [ -n "${CLAUDE_CODE_SSE_PORT}" ]; then
     ENV_ARGS="${ENV_ARGS} -e CLAUDE_CODE_SSE_PORT=${CLAUDE_CODE_SSE_PORT}"
+fi
+
+# Check if Codex is configured
+CODEX_CONFIGURED=false
+if [ -n "${OPENAI_API_KEY}" ]; then
+    CODEX_CONFIGURED=true
 fi
 
 # Check if Copilot token is configured
@@ -86,11 +118,13 @@ else
     echo "Auto-approve aliases are configured:"
     echo "  claude   -> claude --dangerously-skip-permissions"
     echo "  copilot  -> copilot --allow-all-tools"
+    echo "  codex    -> codex --dangerously-bypass-approvals-and-sandbox"
     echo ""
     echo "Usage:"
     echo "  claude                        # Interactive mode"
     echo "  claude \"your prompt\"          # One-shot mode"
     echo "  copilot -p \"your prompt\"      # Copilot CLI"
+    echo "  codex \"your prompt\"           # OpenAI Codex CLI"
     echo ""
 
     if [ "${COPILOT_CONFIGURED}" = "false" ]; then
@@ -105,6 +139,19 @@ else
         echo "|    chmod 600 ~/.copilot/.gh_token                           |"
         echo "|                                                             |"
         echo "| 3. Restart shell: exit, then run ${SANDB_NAME}/shell.sh again      |"
+        echo "+-------------------------------------------------------------+"
+        echo ""
+    fi
+
+    if [ "${CODEX_CONFIGURED}" = "false" ]; then
+        echo "+-------------------------------------------------------------+"
+        echo "| CODEX SETUP (one-time)                                      |"
+        echo "+-------------------------------------------------------------+"
+        echo "| Add to your shell profile (~/.bashrc or ~/.zshrc):          |"
+        echo "|                                                             |"
+        echo "|   export OPENAI_API_KEY=\"sk-...\"                            |"
+        echo "|                                                             |"
+        echo "| Then: source ~/.bashrc && restart shell                     |"
         echo "+-------------------------------------------------------------+"
         echo ""
     fi

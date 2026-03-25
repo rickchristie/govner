@@ -42,9 +42,10 @@ if ! docker ps --format '{{.Names}}' | grep -q "^ai-sandbox-proxy$"; then
     "${SCRIPT_DIR}/proxy/start.sh"
 fi
 
-# Create auth directories if they don't exist
+# Create auth/config directories if they don't exist
 mkdir -p ~/.claude
 mkdir -p ~/.copilot
+mkdir -p ~/.codex
 
 # ============================================================================
 # VOLUME MOUNTS - CUSTOMIZE FOR YOUR PROJECT
@@ -67,6 +68,9 @@ fi
 
 # GitHub Copilot config
 VOLUME_ARGS="${VOLUME_ARGS} -v ${HOME}/.copilot:/home/user/.copilot"
+
+# OpenAI Codex CLI config
+VOLUME_ARGS="${VOLUME_ARGS} -v ${HOME}/.codex:/home/user/.codex"
 
 # Git identity (read-only)
 if [ -f "${HOME}/.gitconfig" ]; then
@@ -113,6 +117,7 @@ docker run -d \
     ${ENV_ARGS} \
     --cap-drop=ALL \
     --security-opt=no-new-privileges \
+    --security-opt seccomp="${SCRIPT_DIR}/cli/seccomp-bwrap.json" \
     --init \
     "${IMAGE_NAME}" \
     sleep infinity

@@ -28,6 +28,7 @@ nc -z -w 3 host.docker.internal 3128 && echo "OK: Squid proxy reachable" || echo
 echo ""
 echo "--- Whitelisted Domains ---"
 curl -so /dev/null -w "%{http_code}" -x http://host.docker.internal:3128 https://api.anthropic.com 2>/dev/null | grep -qE "^[2-4][0-9][0-9]$" && echo "OK: Anthropic API" || echo "FAIL: Anthropic API"
+curl -so /dev/null -w "%{http_code}" -x http://host.docker.internal:3128 https://api.openai.com 2>/dev/null | grep -qE "^[2-4][0-9][0-9]$" && echo "OK: OpenAI API" || echo "FAIL: OpenAI API"
 curl -so /dev/null -w "%{http_code}" -x http://host.docker.internal:3128 https://api.github.com 2>/dev/null | grep -qE "^[2][0-9][0-9]$" && echo "OK: GitHub API" || echo "FAIL: GitHub API"
 curl -so /dev/null -w "%{http_code}" -x http://host.docker.internal:3128 https://registry.npmjs.org 2>/dev/null | grep -qE "^[2][0-9][0-9]$" && echo "OK: NPM registry" || echo "FAIL: NPM registry"
 
@@ -139,6 +140,20 @@ elif [ -f /home/user/.copilot/.gh_token ]; then
     echo "OK: ~/.copilot/.gh_token found (PAT auth configured)"
 else
     echo "INFO: Copilot PAT not configured. See shell.sh welcome message for setup."
+fi
+
+# Test OpenAI Codex CLI auth
+echo ""
+echo "--- OpenAI Codex CLI Auth ---"
+if [ -d /home/user/.codex ]; then
+    echo "OK: ~/.codex directory mounted"
+else
+    echo "FAIL: ~/.codex not mounted"
+fi
+if [ -n "${OPENAI_API_KEY}" ]; then
+    echo "OK: OPENAI_API_KEY is set"
+else
+    echo "INFO: OPENAI_API_KEY not configured. See shell.sh welcome message for setup."
 fi
 
 echo ""

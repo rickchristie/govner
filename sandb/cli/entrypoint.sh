@@ -12,6 +12,7 @@ if ! grep -q "AI Sandbox: Auto-approve aliases" /home/user/.bashrc 2>/dev/null; 
 # AI Sandbox: Auto-approve aliases (container is isolated)
 alias claude='claude --dangerously-skip-permissions'
 alias copilot='copilot --allow-all-tools'
+alias codex='codex --dangerously-bypass-approvals-and-sandbox'
 EOF
 fi
 
