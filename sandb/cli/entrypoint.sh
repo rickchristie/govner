@@ -13,8 +13,26 @@ if ! grep -q "AI Sandbox: Auto-approve aliases" /home/user/.bashrc 2>/dev/null; 
 alias claude='claude --dangerously-skip-permissions'
 alias copilot='copilot --allow-all-tools'
 alias codex='codex --dangerously-bypass-approvals-and-sandbox'
+alias opencode='opencode --auto-approve'
+
+# Virtual display for headless clipboard/TUI support (opencode)
+export DISPLAY=:99.0
 EOF
 fi
+
+# OpenCode config: create defaults only if not already present (dir is host-mounted)
+mkdir -p /home/user/.config/opencode/plugins /home/user/.config/opencode/commands
+if [ ! -f /home/user/.config/opencode/opencode.json ]; then
+    echo '{"$schema": "https://opencode.ai/config.json", "autoupdate": false}' > /home/user/.config/opencode/opencode.json
+fi
+
+# Install OpenCode plugins and commands (copilot-stats etc.)
+cp /opt/opencode/plugins/* /home/user/.config/opencode/plugins/ 2>/dev/null || true
+cp /opt/opencode/commands/* /home/user/.config/opencode/commands/ 2>/dev/null || true
+
+# Start Xvfb virtual display for headless clipboard/display support (needed by opencode TUI)
+Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
+export DISPLAY=:99.0
 
 # ============================================================================
 # SOCAT PORT FORWARDING (EXAMPLE - CUSTOMIZE FOR YOUR PROJECT)

@@ -156,5 +156,14 @@ else
     echo "INFO: OPENAI_API_KEY not configured. See shell.sh welcome message for setup."
 fi
 
+# Test OpenCode CLI installation
+echo ""
+echo "--- OpenCode CLI Install ---"
+if command -v opencode &>/dev/null; then
+    echo "OK: OpenCode CLI installed"
+else
+    echo "FAIL: OpenCode CLI not found"
+fi
+
 echo ""
 echo "=== AI Sandbox Doctor Complete ==="

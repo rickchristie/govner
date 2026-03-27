@@ -46,6 +46,8 @@ fi
 mkdir -p ~/.claude
 mkdir -p ~/.copilot
 mkdir -p ~/.codex
+mkdir -p ~/.config/opencode
+mkdir -p ~/.local/share/opencode
 
 # ============================================================================
 # VOLUME MOUNTS - CUSTOMIZE FOR YOUR PROJECT
@@ -71,6 +73,10 @@ VOLUME_ARGS="${VOLUME_ARGS} -v ${HOME}/.copilot:/home/user/.copilot"
 
 # OpenAI Codex CLI config
 VOLUME_ARGS="${VOLUME_ARGS} -v ${HOME}/.codex:/home/user/.codex"
+
+# OpenCode CLI config and data
+VOLUME_ARGS="${VOLUME_ARGS} -v ${HOME}/.config/opencode:/home/user/.config/opencode"
+VOLUME_ARGS="${VOLUME_ARGS} -v ${HOME}/.local/share/opencode:/home/user/.local/share/opencode"
 
 # Git identity (read-only)
 if [ -f "${HOME}/.gitconfig" ]; then

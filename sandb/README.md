@@ -42,6 +42,7 @@ Download `sandb/` to any Go project to run AI coding assistants in a secure, iso
 | **Claude Code** | Supported | Native install with auto-updates. Uses `--dangerously-skip-permissions` (safe in sandbox). |
 | **GitHub Copilot CLI** | Supported | Requires fine-grained PAT with "Copilot Requests" permission. Uses `--allow-all-tools`. |
 | **OpenAI Codex CLI** | Supported | Requires `OPENAI_API_KEY`. Uses `--dangerously-bypass-approvals-and-sandbox`. Bubblewrap sandbox built from source. |
+| **OpenCode CLI** | Supported | Pinned to v1.2.27. Uses `--auto-approve`. Includes copilot-stats plugin for tracking Copilot premium request usage. |
 | **Cursor** | Not supported | IDE-based, cannot run in container. |
 | **Windsurf** | Not supported | IDE-based, cannot run in container. |
 | **Aider** | Possible | Not pre-installed. Add to Dockerfile and whitelist required API domains. |
@@ -83,6 +84,7 @@ claude                    # Interactive Claude Code
 claude "your prompt"      # One-shot mode
 copilot -p "your prompt"  # GitHub Copilot CLI
 codex "your prompt"       # OpenAI Codex CLI
+opencode                  # OpenCode CLI
 
 go build ./...            # Build Go project
 go test ./...             # Run tests
@@ -146,6 +148,8 @@ sandb/
 |   +-- entrypoint.sh   # Container entrypoint (socat examples commented)
 |   +-- seccomp-bwrap.json    # Custom seccomp profile for bubblewrap
 |   +-- generate-seccomp.sh   # Regenerate seccomp profile after Docker updates
+|   +-- opencode-plugins/     # OpenCode plugins (copilot-stats)
+|   +-- opencode-commands/    # OpenCode slash commands
 +-- proxy/
 |   +-- Dockerfile      # Squid proxy container
 |   +-- build.sh        # Build proxy image

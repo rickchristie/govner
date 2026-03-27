@@ -29,6 +29,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     netcat-openbsd \
     ca-certificates \
     xz-utils \
+    inotify-tools \
+    xclip \
+    xvfb \
     ripgrep \
     fd-find \
     jq \
@@ -73,6 +76,10 @@ RUN mkdir -p /home/user/.claude /home/user/.copilot /home/user/.codex /home/user
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# Copy OpenCode plugins and commands (installed to user config dir at runtime by entrypoint)
+COPY opencode-plugins/ /opt/opencode/plugins/
+COPY opencode-commands/ /opt/opencode/commands/
+
 USER user
 
 # Configure npm to use user-writable directory for global packages
@@ -94,6 +101,15 @@ RUN npm install -g @github/copilot
 # OpenAI Codex CLI installation (requires bubblewrap for sandboxing)
 # ============================================================================
 RUN npm install -g @openai/codex
+
+# ============================================================================
+# OpenCode CLI installation
+# ============================================================================
+# Pinned version - update this when upgrading OpenCode
+RUN npm i -g opencode-ai@1.2.27
+
+# Configure OpenCode defaults (disable auto-update)
+RUN mkdir -p /home/user/.config/opencode
 
 # ============================================================================
 # Proxy environment variables

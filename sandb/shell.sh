@@ -119,12 +119,14 @@ else
     echo "  claude   -> claude --dangerously-skip-permissions"
     echo "  copilot  -> copilot --allow-all-tools"
     echo "  codex    -> codex --dangerously-bypass-approvals-and-sandbox"
+    echo "  opencode -> opencode --auto-approve"
     echo ""
     echo "Usage:"
     echo "  claude                        # Interactive mode"
     echo "  claude \"your prompt\"          # One-shot mode"
     echo "  copilot -p \"your prompt\"      # Copilot CLI"
     echo "  codex \"your prompt\"           # OpenAI Codex CLI"
+    echo "  opencode                      # OpenCode CLI"
     echo ""
 
     if [ "${COPILOT_CONFIGURED}" = "false" ]; then
