@@ -1,0 +1,739 @@
+Read through /sandb and thoroughly understand what it does - completely.
+Currently sandb is tough to set-up, we need to copy paste the folder directly on each repository.
+Then please read through /pgflock and notice the difference:
+  - pgflock has command line to control dockers.
+  - pgflock builds Dockerfile based on configuration.
+  - pgflock builds once and then can be run over and over again.
+
+# Cooper Requirements
+
+## High level goals
+- Build and start one proxy container, the proxy can be configured and rebuild easily.
+  - Change whitelists, which domain is allowed or not.
+  - Change socat rules, which ports in CLI containers are forwarded to which ports on the host machine.
+- Livestream of the proxy logs in the TUI, shows requests that are coming in.
+  - On-the-fly approve/deny for non-whitelisted domains.
+- Easily change configuration
+- Same ease of use as pgflock.
+
+## Supported Platforms
+
+- **Primary**: Linux (Ubuntu/Debian). This is the tested and supported platform.
+- **Other Linux**: Should work on any Linux distro (Fedora, Arch, Alpine, etc.) with Docker Engine 20.10+.
+  The `cooper` binary is pure Go with no distro-specific dependencies. The CLI container Dockerfile
+  uses Debian bookworm as base, but this only affects what runs *inside* the container, not the host.
+  Host requirements: Docker Engine, bash or zsh (for login shell token resolution).
+- **macOS / Windows**: Not supported in v1. Docker Desktop has different networking (`host.docker.internal`
+  behavior, no `--network host` on Mac), and socat/seccomp details differ. May be explored in future versions.
+
+## New Features (Next Steps)
+- Request/response body inspection in the proxy monitor via ICAP server integration. v1 has SSL bump which gives URL, method,
+  headers, and status code. Full body inspection (seeing what the AI is sending/receiving) requires an ICAP server that Squid
+  forwards decrypted traffic to for deep inspection. This is significantly more complex but enables the richest visibility.
+- Fix paste image problem, something like, cc-clip or the VS Code extension "Image Paste for Remote SSH" bridge the clipboard gap to Docker.
+- Playwright support, the CLI container can run headed browser in the host machine safely.
+
+## Detailed requirements
+
+- `cooper configure` sets-up all required files in the machine:
+  - If already configured, this command still runs and allows user to change the configuration.
+  - Cooper detects that Docker Engine is installed and is the appropriate version.
+  - Creates `~/.cooper` folder to contain all cooper files.
+  - Generates a Cooper CA certificate (`~/.cooper/ca/cooper-ca.pem`) for TLS interception (SSL bump),
+    only if one doesn't already exist. This CA is local-only, generated per-installation, never shared.
+    It allows the proxy to decrypt HTTPS traffic so the monitor can show full URL, method, and headers.
+    - If the CA already exists, `cooper configure` reuses it (no regeneration). This avoids invalidating
+      existing barrel images that have the old CA baked in.
+    - If regeneration is needed (CA deleted, corrupted, or expired), user can run `cooper configure --regenerate-ca`.
+      This regenerates the CA and warns that `cooper build` must be run afterward to inject the new CA into images.
+  - Creates Dockerfile for the proxy container. The proxy image must include Squid built with
+    `--enable-ssl-crtd --with-openssl` for SSL bump support (may require building Squid from source
+    instead of using the Alpine package).
+  - Creates proxy configuration file that is loaded when cooper starts the proxy container.
+  - Creates configuration that is used to generate Dockerfile for the CLI container:
+    - We generate both configuration json at `~/.cooper/config.json` and Dockerfile(s).
+      - The config file is important for the `cooper update` commands, as we can specify "latest" versions that doesn't version pin at all.
+      - We can also specify "mirror", which means mirror version in the host machine, so whenever user runs `cooper update`, the Dockerfile will
+        always be re-generated with the version that is currently in the host machine.
+    - Programming Tool Setup Flow:
+      - Sets up programming language environment in Dockerfile for the AI CLI to use.
+      - This is important, because we want the AI to be able to run tests, run lints, run builds, etc.
+      - Out-of-the box support for: Golang, Nodejs (npm, yarn, bun), Python (pip, pipenv, poetry), Rust (cargo).
+        User is able to auto-generate Dockerfile for these.
+      - User is instructed that they can add programming language/tools that they want manually if not in the list.
+        - User customizations go in a separate file (`~/.cooper/cli/Dockerfile.user`) which is layered on top of the
+          cooper-generated Dockerfile. Cooper never touches this file. The generated base image (`cooper-barrel-base`)
+          is built first, then `Dockerfile.user` uses `FROM cooper-barrel-base` to add user's custom layers.
+          This way `cooper update` can regenerate the base without clobbering user additions.
+      - When run, this flow checks if host machine has any of these languages and tools installed, if so, it also checks
+        the versions of these languages/tools in host machine.
+      - Flow:
+        - Programming Tool Setup screen shows list of all out-of-the-box programming language/tools and versions that will be added to the Dockerfile.
+          If Dockerfile is already generated, it shows the programming language/tools that are already in the Dockerfile and their versions.
+          If no Dockerfile is generated, programming tools that are detected in the host machine is on with versions detected at the host machine as starting point.
+        - User can navigate and select the list of programming language/tool, it will enter the config for that language/tool, where user can:
+          - Turn on/off button. Off means not included in the Dockerfile at all.
+          - Mirror version button. Updates version of this tool in config is updated to mirror the version in host machine (no version pinning in config).
+          - Latest version button. Updates version of this tool in config to the latest version available (no version pinning in config).
+          - Pin version button. User can input any version they want, and it will be validated to ensure it is a valid version.
+          - Version resolution sources (used for "latest" lookup and pin validation):
+            - Go: `go.dev/dl/?mode=json` API
+            - Node.js: `nodejs.org/dist/index.json`
+            - Python: `endoflife.date/api/python.json` or similar stable API
+            - Rust: `static.rust-lang.org/dist/channel-rust-stable.toml`
+            - AI CLI tools (npm-based): npm registry HTTP API (`https://registry.npmjs.org/<package>`) queried
+              directly from Go. Does NOT require npm installed on the host.
+            All version resolution is done via HTTP APIs directly from Go — the only host dependencies are
+            Docker Engine and bash/zsh. Cooper resolves versions at `cooper configure` time and at `cooper update` time, not at runtime.
+          - Back button. Go back to Programming Tool Setup screen.
+          - (UI) When Mirror/Latest version is selected, it tells user that they can run `cooper update` to rebuild
+            with "latest" or "mirror" version in the future.
+          - (UI) Mirror button shows the version in the host machine.
+        - Back to main screen, user can select "Save & Continue" button to save the configuration file.
+    - AI CLI Tool Setup Flow:
+      - Sets up which AI CLI tool to install in the CLI container, so when user runs `cooper cli` to enter the CLI container, the AI CLIs are ready to use.
+      - Out-of-the-box support for: Claude Code, GitHub Copilot CLI, OpenAI Codex, OpenCode.
+        User is able to auto-generate Dockerfile for these.
+      - User is instructed that they can add AI CLI tools that they want manually if not in the list.
+        User is also instructed to create GitHub issue in our repo to request adding CLI tool they want.
+        - Same two-file approach as programming tools: user customizations go in `~/.cooper/cli/Dockerfile.user`,
+          cooper-generated Dockerfile is never modified by the user.
+      - When run, this flow checks if host machine has any of these AI CLI tools installed, if so, it also checks
+        the versions of these AI CLI tools in host machine.
+      - Flow:
+        - AI CLI Tool Setup screen shows list of all out-of-the-box AI CLI tools and versions that will be added to the Dockerfile.
+          If Dockerfile is already generated, it shows the AI CLI tools that are already in the Dockerfile and their versions.
+          If no Dockerfile is generated, AI CLI tools that are detected in the host machine is on with versions detected at the host machine as starting point.
+        - User can navigate and select list of AI CLI tools, it will enter the config for that AI CLI tool, where user can:
+          - Turn on/off button. Off means not included in the Dockerfile at all.
+          - Mirror version button. Updates version of this tool in config is updated to mirror the version in host machine (no version pinning in config).
+          - Latest version button. Updates version of this tool in config to the latest version available (no version pinning in config).
+          - Pin Version button. User can input any version they want, and it will be validated to ensure it is a valid version.
+          - Back button. Go back to AI CLI Tool Setup screen.
+          - (UI) When Mirror/Latest version is selected, it tells user that they can run `cooper update` to rebuild
+            with "latest" or "mirror" version in the future.
+          - (UI) Mirror button shows the version in the host machine.
+        - Back to main screen, user can select "Save & Continue" button to save the configuration file.
+    - Proxy Whitelist Setup Flow:
+      - Sets up proxy whitelist config, that is used to define the Proxy whitelist and port forwarding rules.
+      - By default, all traffic is blocked, except the ones whitelisted.
+      - By default, these traffic is allowed:
+        - Requests to AI provider API domains that are enabled in the CLI container, so that AI CLI tools work out of the box.
+          (e.g., `.anthropic.com` for Claude, `.openai.com` for Codex, `.githubcopilot.com` for Copilot, etc.)
+        - Requests to `raw.githubusercontent.com`, because it's read-only and safe.
+      - All package registries (npm, gopkg, pypi, crates.io, etc.) are blocked by default — including NPM.
+        AI tool installation happens at image build time (`cooper build`/`cooper update`), not at runtime.
+        This prevents supply-chain attacks where an AI could be tricked into downloading malicious packages or exfiltrating data.
+      - Flow:
+        - Proxy Whitelist Setup screen shows two tabs, "Domain Whitelist" and "Port Forwarding".
+        - "Domain Whitelist" tab:
+          - Shows list of default whitelisted domains above, and list of user-added whitelisted domains.
+          - For each whitelisted domain, user can select it to edit or delete it.
+          - When adding/editing a whitelisted domain, user can input the domain, and also specify if subdomains are included or not
+          - (UI) User is guided to add domain names that the user trusts completely, for example:
+            - The user's company domains, API domains, staging domains, etc.
+            - Personally owned domains.
+            - Trusted metrics companies, such as your company's grafana or sentry domain.
+          - (UI) User is told that requests to package manager registries, such as gopkg, npm registry, pypi, etc. are not allowed by default.
+            This is to prevent supply-chain attacks, AIs can be tricked to download malicious dependencies, and could even exfiltrate data through these requests.
+            User is told that the AI CLI mounts host machine's module cache (like go mod cache, npm cache, pip cache, etc.) into the CLI container as
+            read-only volume, so they can read dependencies that are already in host machine, but cannot change them. This requires action from user.
+          - (UI) User is recommended to be as strict as possible, because control panel at `cooper up` allows the user to take a look at live network request
+            and allow them on the fly. This is the recommended way, so any requests to the web are monitored.
+        - "Port Forwarding" tab:
+          - Port forwarding uses a two-hop socat relay (see Network Architecture): socat inside the CLI container
+            forwards `localhost:{port}` to `cooper-proxy:{port}` on the internal network, then socat inside the
+            proxy container forwards to `host.docker.internal:{port}` on the external network to reach host services.
+            Rules are configured centrally here and applied to both container entrypoints when `cooper cli` launches.
+          - Shows list of port forwarding rules, each rule is like "localhost:X in CLI container is forwarded to Port Y on host machine".
+          - User can add/edit/delete port forwarding rules.
+          - User can self-forward in range, for example, forward port 8000-8100 to host 8000-8100, useful when development needs many ports.
+          - (UI) User is warned that host services must bind to `0.0.0.0` or the Docker gateway IP to be reachable
+            from containers. Services bound strictly to `127.0.0.1` will NOT be accessible through port forwarding.
+            This is a Linux Docker networking limitation — `host.docker.internal` resolves to the Docker bridge
+            gateway IP, not the loopback interface.
+          - (UI) User is guided to only forward ports that are necessary, for example,
+            - The AI will need to access port of the local postgres database, so user adds a rule for that port.
+            - User is using a self-hosted AI provider, so they add a rule for the port of that provider.
+            - User is developing a web application, so they add a rule for the port of that application so AI can curl and test the application.
+        - Back to main screen, user can select "Save & Continue" button to save the configuration file.
+    - Proxy Setup:
+      - Users can set-up:
+        - Which port is used by the Squid proxy. Default: 3128 (Squid standard).
+        - Which port is used for the execution bridge API. Default: 4343.
+        These are two separate ports and must not collide.
+      - The execution bridge HTTP API binds to `127.0.0.1` AND the Docker bridge gateway IP (discovered at runtime
+        via `docker network inspect cooper-external`). This makes it reachable from localhost and Docker containers,
+        but NOT from the LAN. No authentication is required — Cooper's threat model is a single-user local dev machine.
+        Any process with local access already has the same privileges as the bridge scripts.
+        See Network Architecture for the full relay path.
+      - (UI) User is explained the use-case. We might need the AI CLI to do something from the host machine, for example: deploy to staging, restart-local-dev, go-mod-tidy.
+        Bridges gives a HTTP API that the AI CLI can call, without us giving it direct access to the machine.
+        Recommend that the script **takes no input**, and handles concurrency, i.e. what happens when requests from multiple AI agents happen at the same time.
+        The stdout and stderr of the script is returned in the response of the API call, so AI can read and understand it.
+  - Cooper then writes configuration file and generates the Dockerfile.
+  - Cooper then asks the user, "Would you like to build?" - if so, cooper runs `cooper build`.
+  - Once finished with the build, Cooper tells the user to start with `cooper up`.
+
+- `cooper build` runs build for the proxy and CLI container image.
+  - Deletes existing image and builds both proxy and CLI image with no-cache all-the-way.
+  - The proxy image name is `cooper-proxy`. The container name is also `cooper-proxy`.
+  - CLI image build is a two-step process (matching the two-file Dockerfile approach):
+    1. Builds `cooper-barrel-base` from the cooper-generated Dockerfile (OS + languages + AI tools).
+    2. If `~/.cooper/cli/Dockerfile.user` exists, builds `cooper-barrel` from it (must use `FROM cooper-barrel-base`).
+       If no `Dockerfile.user` exists, `cooper-barrel` is just tagged as an alias of `cooper-barrel-base`.
+  - This just builds the images and gets them ready to be used by `cooper up`.
+  - Both CLI and proxy image is reused for all projects. Currently we don't support multiple cooper instances. Maybe later.
+    - For example, user have both python and Go project in the same PC, then currently user would have to set up CLI supporting both python and Go.
+
+- `cooper up` starts the proxy container and opens the control panel with live updates and configuration.
+  - `cooper up` must be running before `cooper cli` can be used. `cooper cli` checks for a running proxy and refuses
+    to start if `cooper up` is not active. The TUI is the control plane; CLI containers are the data plane.
+  - The TUI must always be active, and just like `pgflock` when user exits the TUI, it also stops all cooper containers.
+  - (UI) Exiting always pops up an exit confirmation dialog (like pgflock). This is intentional — keeping barrels running
+    without proxy/bridge is unsafe, and an explicit visible TUI is preferred over a background daemon.
+  - When starting, it checks programming tool and AI CLI tool versions in the docker image against the expected version per mode:
+    - **Mirror mode**: compares container version against host machine version. Warns if different.
+    - **Latest mode**: compares container version against latest remote version (queried from registry APIs). Warns if outdated.
+    - **Pinned mode**: no warning. The version is what the user explicitly chose.
+    - If any mismatch is found, it prompts user to run `cooper update` to update the CLI image.
+    - This is important because the CLI docker shares important folders with the host machine, module cache, AI CLI config folders, etc.
+  - Control panel main screens/functions are:
+    - Containers:
+      - List all live cooper containers (proxy and CLI containers), their CPU and memory usage, start time, elapsed, etc.
+      - Start, stop, restart proxy container.
+      - Start, stop, restart CLI container.
+    - Proxy:
+      - (UI) Has several tabs.
+      - Monitor:
+        - Cooper uses Squid SSL bump (TLS interception) to decrypt HTTPS traffic. This allows the monitor to show
+          full request details, not just the domain name. A Cooper CA certificate is generated during `cooper configure`
+          and injected into CLI containers at build time (system CA store + `NODE_EXTRA_CA_CERTS` for Node.js tools).
+        - Two-pane UI: left pane shows a scrolling list of pending requests to non-whitelisted domains, right pane shows details of the currently selected request.
+        - Each request to a non-whitelisted domain appears in the left pane with a countdown timer, sorted by time remaining (most urgent at top).
+        - User navigates with up/down arrow keys; the right detail pane shows request-side data only (response doesn't
+          exist yet while pending): full URL, HTTP method, request headers, destination domain, which container sent it, timestamp.
+        - User can press a key (e.g., Enter or 'a') to allow the selected request before the timer runs out. If timer runs out, the request is denied automatically.
+        - Each approval applies to that single request. If the same domain is requested again, it appears as a new pending request.
+          The HTTP client sees its connection hanging while waiting for approval; on deny/timeout, Squid returns a 403.
+        - This allows user to make real-time decisions, when the AI needs to do research for example.
+        - Cooper purposefully doesn't have "Always allow this request" option, it forces user to verify and think for every single request to be secure.
+      - Blocked:
+        - Shows history of blocked requests, including which container sent it.
+        - User can navigate up and down the history, select request to view more details.
+        - Detail view shows: full URL, method, request headers, domain, container, timestamp, reason (timeout/manual deny).
+        - Blocked history viewer is capped at max N lines (See: configure).
+      - Allowed:
+        - Shows history of allowed requests (both whitelist and manually allowed), including which container sent it.
+        - User can navigate up and down the history, select request to view more details.
+        - Detail view shows request data plus response data (status code, response headers) captured after the request completed.
+        - Allowed history viewer is capped at max N lines (See: configure).
+    - Execution Bridge:
+      - (UI) Shows execution bridge API port, i.e. localhost:4343, which is used as the API endpoint for CLI container.
+      - (UI) Has several tabs.
+      - Logs:
+        - Shows live logs of the execution bridge, each log entry shows the request time and the API called.
+        - User can select each log entry to view more details, such as the request body, response body, stdout, stderr, etc.
+        - Logs viewer is capped at max N lines (See: configure).
+      - Bridges:
+        - Shows list of all active execution bridges between CLI and host machine, each entry maps API path to script file path.
+        - User can add/edit/delete bridge entries, for example, map `/deploy-staging` to `~/scripts/deploy-staging.sh`.
+        - (UI) User is reminded that the best practice is to have these scripts take no input. If scripts take input, scripts must validate them religiously.
+    - Configure:
+      - Can set how long to block the request in Monitor tab before it's automatically blocked. Defaults to 5 seconds.
+      - Can set how many lines of blocked history requests in the log. Default 500.
+      - Can set how many lines of allowed history requests in the log. Default 500.
+      - Can set how many lines of execution bridge requests in the log. Default to 500.
+      - Configuration, when changed, takes effect immediately.
+      - (UI) Tells the user that full logs are available at `~/.cooper/logs/` directory.
+    - About:
+      - Shows list of active programming tools/CLIs, each with their installed version, compared to the version in the host machine (if any).
+  - Even though log views are capped, they are actually written to `~/.cooper/logs` using logrotate at 10 files, each at 10MB max.
+
+- `cooper update` regenerates Dockerfile and rebuilds CLI container.
+  - This is used when user wants to update the CLI container with new versions of programming tools or AI CLI tools.
+  - It only builds the CLI container, and it only rebuilds layers that needs updates, where mirror/latest version is no longer the same.
+    It only forces no-cache on the layers that it needs.
+  - This is cheaper than `cooper build`, it only rebuilds when there's a mismatch, and it only builds layers that needs building.
+  - If AI tool selection has changed (tools added/removed), `cooper update` also regenerates the proxy squid.conf
+    (to add/remove the corresponding API domains) and hot-reloads it via `squid -k reconfigure`. No proxy image rebuild needed —
+    squid.conf is volume-mounted, not baked into the image.
+  - Implementation note: Docker doesn't support `--no-cache` on specific layers. To selectively bust cache, the
+    generated Dockerfile uses `ARG CACHE_BUST_LANG=1` and `ARG CACHE_BUST_AI=1` before language and AI tool layers
+    respectively. `cooper update` changes only the relevant ARG value (e.g., to current timestamp) to force Docker
+    to rebuild from that layer onward while keeping earlier layers cached.
+
+- `cooper cli` opens a CLI container:
+  - The same CLI image is used for all workspaces.
+  - It mounts the current folder where user runs this command to the CLI container.
+  - This allows people to create multiple containers for different projects, each in different workspace/directory.
+  - The name of the container is `barrel-{folder-name}`, for example, if user runs `cooper cli` in `~/myproject`, the container name is `barrel-myproject`.
+    If the name collides with an existing container from a different workspace path, a short hash of the absolute path is appended
+    (e.g., `barrel-myproject-a3f1`). This only happens on collision — 99.9% of users see clean names without hashes.
+  - Supports one-shot commands with `-c` flag: `cooper cli -c "go test ./..."` runs the command and exits.
+  - Sets the terminal title to `{workspace}-{random-name}` (via `\033]0;TITLE\007` escape sequence) so the user can
+    distinguish multiple shells in their terminal tabs/windows.
+  - Each time `cooper cli` is run, the shell is initialized with a random name suffix at the end.
+    - It doesn't create new container, it reuses the same container, but with a different shell.
+    - The random name are list of one or two words related to cooper profession, whiskey aging, wine aging. These are randomly selected and is unique globally.
+      If "rickhouse" is already active in "myproject", it can't be used even in another workspace dir.
+    - Proxy identification is at container (workspace) granularity, not per-shell. All shells in the same container share the
+      same IP, so the proxy monitor shows `barrel-{dir}` for requests. The random name is for the user's own terminal
+      management (distinguishing shells), not for proxy identification.
+  - Volume Mounts:
+    - The workspace dir is the only directory mounted as read-write.
+    - `.git/hooks` inside the workspace is overlaid as read-only to prevent hook injection attacks.
+    - AI tool auth/config directories (mounted read-write):
+      - `~/.claude` and `~/.claude.json` — Claude Code auth and config
+      - `~/.copilot` — GitHub Copilot CLI auth and chat history
+      - `~/.codex` — OpenAI Codex CLI config
+      - `~/.config/opencode` and `~/.local/share/opencode` — OpenCode CLI config and data
+    - `~/.gitconfig` — git identity (read-only)
+    - Language-specific caches (auto-configured based on enabled programming tools):
+      - Go: `$GOPATH/pkg/mod` (read-only), `~/.cache/go-build` (read-write), `GOFLAGS=-mod=readonly`
+      - Node: `~/.npm` (read-only)
+      - Python: `~/.cache/pip` (read-only)
+      - Rust: `~/.cargo/registry` (read-only)
+    - Directories are created on host if they don't exist (`mkdir -p` before mount).
+    - Dependency workflow per ecosystem (host-preload model — same pattern for all, different commands):
+      - Go: `go mod download` on host populates `$GOPATH/pkg/mod`, mounted read-only. `GOFLAGS=-mod=readonly` enforced.
+      - Node: `npm install` on host populates `node_modules/` in workspace (rw) and `~/.npm` cache (ro). AI can use existing deps but not install new ones from registry.
+      - Python: `pip install`, `pipenv install`, or `poetry install` on host. The workspace is mounted rw, so virtualenvs
+        created inside the workspace (e.g., `.venv/`) are accessible inside the container. `~/.cache/pip` is mounted ro
+        for cached wheels. Cooper detects which Python tool is installed and generates the Dockerfile accordingly, but
+        does not enforce a specific virtualenv layout — it just ensures `python` is available at the configured version.
+      - Rust: `cargo fetch` on host populates `~/.cargo/registry` (ro). `cargo build` inside container uses cached crates.
+      - (UI) `cooper cli` welcome message reminds user: "Dependencies must be installed on the host. Run [command] on host, then re-enter the container."
+  - Authentication / Token Management:
+    - API keys and tokens are automatically resolved and forwarded into the container as environment variables.
+    - Resolution order (first match wins): environment variable → `~/.cooper/secrets/{workspace-hash}` cache → login shell profile (`~/.bashrc`, `~/.zshrc`).
+    - If resolved from login shell, the value is cached to `~/.cooper/secrets/{workspace-hash}` for faster subsequent launches.
+      Secrets are stored in `~/.cooper/` (never in the workspace directory) to prevent accidental git commits.
+    - Tokens forwarded per AI tool:
+      - Claude Code: auth handled via mounted `~/.claude` and `~/.claude.json` (no env var needed)
+      - GitHub Copilot CLI: `GH_TOKEN` or `GITHUB_TOKEN` env var, or `~/.copilot/.gh_token` file
+      - OpenAI Codex CLI: `OPENAI_API_KEY` env var
+    - VS Code integration env vars forwarded when available: `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `CLAUDE_CODE_SSE_PORT`.
+    - `CLAUDECODE` env var is NOT forwarded (prevents "nested session" error — container is an isolated sandbox, not a nested session).
+  - Security Settings:
+    - `--cap-drop=ALL` — drop all Linux capabilities
+    - `--security-opt=no-new-privileges` — prevent privilege escalation
+    - `--security-opt seccomp=<custom-profile>` — custom seccomp profile that allows bubblewrap (bwrap) syscalls for Codex CLI sandboxing, while keeping all other Docker default restrictions
+    - `--init` — proper PID 1 process for signal handling
+    - `--network cooper-internal` — internal Docker network with NO internet gateway. Even raw sockets and proxy-ignoring
+      tools cannot reach the internet. This is the core isolation mechanism (see Network Architecture).
+    - Cooper CA certificate injected into container at build time (system CA store + `NODE_EXTRA_CA_CERTS` env var) to
+      enable SSL bump. This is transparent to AI tools — they see valid certificates signed by a trusted CA.
+    - Auto-approve aliases configured in container's `.bashrc` via the entrypoint script (safe because container is already
+      sandboxed by Cooper's network isolation, seccomp, and capability restrictions). These aliases are critical — without
+      them, each AI tool would prompt for its own permission system, which is redundant inside the sandbox:
+      - `claude` → `claude --dangerously-skip-permissions`
+      - `copilot` → `copilot --allow-all-tools`
+      - `codex` → `codex --dangerously-bypass-approvals-and-sandbox`
+      - `opencode` → `opencode --auto-approve`
+    - The entrypoint script must be generated from template (not hardcoded) so it adapts to which AI tools are enabled.
+      Disabled tools should not have aliases or startup configuration.
+
+- `cooper proof` runs diagnostics inside a CLI container to verify the setup:
+  - Checks Squid proxy connectivity from inside the container.
+  - **SSL bump verification**: makes an actual HTTPS request through the proxy from inside the container and verifies
+    it succeeds without certificate errors. This validates the entire chain: CA generated → injected into container →
+    trusted by system CA store → SSL bump decryption works. Without this test, "everything built but requests fail
+    with cert errors" regressions will slip through.
+  - Tests whitelisted domains are reachable (Anthropic, OpenAI, GitHub — based on enabled AI tools).
+  - Tests blocked domains are actually blocked (example.com, google.com).
+  - Tests direct internet access is blocked (no route bypassing proxy).
+  - Tests socat port forwarding (if configured).
+  - Verifies Go/Node/Python/Rust installations and versions (based on enabled tools).
+  - Verifies AI CLI tool installations (Claude Code, Copilot, Codex, OpenCode — based on enabled tools).
+  - Checks auth: Claude Code credentials, Copilot PAT, OpenAI API key.
+  - Checks directory ownership and permissions.
+  - Usage: `cooper proof` (runs in the CLI container for the current workspace directory).
+
+- `cooper cleanup` removes all resources created by cooper:
+  - Stops and removes all running cooper containers (proxy and all CLI barrels).
+  - Removes cooper Docker images (`cooper-proxy`, `cooper-barrel`, `cooper-barrel-base`).
+  - Optionally removes `~/.cooper` directory (config, logs, Dockerfiles). Prompts for confirmation before deleting config.
+  - Does NOT remove auth directories (`~/.claude`, `~/.copilot`, etc.) — these belong to the AI tools, not cooper.
+
+## Scope Model
+
+- **Global** (`~/.cooper/`): config.json, generated Dockerfiles, images (`cooper-proxy`, `cooper-barrel`, `cooper-barrel-base`),
+  proxy container (`cooper-proxy`), secrets cache (`~/.cooper/secrets/`), logs (`~/.cooper/logs/`).
+- **Per-workspace**: CLI containers (`barrel-{folder-name}`), volume mounts (workspace dir rw, caches ro), socat port forwarding,
+  token resolution (per-workspace secret cache keyed by path hash).
+- **Per-workspace persisted** (`~/.cooper/config.json`): execution bridge route mappings (API path → script path), configured
+  via the Bridges tab in the Execution Bridge screen.
+- **Runtime-only** (not persisted): proxy monitor pending queue, approval decisions, TUI state, bridge API server process.
+
+## Config Change → Required Action Matrix
+
+Different config types are editable in different places and require different actions to apply:
+
+- **`cooper configure` only (v1)**: domain whitelist, port forwarding rules, AI tool selection, programming tool versions,
+  proxy/bridge ports, CA regeneration. These require container restarts or rebuilds to apply.
+- **TUI runtime (Configure tab)**: monitor timeout, log line limits. These take effect immediately.
+- **TUI runtime (Bridges tab)**: execution bridge route mappings. These take effect immediately.
+
+| Config change | Required action | Reason |
+|---|---|---|
+| Domain whitelist add/remove | Proxy hot-reload (`squid -k reconfigure`) | squid.conf is volume-mounted, not baked in |
+| AI tool enabled/disabled | `cooper update` (CLI image rebuild + proxy hot-reload) | Tool installed in image; proxy domains change |
+| Programming tool version | `cooper update` (CLI image rebuild) | Tool version baked into image |
+| Port forwarding rule add/remove | Restart affected CLI containers | socat rules generated into entrypoint at container start |
+| Execution bridge route add/remove | Immediate (runtime) | Bridge runs in `cooper up` host process, routes held in memory + persisted |
+| Bridge/proxy port change | `cooper up` restart | Port is bound at process/container start |
+| CA certificate regeneration | `cooper build` (full rebuild) | CA baked into CLI image at build time |
+| Monitor timeout / log limits | Immediate (runtime) | TUI-side config, no container changes |
+
+`cooper configure` and the TUI Configure tab should tell the user which action is needed after each change.
+
+# Network Architecture
+
+The network model is the foundation that enables all Cooper features. It uses a dual-network architecture
+to enforce true network isolation — CLI containers physically cannot reach the internet, even if a tool
+ignores proxy environment variables or opens raw sockets.
+
+## Docker Networks
+
+Cooper creates two Docker networks at `cooper up` startup:
+
+- **`cooper-external`** — regular Docker bridge network. Has a default gateway, can reach the internet.
+  Only the proxy container is on this network.
+- **`cooper-internal`** — Docker bridge network created with `--internal` flag. Has NO default gateway
+  and NO route to the internet. CLI containers and the proxy container are both on this network.
+
+The `--internal` flag is the key security mechanism. Containers on an internal network can reach each
+other (by container name via Docker DNS) but cannot reach anything outside the network — not even the
+host machine's network interfaces. This is enforced at the network layer, not by environment variables.
+
+## Container Network Topology
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Host Machine                                                        │
+│                                                                     │
+│  cooper up (TUI process, runs directly on host):                    │
+│    - Execution bridge API on 127.0.0.1:4343 + {gateway-ip}:4343    │
+│    - TUI control panel                                              │
+│                                                                     │
+│  Host services:                                                     │
+│    - PostgreSQL on 0.0.0.0:5432                                     │
+│    - Redis on 0.0.0.0:6379                                          │
+│    - (must bind to 0.0.0.0 or Docker gateway IP, not 127.0.0.1)    │
+│                                                                     │
+│  ┌─── cooper-external network (regular bridge, has internet) ───┐   │
+│  │                                                               │   │
+│  │  ┌──────────────────────────────────────────────┐            │   │
+│  │  │ cooper-proxy container                        │            │   │
+│  │  │ (on BOTH cooper-external AND cooper-internal) │            │   │
+│  │  │                                               │            │   │
+│  │  │  Squid Proxy (SSL bump)                       │            │   │
+│  │  │    listens on 0.0.0.0:3128                    │            │   │
+│  │  │                                               │            │   │
+│  │  │  External ACL Helper                          │            │   │
+│  │  │    stdin/stdout to Squid                      │            │   │
+│  │  │                                               │            │   │
+│  │  │  socat relays for host services:              │            │   │
+│  │  │    *:4343 → host gateway:4343 (bridge)          │            │   │
+│  │  │    0.0.0.0:5432 → host gateway:5432 (postgres) │           │   │
+│  │  │    0.0.0.0:6379 → host gateway:6379 (redis)   │            │   │
+│  │  └──────────────────────────────────────────────┘            │   │
+│  │                                                               │   │
+│  └───────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│  ┌─── cooper-internal network (--internal, NO internet) ────────┐   │
+│  │                                                               │   │
+│  │  cooper-proxy (also on this network, reachable as             │   │
+│  │               "cooper-proxy" via Docker DNS)                  │   │
+│  │                                                               │   │
+│  │  ┌──────────────────────────────────────────────┐            │   │
+│  │  │ barrel-{workspace} container                  │            │   │
+│  │  │ (on cooper-internal ONLY)                     │            │   │
+│  │  │                                               │            │   │
+│  │  │  HTTP_PROXY=http://cooper-proxy:3128           │            │   │
+│  │  │  HTTPS_PROXY=http://cooper-proxy:3128          │            │   │
+│  │  │                                               │            │   │
+│  │  │  socat port forwarders (entrypoint):          │            │   │
+│  │  │    localhost:4343 → cooper-proxy:4343 (bridge) │            │   │
+│  │  │    localhost:5432 → cooper-proxy:5432 (DB)    │            │   │
+│  │  │    localhost:6379 → cooper-proxy:6379 (redis)  │            │   │
+│  │  │                                               │            │   │
+│  │  │  AI tools see:                                │            │   │
+│  │  │    localhost:4343 = execution bridge           │            │   │
+│  │  │    localhost:5432 = PostgreSQL                 │            │   │
+│  │  │    HTTPS via proxy = SSL-bumped, monitored    │            │   │
+│  │  │    Direct internet = IMPOSSIBLE (no route)    │            │   │
+│  │  └──────────────────────────────────────────────┘            │   │
+│  │                                                               │   │
+│  └───────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+
+Internet:
+  Whitelisted domains (via Squid)  → anthropic.com, openai.com, etc.
+  Non-whitelisted domains           → held pending in TUI monitor for approval
+  Direct access (bypassing proxy)  → IMPOSSIBLE (--internal network, no route)
+  Raw socket bypass                → IMPOSSIBLE (no gateway, no route exists)
+```
+
+## Why This Topology
+
+**Dual-network isolation (the key security mechanism):**
+- `cooper-internal` is created with `docker network create --internal cooper-internal`
+- The `--internal` flag means: no default gateway, no route to any external network
+- Containers on this network can ONLY reach other containers on the same network (via Docker DNS)
+- This is enforced at the Linux networking layer — even raw sockets, `curl --noproxy '*'`, or
+  any tool that ignores proxy env vars CANNOT reach the internet. There is simply no route.
+
+**Proxy container (on both networks):**
+- Connected to `cooper-external` at creation, then `docker network connect cooper-internal cooper-proxy`
+- Created with `--add-host=host.docker.internal:host-gateway` so it can resolve the host's Docker gateway IP
+  (required on Linux — Docker Desktop provides this automatically, but Docker Engine does not)
+- Reaches the internet via `cooper-external` (for whitelisted/approved requests)
+- Reachable from CLI containers as `cooper-proxy` via Docker DNS on `cooper-internal`
+- Runs socat relays for host service access: listens on `cooper-internal`, forwards to host via `cooper-external`
+- Squid config is volume-mounted (not baked in) so `cooper update` can hot-reload via `squid -k reconfigure`
+
+**CLI containers (internal network only):**
+- Connected to `cooper-internal` ONLY — physically isolated from the internet
+- All HTTP/HTTPS traffic goes through `cooper-proxy:3128` (Docker DNS resolution on internal network)
+- Host services accessed via two-hop socat: CLI socat → `cooper-proxy:{port}` → proxy socat → `host.docker.internal:{port}`
+- `HTTP_PROXY`/`HTTPS_PROXY` env vars point to `cooper-proxy:3128` (not `host.docker.internal`)
+
+**Execution bridge (runs on the host, inside `cooper up` process):**
+- Binds to `127.0.0.1:4343` AND `{docker-gateway-ip}:4343` — reachable from localhost and Docker containers, but NOT from LAN
+- The Docker gateway IP is discovered at runtime via `docker network inspect cooper-external` (e.g., `172.17.0.1`)
+- CLI containers reach it via: CLI socat (`localhost:4343`) → `cooper-proxy:4343` → proxy socat → `host.docker.internal:4343` → host
+- The bridge port relay is auto-configured in the proxy container's entrypoint (not user-configured)
+
+**Host service accessibility (important limitation):**
+- `host.docker.internal` resolves to the Docker bridge gateway IP (e.g., `172.17.0.1`), NOT `127.0.0.1`
+- Host services must bind to `0.0.0.0` (or the Docker gateway IP) to be reachable from containers
+- Services bound strictly to `127.0.0.1` are NOT reachable. This is documented in `cooper configure` port
+  forwarding setup, which warns the user about this requirement.
+- The execution bridge binds to `127.0.0.1` + Docker gateway IP (not `0.0.0.0`) to be reachable from
+  containers without exposing the API to the LAN.
+
+**socat port forwarding (two-hop relay):**
+- **Inside CLI container** (entrypoint): `localhost:{port}` → `cooper-proxy:{port}` (Docker DNS on internal network)
+  - Binds to `127.0.0.1` only, `fork,reuseaddr,backlog=5000`, auto-restart on failure
+- **Inside proxy container** (entrypoint): `0.0.0.0:{port}` → `host.docker.internal:{port}` (via external network)
+  - Forwards from internal-network-reachable address to host services
+- User-configured ports + bridge port are both auto-generated in entrypoint templates from config
+- This two-hop model is the cost of true network isolation — it replaces the simpler single-hop socat
+  that sandb uses (where CLI connects directly to `host.docker.internal`)
+
+## How Each Feature Uses the Network
+
+| Feature | Network path |
+|---|---|
+| AI tool API calls | CLI → `cooper-proxy:3128` (internal) → Squid (SSL bump, whitelist) → internet (external) |
+| Proxy monitor (approve/deny) | Squid → external ACL helper (stdin/stdout) → Unix socket → `cooper up` on host → TUI → user decision |
+| Execution bridge | CLI socat → `cooper-proxy:4343` (internal) → proxy socat → `host.docker.internal:4343` (external) → host |
+| Host service access (DB, etc.) | CLI socat → `cooper-proxy:{port}` (internal) → proxy socat → `host.docker.internal:{port}` (external) → host |
+| Package registry blocking | CLI → `cooper-proxy:3128` → Squid → denied (not in whitelist) |
+| Direct internet bypass | IMPOSSIBLE — `cooper-internal` has no gateway, no route to any external network |
+| Raw socket bypass | IMPOSSIBLE — even without proxy env vars, no network route exists to the internet |
+
+# Implementation Notes
+
+- **External ACL helper IPC transport**: The ACL helper process runs inside the proxy container, but the TUI
+  that displays approval prompts runs on the host (`cooper up`). These are separate processes in separate
+  namespaces, so they cannot use in-process Go channels. The IPC mechanism is a Unix domain socket:
+  - `cooper up` creates a socket at `~/.cooper/run/acl.sock` and listens for connections.
+  - The socket file is volume-mounted into the proxy container at a known path.
+  - The ACL helper (spawned by Squid via `external_acl_type`) reads domain requests from Squid on stdin,
+    writes them to the Unix socket, waits for an approve/deny response, then writes OK/ERR back to Squid on stdout.
+  - The `cooper up` host process reads pending requests from the socket, pushes them to the TUI via Go channels,
+    receives the user's decision, and writes back through the socket.
+  - This keeps the ACL helper simple (a small script/binary that bridges stdin/stdout ↔ Unix socket) and puts
+    all decision logic in the host-side Go process where the TUI lives.
+  - **Fail-closed behavior** (critical — this is a security boundary):
+    - If the Unix socket file is missing: ACL helper returns ERR (deny) immediately to Squid.
+    - If `cooper up` is not listening yet or crashes: socket connect/write fails, ACL helper returns ERR (deny).
+    - If the socket read times out (e.g., `cooper up` is unresponsive): bounded timeout (same as the approval timer),
+      then returns ERR (deny). Never hangs indefinitely.
+    - On any unexpected error (malformed response, broken pipe, etc.): returns ERR (deny).
+    - The ACL helper must NEVER fail open. Every error path results in deny.
+- `cooper up` also starts a HTTP API server for the execution bridge on the host process (not in a container).
+  - Bridge doesn't crash the entire TUI whenever there's an error, all errors are recoverable and logged properly.
+- Implementation is using Golang, with bubbletea for TUI, matching `pgflock`.
+
+# Code Architecture Overview
+
+- High level code architecture is designed to maximize: Reliability, Maintainability, Testability, Security, and Readability of the code.
+- Follows the same patterns as `pgflock`: Cobra CLI, BubbleTea TUI with Model-Update-View, embedded templates, channel-based state sync.
+- All TUI pages are implemented in such a way that the UI (view) is separated with the model and controllers (input data/events and the event handlers):
+  - There is a TUI cli test where we can select which page, then which state/event flows to test:
+    - The mock data input and the event handlers are mocked.
+    - Whenever there's a bug, we can create new scenarios on the CLI, effectively creating sort of a storybook to test the TUI screens.
+
+## Test Strategy
+
+Tests are organized by layer, each with clear scope:
+
+- **Model/State Tests** (unit tests, pure Go):
+  - Config loading, validation, defaults, version comparison logic.
+  - Proxy ACL helper decision logic: given pending queue state + timeout, assert correct allow/deny.
+  - Bridge route matching: given API path + bridge config, assert correct script resolution.
+  - Name generator: uniqueness, format validation.
+  - Template generation: given config, assert Dockerfile/squid.conf output matches expected.
+  - These are the bulk of tests. All business logic should be testable without Docker.
+
+- **TUI Model Tests** (unit tests, bubbletea teatest):
+  - Given model state + message, assert new model state (no rendering needed).
+  - Test tab navigation, approval key handling, timer countdown, history scrolling.
+  - Use `teatest` package for automated golden file tests that capture terminal output and assert against snapshots.
+  - TUI storybook CLI (`cooper tui-test`) for manual QA: select page, inject mock state/events, visually verify.
+
+- **Docker Integration Tests** (integration tests, require Docker):
+  - Config → Dockerfile generation → image build → container start → health check.
+  - Volume mount verification (correct paths, permissions).
+  - Security setting verification (cap-drop, seccomp, no-new-privileges).
+  - These tests are slower, tagged with `//go:build integration` so they don't run in normal `go test`.
+
+- **External ACL Helper Tests** (unit tests):
+  - Stdin/stdout protocol: given domain input, assert correct OK/ERR output.
+  - Timeout behavior: assert deny after configured seconds with no approval.
+  - Approval flow: assert allow when approval signal received within timeout.
+  - Concurrent requests: multiple domains pending simultaneously.
+  - Fail-closed error paths (security-critical):
+    - Socket file missing → immediate deny.
+    - `cooper up` not listening (connection refused) → immediate deny.
+    - Broken pipe mid-request → deny.
+    - Malformed response from host process → deny.
+    - Socket read timeout (host unresponsive) → deny after bounded timeout, never hang.
+
+- **Bridge API Tests** (unit/integration tests):
+  - HTTP handler tests: given request path, assert correct script execution and response.
+  - Error handling: script not found, script timeout, script crash.
+  - Concurrent execution: multiple bridge calls at once.
+  - Bind address verification: bridge listens on `127.0.0.1` + Docker gateway IP only, NOT on `0.0.0.0` (LAN-exposed).
+
+- **Proof Tests** (integration tests, require running container):
+  - Verify each diagnostic check produces correct OK/FAIL output.
+  - Network isolation: whitelisted domains pass, blocked domains fail, direct access fails.
+
+- **Network Acceptance Tests** (first-class, critical — guards the core security guarantee):
+  - **Direct egress impossible**: from inside a CLI container, attempt `curl --noproxy '*' https://example.com` (raw socket,
+    bypassing proxy env vars). Must fail with "no route to host" or connection refused — NOT a proxy error.
+    This validates the `--internal` network has no gateway.
+  - **SSL bump works end-to-end**: from inside a CLI container, make an HTTPS request through the proxy to a whitelisted
+    domain. Must succeed without certificate errors. Validates the full CA chain: generated → injected → trusted → SSL bump decryption.
+  - **Host services reachable via two-hop relay**: from inside a CLI container, connect to a forwarded port (e.g., `localhost:5432`).
+    Must successfully reach the host service. Validates: CLI socat → proxy (internal) → proxy socat → host (external).
+  - **Execution bridge reachable**: from inside a CLI container, call `localhost:4343` bridge API. Must get a valid response.
+    Validates the full bridge relay path.
+  - These tests are part of `cooper proof` AND are standalone integration tests tagged `//go:build integration`.
+
+## Module Structure
+
+Following pgflock's patterns (Cobra CLI + BubbleTea + internal packages):
+
+```
+cooper/
+├── main.go                          # CLI entry point (Cobra): configure, build, up, update, cli, proof, cleanup
+├── go.mod / go.sum
+│
+├── meta/
+│   └── version.go                   # Version string
+│
+├── internal/
+│   ├── config/
+│   │   ├── config.go                # JSON config loading, validation, defaults
+│   │   ├── config_test.go           # Config validation, version comparison tests
+│   │   └── versions.go              # Host version detection (go version, node --version, etc.)
+│   │
+│   ├── configure/                   # `cooper configure` TUI wizard
+│   │   ├── configure.go             # Main configure orchestration
+│   │   ├── programming.go           # Programming Tool Setup flow
+│   │   ├── aicli.go                 # AI CLI Tool Setup flow
+│   │   ├── whitelist.go             # Proxy Whitelist Setup flow
+│   │   ├── portforward.go           # Port Forwarding Setup flow
+│   │   ├── proxy.go                 # Proxy/Bridge port setup
+│   │   └── configure_test.go
+│   │
+│   ├── templates/                   # Embedded templates (//go:embed *.tmpl)
+│   │   ├── templates.go             # Template rendering from config
+│   │   ├── templates_test.go        # Golden file tests for generated output
+│   │   ├── cli.Dockerfile.tmpl      # CLI container Dockerfile template
+│   │   ├── proxy.Dockerfile.tmpl    # Proxy container Dockerfile template
+│   │   ├── squid.conf.tmpl          # Squid proxy config template
+│   │   └── entrypoint.sh.tmpl       # CLI container entrypoint template
+│   │
+│   ├── docker/                      # Docker image + container management
+│   │   ├── build.go                 # Image build (full and incremental with cache-bust args)
+│   │   ├── barrel.go                # CLI container lifecycle (create, exec, stop, list)
+│   │   ├── proxy.go                 # Proxy container lifecycle
+│   │   └── health.go                # Container health checks, stats (CPU/mem)
+│   │
+│   ├── proxy/                       # Squid proxy interaction
+│   │   ├── acl.go                   # External ACL helper: pending queue, timeout, approve/deny
+│   │   ├── acl_test.go              # ACL decision logic tests
+│   │   ├── monitor.go               # Request stream parsing, history (blocked/allowed)
+│   │   └── reconfigure.go           # Squid config hot-reload (squid -k reconfigure)
+│   │
+│   ├── bridge/                      # Execution bridge HTTP API
+│   │   ├── server.go                # HTTP server on 127.0.0.1 + Docker gateway IP
+│   │   ├── handler.go               # Route → script dispatch, stdout/stderr capture
+│   │   ├── handler_test.go          # Route matching, error handling, concurrency tests
+│   │   └── config.go                # Bridge route config (API path → script path)
+│   │
+│   ├── proof/                       # `cooper proof` diagnostics
+│   │   └── proof.go                 # Network, auth, tool, permission checks
+│   │
+│   ├── names/                       # Random whiskey/cooper name generator
+│   │   ├── names.go                 # Name list + uniqueness tracking
+│   │   └── names_test.go
+│   │
+│   ├── auth/                        # Token resolution (env → ~/.cooper/secrets/ → login shell)
+│   │   ├── resolve.go               # Token resolution logic per AI tool
+│   │   └── resolve_test.go
+│   │
+│   └── tui/                         # BubbleTea TUI for `cooper up`
+│       ├── model.go                 # Root model: active tab, global state, channels
+│       ├── app.go                   # Root Update: message routing to sub-models
+│       ├── view.go                  # Root View: tab bar + active tab rendering
+│       ├── styles.go                # Lipgloss styling, cooper color palette
+│       ├── constants.go             # Colors, timing, icons, key bindings
+│       │
+│       ├── containers/              # Containers tab (list, start/stop/restart)
+│       │   ├── model.go
+│       │   └── view.go
+│       │
+│       ├── proxymon/                # Proxy Monitor tab (two-pane approval UI)
+│       │   ├── model.go             # Pending queue, timers, selected index
+│       │   └── view.go              # Left: request list with timers, Right: detail pane
+│       │
+│       ├── history/                 # Blocked/Allowed history tabs (shared component)
+│       │   ├── model.go             # Scrollable list with detail view
+│       │   └── view.go
+│       │
+│       ├── bridgeui/                # Execution Bridge tab (logs + bridge config)
+│       │   ├── model.go
+│       │   └── view.go
+│       │
+│       ├── settings/                # Configure tab (runtime settings)
+│       │   ├── model.go
+│       │   └── view.go
+│       │
+│       ├── about/                   # About tab (versions, tool status)
+│       │   ├── model.go
+│       │   └── view.go
+│       │
+│       ├── loading/                 # Loading/startup/shutdown screens
+│       │   ├── model.go
+│       │   └── view.go
+│       │
+│       └── components/              # Shared UI components
+│           ├── modal.go             # Confirmation dialogs (exit, restart)
+│           ├── tabs.go              # Tab bar navigation
+│           ├── timer.go             # Countdown timer (for approval UI)
+│           └── table.go             # Scrollable table with selection
+```
+
+Key design patterns (matching pgflock):
+- **Embedded templates** (`//go:embed`) — Dockerfile, squid.conf, entrypoint.sh baked into binary. No external file dependencies at runtime.
+- **Channel-based state sync** — proxy monitor sends request events on channel, bridge sends execution events, TUI listens and refreshes.
+- **Callback architecture** — TUI sets `onRestart`, `onShutdown`, `onQuit` callbacks. `main.go` calls them to control loading screen.
+- **Sub-model composition** — each TUI tab is its own BubbleTea model with Model/Update/View. Root model routes messages to active tab.
