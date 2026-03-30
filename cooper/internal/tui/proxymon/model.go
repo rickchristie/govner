@@ -7,28 +7,37 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/rickchristie/govner/cooper/internal/proxy"
+	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
 	"github.com/rickchristie/govner/cooper/internal/tui/events"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
+
+// ACLApprover is the subset of app.App used by the proxy monitor for
+// approve/deny actions and listing pending requests. Defining a local
+// interface keeps this package decoupled from the full App interface.
+type ACLApprover interface {
+	ApproveRequest(id string)
+	DenyRequest(id string)
+	PendingRequests() []*app.PendingRequest
+}
 
 // Model is the sub-model for the Proxy Monitor tab. It shows a two-pane
 // layout: left pane is a scrollable list of pending requests with countdown
 // timer bars, right pane shows detail for the selected request.
 type Model struct {
 	list     components.ScrollableList
-	pending  []*proxy.PendingRequest
-	listener *proxy.ACLListener
+	pending  []*app.PendingRequest
+	approver ACLApprover
 	timeout  time.Duration
 }
 
-// New creates a new proxy monitor tab model. The listener is used to
+// New creates a new proxy monitor tab model. The approver is used to
 // approve/deny requests. timeout is the per-request approval window.
-func New(listener *proxy.ACLListener, timeout time.Duration) *Model {
+func New(approver ACLApprover, timeout time.Duration) *Model {
 	return &Model{
 		list:     components.NewScrollableList(0, 0),
-		listener: listener,
+		approver: approver,
 		timeout:  timeout,
 	}
 }
@@ -150,9 +159,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 	case "a", "enter":
 		// Approve selected request.
 		if sel := m.list.Selected(); sel != nil {
-			if pr, ok := sel.Data.(*proxy.PendingRequest); ok {
-				if m.listener != nil {
-					m.listener.Approve(pr.Request.ID)
+			if pr, ok := sel.Data.(*app.PendingRequest); ok {
+				if m.approver != nil {
+					m.approver.ApproveRequest(pr.Request.ID)
 				}
 				m.removeRequest(pr.Request.ID)
 			}
@@ -160,9 +169,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 	case "d":
 		// Deny selected request.
 		if sel := m.list.Selected(); sel != nil {
-			if pr, ok := sel.Data.(*proxy.PendingRequest); ok {
-				if m.listener != nil {
-					m.listener.Deny(pr.Request.ID)
+			if pr, ok := sel.Data.(*app.PendingRequest); ok {
+				if m.approver != nil {
+					m.approver.DenyRequest(pr.Request.ID)
 				}
 				m.removeRequest(pr.Request.ID)
 			}
@@ -170,8 +179,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 	case "A":
 		// Approve all pending requests.
 		for _, pr := range m.pending {
-			if m.listener != nil {
-				m.listener.Approve(pr.Request.ID)
+			if m.approver != nil {
+				m.approver.ApproveRequest(pr.Request.ID)
 			}
 		}
 		m.pending = nil
@@ -181,8 +190,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 }
 
 // addRequest inserts a new pending request into the list.
-func (m *Model) addRequest(req proxy.ACLRequest) {
-	pr := &proxy.PendingRequest{
+func (m *Model) addRequest(req app.ACLRequest) {
+	pr := &app.PendingRequest{
 		Request:  req,
 		Deadline: time.Now().Add(m.timeout),
 	}
@@ -206,9 +215,9 @@ func (m *Model) removeRequest(id string) {
 // pruneExpired removes requests whose deadline has passed.
 func (m *Model) pruneExpired() {
 	now := time.Now()
-	var kept []*proxy.PendingRequest
+	var kept []*app.PendingRequest
 	for _, pr := range m.pending {
-		if now.Before(pr.Deadline) && pr.GetDecision() == proxy.DecisionPending {
+		if now.Before(pr.Deadline) && pr.GetDecision() == app.DecisionPending {
 			kept = append(kept, pr)
 		}
 	}

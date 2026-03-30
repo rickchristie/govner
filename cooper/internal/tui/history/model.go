@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/rickchristie/govner/cooper/internal/proxy"
+	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
@@ -27,7 +27,7 @@ const (
 
 // HistoryEntry is a single resolved request shown in the history list.
 type HistoryEntry struct {
-	Request         proxy.ACLRequest
+	Request         app.ACLRequest
 	Decision        string // "timeout", "denied", "whitelist", "approved"
 	ResponseStatus  int    // HTTP status code (only meaningful for Allowed)
 	ResponseHeaders string // raw response headers (only meaningful for Allowed)

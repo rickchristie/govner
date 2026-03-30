@@ -11,7 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/rickchristie/govner/cooper/internal/bridge"
+	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/tableutil"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
 	"github.com/rickchristie/govner/cooper/internal/tui/events"
@@ -20,7 +20,7 @@ import (
 
 // LogsModel is the sub-model for the Bridge Logs tab.
 type LogsModel struct {
-	logs     []bridge.ExecutionLog
+	logs     []app.ExecutionLog
 	list     components.ScrollableList
 	capacity int
 
@@ -53,8 +53,8 @@ func (m *LogsModel) SetMaxCapacity(n int) {
 }
 
 // AddLog prepends a log entry to the list and trims to capacity.
-func (m *LogsModel) AddLog(log bridge.ExecutionLog) {
-	m.logs = append([]bridge.ExecutionLog{log}, m.logs...)
+func (m *LogsModel) AddLog(log app.ExecutionLog) {
+	m.logs = append([]app.ExecutionLog{log}, m.logs...)
 	if len(m.logs) > m.capacity {
 		m.logs = m.logs[:m.capacity]
 	}
@@ -74,12 +74,12 @@ func (m *LogsModel) syncList() {
 }
 
 // selectedLog returns the log entry at the current selection, or nil.
-func (m *LogsModel) selectedLog() *bridge.ExecutionLog {
+func (m *LogsModel) selectedLog() *app.ExecutionLog {
 	sel := m.list.Selected()
 	if sel == nil {
 		return nil
 	}
-	if log, ok := sel.Data.(bridge.ExecutionLog); ok {
+	if log, ok := sel.Data.(app.ExecutionLog); ok {
 		return &log
 	}
 	return nil
@@ -162,7 +162,7 @@ func (m *LogsModel) View(width, height int) string {
 
 	// Log list.
 	listView := m.list.View(func(item components.ListItem, selected bool, w int) string {
-		log, ok := item.Data.(bridge.ExecutionLog)
+		log, ok := item.Data.(app.ExecutionLog)
 		if !ok {
 			return ""
 		}
@@ -185,7 +185,7 @@ func (m *LogsModel) View(width, height int) string {
 
 // buildLogTable creates a tableRenderer populated with all log entries,
 // used to compute consistent column widths.
-func buildLogTable(logs []bridge.ExecutionLog) *tableutil.TableRenderer {
+func buildLogTable(logs []app.ExecutionLog) *tableutil.TableRenderer {
 	tbl := tableutil.NewTable("TIME", "ROUTE", "SCRIPT", "STATUS", "DURATION")
 	tbl.SetHeaderStyle(theme.ColorDusty, true)
 	for _, log := range logs {
@@ -214,7 +214,7 @@ func renderLogHeader(tbl *tableutil.TableRenderer, width int) string {
 	return header + "\n" + divider
 }
 
-func renderLogRow(log bridge.ExecutionLog, selected bool, width int, colWidths []int) string {
+func renderLogRow(log app.ExecutionLog, selected bool, width int, colWidths []int) string {
 	tsW, routeW, scriptW, statusW, durW := 10, 20, 30, 8, 10
 	if len(colWidths) >= 5 {
 		tsW = colWidths[0]
@@ -248,7 +248,7 @@ func renderLogRow(log bridge.ExecutionLog, selected bool, width int, colWidths [
 	return theme.RowNormalStyle.Width(width).Render("  " + row)
 }
 
-func renderLogDetail(log bridge.ExecutionLog, width int) string {
+func renderLogDetail(log app.ExecutionLog, width int) string {
 	var b strings.Builder
 
 	headerStyle := lipgloss.NewStyle().Foreground(theme.ColorDusty).Bold(true)

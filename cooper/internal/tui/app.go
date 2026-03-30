@@ -9,10 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/rickchristie/govner/cooper/internal/bridge"
-	"github.com/rickchristie/govner/cooper/internal/config"
-	"github.com/rickchristie/govner/cooper/internal/docker"
-	"github.com/rickchristie/govner/cooper/internal/proxy"
+	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/tui/about"
 	"github.com/rickchristie/govner/cooper/internal/tui/bridgeui"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
@@ -37,20 +34,20 @@ func (m *Model) Init() tea.Cmd {
 	// Start tick timers.
 	cmds = append(cmds, m.tickCmd(), m.animTickCmd())
 
-	// Subscribe to external event channels.
-	if m.aclRequestCh != nil {
-		cmds = append(cmds, listenACL(m.aclRequestCh))
-	}
-	if m.bridgeLogCh != nil {
-		cmds = append(cmds, listenBridgeLogs(m.bridgeLogCh))
-	}
-	if m.aclDecisionCh != nil {
-		cmds = append(cmds, listenACLDecisions(m.aclDecisionCh))
-	}
+	// Subscribe to external event channels via the App.
+	if m.app != nil {
+		if ch := m.app.ACLRequests(); ch != nil {
+			cmds = append(cmds, listenACL(ch))
+		}
+		if ch := m.app.BridgeLogs(); ch != nil {
+			cmds = append(cmds, listenBridgeLogs(ch))
+		}
+		if ch := m.app.ACLDecisions(); ch != nil {
+			cmds = append(cmds, listenACLDecisions(ch))
+		}
 
-	// Kick off the initial docker stats poll if enabled.
-	if m.pollStats {
-		cmds = append(cmds, pollStats(5*time.Second))
+		// Kick off the initial docker stats poll.
+		cmds = append(cmds, pollStats(m.app, 5*time.Second))
 	}
 
 	return tea.Batch(cmds...)
@@ -93,7 +90,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.proxyMonModel = sm
 		}
 		// Re-listen for the next event.
-		listenCmd := listenACL(m.aclRequestCh)
+		var listenCmd tea.Cmd
+		if m.app != nil {
+			if ch := m.app.ACLRequests(); ch != nil {
+				listenCmd = listenACL(ch)
+			}
+		}
 		return m, tea.Batch(cmd, listenCmd)
 
 	case events.ACLDecisionMsg:
@@ -103,7 +105,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Decision:  msg.Event.Reason, // "approved", "denied", "timeout"
 			Timestamp: msg.Event.Request.Timestamp,
 		}
-		if msg.Event.Decision == proxy.DecisionAllow {
+		if msg.Event.Decision == app.DecisionAllow {
 			if m.allowedModel != nil {
 				if hm, ok := m.allowedModel.(*history.Model); ok {
 					hm.AddEntry(entry)
@@ -117,7 +119,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		// Re-listen for next decision.
-		listenCmd := listenACLDecisions(m.aclDecisionCh)
+		var listenCmd tea.Cmd
+		if m.app != nil {
+			if ch := m.app.ACLDecisions(); ch != nil {
+				listenCmd = listenACLDecisions(ch)
+			}
+		}
 		return m, listenCmd
 
 	case events.BridgeLogMsg:
@@ -127,7 +134,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			sm, cmd = m.bridgeLogsModel.Update(msg)
 			m.bridgeLogsModel = sm
 		}
-		listenCmd := listenBridgeLogs(m.bridgeLogCh)
+		var listenCmd tea.Cmd
+		if m.app != nil {
+			if ch := m.app.BridgeLogs(); ch != nil {
+				listenCmd = listenBridgeLogs(ch)
+			}
+		}
 		return m, tea.Batch(cmd, listenCmd)
 
 	case events.ContainerStatsMsg:
@@ -138,39 +150,39 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.containersModel = sm
 		}
 		// Schedule next poll.
-		pollCmd := pollStats(theme.UITickInterval)
+		var pollCmd tea.Cmd
+		if m.app != nil {
+			pollCmd = pollStats(m.app, theme.UITickInterval)
+		}
 		return m, tea.Batch(cmd, pollCmd)
 
 	case bridgeui.RoutesChangedMsg:
-		// Persist route changes and hot-swap on the bridge server.
-		if m.bridgeServer != nil {
-			m.bridgeServer.UpdateRoutes(msg.Routes)
-		}
-		if m.cooperDir != "" {
-			if err := bridge.SaveBridgeRoutes(m.cooperDir, msg.Routes); err != nil {
-				log.Printf("cooper: failed to persist bridge routes: %v", err)
+		// Persist route changes and hot-swap on the bridge server via the App.
+		if m.app != nil {
+			if err := m.app.UpdateBridgeRoutes(msg.Routes); err != nil {
+				log.Printf("cooper: failed to update bridge routes: %v", err)
 			}
 		}
 		return m, nil
 
 	case settings.SettingsChangedMsg:
-		// Apply changed settings to the runtime config.
-		if m.cfg != nil {
-			m.cfg.MonitorTimeoutSecs = msg.MonitorTimeoutSecs
-			m.cfg.BlockedHistoryLimit = msg.BlockedHistoryLimit
-			m.cfg.AllowedHistoryLimit = msg.AllowedHistoryLimit
-			m.cfg.BridgeLogLimit = msg.BridgeLogLimit
+		// Apply changed settings via the App.
+		if m.app != nil {
+			if err := m.app.UpdateSettings(
+				msg.MonitorTimeoutSecs,
+				msg.BlockedHistoryLimit,
+				msg.AllowedHistoryLimit,
+				msg.BridgeLogLimit,
+			); err != nil {
+				log.Printf("cooper: failed to update settings: %v", err)
+			}
 		}
-		// Propagate new values to live components.
+		// Propagate new values to live TUI components.
 		newTimeout := time.Duration(msg.MonitorTimeoutSecs) * time.Second
 		if m.proxyMonModel != nil {
 			if pm, ok := m.proxyMonModel.(*proxymon.Model); ok {
 				pm.SetTimeout(newTimeout)
 			}
-		}
-		// Update the live ACL listener so new requests use the updated timeout.
-		if m.aclListener != nil {
-			m.aclListener.SetTimeout(newTimeout)
 		}
 		if m.blockedModel != nil {
 			if hm, ok := m.blockedModel.(*history.Model); ok {
@@ -199,7 +211,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			"",
 		)
 		m.modal = &modal
-		// Run validation + reload + persist as a background command.
+		// Run reload via the App as a background command.
 		rules := msg.Rules
 		return m, m.reloadPortForwardsCmd(rules)
 
@@ -216,7 +228,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 			m.modal = &modal
 			// Tell settings model the old (pre-change) rules so it can revert.
-			oldRules := m.cfg.PortForwardRules
+			var oldRules []app.PortForwardRule
+			if m.app != nil {
+				oldRules = m.app.Config().PortForwardRules
+			}
 			resultCmd = func() tea.Msg {
 				return settings.PFApplyResultMsg{OK: false, ErrMsg: msg.Err.Error(), Rules: oldRules}
 			}
@@ -229,10 +244,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				"Dismiss",
 			)
 			m.modal = &modal
-			// Update local config state on success.
-			if m.cfg != nil {
-				m.cfg.PortForwardRules = msg.Rules
-			}
 			resultCmd = func() tea.Msg {
 				return settings.PFApplyResultMsg{OK: true, Rules: msg.Rules}
 			}
@@ -472,13 +483,9 @@ func (m *Model) headerBar(width int) string {
 	brand := theme.BrandStyle.Render(theme.BarrelEmoji + " Cooper")
 	tagline := theme.TaglineStyle.Render("barrel-proof")
 
-	// Proxy status -- we use the presence of the ACL channel as a proxy for
-	// "proxy is running". A proper check would call docker.IsProxyRunning(),
-	// but that is a blocking Docker API call unsuitable for a synchronous
-	// View render. The channel is non-nil only when startup succeeded, so
-	// this is an acceptable heuristic for v1.
+	// Proxy status -- check via the App interface.
 	var proxyStatus string
-	if m.aclRequestCh != nil {
+	if m.app != nil && m.app.IsProxyRunning() {
 		proxyStatus = theme.StatusRunningStyle.Render(theme.IconShield + "  Proxy " + theme.IconCheck)
 	} else {
 		proxyStatus = theme.StatusStoppedStyle.Render(theme.IconShield + "  Proxy " + theme.IconCross)
@@ -582,42 +589,21 @@ func Run(m *Model) error {
 
 // portForwardReloadResultMsg carries the result of an async port forward reload.
 type portForwardReloadResultMsg struct {
-	Rules []config.PortForwardRule
+	Rules []app.PortForwardRule
 	Err   error
 }
 
-// reloadPortForwardsCmd returns a tea.Cmd that validates, reloads socat, and
-// persists config in the background.
-func (m *Model) reloadPortForwardsCmd(rules []config.PortForwardRule) tea.Cmd {
-	cooperDir := m.cooperDir
-	cfg := m.cfg
+// reloadPortForwardsCmd returns a tea.Cmd that validates and reloads
+// port forwarding via the App.
+func (m *Model) reloadPortForwardsCmd(rules []app.PortForwardRule) tea.Cmd {
+	a := m.app
 	return func() tea.Msg {
-		// Validate.
-		if cfg != nil {
-			candidate := *cfg
-			candidate.PortForwardRules = rules
-			if err := candidate.Validate(); err != nil {
-				return portForwardReloadResultMsg{Rules: rules, Err: fmt.Errorf("validation failed: %w", err)}
-			}
+		if a == nil {
+			return portForwardReloadResultMsg{Rules: rules, Err: fmt.Errorf("app not available")}
 		}
-
-		// Reload socat (writes socat-rules.json + signals containers).
-		if cooperDir != "" && cfg != nil {
-			if err := docker.ReloadSocat(cooperDir, cfg.BridgePort, rules); err != nil {
-				return portForwardReloadResultMsg{Rules: rules, Err: fmt.Errorf("reload failed: %w", err)}
-			}
+		if err := a.UpdatePortForwards(rules); err != nil {
+			return portForwardReloadResultMsg{Rules: rules, Err: err}
 		}
-
-		// Persist config.json.
-		if cooperDir != "" && cfg != nil {
-			cfgCopy := *cfg
-			cfgCopy.PortForwardRules = rules
-			cfgPath := cooperDir + "/config.json"
-			if err := config.SaveConfig(cfgPath, &cfgCopy); err != nil {
-				return portForwardReloadResultMsg{Rules: rules, Err: fmt.Errorf("config save failed: %w", err)}
-			}
-		}
-
 		return portForwardReloadResultMsg{Rules: rules, Err: nil}
 	}
 }

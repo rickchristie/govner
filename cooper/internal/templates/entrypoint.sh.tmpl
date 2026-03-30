@@ -4,6 +4,18 @@
 #
 # Starts socat port forwarding, configures auto-approve aliases, then executes the command.
 
+# ============================================================================
+# Runtime CA certificate update
+# ============================================================================
+# If a CA cert is volume-mounted at /etc/cooper/cooper-ca.pem (which happens
+# when the proxy's CA was regenerated after the barrel image was built), update
+# the system trust store so curl/wget/etc. trust the proxy's SSL bump certs.
+if [ -f /etc/cooper/cooper-ca.pem ]; then
+    cp /etc/cooper/cooper-ca.pem /usr/local/share/ca-certificates/cooper-ca.crt 2>/dev/null || true
+    cat /etc/cooper/cooper-ca.pem >> /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
+    export NODE_EXTRA_CA_CERTS=/etc/cooper/cooper-ca.pem
+fi
+
 SOCAT_RULES="/etc/cooper/socat-rules.json"
 
 # ============================================================================
@@ -11,6 +23,9 @@ SOCAT_RULES="/etc/cooper/socat-rules.json"
 # ============================================================================
 if ! grep -q "Cooper: Auto-approve aliases" /home/user/.bashrc 2>/dev/null; then
     cat >> /home/user/.bashrc << 'ALIASES'
+
+# Cooper: Ensure PATH includes tool directories (login shells reset PATH)
+export PATH="/home/user/.local/bin:/home/user/.npm-global/bin:$PATH"
 
 # Cooper: Auto-approve aliases (container is network-isolated)
 {{- if .HasClaudeCode}}

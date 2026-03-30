@@ -365,6 +365,42 @@
       },
       "problemMatcher": [],
       "isBackground": false
+    },
+    {
+      "label": "cooper: E2E Test",
+      "type": "shell",
+      "command": "${workspaceFolder}/cooper/test-e2e.sh",
+      "options": {
+        "cwd": "${workspaceFolder}/cooper"
+      },
+      "presentation": {
+        "clear": true,
+        "echo": true,
+        "focus": true,
+        "panel": "dedicated",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "cooper: E2E Test (Clean)",
+      "type": "shell",
+      "command": "${workspaceFolder}/cooper/test-e2e.sh clean",
+      "options": {
+        "cwd": "${workspaceFolder}/cooper"
+      },
+      "presentation": {
+        "clear": true,
+        "echo": true,
+        "focus": true,
+        "panel": "dedicated",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": [],
+      "isBackground": false
     }
   ]
 }

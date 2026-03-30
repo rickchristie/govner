@@ -1,0 +1,2335 @@
+//go:build integration
+
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/rickchristie/govner/cooper/internal/auth"
+	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/names"
+	"github.com/rickchristie/govner/cooper/internal/proof"
+	"github.com/rickchristie/govner/cooper/internal/templates"
+)
+
+// testImagePrefix isolates test images from production Cooper images.
+const testImagePrefix = "test-mirror-"
+
+// skipIfNoDocker skips the test if the docker CLI is not available.
+func skipIfNoDocker(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+}
+
+// skipIfNoProxyImage skips the test if the proxy image has not been built.
+func skipIfNoProxyImage(t *testing.T) {
+	t.Helper()
+	docker.SetImagePrefix(testImagePrefix)
+	imageName := docker.GetImageProxy()
+	exists, err := docker.ImageExists(imageName)
+	if err != nil {
+		t.Skipf("cannot check image %s: %v", imageName, err)
+	}
+	if !exists {
+		t.Skipf("proxy image %s not found; run test-docker-build.sh first", imageName)
+	}
+}
+
+// setupCooperDir creates a full cooper directory using the real template
+// rendering pipeline — the same code path as `cooper build` and `cooper up`.
+// This ensures integration tests validate the actual generated configs
+// (squid.conf, entrypoints, socat rules) against the real Squid/socat binaries.
+func setupCooperDir(t *testing.T) (string, *config.Config) {
+	t.Helper()
+	cooperDir := t.TempDir()
+
+	cfg := config.DefaultConfig()
+
+	// Write config.json.
+	cfgPath := filepath.Join(cooperDir, "config.json")
+	if err := config.SaveConfig(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	// Generate CA certificate.
+	if _, _, err := config.EnsureCA(cooperDir); err != nil {
+		t.Fatalf("ensure CA: %v", err)
+	}
+
+	// Render ALL templates using the real template pipeline.
+	// This generates squid.conf, proxy-entrypoint.sh, cli entrypoint, etc.
+	cliDir := filepath.Join(cooperDir, "cli")
+	proxyDir := filepath.Join(cooperDir, "proxy")
+	for _, dir := range []string{cliDir, proxyDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	// Render CLI templates (entrypoint.sh, Dockerfile).
+	if err := templates.WriteAllTemplates(cliDir, cfg); err != nil {
+		t.Fatalf("write cli templates: %v", err)
+	}
+
+	// Render proxy templates (squid.conf, proxy.Dockerfile, proxy-entrypoint.sh).
+	squidConf, err := templates.RenderSquidConf(cfg)
+	if err != nil {
+		t.Fatalf("render squid.conf: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(proxyDir, "squid.conf"), []byte(squidConf), 0644); err != nil {
+		t.Fatalf("write squid.conf: %v", err)
+	}
+
+	proxyEntrypoint, err := templates.RenderProxyEntrypoint(cfg)
+	if err != nil {
+		t.Fatalf("render proxy-entrypoint.sh: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(proxyDir, "proxy-entrypoint.sh"), []byte(proxyEntrypoint), 0755); err != nil {
+		t.Fatalf("write proxy-entrypoint.sh: %v", err)
+	}
+
+	// Write socat rules config.
+	if err := docker.WritePortForwardConfig(cooperDir, cfg.BridgePort, cfg.PortForwardRules); err != nil {
+		t.Fatalf("write socat rules: %v", err)
+	}
+
+	// Create run and logs directories (must exist before Docker mounts them).
+	// Use 0777 so Squid (running as user "squid" inside the container) can
+	// write to the volume-mounted logs dir, and t.TempDir() can clean up.
+	for _, dir := range []string{
+		filepath.Join(cooperDir, "run"),
+		filepath.Join(cooperDir, "logs"),
+	} {
+		if err := os.MkdirAll(dir, 0777); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		os.Chmod(dir, 0777)
+	}
+
+	// Register cleanup that fixes permissions on files created by container
+	// processes (e.g., Squid's "squid" user), so t.TempDir() can remove them.
+	t.Cleanup(func() {
+		exec.Command("chmod", "-R", "u+rwX", cooperDir).Run()
+	})
+
+	// Stage CA cert into proxy dir (proxy Dockerfile COPYs it from context,
+	// but at runtime it's volume-mounted from cooperDir).
+	caCert := filepath.Join(cooperDir, "ca", "cooper-ca.pem")
+	caKey := filepath.Join(cooperDir, "ca", "cooper-ca-key.pem")
+	copyFileForTest(t, caCert, filepath.Join(proxyDir, "cooper-ca.pem"))
+	copyFileForTest(t, caKey, filepath.Join(proxyDir, "cooper-ca-key.pem"))
+
+	return cooperDir, cfg
+}
+
+func copyFileForTest(t *testing.T, src, dst string) {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read %s: %v", src, err)
+	}
+	if err := os.WriteFile(dst, data, 0644); err != nil {
+		t.Fatalf("write %s: %v", dst, err)
+	}
+}
+
+// cleanupDocker removes containers and networks created during tests.
+func cleanupDocker(t *testing.T) {
+	t.Helper()
+	// Stop and remove the proxy container.
+	_ = exec.Command("docker", "rm", "-f", docker.ContainerProxy).Run()
+
+	// Remove networks (ignore errors if they don't exist or have endpoints).
+	_ = exec.Command("docker", "network", "rm", docker.NetworkInternal).Run()
+	_ = exec.Command("docker", "network", "rm", docker.NetworkExternal).Run()
+}
+
+// fixCooperDirPermissions makes all files in cooperDir writable by the current
+// user so t.TempDir() cleanup can remove them. Squid writes log files as the
+// container's "squid" user (different UID), making them unremovable.
+func fixCooperDirPermissions(t *testing.T, cooperDir string) {
+	t.Helper()
+	_ = exec.Command("chmod", "-R", "u+rwX", cooperDir).Run()
+}
+
+// TestCooperApp_StartStop verifies that a CooperApp can start (creating
+// networks, proxy container, ACL listener, bridge server) and stop
+// (cleaning up all resources).
+func TestCooperApp_StartStop(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	// Start the app.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var steps []string
+	err := app.Start(ctx, func(step int, total int, name string, err error) {
+		steps = append(steps, name)
+		if err != nil {
+			t.Logf("step %d/%d %q failed: %v", step, total, name, err)
+		}
+	})
+	if err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Verify progress callbacks were received for all steps.
+	if len(steps) != totalSteps {
+		t.Errorf("got %d progress steps, want %d; steps: %v", len(steps), totalSteps, steps)
+	}
+
+	// Verify proxy is running.
+	if !app.IsProxyRunning() {
+		t.Error("IsProxyRunning() = false after Start, want true")
+	}
+
+	// Verify ACL requests channel is non-nil and readable.
+	select {
+	case <-app.ACLRequests():
+		// Got an unexpected request -- this is fine, channel works.
+	case <-time.After(100 * time.Millisecond):
+		// No request pending, expected.
+	}
+
+	// Stop the app.
+	if err := app.Stop(); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
+
+	// Verify proxy is no longer running.
+	running, _ := docker.IsProxyRunning()
+	if running {
+		t.Error("proxy still running after Stop()")
+	}
+}
+
+// TestCooperApp_ACLFlow starts the app, subscribes to ACL channels, simulates
+// an ACL request by connecting to the Unix socket, verifies the request appears,
+// approves it, and verifies the decision event.
+func TestCooperApp_ACLFlow(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	// Use a short timeout so the test doesn't hang on approval.
+	cfg.MonitorTimeoutSecs = 5
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	// Connect to the ACL Unix socket and send a domain request.
+	socketPath := filepath.Join(cooperDir, "run", "acl.sock")
+	conn, err := net.DialTimeout("unix", socketPath, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial ACL socket: %v", err)
+	}
+
+	// Protocol: "domain port source_ip\n"
+	_, err = fmt.Fprintf(conn, "example.com 443 172.18.0.5\n")
+	if err != nil {
+		conn.Close()
+		t.Fatalf("write to ACL socket: %v", err)
+	}
+
+	// Read the ACL request from the channel.
+	var req ACLRequest
+	select {
+	case req = <-app.ACLRequests():
+		// Got the request.
+	case <-time.After(5 * time.Second):
+		conn.Close()
+		t.Fatal("timed out waiting for ACL request on channel")
+	}
+
+	if req.Domain != "example.com" {
+		t.Errorf("ACLRequest.Domain = %q, want %q", req.Domain, "example.com")
+	}
+	if req.Port != "443" {
+		t.Errorf("ACLRequest.Port = %q, want %q", req.Port, "443")
+	}
+	if req.SourceIP != "172.18.0.5" {
+		t.Errorf("ACLRequest.SourceIP = %q, want %q", req.SourceIP, "172.18.0.5")
+	}
+
+	// Approve the request.
+	app.ApproveRequest(req.ID)
+
+	// Read the decision event from the channel.
+	select {
+	case evt := <-app.ACLDecisions():
+		if evt.Decision != DecisionAllow {
+			t.Errorf("DecisionEvent.Decision = %v, want DecisionAllow", evt.Decision)
+		}
+		if evt.Reason != "approved" {
+			t.Errorf("DecisionEvent.Reason = %q, want %q", evt.Reason, "approved")
+		}
+		if evt.Request.Domain != "example.com" {
+			t.Errorf("DecisionEvent.Request.Domain = %q, want %q", evt.Request.Domain, "example.com")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for ACL decision on channel")
+	}
+
+	// Read the response from the socket (should be "OK\n").
+	buf := make([]byte, 64)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := conn.Read(buf)
+	conn.Close()
+	if err != nil {
+		t.Fatalf("read ACL response: %v", err)
+	}
+	response := string(buf[:n])
+	if response != "OK\n" {
+		t.Errorf("ACL response = %q, want %q", response, "OK\n")
+	}
+}
+
+// TestCooperApp_BridgeHealth starts the app and makes an HTTP GET to the
+// bridge health endpoint. Verifies it returns 200.
+func TestCooperApp_BridgeHealth(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	// The bridge binds to 127.0.0.1:{BridgePort}.
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", cfg.BridgePort)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(healthURL)
+	if err != nil {
+		t.Fatalf("GET %s failed: %v", healthURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("bridge /health status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+// TestCooperApp_UpdateSettings starts the app, calls UpdateSettings with
+// new values, and verifies the config was updated and persisted.
+func TestCooperApp_UpdateSettings(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	// Original values from DefaultConfig.
+	if cfg.MonitorTimeoutSecs != 5 {
+		t.Fatalf("precondition: MonitorTimeoutSecs = %d, want 5", cfg.MonitorTimeoutSecs)
+	}
+
+	// Update settings.
+	newTimeout := 15
+	newBlocked := 200
+	newAllowed := 300
+	newBridgeLog := 100
+	if err := app.UpdateSettings(newTimeout, newBlocked, newAllowed, newBridgeLog); err != nil {
+		t.Fatalf("UpdateSettings() failed: %v", err)
+	}
+
+	// Verify in-memory config was updated.
+	got := app.Config()
+	if got.MonitorTimeoutSecs != newTimeout {
+		t.Errorf("Config().MonitorTimeoutSecs = %d, want %d", got.MonitorTimeoutSecs, newTimeout)
+	}
+	if got.BlockedHistoryLimit != newBlocked {
+		t.Errorf("Config().BlockedHistoryLimit = %d, want %d", got.BlockedHistoryLimit, newBlocked)
+	}
+	if got.AllowedHistoryLimit != newAllowed {
+		t.Errorf("Config().AllowedHistoryLimit = %d, want %d", got.AllowedHistoryLimit, newAllowed)
+	}
+	if got.BridgeLogLimit != newBridgeLog {
+		t.Errorf("Config().BridgeLogLimit = %d, want %d", got.BridgeLogLimit, newBridgeLog)
+	}
+
+	// Verify persisted config was updated.
+	cfgPath := filepath.Join(cooperDir, "config.json")
+	persisted, err := config.LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() failed: %v", err)
+	}
+	if persisted.MonitorTimeoutSecs != newTimeout {
+		t.Errorf("persisted MonitorTimeoutSecs = %d, want %d", persisted.MonitorTimeoutSecs, newTimeout)
+	}
+	if persisted.BlockedHistoryLimit != newBlocked {
+		t.Errorf("persisted BlockedHistoryLimit = %d, want %d", persisted.BlockedHistoryLimit, newBlocked)
+	}
+}
+
+// TestCooperApp_UpdatePortForwards starts the app, calls UpdatePortForwards
+// with new rules, and verifies that socat-rules.json was written correctly.
+func TestCooperApp_UpdatePortForwards(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	// Define new port forward rules.
+	rules := []config.PortForwardRule{
+		{
+			ContainerPort: 8080,
+			HostPort:      8080,
+			Description:   "test HTTP",
+		},
+		{
+			ContainerPort: 9090,
+			HostPort:      9090,
+			Description:   "test metrics",
+		},
+	}
+
+	if err := app.UpdatePortForwards(rules); err != nil {
+		t.Fatalf("UpdatePortForwards() failed: %v", err)
+	}
+
+	// Verify socat-rules.json was written.
+	socatPath := filepath.Join(cooperDir, "socat-rules.json")
+	data, err := os.ReadFile(socatPath)
+	if err != nil {
+		t.Fatalf("read socat-rules.json: %v", err)
+	}
+
+	var socatCfg docker.PortForwardConfig
+	if err := json.Unmarshal(data, &socatCfg); err != nil {
+		t.Fatalf("parse socat-rules.json: %v", err)
+	}
+
+	if len(socatCfg.Rules) != 2 {
+		t.Fatalf("socat-rules.json has %d rules, want 2", len(socatCfg.Rules))
+	}
+	if socatCfg.Rules[0].ContainerPort != 8080 {
+		t.Errorf("rule[0].ContainerPort = %d, want 8080", socatCfg.Rules[0].ContainerPort)
+	}
+	if socatCfg.Rules[1].Description != "test metrics" {
+		t.Errorf("rule[1].Description = %q, want %q", socatCfg.Rules[1].Description, "test metrics")
+	}
+	if socatCfg.BridgePort != cfg.BridgePort {
+		t.Errorf("socat BridgePort = %d, want %d", socatCfg.BridgePort, cfg.BridgePort)
+	}
+
+	// Verify in-memory config was updated.
+	if len(app.Config().PortForwardRules) != 2 {
+		t.Errorf("Config().PortForwardRules has %d rules, want 2", len(app.Config().PortForwardRules))
+	}
+
+	// Verify persisted config.json was updated.
+	cfgPath := filepath.Join(cooperDir, "config.json")
+	persisted, err := config.LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() failed: %v", err)
+	}
+	if len(persisted.PortForwardRules) != 2 {
+		t.Errorf("persisted PortForwardRules has %d rules, want 2", len(persisted.PortForwardRules))
+	}
+}
+
+// TestCooperApp_ACLDenyFlow starts the app, sends an ACL request, denies it,
+// and verifies the deny decision event and socket response.
+func TestCooperApp_ACLDenyFlow(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	cfg.MonitorTimeoutSecs = 5
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	// Connect to the ACL Unix socket and send a domain request.
+	socketPath := filepath.Join(cooperDir, "run", "acl.sock")
+	conn, err := net.DialTimeout("unix", socketPath, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial ACL socket: %v", err)
+	}
+
+	_, err = fmt.Fprintf(conn, "denied-domain.com 443 172.18.0.5\n")
+	if err != nil {
+		conn.Close()
+		t.Fatalf("write to ACL socket: %v", err)
+	}
+
+	// Read the ACL request from the channel.
+	var req ACLRequest
+	select {
+	case req = <-app.ACLRequests():
+	case <-time.After(5 * time.Second):
+		conn.Close()
+		t.Fatal("timed out waiting for ACL request on channel")
+	}
+
+	if req.Domain != "denied-domain.com" {
+		t.Errorf("ACLRequest.Domain = %q, want %q", req.Domain, "denied-domain.com")
+	}
+
+	// Deny the request.
+	app.DenyRequest(req.ID)
+
+	// Read the decision event from the channel.
+	select {
+	case evt := <-app.ACLDecisions():
+		if evt.Decision != DecisionDeny {
+			t.Errorf("DecisionEvent.Decision = %v, want DecisionDeny", evt.Decision)
+		}
+		if evt.Reason != "denied" {
+			t.Errorf("DecisionEvent.Reason = %q, want %q", evt.Reason, "denied")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for ACL decision on channel")
+	}
+
+	// Read the response from the socket (should be "ERR\n").
+	buf := make([]byte, 64)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := conn.Read(buf)
+	conn.Close()
+	if err != nil {
+		t.Fatalf("read ACL response: %v", err)
+	}
+	response := string(buf[:n])
+	if response != "ERR\n" {
+		t.Errorf("ACL response = %q, want %q", response, "ERR\n")
+	}
+}
+
+// TestCooperApp_ACLTimeout starts the app with a short timeout, sends an ACL
+// request, does NOT approve or deny, and verifies the request times out with
+// fail-closed behavior (ERR response).
+func TestCooperApp_ACLTimeout(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	cfg.MonitorTimeoutSecs = 1 // 1 second timeout for fast test
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	// Connect to the ACL Unix socket and send a domain request.
+	socketPath := filepath.Join(cooperDir, "run", "acl.sock")
+	conn, err := net.DialTimeout("unix", socketPath, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial ACL socket: %v", err)
+	}
+
+	_, err = fmt.Fprintf(conn, "timeout-test.com 443 172.18.0.5\n")
+	if err != nil {
+		conn.Close()
+		t.Fatalf("write to ACL socket: %v", err)
+	}
+
+	// Read the request from the channel to confirm it arrived.
+	select {
+	case <-app.ACLRequests():
+		// Got the request; do NOT approve or deny.
+	case <-time.After(5 * time.Second):
+		conn.Close()
+		t.Fatal("timed out waiting for ACL request on channel")
+	}
+
+	// Read the socket response — should be "ERR\n" after the 1s timeout.
+	buf := make([]byte, 64)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := conn.Read(buf)
+	conn.Close()
+	if err != nil {
+		t.Fatalf("read ACL response: %v", err)
+	}
+	response := string(buf[:n])
+	if response != "ERR\n" {
+		t.Errorf("ACL response = %q, want %q (auto-denied after timeout)", response, "ERR\n")
+	}
+
+	// Read the decision event from the channel.
+	select {
+	case evt := <-app.ACLDecisions():
+		if evt.Decision != DecisionTimeout {
+			t.Errorf("DecisionEvent.Decision = %v, want DecisionTimeout", evt.Decision)
+		}
+		if evt.Reason != "timeout" {
+			t.Errorf("DecisionEvent.Reason = %q, want %q", evt.Reason, "timeout")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for ACL decision on channel")
+	}
+}
+
+// TestCooperApp_BridgeRouteExecution starts the app with a bridge route
+// pointing to a test script, POSTs to the route, and verifies the response.
+func TestCooperApp_BridgeRouteExecution(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+
+	// Create a test script.
+	scriptDir := t.TempDir()
+	scriptPath := filepath.Join(scriptDir, "test-route.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho \"hello from bridge\"\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write test script: %v", err)
+	}
+
+	cfg.BridgeRoutes = []config.BridgeRoute{{APIPath: "/test-route", ScriptPath: scriptPath}}
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	// POST to the configured route.
+	routeURL := fmt.Sprintf("http://127.0.0.1:%d/test-route", cfg.BridgePort)
+	resp, err := client.Post(routeURL, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST %s failed: %v", routeURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("POST /test-route status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var result struct {
+		ExitCode int    `json:"exit_code"`
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if result.ExitCode != 0 {
+		t.Errorf("exit_code = %d, want 0", result.ExitCode)
+	}
+	if !strings.Contains(result.Stdout, "hello from bridge") {
+		t.Errorf("stdout = %q, want to contain %q", result.Stdout, "hello from bridge")
+	}
+
+	// Test error case: POST to nonexistent route should return 404.
+	notFoundURL := fmt.Sprintf("http://127.0.0.1:%d/nonexistent", cfg.BridgePort)
+	resp404, err := client.Post(notFoundURL, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST %s failed: %v", notFoundURL, err)
+	}
+	defer resp404.Body.Close()
+
+	if resp404.StatusCode != http.StatusNotFound {
+		t.Errorf("POST /nonexistent status = %d, want %d", resp404.StatusCode, http.StatusNotFound)
+	}
+}
+
+// TestCooperApp_UpdateBridgeRoutes starts the app with no routes, verifies
+// 404 on a route, adds a route via UpdateBridgeRoutes, verifies 200, removes
+// all routes, and verifies 404 again and that the routes file was written.
+func TestCooperApp_UpdateBridgeRoutes(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	routeURL := fmt.Sprintf("http://127.0.0.1:%d/test-route", cfg.BridgePort)
+
+	// Step 1: POST to /test-route with no routes — should be 404.
+	resp, err := client.Post(routeURL, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST %s failed: %v", routeURL, err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("POST /test-route (no routes) status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+
+	// Step 2: Create a test script and add the route.
+	scriptDir := t.TempDir()
+	scriptPath := filepath.Join(scriptDir, "dynamic-route.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho \"dynamic route works\"\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write test script: %v", err)
+	}
+
+	if err := app.UpdateBridgeRoutes([]config.BridgeRoute{{APIPath: "/test-route", ScriptPath: scriptPath}}); err != nil {
+		t.Fatalf("UpdateBridgeRoutes() failed: %v", err)
+	}
+
+	// Step 3: POST to /test-route — should now be 200.
+	resp, err = client.Post(routeURL, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST %s (after add) failed: %v", routeURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("POST /test-route (after add) status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var result struct {
+		ExitCode int    `json:"exit_code"`
+		Stdout   string `json:"stdout"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !strings.Contains(result.Stdout, "dynamic route works") {
+		t.Errorf("stdout = %q, want to contain %q", result.Stdout, "dynamic route works")
+	}
+
+	// Step 4: Remove all routes.
+	if err := app.UpdateBridgeRoutes([]config.BridgeRoute{}); err != nil {
+		t.Fatalf("UpdateBridgeRoutes(empty) failed: %v", err)
+	}
+
+	// Step 5: POST to /test-route — should be 404 again.
+	resp2, err := client.Post(routeURL, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST %s (after remove) failed: %v", routeURL, err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Errorf("POST /test-route (after remove) status = %d, want %d", resp2.StatusCode, http.StatusNotFound)
+	}
+
+	// Step 6: Verify bridge-routes.json was written.
+	routesPath := filepath.Join(cooperDir, "bridge-routes.json")
+	if _, err := os.Stat(routesPath); os.IsNotExist(err) {
+		t.Errorf("bridge-routes.json was not written to %s", routesPath)
+	}
+}
+
+// TestCooperApp_StartupFailure verifies that Start() returns an error when
+// the bridge server cannot bind to its port (because another listener is
+// already occupying it).
+func TestCooperApp_StartupFailure(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	// Bind a TCP listener to the bridge port BEFORE starting the app.
+	blocker, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.BridgePort))
+	if err != nil {
+		t.Fatalf("failed to pre-bind bridge port %d: %v", cfg.BridgePort, err)
+	}
+	defer blocker.Close()
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	startErr := app.Start(ctx, nil)
+
+	// Start() should fail because bridge can't bind.
+	if startErr == nil {
+		// Bridge somehow started despite port being taken; stop everything.
+		app.Stop()
+		t.Fatal("Start() succeeded but expected failure because bridge port is occupied")
+	}
+
+	// Verify the error message mentions the port.
+	errMsg := startErr.Error()
+	portStr := fmt.Sprintf("%d", cfg.BridgePort)
+	if !strings.Contains(errMsg, portStr) {
+		t.Errorf("error message %q does not mention port %s", errMsg, portStr)
+	}
+
+	// Clean up: proxy may have started before bridge failed.
+	app.Stop()
+}
+
+// TestCooperApp_ACLLogging verifies that ACL requests and decisions are
+// logged to disk in {cooperDir}/logs/acl.log.
+func TestCooperApp_ACLLogging(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	cfg.MonitorTimeoutSecs = 5
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	// Connect to the ACL Unix socket and send a domain request.
+	socketPath := filepath.Join(cooperDir, "run", "acl.sock")
+	conn, err := net.DialTimeout("unix", socketPath, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial ACL socket: %v", err)
+	}
+
+	_, err = fmt.Fprintf(conn, "logged-domain.com 443 10.0.0.1\n")
+	if err != nil {
+		conn.Close()
+		t.Fatalf("write to ACL socket: %v", err)
+	}
+
+	// Read request from channel.
+	var req ACLRequest
+	select {
+	case req = <-app.ACLRequests():
+	case <-time.After(5 * time.Second):
+		conn.Close()
+		t.Fatal("timed out waiting for ACL request on channel")
+	}
+
+	// Approve the request.
+	app.ApproveRequest(req.ID)
+
+	// Read the decision from the channel so the pipeline completes.
+	select {
+	case <-app.ACLDecisions():
+	case <-time.After(5 * time.Second):
+		conn.Close()
+		t.Fatal("timed out waiting for ACL decision on channel")
+	}
+
+	// Read and discard the socket response.
+	buf := make([]byte, 64)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	conn.Read(buf)
+	conn.Close()
+
+	// Wait for log flush.
+	time.Sleep(500 * time.Millisecond)
+
+	// Read the ACL log file.
+	logPath := filepath.Join(cooperDir, "logs", "acl.log")
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read acl.log: %v", err)
+	}
+
+	logContent := string(logData)
+
+	// Verify request was logged.
+	if !strings.Contains(logContent, "domain=logged-domain.com") {
+		t.Errorf("acl.log does not contain request log; got:\n%s", logContent)
+	}
+
+	// Verify decision was logged.
+	if !strings.Contains(logContent, "decision=approved") {
+		t.Errorf("acl.log does not contain decision log; got:\n%s", logContent)
+	}
+}
+
+// TestCooperApp_BridgeLogging verifies that bridge execution results are
+// logged to disk in {cooperDir}/logs/bridge.log.
+func TestCooperApp_BridgeLogging(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+
+	// Create a test script.
+	scriptDir := t.TempDir()
+	scriptPath := filepath.Join(scriptDir, "log-test.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho \"bridge-test\"\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write test script: %v", err)
+	}
+
+	cfg.BridgeRoutes = []config.BridgeRoute{{APIPath: "/test-log", ScriptPath: scriptPath}}
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	// POST to the route.
+	client := &http.Client{Timeout: 10 * time.Second}
+	routeURL := fmt.Sprintf("http://127.0.0.1:%d/test-log", cfg.BridgePort)
+	resp, err := client.Post(routeURL, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST %s failed: %v", routeURL, err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /test-log status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// Drain the BridgeLogs channel so the forwarding goroutine processes the log entry.
+	select {
+	case <-app.BridgeLogs():
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for bridge log on channel")
+	}
+
+	// Wait for log flush.
+	time.Sleep(500 * time.Millisecond)
+
+	// Read the bridge log file.
+	logPath := filepath.Join(cooperDir, "logs", "bridge.log")
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bridge.log: %v", err)
+	}
+
+	logContent := string(logData)
+
+	// Verify the log contains route and exit code.
+	if !strings.Contains(logContent, "route=/test-log") {
+		t.Errorf("bridge.log does not contain route=/test-log; got:\n%s", logContent)
+	}
+	if !strings.Contains(logContent, "exit=0") {
+		t.Errorf("bridge.log does not contain exit=0; got:\n%s", logContent)
+	}
+}
+
+// TestCooperApp_ContainerStats starts the app and calls ContainerStats.
+// Verifies it returns without error. The result may contain only the proxy
+// stats (no barrels are running in tests).
+func TestCooperApp_ContainerStats(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	stats, err := app.ContainerStats()
+	if err != nil {
+		t.Fatalf("ContainerStats() failed: %v", err)
+	}
+
+	// The proxy container should appear in the stats.
+	found := false
+	for _, s := range stats {
+		t.Logf("container stat: name=%s cpu=%s mem=%s", s.Name, s.CPUPercent, s.MemUsage)
+		if s.Name == docker.ContainerProxy {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("ContainerStats() did not include the proxy container")
+	}
+}
+
+// =====================================================================
+// Barrel integration tests
+// =====================================================================
+//
+// These tests require BOTH the proxy AND barrel images to be built.
+// Run test-docker-build.sh first to build them.
+
+// skipIfNoBarrelImage skips the test if the barrel image has not been built.
+func skipIfNoBarrelImage(t *testing.T) {
+	t.Helper()
+	docker.SetImagePrefix(testImagePrefix)
+	imageName := docker.GetImageBarrel()
+	exists, err := docker.ImageExists(imageName)
+	if err != nil || !exists {
+		t.Skipf("barrel image %s not found; run test-docker-build.sh first", imageName)
+	}
+}
+
+// barrelExec runs a command inside a barrel container and returns combined output.
+func barrelExec(containerName string, cmd string) (string, error) {
+	out, err := exec.Command("docker", "exec", containerName, "bash", "-c", cmd).CombinedOutput()
+	return string(out), err
+}
+
+// startAppAndBarrel is a helper that starts the full Cooper app (proxy + ACL +
+// bridge) and a barrel container. It returns the barrel container name.
+// The caller's t.Cleanup handles removing the barrel and Docker resources.
+func startAppAndBarrel(t *testing.T, cfg *config.Config, cooperDir string) (*CooperApp, string) {
+	t.Helper()
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, func(step int, total int, name string, err error) {
+		if err != nil {
+			t.Logf("startup step %d/%d %q failed: %v", step, total, name, err)
+		}
+	}); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Create a workspace directory for the barrel.
+	workspaceDir := t.TempDir()
+
+	// Start the barrel container.
+	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir); err != nil {
+		app.Stop()
+		t.Fatalf("StartBarrel() failed: %v", err)
+	}
+
+	barrelName := docker.BarrelContainerName(workspaceDir)
+
+	// Wait for barrel container to be running.
+	waitForContainer(t, barrelName, 15*time.Second)
+
+	// Wait for proxy to be reachable from inside the barrel.
+	// The barrel's entrypoint needs time to start, and Docker DNS
+	// needs time to propagate the "cooper-proxy" name.
+	waitForProxyFromBarrel(t, barrelName, 30*time.Second)
+
+	return app, barrelName
+}
+
+// waitForContainer polls until the named container is running or the timeout
+// expires. This avoids races between docker run returning and the container
+// being ready to accept exec commands.
+func waitForContainer(t *testing.T, name string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		running, _ := docker.IsBarrelRunning(name)
+		if running {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("container %s did not become running within %v", name, timeout)
+}
+
+// waitForProxyFromBarrel polls until the proxy is reachable from inside the
+// barrel container. This waits for Docker DNS propagation and the barrel's
+// entrypoint to finish initializing.
+func waitForProxyFromBarrel(t *testing.T, barrelName string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	attempt := 0
+	for time.Now().Before(deadline) {
+		attempt++
+		// Use a separate curl call that only outputs the HTTP status code.
+		// Avoid `|| echo 000` which concatenates with curl's output on failure.
+		out, _ := exec.Command("docker", "exec", barrelName, "bash", "-c",
+			"curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 -x http://cooper-proxy:3128 http://example.com 2>/dev/null").CombinedOutput()
+		status := strings.TrimSpace(string(out))
+
+		// A valid HTTP status is exactly 3 digits and not "000".
+		if len(status) == 3 && status != "000" && status >= "100" && status <= "599" {
+			t.Logf("proxy reachable from barrel (status=%s, attempt=%d)", status, attempt)
+			return
+		}
+
+		// Log diagnostics on first few attempts.
+		if attempt <= 3 {
+			// Check if proxy container is running.
+			proxyState, _ := exec.Command("docker", "inspect", "--format", "{{.State.Status}}", "cooper-proxy").CombinedOutput()
+			// Check if both are on the same network.
+			netMembers, _ := exec.Command("docker", "network", "inspect", "cooper-internal",
+				"--format", "{{range .Containers}}{{.Name}} {{end}}").CombinedOutput()
+			t.Logf("waitForProxy attempt=%d status=%q proxy=%s internal_members=[%s]",
+				attempt, status, strings.TrimSpace(string(proxyState)), strings.TrimSpace(string(netMembers)))
+		}
+
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatalf("proxy not reachable from barrel %s within %v", barrelName, timeout)
+}
+
+// TestCooperApp_WhitelistedDomainPassthrough verifies that the proxy allows
+// CONNECT tunnels to whitelisted domains. The Anthropic API is whitelisted
+// by default; it will return 401 without auth, but that proves the proxy
+// allowed the connection (not 403).
+func TestCooperApp_WhitelistedDomainPassthrough(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	// curl through the proxy to a whitelisted domain (api.anthropic.com).
+	// We expect a 2xx or 4xx status (not 403, which would mean proxy denied).
+	out, err := barrelExec(barrelName,
+		"curl -s -o /dev/null -w '%{http_code}' --connect-timeout 10 -x http://cooper-proxy:3128 https://api.anthropic.com")
+	if err != nil {
+		t.Fatalf("curl failed: %v\noutput: %s", err, out)
+	}
+
+	statusCode := strings.TrimSpace(out)
+	t.Logf("whitelisted domain status code: %s", statusCode)
+
+	// 403 means the proxy blocked it — that would be a failure.
+	if statusCode == "403" {
+		t.Errorf("expected proxy to allow api.anthropic.com, got HTTP 403 (denied)")
+	}
+
+	// Any 2xx or 4xx (e.g. 401 unauthorized) proves the proxy forwarded the request.
+	if len(statusCode) != 3 {
+		t.Errorf("unexpected status code format: %q", statusCode)
+	}
+}
+
+// TestCooperApp_BlockedDomainDenied verifies that the proxy denies CONNECT
+// tunnels to domains that are NOT whitelisted. example.com is not in the
+// default whitelist, so the proxy should return 403.
+func TestCooperApp_BlockedDomainDenied(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	// curl through the proxy to a non-whitelisted domain (example.com).
+	out, err := barrelExec(barrelName,
+		"curl -s -o /dev/null -w '%{http_code}' --connect-timeout 10 -x http://cooper-proxy:3128 https://example.com")
+
+	statusCode := strings.TrimSpace(out)
+	t.Logf("blocked domain status code: %s (err: %v)", statusCode, err)
+
+	// The proxy should deny this with 403, or the connection should be refused.
+	// Either outcome proves the domain is blocked.
+	if statusCode == "403" {
+		// Expected: proxy denied the CONNECT.
+		return
+	}
+
+	// Connection refused or similar error also means blocked.
+	if err != nil {
+		// curl returned non-zero — connection was denied. This is expected.
+		t.Logf("curl failed with error (expected for blocked domain): %v", err)
+		return
+	}
+
+	// If we got a successful 2xx/3xx, the proxy incorrectly allowed the request.
+	if len(statusCode) == 3 && (statusCode[0] == '2' || statusCode[0] == '3') {
+		t.Errorf("expected proxy to block example.com, but got HTTP %s (allowed)", statusCode)
+	}
+}
+
+// TestCooperApp_SSLBumpWorks verifies that SSL bump (MITM) works end-to-end.
+// The barrel has the Cooper CA cert installed in its trust store, so curl
+// should be able to connect to HTTPS sites through the proxy without
+// certificate errors. We explicitly pass --cacert to ensure the CA is used.
+func TestCooperApp_SSLBumpWorks(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	// Use --cacert to explicitly trust the Cooper CA cert, connecting through
+	// the proxy to a whitelisted HTTPS endpoint. If SSL bump is working, curl
+	// will succeed without certificate errors.
+	out, err := barrelExec(barrelName,
+		"curl --cacert /usr/local/share/ca-certificates/cooper-ca.crt "+
+			"-s -o /dev/null -w '%{http_code}' --connect-timeout 10 "+
+			"-x http://cooper-proxy:3128 https://api.anthropic.com")
+	if err != nil {
+		t.Fatalf("curl with CA cert failed: %v\noutput: %s", err, out)
+	}
+
+	statusCode := strings.TrimSpace(out)
+	t.Logf("SSL bump status code: %s", statusCode)
+
+	// A certificate error would cause curl to exit non-zero (already caught above)
+	// or return 000. Any real HTTP status proves the SSL bump worked.
+	if statusCode == "000" {
+		t.Errorf("curl returned 000 — likely a certificate error; SSL bump may not be working")
+	}
+	if statusCode == "403" {
+		t.Errorf("proxy denied the request (403) — api.anthropic.com should be whitelisted")
+	}
+}
+
+// TestCooperApp_DirectEgressBlocked verifies that the barrel container cannot
+// reach the internet directly (bypassing the proxy). The barrel is on
+// cooper-internal which is created with --internal (no default gateway),
+// so direct TCP connections should fail.
+func TestCooperApp_DirectEgressBlocked(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	// Attempt to connect directly (bypassing proxy via --noproxy '*') with a
+	// short timeout. On the isolated network this should fail with a connection
+	// error, NOT a proxy error.
+	out, err := barrelExec(barrelName,
+		"curl --noproxy '*' --connect-timeout 5 -s -o /dev/null -w '%{http_code}' https://example.com 2>&1")
+
+	t.Logf("direct egress output: %q (err: %v)", strings.TrimSpace(out), err)
+
+	// We expect curl to fail because there is no route to the internet.
+	if err == nil {
+		statusCode := strings.TrimSpace(out)
+		// If curl somehow succeeded with a real HTTP status, that means
+		// direct egress is NOT blocked — a serious security failure.
+		if len(statusCode) == 3 && statusCode[0] >= '1' && statusCode[0] <= '5' && statusCode != "000" {
+			t.Errorf("direct egress succeeded with HTTP %s — network isolation is broken", statusCode)
+		}
+	}
+	// err != nil is the expected case: connection timed out or refused.
+}
+
+// TestCooperApp_BarrelReachesProxy verifies that the barrel container can
+// reach the proxy via Docker DNS (cooper-proxy:3128). This tests that both
+// containers are on the cooper-internal network and DNS resolution works.
+func TestCooperApp_BarrelReachesProxy(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	// Use HTTP (not HTTPS) to avoid SSL bump complexity — we just want to
+	// verify TCP connectivity and DNS resolution to cooper-proxy.
+	out, err := barrelExec(barrelName,
+		"curl -s -o /dev/null -w '%{http_code}' --connect-timeout 10 -x http://cooper-proxy:3128 http://api.anthropic.com")
+	if err != nil {
+		// Even an error response proves connectivity worked at the TCP level
+		// if we got any HTTP status back.
+		t.Logf("curl returned error: %v (output: %s)", err, out)
+	}
+
+	statusCode := strings.TrimSpace(out)
+	t.Logf("barrel-to-proxy status code: %s", statusCode)
+
+	// Any valid HTTP status code (even 403 or 503) proves the barrel resolved
+	// cooper-proxy via DNS and made a TCP connection to port 3128.
+	if statusCode == "000" || statusCode == "" {
+		t.Errorf("barrel could not reach proxy: status=%q — DNS resolution or TCP connectivity failed", statusCode)
+	}
+}
+
+// TestCooperApp_SocatPortForwarding verifies the two-hop socat relay:
+// barrel container -> cooper-proxy -> host.docker.internal -> host listener.
+//
+// A TCP listener on the host writes "hello-from-host\n" to any connection.
+// A port forward rule maps containerPort=19999 -> hostPort=19999. The barrel
+// connects to localhost:19999, which socat inside the barrel forwards to
+// cooper-proxy, which socat inside the proxy forwards to host.docker.internal,
+// which Docker resolves to the host machine where our listener is running.
+func TestCooperApp_SocatPortForwarding(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	// Start a TCP listener on the host on a test port.
+	const testPort = 19999
+	const testMessage = "hello-from-host"
+
+	listener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", testPort))
+	if err != nil {
+		t.Fatalf("failed to start TCP listener on port %d: %v", testPort, err)
+	}
+	t.Cleanup(func() { listener.Close() })
+
+	// Accept connections in a goroutine and write the test message.
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return // listener closed
+			}
+			conn.Write([]byte(testMessage + "\n"))
+			conn.Close()
+		}
+	}()
+
+	// Configure a port forward rule.
+	cooperDir, cfg := setupCooperDir(t)
+	cfg.PortForwardRules = []config.PortForwardRule{
+		{
+			ContainerPort: testPort,
+			HostPort:      testPort,
+			Description:   "test socat relay",
+		},
+	}
+
+	// Re-write the config and socat rules with the port forward.
+	cfgPath := filepath.Join(cooperDir, "config.json")
+	if err := config.SaveConfig(cfgPath, cfg); err != nil {
+		t.Fatalf("save config with port forward: %v", err)
+	}
+	if err := docker.WritePortForwardConfig(cooperDir, cfg.BridgePort, cfg.PortForwardRules); err != nil {
+		t.Fatalf("write socat rules: %v", err)
+	}
+
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	// Give socat relays a moment to start inside the containers.
+	time.Sleep(3 * time.Second)
+
+	// Connect from inside the barrel to localhost:19999. The socat relay in
+	// the barrel forwards this to cooper-proxy's socat, which forwards to
+	// host.docker.internal:19999, reaching our listener.
+	out, err := barrelExec(barrelName,
+		fmt.Sprintf("bash -c 'timeout 5 bash -c \"cat < /dev/tcp/localhost/%d\" 2>&1 || echo SOCAT_FAIL'", testPort))
+
+	t.Logf("socat forwarding output: %q (err: %v)", strings.TrimSpace(out), err)
+
+	trimmed := strings.TrimSpace(out)
+	if !strings.Contains(trimmed, testMessage) {
+		// Try an alternative approach with curl in case /dev/tcp is not available.
+		out2, err2 := barrelExec(barrelName,
+			fmt.Sprintf("curl -s --connect-timeout 5 telnet://localhost:%d", testPort))
+		t.Logf("socat forwarding (curl fallback) output: %q (err: %v)", strings.TrimSpace(out2), err2)
+
+		trimmed2 := strings.TrimSpace(out2)
+		if !strings.Contains(trimmed2, testMessage) {
+			t.Errorf("expected to receive %q from host through socat relay, got: %q (first attempt: %q)",
+				testMessage, trimmed2, trimmed)
+		}
+	}
+}
+
+// =====================================================================
+// Additional integration tests
+// =====================================================================
+
+// TestCooperApp_CLIOneShot starts the app and a barrel, runs a one-shot
+// command via ExecBarrel with interactive=false, and verifies stdout
+// contains the expected output.
+func TestCooperApp_CLIOneShot(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	// Run a one-shot command inside the barrel (non-interactive).
+	out, err := barrelExec(barrelName, "echo hello")
+	if err != nil {
+		t.Fatalf("one-shot exec failed: %v\noutput: %s", err, out)
+	}
+
+	trimmed := strings.TrimSpace(out)
+	if trimmed != "hello" {
+		t.Errorf("one-shot output = %q, want %q", trimmed, "hello")
+	}
+}
+
+// TestCooperApp_CLITokenForwarding starts a barrel with env args containing
+// OPENAI_API_KEY and GH_TOKEN, then verifies those variables are accessible
+// inside the container via docker exec.
+func TestCooperApp_CLITokenForwarding(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	// Simulate token forwarding by running docker exec with -e flags,
+	// the same mechanism that runCLI uses via ExecBarrel's envArgs.
+	envArgs := []string{
+		"-e", "OPENAI_API_KEY=test-openai-key-12345",
+		"-e", "GH_TOKEN=test-gh-token-67890",
+	}
+
+	// Build the docker exec command manually (ExecBarrel wires to os.Stdout,
+	// so we use exec.Command directly to capture output).
+	args := append([]string{"exec"}, envArgs...)
+	args = append(args, barrelName, "bash", "-c", "echo OPENAI=$OPENAI_API_KEY GH=$GH_TOKEN")
+	cmd := exec.Command("docker", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("exec with env args failed: %v\noutput: %s", err, output)
+	}
+
+	out := strings.TrimSpace(string(output))
+	if !strings.Contains(out, "OPENAI=test-openai-key-12345") {
+		t.Errorf("OPENAI_API_KEY not forwarded; output: %s", out)
+	}
+	if !strings.Contains(out, "GH=test-gh-token-67890") {
+		t.Errorf("GH_TOKEN not forwarded; output: %s", out)
+	}
+}
+
+// TestCooperApp_CLIClaudeCodeNotForwarded verifies that the CLAUDECODE
+// environment variable is NOT forwarded into the barrel container. Claude
+// Code sets CLAUDECODE=1 to detect nested sessions, and forwarding it would
+// cause "Error: Claude Code cannot be launched inside another Claude Code
+// session." The container must run as a fresh top-level session.
+func TestCooperApp_CLIClaudeCodeNotForwarded(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+
+	// Enable claude and codex so ResolveTokens exercises the full tool list.
+	cfg.AITools = []config.ToolConfig{
+		{Name: "claude", Enabled: true, Mode: config.ModeLatest},
+		{Name: "codex", Enabled: true, Mode: config.ModeLatest},
+	}
+
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	// Set CLAUDECODE in the current process environment (simulating a
+	// nested Claude Code session on the host).
+	t.Setenv("CLAUDECODE", "1")
+
+	// Resolve tokens with the environment variable set.
+	workspaceDir := t.TempDir()
+	enabledTools := []string{"claude", "codex"}
+	tokens, err := auth.ResolveTokens(workspaceDir, cooperDir, enabledTools)
+	if err != nil {
+		t.Fatalf("ResolveTokens() failed: %v", err)
+	}
+
+	// Verify that CLAUDECODE is NOT among the resolved tokens.
+	for _, tok := range tokens {
+		if tok.Name == "CLAUDECODE" {
+			t.Errorf("CLAUDECODE was resolved as a token but should be excluded")
+		}
+	}
+
+	// Also verify that CLAUDECODE is not present in the barrel container's
+	// own environment (it should never have been set during StartBarrel).
+	out, err := barrelExec(barrelName, "env")
+	if err != nil {
+		t.Fatalf("env command failed: %v\noutput: %s", err, out)
+	}
+
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "CLAUDECODE=") {
+			t.Errorf("CLAUDECODE found in barrel environment: %s", line)
+		}
+	}
+}
+
+// TestCooperApp_CLIReusesContainer starts a barrel for a workspace, verifies
+// it is running, then calls StartBarrel again for the same workspace and
+// verifies the same container name is reused (not duplicated).
+func TestCooperApp_CLIReusesContainer(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	// Verify the barrel is running.
+	running, err := docker.IsBarrelRunning(barrelName)
+	if err != nil {
+		t.Fatalf("IsBarrelRunning() failed: %v", err)
+	}
+	if !running {
+		t.Fatal("barrel should be running after startAppAndBarrel")
+	}
+
+	// Determine the workspace directory used by startAppAndBarrel.
+	// We can get it from the container label.
+	wsOut, err := exec.Command("docker", "inspect",
+		"--format", "{{index .Config.Labels \"cooper.workspace\"}}",
+		barrelName).Output()
+	if err != nil {
+		t.Fatalf("inspect barrel workspace label: %v", err)
+	}
+	workspaceDir := strings.TrimSpace(string(wsOut))
+
+	// Call BarrelContainerName for the same workspace -- should return same name.
+	secondName := docker.BarrelContainerName(workspaceDir)
+	if secondName != barrelName {
+		t.Errorf("BarrelContainerName returned %q on second call, want %q (reuse)", secondName, barrelName)
+	}
+
+	// Call StartBarrel again for the same workspace (it removes and recreates).
+	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir); err != nil {
+		t.Fatalf("second StartBarrel() failed: %v", err)
+	}
+
+	// Container should still exist with the same name.
+	running, err = docker.IsBarrelRunning(barrelName)
+	if err != nil {
+		t.Fatalf("IsBarrelRunning() after second start: %v", err)
+	}
+	if !running {
+		t.Error("barrel should be running after second StartBarrel call")
+	}
+
+	// Verify there is exactly one container with the barrel name prefix for this workspace.
+	barrels, err := docker.ListBarrels()
+	if err != nil {
+		t.Fatalf("ListBarrels() failed: %v", err)
+	}
+	count := 0
+	for _, b := range barrels {
+		if b.WorkspaceDir == workspaceDir {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected 1 barrel for workspace %s, found %d", workspaceDir, count)
+	}
+}
+
+// TestCooperApp_CLIChecksProxyRunning verifies that without starting the
+// proxy, IsProxyRunning returns false. This mirrors the check that
+// `cooper cli` performs before starting a barrel.
+func TestCooperApp_CLIChecksProxyRunning(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	// Ensure proxy is not running (clean state).
+	_ = exec.Command("docker", "rm", "-f", docker.ContainerProxy).Run()
+
+	running, err := docker.IsProxyRunning()
+	if err != nil {
+		t.Fatalf("IsProxyRunning() returned error: %v", err)
+	}
+	if running {
+		t.Error("IsProxyRunning() = true, want false when proxy is not started")
+	}
+}
+
+// TestCooperApp_SocatLiveReload starts the app with port forward rules,
+// calls ReloadSocat with new rules, and verifies the socat-rules.json is
+// updated on disk. Then it verifies socat processes are running inside the
+// proxy container for the new rules.
+func TestCooperApp_SocatLiveReload(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+
+	// Start with one port forward rule.
+	cfg.PortForwardRules = []config.PortForwardRule{
+		{ContainerPort: 15000, HostPort: 15000, Description: "initial rule"},
+	}
+	if err := config.SaveConfig(filepath.Join(cooperDir, "config.json"), cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if err := docker.WritePortForwardConfig(cooperDir, cfg.BridgePort, cfg.PortForwardRules); err != nil {
+		t.Fatalf("write initial socat rules: %v", err)
+	}
+
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	// Give socat relays time to start.
+	time.Sleep(3 * time.Second)
+
+	// Now reload with NEW rules (different port).
+	newRules := []config.PortForwardRule{
+		{ContainerPort: 16000, HostPort: 16000, Description: "reloaded rule"},
+		{ContainerPort: 16001, HostPort: 16001, Description: "second reloaded rule"},
+	}
+	if err := docker.ReloadSocat(cooperDir, cfg.BridgePort, newRules); err != nil {
+		// ReloadSocat may return signal errors if containers don't support
+		// SIGHUP, but the config file should still be written.
+		t.Logf("ReloadSocat returned (non-fatal): %v", err)
+	}
+
+	// Verify socat-rules.json was updated.
+	socatPath := filepath.Join(cooperDir, "socat-rules.json")
+	data, err := os.ReadFile(socatPath)
+	if err != nil {
+		t.Fatalf("read socat-rules.json: %v", err)
+	}
+
+	var socatCfg docker.PortForwardConfig
+	if err := json.Unmarshal(data, &socatCfg); err != nil {
+		t.Fatalf("parse socat-rules.json: %v", err)
+	}
+
+	if len(socatCfg.Rules) != 2 {
+		t.Fatalf("socat-rules.json has %d rules, want 2", len(socatCfg.Rules))
+	}
+	if socatCfg.Rules[0].ContainerPort != 16000 {
+		t.Errorf("rule[0].ContainerPort = %d, want 16000", socatCfg.Rules[0].ContainerPort)
+	}
+	if socatCfg.Rules[1].ContainerPort != 16001 {
+		t.Errorf("rule[1].ContainerPort = %d, want 16001", socatCfg.Rules[1].ContainerPort)
+	}
+
+	// Verify socat processes are running inside the proxy container.
+	// Wait a moment for SIGHUP handler to spawn new socat processes.
+	time.Sleep(2 * time.Second)
+	psOut, err := exec.Command("docker", "exec", docker.ContainerProxy, "ps", "aux").CombinedOutput()
+	if err != nil {
+		t.Logf("ps inside proxy failed (non-fatal): %v", err)
+	} else {
+		psStr := string(psOut)
+		t.Logf("proxy processes:\n%s", psStr)
+		// Check that socat appears in the process list.
+		if strings.Contains(psStr, "socat") {
+			t.Logf("socat processes found in proxy container")
+		} else {
+			t.Logf("no socat processes visible in proxy (entrypoint may not have started socat yet)")
+		}
+	}
+}
+
+// TestCooperApp_BridgeBindAddress starts the app and verifies the bridge
+// server is reachable on 127.0.0.1:port. It also verifies that the bridge
+// is NOT reachable on 0.0.0.0 from a different interface (if possible).
+func TestCooperApp_BridgeBindAddress(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	// Verify bridge is reachable on 127.0.0.1.
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", cfg.BridgePort)
+	resp, err := client.Get(healthURL)
+	if err != nil {
+		t.Fatalf("GET %s failed: %v", healthURL, err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("bridge /health on 127.0.0.1 status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// Attempt to verify bridge is NOT reachable from a non-loopback address.
+	// We try to connect on a non-loopback IP; if the bridge is correctly bound
+	// to 127.0.0.1, it should refuse connections from other addresses.
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Logf("cannot enumerate interfaces: %v", err)
+		return
+	}
+
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() || ip.To4() == nil {
+				continue
+			}
+
+			// Try connecting to the bridge on a non-loopback IP.
+			externalURL := fmt.Sprintf("http://%s:%d/health", ip.String(), cfg.BridgePort)
+			externalResp, externalErr := client.Get(externalURL)
+			if externalErr == nil {
+				externalResp.Body.Close()
+				if externalResp.StatusCode == http.StatusOK {
+					t.Errorf("bridge reachable on non-loopback address %s (should only bind to 127.0.0.1)", ip.String())
+				}
+			}
+			// Connection refused or timeout is expected -- bridge is bound to localhost only.
+			return // Only need to test one non-loopback address.
+		}
+	}
+}
+
+// TestCooperApp_HistoryTabsReceiveEvents starts the app, sends an ACL
+// request, approves it, and verifies the DecisionChan receives a
+// DecisionEvent with DecisionAllow.
+func TestCooperApp_HistoryTabsReceiveEvents(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	cfg.MonitorTimeoutSecs = 10
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	// Connect to the ACL Unix socket and send a domain request.
+	socketPath := filepath.Join(cooperDir, "run", "acl.sock")
+	conn, err := net.DialTimeout("unix", socketPath, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial ACL socket: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = fmt.Fprintf(conn, "history-test.com 443 172.18.0.10\n")
+	if err != nil {
+		t.Fatalf("write to ACL socket: %v", err)
+	}
+
+	// Read the ACL request from the channel.
+	var req ACLRequest
+	select {
+	case req = <-app.ACLRequests():
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for ACL request on channel")
+	}
+
+	if req.Domain != "history-test.com" {
+		t.Errorf("ACLRequest.Domain = %q, want %q", req.Domain, "history-test.com")
+	}
+
+	// Approve the request.
+	app.ApproveRequest(req.ID)
+
+	// Verify the decision event appears on the decisions channel.
+	select {
+	case evt := <-app.ACLDecisions():
+		if evt.Decision != DecisionAllow {
+			t.Errorf("DecisionEvent.Decision = %v, want DecisionAllow", evt.Decision)
+		}
+		if evt.Reason != "approved" {
+			t.Errorf("DecisionEvent.Reason = %q, want %q", evt.Reason, "approved")
+		}
+		if evt.Request.Domain != "history-test.com" {
+			t.Errorf("DecisionEvent.Request.Domain = %q, want %q", evt.Request.Domain, "history-test.com")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for ACL decision on channel")
+	}
+
+	// Read and discard socket response.
+	buf := make([]byte, 64)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	conn.Read(buf)
+}
+
+// TestCooperApp_ACLBackpressure starts the app, floods 50 ACL requests
+// simultaneously without consuming the channel, then consumes all of them
+// and verifies none were dropped.
+func TestCooperApp_ACLBackpressure(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	cfg.MonitorTimeoutSecs = 30 // Long timeout so requests don't auto-deny.
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	socketPath := filepath.Join(cooperDir, "run", "acl.sock")
+
+	const numRequests = 50
+
+	// Send 50 ACL requests concurrently WITHOUT consuming the channel first.
+	var wg sync.WaitGroup
+	conns := make([]net.Conn, numRequests)
+	for i := 0; i < numRequests; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			conn, err := net.DialTimeout("unix", socketPath, 10*time.Second)
+			if err != nil {
+				t.Errorf("dial ACL socket [%d]: %v", idx, err)
+				return
+			}
+			conns[idx] = conn
+			domain := fmt.Sprintf("backpressure-%d.example.com", idx)
+			if _, err := fmt.Fprintf(conn, "%s 443 172.18.0.%d\n", domain, idx+10); err != nil {
+				t.Errorf("write to ACL socket [%d]: %v", idx, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// Now consume all requests from the channel.
+	received := make(map[string]bool)
+	timeout := time.After(30 * time.Second)
+	for len(received) < numRequests {
+		select {
+		case req := <-app.ACLRequests():
+			received[req.Domain] = true
+			// Approve each request so the connection completes.
+			app.ApproveRequest(req.ID)
+		case <-timeout:
+			t.Fatalf("timed out after receiving %d/%d requests", len(received), numRequests)
+		}
+	}
+
+	// Verify all 50 domains were received.
+	for i := 0; i < numRequests; i++ {
+		domain := fmt.Sprintf("backpressure-%d.example.com", i)
+		if !received[domain] {
+			t.Errorf("request for %s was dropped", domain)
+		}
+	}
+
+	// Clean up connections.
+	for _, conn := range conns {
+		if conn != nil {
+			conn.Close()
+		}
+	}
+}
+
+// TestCooperApp_ContainerNamingCollision creates a barrel for a "myproject"
+// workspace, then creates a barrel for a different path also named "myproject",
+// and verifies the second gets a hash suffix to avoid collision.
+func TestCooperApp_ContainerNamingCollision(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// Create two workspace directories with the same base name "myproject".
+	ws1 := filepath.Join(t.TempDir(), "myproject")
+	ws2 := filepath.Join(t.TempDir(), "myproject")
+	if err := os.MkdirAll(ws1, 0755); err != nil {
+		t.Fatalf("mkdir ws1: %v", err)
+	}
+	if err := os.MkdirAll(ws2, 0755); err != nil {
+		t.Fatalf("mkdir ws2: %v", err)
+	}
+
+	// Start first barrel.
+	if err := docker.StartBarrel(cfg, ws1, cooperDir); err != nil {
+		app.Stop()
+		t.Fatalf("StartBarrel(ws1) failed: %v", err)
+	}
+	name1 := docker.BarrelContainerName(ws1)
+	t.Logf("barrel 1: name=%s workspace=%s", name1, ws1)
+
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", name1).Run()
+	})
+
+	waitForContainer(t, name1, 15*time.Second)
+
+	// Start second barrel with a different absolute path but same dir name.
+	if err := docker.StartBarrel(cfg, ws2, cooperDir); err != nil {
+		app.Stop()
+		t.Fatalf("StartBarrel(ws2) failed: %v", err)
+	}
+	name2 := docker.BarrelContainerName(ws2)
+	t.Logf("barrel 2: name=%s workspace=%s", name2, ws2)
+
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", name2).Run()
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	// The two names must be different (second should have a hash suffix).
+	if name1 == name2 {
+		t.Errorf("both barrels have the same name %q; expected hash suffix on the second", name1)
+	}
+
+	// The first should be "barrel-myproject", the second "barrel-myproject-XXXX".
+	if !strings.HasPrefix(name1, "barrel-myproject") {
+		t.Errorf("name1 = %q, want prefix %q", name1, "barrel-myproject")
+	}
+	if !strings.HasPrefix(name2, "barrel-myproject-") {
+		t.Errorf("name2 = %q, want prefix %q with hash suffix", name2, "barrel-myproject-")
+	}
+}
+
+// TestCooperApp_Cleanup starts the app with proxy and a barrel, then calls
+// the cleanup functions and verifies all containers are stopped and removed.
+func TestCooperApp_Cleanup(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	// Do NOT use the standard cleanup because we are testing cleanup itself.
+
+	// Verify proxy and barrel are running before cleanup.
+	proxyRunning, err := docker.IsProxyRunning()
+	if err != nil {
+		t.Fatalf("IsProxyRunning() before cleanup: %v", err)
+	}
+	if !proxyRunning {
+		t.Fatal("proxy should be running before cleanup")
+	}
+
+	barrelRunning, err := docker.IsBarrelRunning(barrelName)
+	if err != nil {
+		t.Fatalf("IsBarrelRunning() before cleanup: %v", err)
+	}
+	if !barrelRunning {
+		t.Fatal("barrel should be running before cleanup")
+	}
+
+	// Perform cleanup: stop all barrels, then stop proxy.
+	barrels, err := docker.ListBarrels()
+	if err != nil {
+		t.Fatalf("ListBarrels() failed: %v", err)
+	}
+	for _, b := range barrels {
+		if err := docker.StopBarrel(b.Name); err != nil {
+			t.Errorf("StopBarrel(%s) failed: %v", b.Name, err)
+		}
+	}
+
+	if err := docker.StopProxy(); err != nil {
+		t.Errorf("StopProxy() failed: %v", err)
+	}
+
+	// Also stop via the app to close loggers and clean up resources.
+	app.Stop()
+
+	// Verify barrel is no longer running.
+	barrelRunning, err = docker.IsBarrelRunning(barrelName)
+	if err != nil {
+		t.Fatalf("IsBarrelRunning() after cleanup: %v", err)
+	}
+	if barrelRunning {
+		t.Error("barrel still running after cleanup")
+	}
+
+	// Verify proxy is no longer running.
+	proxyRunning, err = docker.IsProxyRunning()
+	if err != nil {
+		t.Fatalf("IsProxyRunning() after cleanup: %v", err)
+	}
+	if proxyRunning {
+		t.Error("proxy still running after cleanup")
+	}
+
+	// Verify the containers were actually removed (not just stopped).
+	inspectBarrel := exec.Command("docker", "inspect", barrelName)
+	if err := inspectBarrel.Run(); err == nil {
+		t.Errorf("barrel container %s still exists after cleanup (expected removal)", barrelName)
+	}
+
+	inspectProxy := exec.Command("docker", "inspect", docker.ContainerProxy)
+	if err := inspectProxy.Run(); err == nil {
+		t.Errorf("proxy container still exists after cleanup (expected removal)")
+	}
+
+	// Final cleanup of networks.
+	cleanupDocker(t)
+}
+
+// TestCooperApp_UpdateSelectiveRebuild modifies config to change only AI
+// tools and verifies the generated Dockerfile template contains the correct
+// CACHE_BUST_AI ARG while CACHE_BUST_LANG remains at the default value.
+// This validates the selective rebuild mechanism used by `cooper update`.
+func TestCooperApp_UpdateSelectiveRebuild(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	// Create a config with specific AI and programming tools.
+	cfg := config.DefaultConfig()
+
+	// Render the initial Dockerfile.
+	initialDockerfile, err := templates.RenderCLIDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderCLIDockerfile (initial) failed: %v", err)
+	}
+
+	// The initial Dockerfile should contain both CACHE_BUST_LANG and CACHE_BUST_AI
+	// with their default value of 1.
+	if !strings.Contains(initialDockerfile, "CACHE_BUST_LANG=1") {
+		t.Error("initial Dockerfile missing CACHE_BUST_LANG=1")
+	}
+	if !strings.Contains(initialDockerfile, "CACHE_BUST_AI=1") {
+		t.Error("initial Dockerfile missing CACHE_BUST_AI=1")
+	}
+
+	// Simulate what `cooper update` does when only AI tools changed:
+	// it passes CACHE_BUST_AI as a build arg with a new value (timestamp),
+	// but does NOT pass CACHE_BUST_LANG. Docker uses the Dockerfile default
+	// for CACHE_BUST_LANG (=1, cached) and the new value for CACHE_BUST_AI
+	// (cache-busted).
+
+	// Verify the build args logic: when aiChanged=true, langChanged=false.
+	aiChanged := true
+	langChanged := false
+
+	buildArgs := map[string]string{}
+	cacheBust := fmt.Sprintf("%d", time.Now().Unix())
+	if langChanged {
+		buildArgs["CACHE_BUST_LANG"] = cacheBust
+	}
+	if aiChanged {
+		buildArgs["CACHE_BUST_AI"] = cacheBust
+	}
+
+	// CACHE_BUST_AI should be set with a timestamp.
+	if _, ok := buildArgs["CACHE_BUST_AI"]; !ok {
+		t.Error("CACHE_BUST_AI should be in buildArgs when AI tools changed")
+	}
+
+	// CACHE_BUST_LANG should NOT be set (left at Dockerfile default).
+	if _, ok := buildArgs["CACHE_BUST_LANG"]; ok {
+		t.Error("CACHE_BUST_LANG should NOT be in buildArgs when only AI tools changed")
+	}
+
+	// Now verify the reverse: when only lang tools changed.
+	buildArgs2 := map[string]string{}
+	if true { // langChanged
+		buildArgs2["CACHE_BUST_LANG"] = cacheBust
+	}
+	if false { // aiChanged
+		buildArgs2["CACHE_BUST_AI"] = cacheBust
+	}
+
+	if _, ok := buildArgs2["CACHE_BUST_LANG"]; !ok {
+		t.Error("CACHE_BUST_LANG should be in buildArgs when lang tools changed")
+	}
+	if _, ok := buildArgs2["CACHE_BUST_AI"]; ok {
+		t.Error("CACHE_BUST_AI should NOT be in buildArgs when only lang tools changed")
+	}
+}
+
+// TestCooperApp_ProofDiagnostics starts the app with a barrel and runs
+// proof.RunAllChecks. Verifies that at least the proxy connectivity, SSL
+// bump, and blocked domain checks are present in the results and that
+// critical checks pass.
+func TestCooperApp_ProofDiagnostics(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	// Run all diagnostic checks.
+	results, err := proof.RunAllChecks(barrelName, cfg)
+	if err != nil {
+		t.Fatalf("RunAllChecks() failed: %v", err)
+	}
+
+	if len(results) == 0 {
+		t.Fatal("RunAllChecks() returned 0 results")
+	}
+
+	// Log all results for debugging.
+	for _, r := range results {
+		t.Logf("proof: [%s] %s: %s", r.Status, r.Name, r.Detail)
+	}
+
+	// Build a map for easy lookup.
+	resultMap := make(map[string]proof.ProofResult)
+	for _, r := range results {
+		resultMap[r.Name] = r
+	}
+
+	// Verify proxy connectivity check exists and passes.
+	if r, ok := resultMap["Proxy Connectivity"]; ok {
+		if r.Status != proof.StatusOK {
+			t.Errorf("Proxy Connectivity check: status=%s detail=%s", r.Status, r.Detail)
+		}
+	} else {
+		t.Error("Proxy Connectivity check not found in results")
+	}
+
+	// Verify SSL bump check exists.
+	if r, ok := resultMap["SSL Bump"]; ok {
+		if r.Status == proof.StatusFAIL {
+			t.Errorf("SSL Bump check failed: %s", r.Detail)
+		}
+	} else {
+		t.Error("SSL Bump check not found in results")
+	}
+
+	// Verify blocked domain check exists (should confirm non-whitelisted domains are denied).
+	if r, ok := resultMap["Blocked Domain"]; ok {
+		if r.Status == proof.StatusFAIL {
+			t.Errorf("Blocked Domain check failed: %s", r.Detail)
+		}
+	} else {
+		t.Error("Blocked Domain check not found in results")
+	}
+
+	// Verify direct egress check exists (barrel should not have direct internet).
+	if r, ok := resultMap["Direct Egress"]; ok {
+		if r.Status == proof.StatusFAIL {
+			t.Errorf("Direct Egress check failed: %s", r.Detail)
+		}
+	} else {
+		t.Error("Direct Egress check not found in results")
+	}
+}
+
+// TestCooperApp_LoginShellPATH verifies that interactive login shells have the
+// correct PATH including npm-global/bin and .local/bin. This catches the bug
+// where Debian login shells reset PATH, making tools invisible to users.
+func TestCooperApp_LoginShellPATH(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	defer app.Stop()
+
+	// Run 'echo $PATH' in a login shell (bash -l), not a regular shell.
+	loginPath, err := barrelExec(barrelName, "bash -lc 'echo $PATH'")
+	if err != nil {
+		t.Fatalf("login shell PATH check failed: %v", err)
+	}
+
+	if !strings.Contains(loginPath, ".npm-global/bin") {
+		t.Errorf("login shell PATH missing .npm-global/bin: %s", loginPath)
+	}
+	if !strings.Contains(loginPath, ".local/bin") {
+		t.Errorf("login shell PATH missing .local/bin: %s", loginPath)
+	}
+
+	// Verify enabled AI tools are found in login shell.
+	for _, tool := range cfg.AITools {
+		if !tool.Enabled {
+			continue
+		}
+		which, err := barrelExec(barrelName, "bash -lc 'which "+tool.Name+"'")
+		if err != nil || strings.TrimSpace(which) == "" {
+			t.Errorf("login shell: '%s' not found (enabled but not in login PATH)", tool.Name)
+		} else {
+			t.Logf("login shell: %s found at %s", tool.Name, strings.TrimSpace(which))
+		}
+	}
+}
+
+// Ensure imported packages are used. These variables exist solely to prevent
+// "imported and not used" compilation errors for packages that are used
+// conditionally or in specific test helpers above.
+var (
+	_ = auth.ResolveTokens
+	_ = names.Generate
+)

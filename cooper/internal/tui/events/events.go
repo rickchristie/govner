@@ -6,14 +6,12 @@
 package events
 
 import (
-	"github.com/rickchristie/govner/cooper/internal/bridge"
-	"github.com/rickchristie/govner/cooper/internal/docker"
-	"github.com/rickchristie/govner/cooper/internal/proxy"
+	"github.com/rickchristie/govner/cooper/internal/app"
 )
 
 // ACLRequestMsg wraps a new pending ACL request arriving from the proxy.
 type ACLRequestMsg struct {
-	Request proxy.ACLRequest
+	Request app.ACLRequest
 }
 
 // AnimTickMsg is sent every CountdownTickInterval (100 ms) for smooth
@@ -22,7 +20,7 @@ type AnimTickMsg struct{}
 
 // ContainerStatsMsg carries a periodic snapshot of container resource usage.
 type ContainerStatsMsg struct {
-	Stats []docker.ContainerStat
+	Stats []app.ContainerStat
 }
 
 // TickMsg is sent every UITickInterval (1 s) for general UI refresh
@@ -34,10 +32,10 @@ type ShutdownCompleteMsg struct{}
 
 // ACLDecisionMsg wraps a resolved ACL decision for the history tabs.
 type ACLDecisionMsg struct {
-	Event proxy.DecisionEvent
+	Event app.DecisionEvent
 }
 
 // BridgeLogMsg wraps a new execution log entry from the bridge server.
 type BridgeLogMsg struct {
-	Log bridge.ExecutionLog
+	Log app.ExecutionLog
 }

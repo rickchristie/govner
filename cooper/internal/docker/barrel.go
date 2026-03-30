@@ -183,6 +183,14 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 	// Language-specific caches (based on enabled programming tools).
 	args = appendLanguageCacheMounts(args, homeDir, cfg)
 
+	// CA certificate for SSL bump trust. Volume-mounted so the barrel always
+	// uses the same CA as the running proxy, even if the CA was regenerated
+	// after the barrel image was built.
+	caCert := filepath.Join(cooperDir, "ca", "cooper-ca.pem")
+	if fileExists(caCert) {
+		args = append(args, "-v", fmt.Sprintf("%s:/etc/cooper/cooper-ca.pem:ro", caCert))
+	}
+
 	// Socat port forwarding rules (live-reloadable via SIGHUP).
 	socatRules := filepath.Join(cooperDir, socatRulesFile)
 	if fileExists(socatRules) {

@@ -13,12 +13,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
+	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/auth"
 	"github.com/rickchristie/govner/cooper/internal/bridge"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/configure"
 	"github.com/rickchristie/govner/cooper/internal/docker"
-	"github.com/rickchristie/govner/cooper/internal/logging"
 	"github.com/rickchristie/govner/cooper/internal/names"
 	"github.com/rickchristie/govner/cooper/internal/proof"
 	"github.com/rickchristie/govner/cooper/internal/proxy"
@@ -424,11 +424,6 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// Create a BubbleTea program for the loading screen.
 	p := tea.NewProgram(&loadingAdapter{model: loadModel}, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
-	// Create host-side loggers.
-	logDir := filepath.Join(cooperDir, "logs")
-	bridgeLogger := logging.NewLogger(logDir, "bridge", 10*1024*1024, 10)
-	aclLogger := logging.NewLogger(logDir, "acl", 10*1024*1024, 10)
-
 	// Services that need cleanup on exit.
 	var aclListener *proxy.ACLListener
 	var bridgeServer *bridge.BridgeServer
@@ -540,73 +535,19 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Load persisted bridge routes, merging with config defaults.
-	savedRoutes, err := bridge.LoadBridgeRoutes(cooperDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not load bridge routes: %v\n", err)
-	}
-	if len(savedRoutes) > 0 {
-		cfg.BridgeRoutes = savedRoutes
-		if bridgeServer != nil {
-			bridgeServer.UpdateRoutes(savedRoutes)
-		}
-	}
+	// Build the App, adopting the pre-started infrastructure.
+	cooperApp := app.NewCooperApp(cfg, cooperDir)
+	cooperApp.Adopt(aclListener, bridgeServer, startupWarnings)
 
 	// Transition to the main TUI.
-	mainModel := tui.NewModel(cfg)
-	mainModel.SetCooperDir(cooperDir)
-
-	// Wire channels with logging taps: each incoming event is logged to
-	// the file logger and then forwarded to the TUI via a new channel.
-	if aclListener != nil {
-		aclSrc := aclListener.RequestChan()
-		aclFwd := make(chan proxy.ACLRequest, 256)
-		go func() {
-			for req := range aclSrc {
-				aclLogger.Log(fmt.Sprintf("domain=%s port=%s src=%s", req.Domain, req.Port, req.SourceIP))
-				aclFwd <- req
-			}
-			close(aclFwd)
-		}()
-		mainModel.SetACLRequestChan(aclFwd)
-
-		// Forward decision events to TUI with a logging tap.
-		decisionSrc := aclListener.DecisionChan()
-		decisionFwd := make(chan proxy.DecisionEvent, 1024)
-		go func() {
-			for evt := range decisionSrc {
-				aclLogger.Log(fmt.Sprintf("decision=%s domain=%s port=%s src=%s",
-					evt.Reason, evt.Request.Domain, evt.Request.Port, evt.Request.SourceIP))
-				decisionFwd <- evt
-			}
-			close(decisionFwd)
-		}()
-		mainModel.SetACLDecisionChan(decisionFwd)
-	}
-	if bridgeServer != nil {
-		bridgeSrc := bridgeServer.LogChan()
-		bridgeFwd := make(chan bridge.ExecutionLog, 256)
-		go func() {
-			for entry := range bridgeSrc {
-				bridgeLogger.Log(fmt.Sprintf("route=%s script=%s exit=%d duration=%s err=%s",
-					entry.Route, entry.ScriptPath, entry.ExitCode, entry.Duration, entry.Error))
-				bridgeFwd <- entry
-			}
-			close(bridgeFwd)
-		}()
-		mainModel.SetBridgeLogChan(bridgeFwd)
-		mainModel.SetBridgeServer(bridgeServer)
-	}
-	if aclListener != nil {
-		mainModel.SetACLListener(aclListener)
-	}
+	mainModel := tui.NewModel(cooperApp)
 
 	// Wire all tab sub-models.
-	containersModel := containers.New()
+	containersModel := containers.New(cooperApp)
 	mainModel.SetContainersModel(containersModel)
 
 	timeout := time.Duration(cfg.MonitorTimeoutSecs) * time.Second
-	proxyMonModel := proxymon.New(aclListener, timeout)
+	proxyMonModel := proxymon.New(cooperApp, timeout)
 	mainModel.SetProxyMonModel(proxyMonModel)
 
 	blockedModel := history.NewWithCapacity(history.ModeBlocked, cfg.BlockedHistoryLimit)
@@ -633,13 +574,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	aboutModel := about.New(cfg)
 	// Send startup version warnings collected during loading.
-	if len(startupWarnings) > 0 {
-		aboutModel.Update(about.StartupWarningsMsg{Warnings: startupWarnings})
+	if warnings := cooperApp.StartupWarnings(); len(warnings) > 0 {
+		aboutModel.Update(about.StartupWarningsMsg{Warnings: warnings})
 	}
 	mainModel.SetAboutModel(aboutModel)
-
-	// Enable the initial docker stats poll so the containers tab gets data.
-	mainModel.SetPollStats(true)
 
 	// Create the main TUI program so we can reference it in the shutdown
 	// callback for sending ShutdownCompleteMsg.
@@ -649,30 +587,14 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// in a goroutine and send ShutdownCompleteMsg when done.
 	mainModel.SetOnShutdown(func() {
 		go func() {
-			// Stop ACL listener.
-			if aclListener != nil {
-				aclListener.Stop()
-			}
-			// Stop bridge server.
-			if bridgeServer != nil {
-				bridgeServer.Stop()
-			}
-			// Stop all barrel containers.
-			barrels, _ := docker.ListBarrels()
-			for _, b := range barrels {
-				docker.StopBarrel(b.Name)
-			}
-			// Stop proxy.
-			docker.StopProxy()
+			cooperApp.Stop()
 			// Signal the TUI that shutdown is complete so it can quit.
 			mainProgram.Send(events.ShutdownCompleteMsg{})
 		}()
 	})
 
 	mainModel.SetOnQuit(func() {
-		cleanupServices(aclListener, bridgeServer)
-		bridgeLogger.Close()
-		aclLogger.Close()
+		cooperApp.Stop()
 	})
 
 	// Run the main TUI.
@@ -680,8 +602,6 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("TUI: %w", err)
 	}
 
-	bridgeLogger.Close()
-	aclLogger.Close()
 	return nil
 }
 
@@ -1074,10 +994,10 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create mock ACL request channel with sample pending requests.
-	aclCh := make(chan proxy.ACLRequest, 10)
+	aclCh := make(chan app.ACLRequest, 10)
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		mockRequests := []proxy.ACLRequest{
+		mockRequests := []app.ACLRequest{
 			{ID: "req-1", Domain: "stackoverflow.com", Port: "443", SourceIP: "172.20.0.3", Timestamp: time.Now()},
 			{ID: "req-2", Domain: "docs.python.org", Port: "443", SourceIP: "172.20.0.3", Timestamp: time.Now()},
 			{ID: "req-3", Domain: "pkg.go.dev", Port: "443", SourceIP: "172.20.0.4", Timestamp: time.Now()},
@@ -1088,10 +1008,10 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 	}()
 
 	// Create mock bridge log channel.
-	bridgeLogCh := make(chan bridge.ExecutionLog, 10)
+	bridgeLogCh := make(chan app.ExecutionLog, 10)
 	go func() {
 		time.Sleep(800 * time.Millisecond)
-		bridgeLogCh <- bridge.ExecutionLog{
+		bridgeLogCh <- app.ExecutionLog{
 			Timestamp:  time.Now().Add(-2 * time.Minute),
 			Route:      "/deploy-staging",
 			ScriptPath: "~/scripts/deploy-staging.sh",
@@ -1100,7 +1020,7 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 			Stderr:     "",
 			Duration:   3200 * time.Millisecond,
 		}
-		bridgeLogCh <- bridge.ExecutionLog{
+		bridgeLogCh <- app.ExecutionLog{
 			Timestamp:  time.Now().Add(-30 * time.Second),
 			Route:      "/go-mod-tidy",
 			ScriptPath: "~/scripts/go-mod-tidy.sh",
@@ -1112,17 +1032,13 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	// Build the TUI model.
-	mainModel := tui.NewModel(cfg)
-
-	// Wire mock channels.
-	mainModel.SetACLRequestChan(aclCh)
-	mainModel.SetBridgeLogChan(bridgeLogCh)
-	mainModel.SetPollStats(false) // No Docker in test mode.
+	// Build the test app and TUI model.
+	testApp := app.NewTestApp(cfg, aclCh, bridgeLogCh)
+	mainModel := tui.NewModel(testApp)
 
 	// Wire sub-models.
-	mainModel.SetContainersModel(containers.New())
-	mainModel.SetProxyMonModel(proxymon.New(nil, time.Duration(cfg.MonitorTimeoutSecs)*time.Second))
+	mainModel.SetContainersModel(containers.New(testApp))
+	mainModel.SetProxyMonModel(proxymon.New(testApp, time.Duration(cfg.MonitorTimeoutSecs)*time.Second))
 	mainModel.SetBlockedModel(history.NewWithCapacity(history.ModeBlocked, cfg.BlockedHistoryLimit))
 	mainModel.SetAllowedModel(history.NewWithCapacity(history.ModeAllowed, cfg.AllowedHistoryLimit))
 

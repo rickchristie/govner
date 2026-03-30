@@ -19,8 +19,7 @@ acl step1 at_step SslBump1
 ssl_bump peek step1
 ssl_bump bump all
 
-# Prefer IPv4 - Docker networks typically don't route IPv6
-dns_v4_first on
+# Note: dns_v4_first was removed in Squid 6 (no longer needed).
 
 # Timeouts for streaming/long-lived connections (AI tool API calls)
 read_timeout 120 minutes
@@ -49,7 +48,7 @@ acl allowed_domains dstdomain {{.Domain}}
 # ============================================================================
 # EXTERNAL ACL - For non-whitelisted domain approval
 # ============================================================================
-external_acl_type cooper_acl ttl=0 negative_ttl=0 children-max=20 children-startup=5 %DST %myport %SRC \
+external_acl_type cooper_acl ttl=0 negative_ttl=0 children-max=20 children-startup=5 %DST %SRC \
     /usr/lib/squid/cooper-acl-helper --socket /var/run/cooper/acl.sock
 
 acl pending_review external cooper_acl

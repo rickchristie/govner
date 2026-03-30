@@ -5,9 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/rickchristie/govner/cooper/internal/bridge"
-	"github.com/rickchristie/govner/cooper/internal/docker"
-	"github.com/rickchristie/govner/cooper/internal/proxy"
+	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/tui/events"
 )
 
@@ -26,7 +24,7 @@ type BridgeLogMsg = events.BridgeLogMsg
 // listenACL returns a tea.Cmd that blocks until a value is received on ch,
 // then wraps it as an ACLRequestMsg. The root model re-invokes this after
 // each receive to keep listening.
-func listenACL(ch <-chan proxy.ACLRequest) tea.Cmd {
+func listenACL(ch <-chan app.ACLRequest) tea.Cmd {
 	return func() tea.Msg {
 		req, ok := <-ch
 		if !ok {
@@ -38,7 +36,7 @@ func listenACL(ch <-chan proxy.ACLRequest) tea.Cmd {
 
 // listenACLDecisions returns a tea.Cmd that blocks until a decision event
 // arrives on ch. Used to feed the Blocked/Allowed history tabs.
-func listenACLDecisions(ch <-chan proxy.DecisionEvent) tea.Cmd {
+func listenACLDecisions(ch <-chan app.DecisionEvent) tea.Cmd {
 	return func() tea.Msg {
 		evt, ok := <-ch
 		if !ok {
@@ -50,7 +48,7 @@ func listenACLDecisions(ch <-chan proxy.DecisionEvent) tea.Cmd {
 
 // listenBridgeLogs returns a tea.Cmd that blocks until a log entry arrives
 // on ch.
-func listenBridgeLogs(ch <-chan bridge.ExecutionLog) tea.Cmd {
+func listenBridgeLogs(ch <-chan app.ExecutionLog) tea.Cmd {
 	return func() tea.Msg {
 		log, ok := <-ch
 		if !ok {
@@ -61,11 +59,11 @@ func listenBridgeLogs(ch <-chan bridge.ExecutionLog) tea.Cmd {
 }
 
 // pollStats returns a tea.Cmd that sleeps for interval, then collects
-// container stats and returns them as a ContainerStatsMsg.
-func pollStats(interval time.Duration) tea.Cmd {
+// container stats via the App and returns them as a ContainerStatsMsg.
+func pollStats(a app.App, interval time.Duration) tea.Cmd {
 	return func() tea.Msg {
 		time.Sleep(interval)
-		stats, err := docker.AllContainerStats()
+		stats, err := a.ContainerStats()
 		if err != nil {
 			// Swallow errors; the TUI will simply show stale data.
 			return events.ContainerStatsMsg{}

@@ -7,11 +7,19 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
 	"github.com/rickchristie/govner/cooper/internal/tui/events"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
+
+// ContainerManager is the subset of app.App used by the containers tab
+// for stop/restart actions. Defining a local interface keeps this package
+// decoupled from the full App interface.
+type ContainerManager interface {
+	StopContainer(name string) error
+	RestartContainer(name string) error
+}
 
 // containerItem holds combined barrel info and optional resource stats for
 // a single container row.
@@ -28,12 +36,14 @@ type Model struct {
 	list       components.ScrollableList
 	containers []containerItem
 	expanded   bool // whether the detail pane is shown for selected
+	manager    ContainerManager
 }
 
 // New creates a new containers tab model.
-func New() *Model {
+func New(mgr ContainerManager) *Model {
 	return &Model{
-		list: components.NewScrollableList(0, 0),
+		list:    components.NewScrollableList(0, 0),
+		manager: mgr,
 	}
 }
 
@@ -114,14 +124,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 		// Stop selected container.
 		if sel := m.list.Selected(); sel != nil {
 			if ci, ok := sel.Data.(containerItem); ok {
-				return m, stopContainerCmd(ci.Name)
+				return m, m.stopContainerCmd(ci.Name)
 			}
 		}
 	case "r":
 		// Restart selected container.
 		if sel := m.list.Selected(); sel != nil {
 			if ci, ok := sel.Data.(containerItem); ok {
-				return m, restartContainerCmd(ci.Name)
+				return m, m.restartContainerCmd(ci.Name)
 			}
 		}
 	case "enter":
@@ -133,13 +143,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 // applyStats merges incoming container stats into the model. Containers
 // that appear in stats but not in the current list are added; containers
 // no longer present are removed.
-func (m *Model) applyStats(stats []docker.ContainerStat) {
-	// Build a map of new stats by name.
-	statMap := make(map[string]docker.ContainerStat, len(stats))
-	for _, s := range stats {
-		statMap[s.Name] = s
-	}
-
+func (m *Model) applyStats(stats []app.ContainerStat) {
 	// Rebuild container list from stats.
 	var updated []containerItem
 	for _, s := range stats {
@@ -155,10 +159,10 @@ func (m *Model) applyStats(stats []docker.ContainerStat) {
 	// Sort: proxy first, then alphabetically.
 	sort.Slice(updated, func(i, j int) bool {
 		// cooper-proxy always first.
-		if updated[i].Name == docker.ContainerProxy {
+		if updated[i].Name == app.ContainerProxy {
 			return true
 		}
-		if updated[j].Name == docker.ContainerProxy {
+		if updated[j].Name == app.ContainerProxy {
 			return false
 		}
 		return updated[i].Name < updated[j].Name
@@ -195,9 +199,12 @@ func (m *Model) emptyState(width, height int) string {
 // ----- Commands -----
 
 // stopContainerCmd returns a tea.Cmd that stops a container by name.
-func stopContainerCmd(name string) tea.Cmd {
+func (m *Model) stopContainerCmd(name string) tea.Cmd {
+	mgr := m.manager
 	return func() tea.Msg {
-		_ = docker.StopBarrel(name)
+		if mgr != nil {
+			_ = mgr.StopContainer(name)
+		}
 		return nil
 	}
 }
@@ -205,9 +212,12 @@ func stopContainerCmd(name string) tea.Cmd {
 // restartContainerCmd returns a tea.Cmd that restarts a container.
 // Uses docker restart to preserve the container; the next stats poll
 // will pick up the updated state.
-func restartContainerCmd(name string) tea.Cmd {
+func (m *Model) restartContainerCmd(name string) tea.Cmd {
+	mgr := m.manager
 	return func() tea.Msg {
-		_ = docker.RestartBarrel(name)
+		if mgr != nil {
+			_ = mgr.RestartContainer(name)
+		}
 		return nil
 	}
 }

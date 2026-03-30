@@ -1,0 +1,512 @@
+package app
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/rickchristie/govner/cooper/internal/bridge"
+	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/logging"
+	"github.com/rickchristie/govner/cooper/internal/proof"
+	"github.com/rickchristie/govner/cooper/internal/proxy"
+)
+
+// Compile-time check that CooperApp satisfies App.
+var _ App = (*CooperApp)(nil)
+
+// CooperApp is the concrete implementation of the App interface. It owns all
+// infrastructure (Docker, proxy, bridge) and exposes a clean interface for
+// the TUI or any other consumer.
+type CooperApp struct {
+	cfg        *config.Config
+	cooperDir  string
+
+	aclListener  *proxy.ACLListener
+	bridgeServer *bridge.BridgeServer
+
+	aclLogger    *logging.Logger
+	bridgeLogger *logging.Logger
+
+	// Forwarding channels with logging taps. The TUI reads from these;
+	// internal goroutines forward from the raw infrastructure channels.
+	aclFwd      chan proxy.ACLRequest
+	decisionFwd chan proxy.DecisionEvent
+	bridgeFwd   chan bridge.ExecutionLog
+
+	startupWarnings []string
+}
+
+// NewCooperApp creates a new CooperApp with the given configuration.
+// The app is not started; call Start to begin the startup sequence.
+func NewCooperApp(cfg *config.Config, cooperDir string) *CooperApp {
+	logDir := filepath.Join(cooperDir, "logs")
+	return &CooperApp{
+		cfg:          cfg,
+		cooperDir:    cooperDir,
+		aclLogger:    logging.NewLogger(logDir, "acl", 10*1024*1024, 10),
+		bridgeLogger: logging.NewLogger(logDir, "bridge", 10*1024*1024, 10),
+		aclFwd:       make(chan proxy.ACLRequest, 256),
+		decisionFwd:  make(chan proxy.DecisionEvent, 1024),
+		bridgeFwd:    make(chan bridge.ExecutionLog, 256),
+	}
+}
+
+// totalSteps is the number of startup steps reported via onProgress.
+const totalSteps = 7
+
+// Start executes the startup sequence. It blocks until all steps complete
+// or the context is cancelled. The onProgress callback is invoked after
+// each step with (stepIndex, totalSteps, stepName, err). If err is non-nil,
+// Start returns immediately with that error.
+func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total int, name string, err error)) error {
+	report := func(step int, name string, err error) {
+		if onProgress != nil {
+			onProgress(step, totalSteps, name, err)
+		}
+	}
+
+	// Step 0: Create Docker networks.
+	if err := docker.EnsureNetworks(); err != nil {
+		report(0, "Create networks", err)
+		return err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	report(0, "Create networks", nil)
+
+	// Step 1: Start proxy container.
+	if err := docker.StartProxy(a.cfg, a.cooperDir); err != nil {
+		report(1, "Start proxy", err)
+		return err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	report(1, "Start proxy", nil)
+
+	// Step 2: Verify CA certificate exists.
+	if !config.CAExists(a.cooperDir) {
+		err := fmt.Errorf("CA certificate not found, run 'cooper build' first")
+		report(2, "Verify CA certificate", err)
+		return err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	report(2, "Verify CA certificate", nil)
+
+	// Step 3: Start execution bridge.
+	gatewayIP, gwErr := docker.GetGatewayIP(docker.NetworkExternal)
+	if gwErr != nil {
+		err := fmt.Errorf("could not discover Docker gateway IP: %w\n"+
+			"Bridge won't be reachable from containers. Check that cooper-external network exists", gwErr)
+		report(3, "Start bridge", err)
+		return err
+	}
+	a.bridgeServer = bridge.NewBridgeServer(a.cfg.BridgeRoutes, a.cfg.BridgePort, gatewayIP, a.cfg.BridgePort)
+	if err := a.bridgeServer.Start(); err != nil {
+		report(3, "Start bridge", err)
+		return err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	report(3, "Start bridge", nil)
+
+	// Step 4: CLI image version check (informational, non-blocking).
+	a.startupWarnings = checkToolVersions(a.cfg)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	report(4, "Check tool versions", nil)
+
+	// Step 5: Start ACL listener.
+	socketPath := filepath.Join(a.cooperDir, "run", "acl.sock")
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
+		err = fmt.Errorf("create run dir: %w", err)
+		report(5, "Start ACL listener", err)
+		return err
+	}
+	timeout := time.Duration(a.cfg.MonitorTimeoutSecs) * time.Second
+	a.aclListener = proxy.NewACLListener(socketPath, timeout)
+	if err := a.aclListener.Start(); err != nil {
+		report(5, "Start ACL listener", err)
+		return err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	report(5, "Start ACL listener", nil)
+
+	// Step 6: Wire forwarding channels and load persisted bridge routes.
+	a.wireChannels()
+	a.loadPersistedBridgeRoutes()
+	report(6, "Ready", nil)
+
+	return nil
+}
+
+// wireChannels starts goroutines that forward events from infrastructure
+// channels to the TUI-facing channels, with logging taps.
+func (a *CooperApp) wireChannels() {
+	if a.aclListener != nil {
+		// Forward ACL requests with logging tap.
+		aclSrc := a.aclListener.RequestChan()
+		go func() {
+			for req := range aclSrc {
+				a.aclLogger.Log(fmt.Sprintf("domain=%s port=%s src=%s", req.Domain, req.Port, req.SourceIP))
+				a.aclFwd <- req
+			}
+			close(a.aclFwd)
+		}()
+
+		// Forward ACL decisions with logging tap.
+		decisionSrc := a.aclListener.DecisionChan()
+		go func() {
+			for evt := range decisionSrc {
+				a.aclLogger.Log(fmt.Sprintf("decision=%s domain=%s port=%s src=%s",
+					evt.Reason, evt.Request.Domain, evt.Request.Port, evt.Request.SourceIP))
+				a.decisionFwd <- evt
+			}
+			close(a.decisionFwd)
+		}()
+	}
+
+	if a.bridgeServer != nil {
+		// Forward bridge execution logs with logging tap.
+		bridgeSrc := a.bridgeServer.LogChan()
+		go func() {
+			for entry := range bridgeSrc {
+				a.bridgeLogger.Log(fmt.Sprintf("route=%s script=%s exit=%d duration=%s err=%s",
+					entry.Route, entry.ScriptPath, entry.ExitCode, entry.Duration, entry.Error))
+				a.bridgeFwd <- entry
+			}
+			close(a.bridgeFwd)
+		}()
+	}
+}
+
+// loadPersistedBridgeRoutes loads saved bridge routes from disk and merges
+// them with the config defaults. If saved routes exist, they override the
+// config and are applied to the running bridge server.
+func (a *CooperApp) loadPersistedBridgeRoutes() {
+	savedRoutes, err := bridge.LoadBridgeRoutes(a.cooperDir)
+	if err != nil {
+		// Non-fatal; log and continue with config defaults.
+		return
+	}
+	if len(savedRoutes) > 0 {
+		a.cfg.BridgeRoutes = savedRoutes
+		if a.bridgeServer != nil {
+			a.bridgeServer.UpdateRoutes(savedRoutes)
+		}
+	}
+}
+
+// Stop performs a graceful shutdown of all infrastructure components.
+func (a *CooperApp) Stop() error {
+	// Stop ACL listener.
+	if a.aclListener != nil {
+		a.aclListener.Stop()
+	}
+
+	// Stop bridge server.
+	if a.bridgeServer != nil {
+		a.bridgeServer.Stop()
+	}
+
+	// Stop all barrel containers.
+	barrels, _ := docker.ListBarrels()
+	for _, b := range barrels {
+		docker.StopBarrel(b.Name)
+	}
+
+	// Stop proxy container.
+	docker.StopProxy()
+
+	// Close loggers.
+	a.bridgeLogger.Close()
+	a.aclLogger.Close()
+
+	return nil
+}
+
+// ----- Event channels -----
+
+// ACLRequests returns the channel that emits incoming ACL requests.
+func (a *CooperApp) ACLRequests() <-chan ACLRequest {
+	return a.aclFwd
+}
+
+// ACLDecisions returns the channel that emits ACL decision events.
+func (a *CooperApp) ACLDecisions() <-chan DecisionEvent {
+	return a.decisionFwd
+}
+
+// BridgeLogs returns the channel that emits bridge execution logs.
+func (a *CooperApp) BridgeLogs() <-chan ExecutionLog {
+	return a.bridgeFwd
+}
+
+// ----- ACL actions -----
+
+// ApproveRequest sets the decision for the given request ID to Allow.
+func (a *CooperApp) ApproveRequest(id string) {
+	if a.aclListener != nil {
+		a.aclListener.Approve(id)
+	}
+}
+
+// DenyRequest sets the decision for the given request ID to Deny.
+func (a *CooperApp) DenyRequest(id string) {
+	if a.aclListener != nil {
+		a.aclListener.Deny(id)
+	}
+}
+
+// PendingRequests returns a snapshot of all currently pending ACL requests.
+func (a *CooperApp) PendingRequests() []*PendingRequest {
+	if a.aclListener != nil {
+		return a.aclListener.PendingRequests()
+	}
+	return nil
+}
+
+// ----- Container management -----
+
+// ContainerStats returns CPU and memory statistics for all running
+// cooper containers (proxy + barrels).
+func (a *CooperApp) ContainerStats() ([]ContainerStat, error) {
+	dockerStats, err := docker.AllContainerStats()
+	if err != nil {
+		return nil, err
+	}
+	stats := make([]ContainerStat, len(dockerStats))
+	for i, ds := range dockerStats {
+		stats[i] = ContainerStat{
+			Name:       ds.Name,
+			CPUPercent: ds.CPUPercent,
+			MemUsage:   ds.MemUsage,
+		}
+	}
+	return stats, nil
+}
+
+// StopContainer stops and removes a barrel container by name.
+func (a *CooperApp) StopContainer(name string) error {
+	return docker.StopBarrel(name)
+}
+
+// RestartContainer restarts a barrel container by name.
+func (a *CooperApp) RestartContainer(name string) error {
+	return docker.RestartBarrel(name)
+}
+
+// ListContainers returns information about all running barrel containers.
+func (a *CooperApp) ListContainers() ([]ContainerInfo, error) {
+	barrels, err := docker.ListBarrels()
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]ContainerInfo, len(barrels))
+	for i, b := range barrels {
+		infos[i] = ContainerInfo{
+			Name:         b.Name,
+			Status:       b.Status,
+			WorkspaceDir: b.WorkspaceDir,
+		}
+	}
+	return infos, nil
+}
+
+// IsProxyRunning checks whether the proxy container is currently running.
+func (a *CooperApp) IsProxyRunning() bool {
+	running, err := docker.IsProxyRunning()
+	if err != nil {
+		return false
+	}
+	return running
+}
+
+// ----- Port forwarding -----
+
+// UpdatePortForwards validates the new rules, reloads socat in all
+// containers, and persists the updated configuration.
+func (a *CooperApp) UpdatePortForwards(rules []config.PortForwardRule) error {
+	// Validate.
+	candidate := *a.cfg
+	candidate.PortForwardRules = rules
+	if err := candidate.Validate(); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	// Reload socat (writes socat-rules.json + signals containers).
+	if err := docker.ReloadSocat(a.cooperDir, a.cfg.BridgePort, rules); err != nil {
+		return fmt.Errorf("reload failed: %w", err)
+	}
+
+	// Persist config.json.
+	cfgCopy := *a.cfg
+	cfgCopy.PortForwardRules = rules
+	cfgPath := filepath.Join(a.cooperDir, "config.json")
+	if err := config.SaveConfig(cfgPath, &cfgCopy); err != nil {
+		return fmt.Errorf("config save failed: %w", err)
+	}
+
+	// Update in-memory config on success.
+	a.cfg.PortForwardRules = rules
+	return nil
+}
+
+// ----- Bridge routes -----
+
+// UpdateBridgeRoutes hot-swaps bridge routes on the running server and
+// persists them to disk.
+func (a *CooperApp) UpdateBridgeRoutes(routes []config.BridgeRoute) error {
+	if a.bridgeServer != nil {
+		a.bridgeServer.UpdateRoutes(routes)
+	}
+	if err := bridge.SaveBridgeRoutes(a.cooperDir, routes); err != nil {
+		return fmt.Errorf("persist bridge routes: %w", err)
+	}
+	a.cfg.BridgeRoutes = routes
+	return nil
+}
+
+// ----- Settings -----
+
+// UpdateSettings applies new timeout and limit settings to the running
+// system and persists the updated configuration.
+func (a *CooperApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit int) error {
+	a.cfg.MonitorTimeoutSecs = timeoutSecs
+	a.cfg.BlockedHistoryLimit = blockedLimit
+	a.cfg.AllowedHistoryLimit = allowedLimit
+	a.cfg.BridgeLogLimit = bridgeLogLimit
+
+	// Update live ACL listener timeout.
+	if a.aclListener != nil {
+		newTimeout := time.Duration(timeoutSecs) * time.Second
+		a.aclListener.SetTimeout(newTimeout)
+	}
+
+	// Persist config.json.
+	cfgPath := filepath.Join(a.cooperDir, "config.json")
+	if err := config.SaveConfig(cfgPath, a.cfg); err != nil {
+		return fmt.Errorf("config save failed: %w", err)
+	}
+
+	return nil
+}
+
+// ----- Diagnostics -----
+
+// RunProof executes all diagnostic checks inside the named barrel container.
+func (a *CooperApp) RunProof(containerName string) ([]ProofResult, error) {
+	return proof.RunAllChecks(containerName, a.cfg)
+}
+
+// ----- State accessors -----
+
+// Config returns a pointer to the current configuration. Callers should
+// treat this as read-only; mutations should go through the App methods.
+func (a *CooperApp) Config() *config.Config {
+	return a.cfg
+}
+
+// CooperDir returns the path to the cooper configuration directory.
+func (a *CooperApp) CooperDir() string {
+	return a.cooperDir
+}
+
+// StartupWarnings returns version mismatch warnings collected during startup.
+func (a *CooperApp) StartupWarnings() []string {
+	return a.startupWarnings
+}
+
+// Adopt injects pre-started infrastructure into the CooperApp and wires
+// the forwarding channels. This is used when main.go runs its own startup
+// sequence (e.g. with a loading screen) and then needs to hand off the
+// already-running services to the App.
+func (a *CooperApp) Adopt(aclListener *proxy.ACLListener, bridgeServer *bridge.BridgeServer, warnings []string) {
+	a.aclListener = aclListener
+	a.bridgeServer = bridgeServer
+	a.startupWarnings = warnings
+	a.wireChannels()
+	a.loadPersistedBridgeRoutes()
+}
+
+// ACLListener returns the underlying ACL listener for direct access by
+// components that need the aclTimeoutUpdater interface (e.g., proxymon).
+// This is a transitional accessor; eventually the TUI should go through
+// App methods exclusively.
+func (a *CooperApp) ACLListener() *proxy.ACLListener {
+	return a.aclListener
+}
+
+// BridgeServer returns the underlying bridge server for direct access by
+// components that need the bridgeServerUpdater interface. This is a
+// transitional accessor.
+func (a *CooperApp) BridgeServer() *bridge.BridgeServer {
+	return a.bridgeServer
+}
+
+// ----- Internal helpers -----
+
+// checkToolVersions compares container tool versions against expected
+// versions and returns warnings for any mismatches.
+func checkToolVersions(cfg *config.Config) []string {
+	var warnings []string
+	allTools := append(cfg.ProgrammingTools, cfg.AITools...)
+	for _, tool := range allTools {
+		if !tool.Enabled || tool.Mode == config.ModeOff {
+			continue
+		}
+
+		var expected string
+		switch tool.Mode {
+		case config.ModeMirror:
+			hostVer, err := config.DetectHostVersion(tool.Name)
+			if err != nil {
+				continue
+			}
+			expected = hostVer
+		case config.ModeLatest:
+			type result struct {
+				ver string
+				err error
+			}
+			ch := make(chan result, 1)
+			go func() {
+				v, e := config.ResolveLatestVersion(tool.Name)
+				ch <- result{v, e}
+			}()
+			select {
+			case r := <-ch:
+				if r.err != nil {
+					continue
+				}
+				expected = r.ver
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		case config.ModePin:
+			expected = tool.PinnedVersion
+		default:
+			continue
+		}
+
+		status := config.CompareVersions(tool.ContainerVersion, expected, tool.Mode)
+		if status == config.VersionMismatch {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: container=%s, expected=%s (%s mode)",
+				tool.Name, tool.ContainerVersion, expected, tool.Mode,
+			))
+		}
+	}
+	return warnings
+}

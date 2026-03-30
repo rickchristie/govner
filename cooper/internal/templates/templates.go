@@ -15,6 +15,9 @@ import (
 //go:embed *.tmpl
 var templateFS embed.FS
 
+//go:embed doctor.sh
+var doctorScript []byte
+
 // cliDockerfileData holds template data for the CLI Dockerfile.
 type cliDockerfileData struct {
 	HasGo       bool
@@ -247,6 +250,11 @@ func WriteAllTemplates(dir string, cfg *config.Config) error {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "squid.conf"), []byte(squidConf), 0644); err != nil {
 		return fmt.Errorf("failed to write squid.conf: %w", err)
+	}
+
+	// Write doctor.sh diagnostic script (embedded, not generated).
+	if err := os.WriteFile(filepath.Join(dir, "doctor.sh"), doctorScript, 0755); err != nil {
+		return fmt.Errorf("failed to write doctor.sh: %w", err)
 	}
 
 	// Generate and write entrypoint.sh

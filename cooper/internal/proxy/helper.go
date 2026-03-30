@@ -56,7 +56,7 @@ func RunHelper(socketPath string, stdin io.Reader, stdout io.Writer) {
 func processHelperRequest(socketPath string, line string) string {
 	// Validate input has the expected format: "domain port source_ip"
 	parts := strings.Fields(line)
-	if len(parts) < 3 {
+	if len(parts) < 2 {
 		return "ERR"
 	}
 

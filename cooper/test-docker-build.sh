@@ -141,102 +141,105 @@ run_build_test() {
     # ================================================================
     info "${mode}: Running runtime assertions on barrel image..."
 
-    # Helper: run a command inside the barrel image and check output.
+    # Helper: run a command inside the barrel image, skipping the entrypoint
+    # (which starts socat and pollutes stdout). Use --entrypoint to bypass.
     barrel_run() {
-        docker run --rm "$barrel_image" "$@" 2>&1
+        docker run --rm --entrypoint "" "$barrel_image" "$@" 2>&1
     }
 
     # Read expected versions from config for version assertions.
-    local go_version node_version python_enabled
-    go_version=$(jq -r '.programming_tools[] | select(.name=="go" and .enabled) | .host_version // .pinned_version // empty' "${test_dir}/config.json")
-    node_version=$(jq -r '.programming_tools[] | select(.name=="node" and .enabled) | .host_version // .pinned_version // empty' "${test_dir}/config.json")
-    python_enabled=$(jq -r '.programming_tools[] | select(.name=="python" and .enabled) | .enabled' "${test_dir}/config.json")
+    # Helper to get version for a tool (tries pinned_version, then host_version).
+    get_tool_version() {
+        local tool_type=$1 tool_name=$2
+        jq -r ".${tool_type}[] | select(.name==\"${tool_name}\" and .enabled) | .pinned_version // .host_version // empty" "${test_dir}/config.json"
+    }
+    is_tool_enabled() {
+        local tool_type=$1 tool_name=$2
+        jq -r ".${tool_type}[] | select(.name==\"${tool_name}\" and .enabled) | .enabled" "${test_dir}/config.json"
+    }
 
-    local claude_enabled copilot_enabled codex_enabled opencode_enabled
-    claude_enabled=$(jq -r '.ai_tools[] | select(.name=="claude" and .enabled) | .enabled' "${test_dir}/config.json")
-    copilot_enabled=$(jq -r '.ai_tools[] | select(.name=="copilot" and .enabled) | .enabled' "${test_dir}/config.json")
-    codex_enabled=$(jq -r '.ai_tools[] | select(.name=="codex" and .enabled) | .enabled' "${test_dir}/config.json")
-    opencode_enabled=$(jq -r '.ai_tools[] | select(.name=="opencode" and .enabled) | .enabled' "${test_dir}/config.json")
+    # Helper to assert exact version match.
+    assert_version() {
+        local tool_name=$1 expected=$2 actual=$3
+        if [ -z "$expected" ]; then
+            # No version to pin — just check tool exists.
+            if [ -n "$actual" ]; then
+                pass "${mode}: ${tool_name} installed (${actual})"
+            else
+                fail "${mode}: ${tool_name} not found"
+            fi
+        else
+            if echo "$actual" | grep -q "$expected"; then
+                pass "${mode}: ${tool_name} ${expected} installed"
+            else
+                fail "${mode}: ${tool_name} ${expected} expected, got: ${actual}"
+            fi
+        fi
+    }
 
     # --- Programming tools ---
 
-    # Go
+    # Go (exact version)
+    local go_version
+    go_version=$(get_tool_version programming_tools go)
     if [ -n "$go_version" ]; then
         local actual_go
         actual_go=$(barrel_run go version 2>&1 || true)
-        if echo "$actual_go" | grep -q "go${go_version}"; then
-            pass "${mode}: Go ${go_version} installed"
-        else
-            fail "${mode}: Go ${go_version} expected, got: ${actual_go}"
-        fi
+        assert_version "Go" "$go_version" "$actual_go"
     fi
 
-    # Node.js
-    if [ -n "$node_version" ]; then
+    # Node.js (exact version — now pinned via tarball)
+    local node_version
+    node_version=$(get_tool_version programming_tools node)
+    if [ "$(is_tool_enabled programming_tools node)" = "true" ]; then
         local actual_node
         actual_node=$(barrel_run node --version 2>&1 || true)
-        if echo "$actual_node" | grep -q "v${node_version}"; then
-            pass "${mode}: Node.js ${node_version} installed"
-        else
-            fail "${mode}: Node.js v${node_version} expected, got: ${actual_node}"
-        fi
+        assert_version "Node.js" "v${node_version}" "$actual_node"
     fi
 
-    # Python
-    if [ "$python_enabled" = "true" ]; then
+    # Python (distro version — can't pin exact, just check installed)
+    if [ "$(is_tool_enabled programming_tools python)" = "true" ]; then
         local actual_python
         actual_python=$(barrel_run python3 --version 2>&1 || true)
-        if echo "$actual_python" | grep -q "Python 3"; then
-            pass "${mode}: Python3 installed (${actual_python})"
-        else
-            fail "${mode}: Python3 not found, got: ${actual_python}"
-        fi
+        assert_version "Python3" "" "$actual_python"
     fi
 
-    # --- AI CLI tools ---
+    # --- AI CLI tools (exact versions for mirror/pin modes) ---
 
     # Claude Code
-    if [ "$claude_enabled" = "true" ]; then
+    local claude_version
+    claude_version=$(get_tool_version ai_tools claude)
+    if [ "$(is_tool_enabled ai_tools claude)" = "true" ]; then
         local actual_claude
         actual_claude=$(barrel_run bash -c "claude --version 2>&1 || npm list -g @anthropic-ai/claude-code 2>&1" || true)
-        if echo "$actual_claude" | grep -qi "claude\|anthropic"; then
-            pass "${mode}: Claude Code installed"
-        else
-            fail "${mode}: Claude Code not found, got: ${actual_claude}"
-        fi
+        assert_version "Claude Code" "$claude_version" "$actual_claude"
     fi
 
     # GitHub Copilot CLI
-    if [ "$copilot_enabled" = "true" ]; then
+    local copilot_version
+    copilot_version=$(get_tool_version ai_tools copilot)
+    if [ "$(is_tool_enabled ai_tools copilot)" = "true" ]; then
         local actual_copilot
-        actual_copilot=$(barrel_run bash -c "copilot --version 2>&1 || npm list -g @github/copilot 2>&1" || true)
-        if echo "$actual_copilot" | grep -qi "copilot\|github"; then
-            pass "${mode}: Copilot CLI installed"
-        else
-            fail "${mode}: Copilot CLI not found, got: ${actual_copilot}"
-        fi
+        actual_copilot=$(barrel_run bash -c "npm list -g @github/copilot 2>&1" || true)
+        assert_version "Copilot CLI" "$copilot_version" "$actual_copilot"
     fi
 
     # OpenAI Codex CLI
-    if [ "$codex_enabled" = "true" ]; then
+    local codex_version
+    codex_version=$(get_tool_version ai_tools codex)
+    if [ "$(is_tool_enabled ai_tools codex)" = "true" ]; then
         local actual_codex
-        actual_codex=$(barrel_run bash -c "codex --version 2>&1 || npm list -g @openai/codex 2>&1" || true)
-        if echo "$actual_codex" | grep -qi "codex\|openai"; then
-            pass "${mode}: Codex CLI installed"
-        else
-            fail "${mode}: Codex CLI not found, got: ${actual_codex}"
-        fi
+        actual_codex=$(barrel_run bash -c "npm list -g @openai/codex 2>&1" || true)
+        assert_version "Codex CLI" "$codex_version" "$actual_codex"
     fi
 
-    # OpenCode CLI
-    if [ "$opencode_enabled" = "true" ]; then
+    # OpenCode CLI (curl installer to ~/.opencode/bin)
+    local opencode_version
+    opencode_version=$(get_tool_version ai_tools opencode)
+    if [ "$(is_tool_enabled ai_tools opencode)" = "true" ]; then
         local actual_opencode
-        actual_opencode=$(barrel_run bash -c "opencode --version 2>&1 || which opencode 2>&1" || true)
-        if echo "$actual_opencode" | grep -qi "opencode\|/opencode"; then
-            pass "${mode}: OpenCode CLI installed"
-        else
-            fail "${mode}: OpenCode CLI not found, got: ${actual_opencode}"
-        fi
+        actual_opencode=$(barrel_run bash -c 'export PATH="$HOME/.opencode/bin:$PATH"; opencode --version 2>&1 || ls "$HOME/.opencode/bin/" 2>&1' || true)
+        assert_version "OpenCode CLI" "$opencode_version" "$actual_opencode"
     fi
 
     # --- Barrel image structure ---
@@ -259,14 +262,23 @@ run_build_test() {
         fail "${mode}: Entrypoint script not found in barrel"
     fi
 
+    # Doctor diagnostic script exists
+    local doctor_check
+    doctor_check=$(barrel_run bash -c "test -x /usr/local/bin/doctor.sh && echo found" || true)
+    if [ "$doctor_check" = "found" ]; then
+        pass "${mode}: doctor.sh exists in barrel at /usr/local/bin/"
+    else
+        fail "${mode}: doctor.sh not found in barrel"
+    fi
+
     # --- Proxy image runtime assertions ---
     info "${mode}: Running runtime assertions on proxy image..."
 
     local proxy_container="test-${mode}-proxy-check"
     docker rm -f "$proxy_container" 2>/dev/null || true
 
-    # Start proxy container briefly to check internals.
-    docker run -d --name "$proxy_container" "$proxy_image" sleep 30 >/dev/null 2>&1 || true
+    # Start proxy container briefly to check internals (bypass entrypoint).
+    docker run -d --entrypoint "" --name "$proxy_container" "$proxy_image" sleep 30 >/dev/null 2>&1 || true
 
     # Squid binary exists
     local squid_check

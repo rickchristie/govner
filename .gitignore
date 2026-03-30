@@ -15,5 +15,7 @@ cooper/cooper-acl-helper
 cooper/.test-mirror/
 cooper/.test-latest/
 cooper/.test-pinned/
+cooper/.test-e2e/
+cooper/.e2e-workspace/
 
 .scratch/

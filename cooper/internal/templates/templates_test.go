@@ -92,11 +92,12 @@ func TestRenderCLIDockerfile_DefaultConfig(t *testing.T) {
 	// Should use Go base image when Go is enabled
 	assertContains(t, result, "golang:1.24.10-bookworm")
 
-	// Should have Node.js stage
-	assertContains(t, result, "FROM node:lts-bookworm AS node")
+	// Should install Node.js via tarball with pinned version
+	assertContains(t, result, "NODE_VERSION=22.12.0")
+	assertContains(t, result, "nodejs.org/dist/v${NODE_VERSION}")
 
 	// Should have Python installation
-	assertContains(t, result, "python3=3.12")
+	assertContains(t, result, "python3")
 
 	// Should have Rust installation
 	assertContains(t, result, "rustup")
@@ -110,7 +111,7 @@ func TestRenderCLIDockerfile_DefaultConfig(t *testing.T) {
 	assertContains(t, result, "claude.ai/install.sh")
 	assertContains(t, result, "@github/copilot")
 	assertContains(t, result, "@openai/codex")
-	assertContains(t, result, "opencode-ai")
+	assertContains(t, result, "opencode.ai/install")
 
 	// Should have CA cert injection
 	assertContains(t, result, "cooper-ca.pem")
@@ -173,7 +174,7 @@ func TestRenderCLIDockerfile_NoToolsEnabled(t *testing.T) {
 	assertNotContains(t, result, "claude.ai/install.sh")
 	assertNotContains(t, result, "@github/copilot")
 	assertNotContains(t, result, "@openai/codex")
-	assertNotContains(t, result, "opencode-ai")
+	assertNotContains(t, result, "opencode.ai/install")
 
 	// Should NOT have bubblewrap (no Codex)
 	assertNotContains(t, result, "bubblewrap")
@@ -200,7 +201,7 @@ func TestRenderCLIDockerfile_MinimalConfig(t *testing.T) {
 	assertContains(t, result, "claude.ai/install.sh")
 	assertNotContains(t, result, "@github/copilot")
 	assertNotContains(t, result, "@openai/codex")
-	assertNotContains(t, result, "opencode-ai")
+	assertNotContains(t, result, "opencode.ai/install")
 
 	// No bubblewrap (no Codex)
 	assertNotContains(t, result, "bubblewrap")
@@ -275,8 +276,8 @@ func TestRenderSquidConf(t *testing.T) {
 	assertContains(t, result, "read_timeout 120 minutes")
 	assertContains(t, result, "client_lifetime 1 day")
 
-	// Should have dns_v4_first
-	assertContains(t, result, "dns_v4_first on")
+	// dns_v4_first removed in Squid 6 — verify the directive is NOT active.
+	assertNotContains(t, result, "dns_v4_first on")
 
 	// Should disable caching
 	assertContains(t, result, "cache deny all")
@@ -691,8 +692,9 @@ func TestRenderCLIDockerfile_PinnedAIVersions(t *testing.T) {
 	}
 
 	// Claude should use npm with pinned version (not curl installer).
-	if !strings.Contains(output, "@anthropic-ai/claude-code@2.1.86") {
-		t.Error("expected pinned claude install @2.1.86")
+	// Claude uses curl installer with version arg (not npm).
+	if !strings.Contains(output, "claude.ai/install.sh | bash -s -- 2.1.86") {
+		t.Error("expected pinned claude curl install with version 2.1.86")
 	}
 	// Copilot pinned.
 	if !strings.Contains(output, "@github/copilot@0.7.2") {
@@ -702,9 +704,9 @@ func TestRenderCLIDockerfile_PinnedAIVersions(t *testing.T) {
 	if !strings.Contains(output, "@openai/codex@0.117.0") {
 		t.Error("expected pinned codex install @0.117.0")
 	}
-	// OpenCode pinned.
-	if !strings.Contains(output, "opencode-ai@1.3.0") {
-		t.Error("expected pinned opencode install @1.3.0")
+	// OpenCode uses curl installer (no version pinning via npm).
+	if !strings.Contains(output, "opencode.ai/install") {
+		t.Error("expected opencode curl installer")
 	}
 }
 

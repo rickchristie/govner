@@ -305,7 +305,7 @@ func (l *ACLListener) handleConnection(conn net.Conn) {
 
 	line := strings.TrimSpace(scanner.Text())
 	parts := strings.Fields(line)
-	if len(parts) < 3 {
+	if len(parts) < 2 {
 		// Malformed request -- fail closed.
 		conn.Write([]byte("ERR\n"))
 		return
@@ -314,11 +314,21 @@ func (l *ACLListener) handleConnection(conn net.Conn) {
 	id := generateID()
 	now := time.Now()
 
+	// Squid sends: %DST %SRC (domain and source IP).
+	// Port defaults to 443 (HTTPS CONNECT tunnels).
+	port := "443"
+	sourceIP := parts[1]
+	if len(parts) >= 3 {
+		// If 3 fields provided, middle is port.
+		port = parts[1]
+		sourceIP = parts[2]
+	}
+
 	req := ACLRequest{
 		ID:        id,
 		Domain:    parts[0],
-		Port:      parts[1],
-		SourceIP:  parts[2],
+		Port:      port,
+		SourceIP:  sourceIP,
 		Timestamp: now,
 	}
 

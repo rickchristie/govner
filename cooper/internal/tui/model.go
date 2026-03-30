@@ -1,11 +1,7 @@
 package tui
 
 import (
-	"time"
-
-	"github.com/rickchristie/govner/cooper/internal/bridge"
-	"github.com/rickchristie/govner/cooper/internal/config"
-	"github.com/rickchristie/govner/cooper/internal/proxy"
+	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
@@ -22,8 +18,8 @@ type HelpBinding struct {
 // Model is the root BubbleTea model for the Cooper TUI. It owns the
 // tab bar, modal overlay, and delegates to per-tab SubModels for content.
 type Model struct {
-	// Configuration.
-	cfg *config.Config
+	// App interface -- the single dependency for all business logic.
+	app app.App
 
 	// Terminal dimensions.
 	width  int
@@ -53,50 +49,27 @@ type Model struct {
 	// Shutdown state.
 	shuttingDown bool
 
-	// Channels for external events.
-	aclRequestCh  <-chan proxy.ACLRequest
-	aclDecisionCh <-chan proxy.DecisionEvent
-	bridgeLogCh   <-chan bridge.ExecutionLog
-
-	// Bridge server reference for live route updates.
-	bridgeServer bridgeServerUpdater
-
-	// ACL listener reference for live timeout updates.
-	aclListener aclTimeoutUpdater
-
-	// Cooper configuration directory path for persisting bridge routes.
-	cooperDir string
-
-	// Whether to start polling docker stats on Init.
-	pollStats bool
-
 	// Callbacks.
 	onShutdown func()
 	onQuit     func()
 }
 
-// bridgeServerUpdater is the subset of bridge.BridgeServer used for hot-swapping routes.
-type bridgeServerUpdater interface {
-	UpdateRoutes(routes []config.BridgeRoute)
-}
-
-// aclTimeoutUpdater is the subset of proxy.ACLListener used for live timeout updates.
-type aclTimeoutUpdater interface {
-	SetTimeout(d time.Duration)
-}
-
 // NewModel creates the root model. Sub-models are nil by default;
 // call the Set* methods to wire them up before running the program.
-func NewModel(cfg *config.Config) *Model {
+func NewModel(a app.App) *Model {
 	tb := components.NewTabBar(theme.AllTabs, theme.TabContainers)
 	return &Model{
-		cfg:       cfg,
+		app:       a,
 		activeTab: theme.TabContainers,
 		tabBar:    tb,
 	}
 }
 
-// ----- Setter methods (pgflock pattern) -----
+// ----- Setter methods -----
+
+// SetApp sets the app interface. This is useful when the Model is created
+// before the App is fully initialised.
+func (m *Model) SetApp(a app.App) { m.app = a }
 
 // SetSize updates the terminal dimensions.
 func (m *Model) SetSize(w, h int) {
@@ -131,25 +104,6 @@ func (m *Model) SetAboutModel(sm SubModel) { m.aboutModel = sm }
 
 // SetLoadingModel wires the loading/startup screen sub-model.
 func (m *Model) SetLoadingModel(sm SubModel) { m.loadingModel = sm }
-
-// SetACLRequestChan sets the channel for incoming ACL requests.
-func (m *Model) SetACLRequestChan(ch <-chan proxy.ACLRequest)    { m.aclRequestCh = ch }
-func (m *Model) SetACLDecisionChan(ch <-chan proxy.DecisionEvent) { m.aclDecisionCh = ch }
-
-// SetBridgeLogChan sets the channel for bridge execution logs.
-func (m *Model) SetBridgeLogChan(ch <-chan bridge.ExecutionLog) { m.bridgeLogCh = ch }
-
-// SetBridgeServer sets the bridge server reference for live route updates.
-func (m *Model) SetBridgeServer(bs bridgeServerUpdater) { m.bridgeServer = bs }
-
-// SetACLListener sets the ACL listener reference for live timeout updates.
-func (m *Model) SetACLListener(al aclTimeoutUpdater) { m.aclListener = al }
-
-// SetCooperDir sets the cooper configuration directory path.
-func (m *Model) SetCooperDir(dir string) { m.cooperDir = dir }
-
-// SetPollStats enables the initial docker stats poll on Init.
-func (m *Model) SetPollStats(enabled bool) { m.pollStats = enabled }
 
 // SetActiveTab switches to the given tab (for tui-test --screen).
 func (m *Model) SetActiveTab(tab theme.TabID) {
