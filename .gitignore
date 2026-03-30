@@ -12,6 +12,7 @@ pgflock/pgflock
 # Cooper development files.
 cooper/cooper
 cooper/cooper-acl-helper
+cooper/acl-helper
 cooper/.test-mirror/
 cooper/.test-latest/
 cooper/.test-pinned/
