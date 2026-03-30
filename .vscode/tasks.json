@@ -212,6 +212,159 @@
       },
       "problemMatcher": "$go",
       "isBackground": false
+    },
+    {
+      "label": "cooper: Build",
+      "type": "shell",
+      "command": "go build -o ${workspaceFolder}/cooper/cooper ${workspaceFolder}/cooper && notify-send 'cooper' 'Build complete' || { notify-send 'cooper' 'Build failed'; read -p 'Press Enter to close...'; exit 1; }",
+      "options": {
+        "cwd": "${workspaceFolder}/cooper"
+      },
+      "presentation": {
+        "clear": true,
+        "echo": true,
+        "focus": false,
+        "panel": "dedicated",
+        "reveal": "silent",
+        "close": true,
+        "showReuseMessage": false
+      },
+      "problemMatcher": "$go",
+      "isBackground": false
+    },
+    {
+      "label": "gowt: Test All cooper",
+      "type": "shell",
+      "command": "go clean -testcache && gowt ./...",
+      "options": {
+        "cwd": "${workspaceFolder}/cooper"
+      },
+      "presentation": {
+        "clear": true,
+        "close": true,
+        "echo": true,
+        "focus": true,
+        "panel": "dedicated",
+        "group": "test",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": "$go",
+      "isBackground": false
+    },
+    {
+      "label": "cooper: TUI Test",
+      "type": "shell",
+      "command": "go build -o ${workspaceFolder}/cooper/cooper ${workspaceFolder}/cooper && ${workspaceFolder}/cooper/cooper tui-test",
+      "options": {
+        "cwd": "${workspaceFolder}/cooper"
+      },
+      "presentation": {
+        "clear": true,
+        "echo": true,
+        "focus": true,
+        "panel": "new",
+        "group": "cooper-tui",
+        "close": true,
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "runOptions": {
+        "instanceLimit": 1,
+        "reevaluateOnRerun": true
+      },
+      "problemMatcher": [],
+      "isBackground": true
+    },
+    {
+      "label": "cooper: Docker Test (All)",
+      "type": "shell",
+      "command": "${workspaceFolder}/cooper/test-docker-build.sh all",
+      "options": {
+        "cwd": "${workspaceFolder}/cooper"
+      },
+      "presentation": {
+        "clear": true,
+        "echo": true,
+        "focus": true,
+        "panel": "dedicated",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "cooper: Docker Test (Mirror)",
+      "type": "shell",
+      "command": "${workspaceFolder}/cooper/test-docker-build.sh mirror",
+      "options": {
+        "cwd": "${workspaceFolder}/cooper"
+      },
+      "presentation": {
+        "clear": true,
+        "echo": true,
+        "focus": true,
+        "panel": "dedicated",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "cooper: Docker Test (Latest)",
+      "type": "shell",
+      "command": "${workspaceFolder}/cooper/test-docker-build.sh latest",
+      "options": {
+        "cwd": "${workspaceFolder}/cooper"
+      },
+      "presentation": {
+        "clear": true,
+        "echo": true,
+        "focus": true,
+        "panel": "dedicated",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "cooper: Docker Test (Pinned)",
+      "type": "shell",
+      "command": "${workspaceFolder}/cooper/test-docker-build.sh pinned",
+      "options": {
+        "cwd": "${workspaceFolder}/cooper"
+      },
+      "presentation": {
+        "clear": true,
+        "echo": true,
+        "focus": true,
+        "panel": "dedicated",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "cooper: Docker Test (Clean)",
+      "type": "shell",
+      "command": "${workspaceFolder}/cooper/test-docker-build.sh clean",
+      "options": {
+        "cwd": "${workspaceFolder}/cooper"
+      },
+      "presentation": {
+        "clear": true,
+        "echo": true,
+        "focus": true,
+        "panel": "dedicated",
+        "reveal": "always",
+        "showReuseMessage": false
+      },
+      "problemMatcher": [],
+      "isBackground": false
     }
   ]
 }

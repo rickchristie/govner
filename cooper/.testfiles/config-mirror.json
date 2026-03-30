@@ -1,0 +1,36 @@
+{
+  "programming_tools": [
+    {"name": "go", "enabled": true, "mode": "mirror", "host_version": "1.24.10"},
+    {"name": "node", "enabled": true, "mode": "mirror", "host_version": "22.20.0"},
+    {"name": "python", "enabled": true, "mode": "mirror", "host_version": "3.11.2"},
+    {"name": "rust", "enabled": false, "mode": "off"}
+  ],
+  "ai_tools": [
+    {"name": "claude", "enabled": true, "mode": "mirror", "host_version": "2.1.87"},
+    {"name": "copilot", "enabled": true, "mode": "mirror", "host_version": "1.0.12"},
+    {"name": "codex", "enabled": true, "mode": "mirror", "host_version": "0.117.0"},
+    {"name": "opencode", "enabled": true, "mode": "mirror", "host_version": "1.3.7"}
+  ],
+  "whitelisted_domains": [
+    {"domain": ".anthropic.com", "include_subdomains": true, "source": "default"},
+    {"domain": "platform.claude.com", "include_subdomains": false, "source": "default"},
+    {"domain": ".openai.com", "include_subdomains": true, "source": "default"},
+    {"domain": ".chatgpt.com", "include_subdomains": true, "source": "default"},
+    {"domain": "github.com", "include_subdomains": false, "source": "default"},
+    {"domain": "api.github.com", "include_subdomains": false, "source": "default"},
+    {"domain": ".githubcopilot.com", "include_subdomains": true, "source": "default"},
+    {"domain": "copilot-proxy.githubusercontent.com", "include_subdomains": false, "source": "default"},
+    {"domain": "raw.githubusercontent.com", "include_subdomains": false, "source": "default"},
+    {"domain": "statsig.anthropic.com", "include_subdomains": false, "source": "default"}
+  ],
+  "port_forward_rules": [
+    {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"}
+  ],
+  "proxy_port": 3128,
+  "bridge_port": 4343,
+  "monitor_timeout_secs": 5,
+  "blocked_history_limit": 500,
+  "allowed_history_limit": 500,
+  "bridge_log_limit": 500,
+  "bridge_routes": []
+}
