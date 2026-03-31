@@ -116,7 +116,7 @@ func (m *aicliModel) updateList(msg tea.Msg) toolScreenResult {
 		case "enter":
 			m.inDetail = true
 			m.detailScrollOffset = 0
-			m.detailCursor = aiModeToIndex(m.tools[m.cursor].mode)
+			m.detailCursor = m.detailCursorForMode(m.tools[m.cursor].mode)
 			m.pinInput.SetValue(m.tools[m.cursor].pinVersion)
 			m.pinError = ""
 		case "pgup", "ctrl+u":
@@ -187,20 +187,17 @@ func (m *aicliModel) updateDetail(msg tea.Msg) toolScreenResult {
 				m.detailScrollOffset--
 			}
 		case "down", "j":
-			if m.detailCursor < 2 {
+			maxCursor := m.detailModeCount() - 1
+			if m.detailCursor < maxCursor {
 				m.detailCursor++
 				ensureLineVisible(&m.detailScrollOffset, m.detailCursor, m.lastHeight, 2, 1)
 			} else if m.detailScrollOffset < m.lastDetailMaxScroll {
 				m.detailScrollOffset++
 			}
 		case " ", "enter":
-			switch m.detailCursor {
-			case 0: // Latest
-				tool.mode = config.ModeLatest
-			case 1: // Mirror
-				tool.mode = config.ModeMirror
-			case 2: // Pin
-				tool.mode = config.ModePin
+			selectedMode := m.detailModeAtCursor()
+			tool.mode = selectedMode
+			if selectedMode == config.ModePin {
 				m.pinInput.Focus()
 			}
 		case "pgup", "ctrl+u":
@@ -344,19 +341,22 @@ func (m *aicliModel) viewDetail(width, height int) string {
 
 	inner += " Version Mode:\n\n"
 
-	// Radio buttons: Latest, Mirror, Pin (AI tools default to Latest first).
-	modes := []struct {
+	// Radio buttons: conditionally include Mirror only if host version detected.
+	type modeOption struct {
 		name string
 		desc string
-	}{
-		{"Latest", "Install latest from npm"},
-		{"Mirror", fmt.Sprintf("Install same version as host: %s", displayOrDash(t.hostVersion))},
-		{"Pin", "Specify exact version"},
+		mode config.VersionMode
 	}
+	var modes []modeOption
+	modes = append(modes, modeOption{"Latest", "Install latest from npm", config.ModeLatest})
+	if t.hostVersion != "" {
+		modes = append(modes, modeOption{"Mirror", fmt.Sprintf("Install same version as host: %s", t.hostVersion), config.ModeMirror})
+	}
+	modes = append(modes, modeOption{"Pin", "Specify exact version", config.ModePin})
 
 	for i, mode := range modes {
 		radio := lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(theme.IconDotEmpty)
-		if aiModeMatchesIndex(t.mode, i) {
+		if t.mode == mode.mode {
 			radio = lipgloss.NewStyle().Foreground(theme.ColorAmber).Render(theme.IconDot)
 		}
 		prefix := "     "
@@ -368,7 +368,7 @@ func (m *aicliModel) viewDetail(width, height int) string {
 			lipgloss.NewStyle().Foreground(theme.ColorParchment).Render(mode.name),
 			lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(mode.desc))
 
-		if i == 2 { // Pin.
+		if mode.mode == config.ModePin {
 			pinMargin := 11 // Align with radio label text (past "   ▸ ● Pin").
 			inner += "\n" + m.pinInput.viewWithMargin(pinMargin)
 			if m.pinError != "" {
@@ -421,6 +421,40 @@ func (m *aicliModel) toToolConfigs() []config.ToolConfig {
 		result[i] = tc
 	}
 	return result
+}
+
+// detailModes returns the available version modes for the currently selected AI tool.
+// Latest is first (AI tools default to latest), Mirror only if host version detected.
+func (m *aicliModel) detailModes() []config.VersionMode {
+	t := m.tools[m.cursor]
+	var modes []config.VersionMode
+	modes = append(modes, config.ModeLatest)
+	if t.hostVersion != "" {
+		modes = append(modes, config.ModeMirror)
+	}
+	modes = append(modes, config.ModePin)
+	return modes
+}
+
+func (m *aicliModel) detailModeCount() int {
+	return len(m.detailModes())
+}
+
+func (m *aicliModel) detailModeAtCursor() config.VersionMode {
+	modes := m.detailModes()
+	if m.detailCursor >= 0 && m.detailCursor < len(modes) {
+		return modes[m.detailCursor]
+	}
+	return config.ModeLatest
+}
+
+func (m *aicliModel) detailCursorForMode(mode config.VersionMode) int {
+	for i, md := range m.detailModes() {
+		if md == mode {
+			return i
+		}
+	}
+	return 0
 }
 
 // aiModeToIndex maps a VersionMode to the AI detail radio index.

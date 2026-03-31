@@ -2,14 +2,12 @@ package configure
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/config"
-	"github.com/rickchristie/govner/cooper/internal/templates"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
@@ -27,6 +25,7 @@ type saveModel struct {
 	cfg            *config.Config
 	cooperDir      string
 	configPath     string
+	configureApp   *app.ConfigureApp
 	saved          bool
 	buildRequested bool
 	saveErr        string
@@ -38,11 +37,12 @@ type saveModel struct {
 	lastMaxScroll int // cached max scroll offset from last render
 }
 
-func newSaveModel(cfg *config.Config, cooperDir, configPath string) saveModel {
+func newSaveModel(cfg *config.Config, cooperDir, configPath string, ca *app.ConfigureApp) saveModel {
 	return saveModel{
-		cfg:        cfg,
-		cooperDir:  cooperDir,
-		configPath: configPath,
+		cfg:          cfg,
+		cooperDir:    cooperDir,
+		configPath:   configPath,
+		configureApp: ca,
 	}
 }
 
@@ -99,54 +99,22 @@ func (m *saveModel) update(msg tea.Msg) saveResult {
 }
 
 func (m *saveModel) doSave() error {
-	// Validate config.
-	if err := m.cfg.Validate(); err != nil {
-		return fmt.Errorf("validation failed: %w", err)
-	}
+	// Sync the TUI-mutated config back into the ConfigureApp before saving.
+	if m.configureApp != nil {
+		m.configureApp.SetProgrammingTools(m.cfg.ProgrammingTools)
+		m.configureApp.SetAITools(m.cfg.AITools)
+		m.configureApp.SetWhitelistedDomains(m.cfg.WhitelistedDomains)
+		m.configureApp.SetPortForwardRules(m.cfg.PortForwardRules)
+		m.configureApp.SetProxyPort(m.cfg.ProxyPort)
+		m.configureApp.SetBridgePort(m.cfg.BridgePort)
 
-	// Ensure cooper dir and subdirs exist.
-	cliDir := filepath.Join(m.cooperDir, "cli")
-	proxyDir := filepath.Join(m.cooperDir, "proxy")
-	for _, dir := range []string{m.cooperDir, cliDir, proxyDir} {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("create directory %s: %w", dir, err)
+		if err := m.configureApp.Save(); err != nil {
+			return err
 		}
 	}
 
-	// Save config.json.
-	if err := config.SaveConfig(m.configPath, m.cfg); err != nil {
-		return fmt.Errorf("save config: %w", err)
-	}
 	m.doneMsgs = append(m.doneMsgs, fmt.Sprintf("Saved %s", m.configPath))
-
-	// Generate CLI templates.
-	if err := templates.WriteAllTemplates(cliDir, m.cfg); err != nil {
-		return fmt.Errorf("write CLI templates: %w", err)
-	}
-	m.doneMsgs = append(m.doneMsgs, fmt.Sprintf("Generated CLI templates in %s", cliDir))
-
-	// Generate proxy templates.
-	proxyDockerfile, err := templates.RenderProxyDockerfile(m.cfg)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(proxyDir, "proxy.Dockerfile"), []byte(proxyDockerfile), 0644); err != nil {
-		return fmt.Errorf("write proxy.Dockerfile: %w", err)
-	}
-
-	squidConf, err := templates.RenderSquidConf(m.cfg)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(proxyDir, "squid.conf"), []byte(squidConf), 0644); err != nil {
-		return fmt.Errorf("write squid.conf: %w", err)
-	}
-	m.doneMsgs = append(m.doneMsgs, fmt.Sprintf("Generated proxy templates in %s", proxyDir))
-
-	// Ensure CA certificate.
-	if _, _, err := config.EnsureCA(m.cooperDir); err != nil {
-		return fmt.Errorf("ensure CA: %w", err)
-	}
+	m.doneMsgs = append(m.doneMsgs, fmt.Sprintf("Generated templates in %s", m.cooperDir))
 	m.doneMsgs = append(m.doneMsgs, "CA certificate ensured")
 	m.doneMsgs = append(m.doneMsgs, "")
 	m.doneMsgs = append(m.doneMsgs, "Configuration saved. Run 'cooper build' to rebuild images, then 'cooper up' to start.")

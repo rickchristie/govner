@@ -36,15 +36,21 @@ type BridgeServer struct {
 	mu sync.RWMutex
 }
 
-// NewBridgeServer creates a BridgeServer that will bind to both
-// 127.0.0.1:{localhostPort} and {gatewayIP}:{gatewayPort}. It does
-// NOT bind to 0.0.0.0 — only the two explicit addresses are used.
-func NewBridgeServer(routes []config.BridgeRoute, localhostPort int, gatewayIP string, gatewayPort int) *BridgeServer {
+// NewBridgeServer creates a BridgeServer that will bind to 127.0.0.1:{port}
+// plus each provided gateway IP on the same port. It does NOT bind to 0.0.0.0
+// — only the explicit addresses are used. Multiple gateway IPs are needed
+// because host.docker.internal resolves to the default bridge gateway, which
+// may differ from the cooper-external network gateway.
+func NewBridgeServer(routes []config.BridgeRoute, port int, gatewayIPs []string) *BridgeServer {
 	addrs := []string{
-		fmt.Sprintf("127.0.0.1:%d", localhostPort),
+		fmt.Sprintf("127.0.0.1:%d", port),
 	}
-	if gatewayIP != "" {
-		addrs = append(addrs, fmt.Sprintf("%s:%d", gatewayIP, gatewayPort))
+	seen := map[string]bool{"127.0.0.1": true}
+	for _, ip := range gatewayIPs {
+		if ip != "" && !seen[ip] {
+			seen[ip] = true
+			addrs = append(addrs, fmt.Sprintf("%s:%d", ip, port))
+		}
 	}
 
 	return &BridgeServer{

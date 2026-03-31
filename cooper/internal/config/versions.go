@@ -165,7 +165,6 @@ var toolVersionCommands = map[string][]string{
 	"go":      {"go", "version"},
 	"node":    {"node", "--version"},
 	"python":  {"python3", "--version"},
-	"rust":    {"rustc", "--version"},
 	"claude":  {"claude", "--version"},
 	"copilot": {"copilot", "--version"},
 	"codex":   {"codex", "--version"},

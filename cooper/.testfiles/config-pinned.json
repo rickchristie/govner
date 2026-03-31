@@ -2,8 +2,7 @@
   "programming_tools": [
     {"name": "go", "enabled": true, "mode": "pin", "pinned_version": "1.24.10"},
     {"name": "node", "enabled": true, "mode": "pin", "pinned_version": "22.12.0"},
-    {"name": "python", "enabled": true, "mode": "pin", "pinned_version": "3.12.1"},
-    {"name": "rust", "enabled": false, "mode": "off"}
+    {"name": "python", "enabled": true, "mode": "pin", "pinned_version": "3.12.1"}
   ],
   "ai_tools": [
     {"name": "claude", "enabled": true, "mode": "pin", "pinned_version": "2.1.87"},

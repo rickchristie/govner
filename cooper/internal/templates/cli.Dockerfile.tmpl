@@ -60,14 +60,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/bin/python
 {{end -}}
-{{- if .HasRust}}
-# ============================================================================
-# Rust installation
-# ============================================================================
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain {{.RustVersion}} && \
-    . /root/.cargo/env && rustup default {{.RustVersion}}
-ENV PATH="/root/.cargo/bin:${PATH}"
-{{end -}}
 {{- if .HasCodex}}
 # ============================================================================
 # Bubblewrap build from source (required by OpenAI Codex CLI --argv0 support)

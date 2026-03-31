@@ -31,7 +31,7 @@ func writeTempScript(t *testing.T, content string) string {
 // helper: build a BridgeServer with the given routes, using httptest
 // infrastructure (no real listener needed for handler-level tests).
 func newTestServer(routes []config.BridgeRoute) *BridgeServer {
-	return NewBridgeServer(routes, 0, "", 0)
+	return NewBridgeServer(routes, 0, nil)
 }
 
 // --- Health endpoint ---
@@ -305,14 +305,12 @@ exit 0
 // --- Bind address verification ---
 
 func TestBindAddressVerification(t *testing.T) {
-	// Find two free ports.
-	port1 := getFreePort(t)
-	port2 := getFreePort(t)
+	port := getFreePort(t)
 
 	routes := []config.BridgeRoute{
 		{APIPath: "/test", ScriptPath: "/dev/null"},
 	}
-	srv := NewBridgeServer(routes, port1, "127.0.0.2", port2)
+	srv := NewBridgeServer(routes, port, []string{"127.0.0.2"})
 
 	if err := srv.Start(); err != nil {
 		t.Fatalf("failed to start server: %v", err)
@@ -322,32 +320,24 @@ func TestBindAddressVerification(t *testing.T) {
 	// Give the servers a moment to start accepting connections.
 	time.Sleep(50 * time.Millisecond)
 
-	// Should be reachable on 127.0.0.1:{port1}.
-	resp1, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port1))
+	// Should be reachable on 127.0.0.1:{port}.
+	resp1, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port))
 	if err != nil {
-		t.Fatalf("expected server reachable on 127.0.0.1:%d, got error: %v", port1, err)
+		t.Fatalf("expected server reachable on 127.0.0.1:%d, got error: %v", port, err)
 	}
 	resp1.Body.Close()
 	if resp1.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 on 127.0.0.1:%d, got %d", port1, resp1.StatusCode)
+		t.Errorf("expected 200 on 127.0.0.1:%d, got %d", port, resp1.StatusCode)
 	}
 
-	// Should be reachable on 127.0.0.2:{port2}.
-	resp2, err := http.Get(fmt.Sprintf("http://127.0.0.2:%d/health", port2))
+	// Should be reachable on 127.0.0.2:{port} (gateway IP).
+	resp2, err := http.Get(fmt.Sprintf("http://127.0.0.2:%d/health", port))
 	if err != nil {
-		t.Fatalf("expected server reachable on 127.0.0.2:%d, got error: %v", port2, err)
+		t.Fatalf("expected server reachable on 127.0.0.2:%d, got error: %v", port, err)
 	}
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 on 127.0.0.2:%d, got %d", port2, resp2.StatusCode)
-	}
-
-	// Should NOT be reachable on 127.0.0.1:{port2} (that port is bound
-	// to 127.0.0.2 only, not 0.0.0.0).
-	client := http.Client{Timeout: 500 * time.Millisecond}
-	_, err = client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port2))
-	if err == nil {
-		t.Error("expected server NOT reachable on 127.0.0.1 with gateway port, but it was")
+		t.Errorf("expected 200 on 127.0.0.2:%d, got %d", port, resp2.StatusCode)
 	}
 }
 

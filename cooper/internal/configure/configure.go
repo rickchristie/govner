@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
@@ -31,13 +31,14 @@ const (
 
 // model is the top-level bubbletea model for the configure wizard.
 type model struct {
-	screen     Screen
-	cfg        *config.Config
-	cooperDir  string
-	configPath string
-	width      int
-	height     int
-	existing   bool // true if config was loaded from disk
+	screen       Screen
+	cfg          *config.Config
+	cooperDir    string
+	configPath   string
+	configureApp *app.ConfigureApp
+	width        int
+	height       int
+	existing     bool // true if config was loaded from disk
 
 	// Quit confirmation modal.
 	showQuitModal    bool
@@ -89,23 +90,21 @@ type RunResult struct {
 	BuildRequested bool
 }
 
-// Run is the entry point called from main.go. It loads existing config or
-// creates defaults, then runs the bubbletea program. The returned RunResult
-// indicates whether the user saved and whether they requested a build.
-func Run(cooperDir string) (RunResult, error) {
+// Run is the entry point called from main.go. It accepts a ConfigureApp
+// that provides the configuration state, and runs the bubbletea TUI wizard.
+// The returned RunResult indicates whether the user saved and whether they
+// requested a build.
+func Run(ca *app.ConfigureApp) (RunResult, error) {
 	// Check Docker is installed and running before proceeding.
 	if err := checkDocker(); err != nil {
 		return RunResult{}, err
 	}
 
-	if err := os.MkdirAll(cooperDir, 0755); err != nil {
-		return RunResult{}, fmt.Errorf("create cooper directory: %w", err)
-	}
+	cfg := ca.Config()
+	cooperDir := ca.CooperDir()
+	existing := ca.IsExisting()
 
-	configPath := filepath.Join(cooperDir, "config.json")
-	cfg, existing := loadOrDefault(configPath)
-
-	m := newModel(cfg, cooperDir, configPath, existing)
+	m := newModel(cfg, cooperDir, ca, existing)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	finalModel, err := p.Run()
 	if err != nil {
@@ -126,28 +125,26 @@ func Run(cooperDir string) (RunResult, error) {
 	return result, nil
 }
 
-func loadOrDefault(configPath string) (*config.Config, bool) {
-	cfg, err := config.LoadConfig(configPath)
-	if err != nil {
-		return config.DefaultConfig(), false
-	}
-	return cfg, true
-}
 
-func newModel(cfg *config.Config, cooperDir, configPath string, existing bool) *model {
+func newModel(cfg *config.Config, cooperDir string, ca *app.ConfigureApp, existing bool) *model {
+	configPath := ""
+	if cooperDir != "" {
+		configPath = cooperDir + "/config.json"
+	}
 	m := &model{
-		screen:     ScreenWelcome,
-		cfg:        cfg,
-		cooperDir:  cooperDir,
-		configPath: configPath,
-		existing:   existing,
+		screen:       ScreenWelcome,
+		cfg:          cfg,
+		cooperDir:    cooperDir,
+		configPath:   configPath,
+		configureApp: ca,
+		existing:     existing,
 	}
 	m.welcome = newWelcomeModel(existing)
 	m.programming = newProgrammingModel(cfg.ProgrammingTools)
 	m.aicli = newAICLIModel(cfg.AITools)
 	m.whitelist = newWhitelistModel(cfg.WhitelistedDomains, cfg.PortForwardRules)
 	m.proxySetup = newProxyModel(cfg.ProxyPort, cfg.BridgePort)
-	m.save = newSaveModel(cfg, cooperDir, configPath)
+	m.save = newSaveModel(cfg, cooperDir, configPath, ca)
 	return m
 }
 
@@ -312,7 +309,7 @@ func (m *model) navigateTo(screen Screen) {
 	m.screen = screen
 	// Refresh save model with latest config.
 	if screen == ScreenSave {
-		m.save = newSaveModel(m.cfg, m.cooperDir, m.configPath)
+		m.save = newSaveModel(m.cfg, m.cooperDir, m.configPath, m.configureApp)
 	}
 }
 
@@ -406,7 +403,7 @@ type welcomeItem struct {
 func newWelcomeModel(existing bool) welcomeModel {
 	return welcomeModel{
 		items: []welcomeItem{
-			{label: "Programming Tools", desc: "Go, Node.js, Python, Rust"},
+			{label: "Programming Tools", desc: "Go, Node.js, Python"},
 			{label: "AI CLI Tools", desc: "Claude Code, Copilot, Codex, OpenCode"},
 			{label: "Proxy Whitelist", desc: "Domain whitelist, port forwarding"},
 			{label: "Proxy Settings", desc: "Proxy port, bridge port"},

@@ -37,10 +37,13 @@ func StartProxy(cfg *config.Config, cooperDir string) error {
 	aclSocketDir := filepath.Join(cooperDir, "run")
 	logDir := filepath.Join(cooperDir, "logs")
 
-	// Create mount directories as the current user BEFORE docker run.
-	// If these don't exist, Docker creates them as root, making them
-	// inaccessible to the user process (e.g., ACL socket listener).
+	// Clean and recreate mount directories as the current user BEFORE docker run.
+	// This prevents two problems:
+	// 1. Docker creating them as root if they don't exist.
+	// 2. Stale files from a previous run (e.g., log files or socket files owned
+	//    by a different UID from an older image build) blocking the new container.
 	for _, dir := range []string{aclSocketDir, logDir} {
+		_ = os.RemoveAll(dir)
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("create mount dir %s: %w", dir, err)
 		}

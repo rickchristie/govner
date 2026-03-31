@@ -230,10 +230,6 @@ func appendLanguageCacheMounts(args []string, homeDir string, cfg *config.Config
 			hostPip := filepath.Join(homeDir, ".cache", "pip")
 			containerPip := filepath.Join(containerHome, ".cache", "pip")
 			args = append(args, "-v", fmt.Sprintf("%s:%s:ro", hostPip, containerPip))
-		case "rust":
-			hostCargo := filepath.Join(homeDir, ".cargo", "registry")
-			containerCargo := filepath.Join(containerHome, ".cargo", "registry")
-			args = append(args, "-v", fmt.Sprintf("%s:%s:ro", hostCargo, containerCargo))
 		}
 	}
 	return args
@@ -262,7 +258,6 @@ func ensureBarrelHostDirs(absWorkspace string) error {
 		filepath.Join(homeDir, ".cache", "pip"),
 		filepath.Join(homeDir, ".cache", "go-build"),
 		filepath.Join(gopath, "pkg", "mod"),
-		filepath.Join(homeDir, ".cargo", "registry"),
 	}
 
 	for _, dir := range dirs {
@@ -336,9 +331,13 @@ func ExecBarrel(containerName string, cmd []string, envArgs []string, interactiv
 		c.Stdin = os.Stdin
 	}
 
-	if err := c.Run(); err != nil {
+	err := c.Run()
+	if err != nil && !interactive {
 		return fmt.Errorf("docker exec %s failed: %w", containerName, err)
 	}
+	// For interactive sessions, don't treat shell exit codes as errors.
+	// The exit code is just the status of the last command the user ran
+	// (or from profile scripts like .bash_logout).
 	return nil
 }
 

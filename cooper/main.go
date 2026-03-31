@@ -211,7 +211,12 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, "CA certificate regenerated. Run 'cooper build' to rebuild images with the new CA.")
 	}
 
-	result, err := configure.Run(cooperDir)
+	ca, err := app.NewConfigureApp(cooperDir)
+	if err != nil {
+		return fmt.Errorf("initialize configure: %w", err)
+	}
+
+	result, err := configure.Run(ca)
 	if err != nil {
 		return err
 	}
@@ -481,14 +486,20 @@ func runUp(cmd *cobra.Command, args []string) error {
 		p.Send(loading.StepCompleteMsg{Index: 2})
 
 		// Step 3: Start execution bridge.
-		gatewayIP, gwErr := docker.GetGatewayIP(docker.NetworkExternal)
-		if gwErr != nil {
+		var gatewayIPs []string
+		if ip, err := docker.GetGatewayIP(docker.NetworkExternal); err == nil {
+			gatewayIPs = append(gatewayIPs, ip)
+		}
+		if ip, err := docker.GetGatewayIP("bridge"); err == nil {
+			gatewayIPs = append(gatewayIPs, ip)
+		}
+		if len(gatewayIPs) == 0 {
 			p.Send(loading.StepErrorMsg{Index: 3,
-				Err: fmt.Errorf("could not discover Docker gateway IP: %w\n"+
-					"Bridge won't be reachable from containers. Check that cooper-external network exists", gwErr)})
+				Err: fmt.Errorf("could not discover any Docker gateway IP\n" +
+					"Bridge won't be reachable from containers. Check that Docker networks exist")})
 			return
 		}
-		bridgeServer = bridge.NewBridgeServer(cfg.BridgeRoutes, cfg.BridgePort, gatewayIP, cfg.BridgePort)
+		bridgeServer = bridge.NewBridgeServer(cfg.BridgeRoutes, cfg.BridgePort, gatewayIPs)
 		if err := bridgeServer.Start(); err != nil {
 			p.Send(loading.StepErrorMsg{Index: 3, Err: err})
 			return
@@ -730,6 +741,12 @@ func runCLI(cmd *cobra.Command, args []string) error {
 	interactive := cliOneShot == ""
 	if err := docker.ExecBarrel(containerName, execCmd, envArgs, interactive); err != nil {
 		return fmt.Errorf("exec barrel: %w", err)
+	}
+
+	if interactive {
+		// Reset terminal title and print exit message.
+		fmt.Fprint(os.Stdout, "\033]0;\007")
+		fmt.Print("\n  \033[38;5;130m🥃 Barrel sealed. Back on host.\033[0m\n\n")
 	}
 
 	return nil
@@ -1099,7 +1116,11 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 			fmt.Println("To see it, run: cooper up (with Docker running).")
 			return nil
 		case "configure":
-			_, err := configure.Run("/tmp/cooper-test")
+			testCA, caErr := app.NewConfigureApp("/tmp/cooper-test")
+			if caErr != nil {
+				return caErr
+			}
+			_, err := configure.Run(testCA)
 			return err
 		default:
 			return fmt.Errorf("unknown screen: %s\nAvailable: containers, monitor, blocked, allowed, bridge-logs, bridge-routes, settings, about, loading, configure", tuiTestScreen)

@@ -79,6 +79,9 @@ http_access deny all
 # CACHING AND LOGGING
 # ============================================================================
 
+# PID file in cooper-owned directory (container runs as non-root cooper user)
+pid_filename /var/run/squid/squid.pid
+
 # Disable caching
 cache deny all
 

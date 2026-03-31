@@ -276,8 +276,6 @@ check_tool "Node.js" node --version
 check_tool "npm" npm --version
 check_tool "Python" python3 --version
 check_tool "pip" pip3 --version
-check_tool "Rust" rustc --version
-
 # ============================================================================
 section "AI CLI Tools"
 # ============================================================================

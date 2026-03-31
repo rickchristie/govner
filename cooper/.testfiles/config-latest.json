@@ -2,8 +2,7 @@
   "programming_tools": [
     {"name": "go", "enabled": true, "mode": "latest"},
     {"name": "node", "enabled": true, "mode": "latest"},
-    {"name": "python", "enabled": true, "mode": "latest"},
-    {"name": "rust", "enabled": false, "mode": "off"}
+    {"name": "python", "enabled": true, "mode": "latest"}
   ],
   "ai_tools": [
     {"name": "claude", "enabled": true, "mode": "latest"},

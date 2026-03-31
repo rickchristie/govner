@@ -25,7 +25,7 @@ if ! grep -q "Cooper: Auto-approve aliases" /home/user/.bashrc 2>/dev/null; then
     cat >> /home/user/.bashrc << 'ALIASES'
 
 # Cooper: Ensure PATH includes tool directories (login shells reset PATH)
-export PATH="/home/user/.local/bin:/home/user/.npm-global/bin:$PATH"
+export PATH="/home/user/.local/bin:/home/user/.npm-global/bin{{- if .HasOpenCode}}:/home/user/.opencode/bin{{- end}}{{- if .HasGo}}:/usr/local/go/bin:/go/bin{{- end}}:$PATH"
 
 # Cooper: Auto-approve aliases (container is network-isolated)
 {{- if .HasClaudeCode}}
@@ -182,15 +182,23 @@ start_socat_from_config
 # ============================================================================
 # WELCOME BANNER (interactive bash sessions only)
 # ============================================================================
-if ! grep -q "Cooper: Welcome banner" /home/user/.bashrc 2>/dev/null; then
+if ! grep -q "Cooper: Welcome v2" /home/user/.bashrc 2>/dev/null; then
     cat >> /home/user/.bashrc << 'BANNER'
 
-# Cooper: Welcome banner
+# Cooper: Welcome v2
 if [[ $- == *i* ]]; then
     echo ""
-    echo "Cooper CLI — barrel-proof and ready"
-    echo "   Dependencies must be installed on the host."
-    echo "   Run package manager on host, then re-enter."
+    echo -e "  \033[38;5;130m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+    echo ""
+    echo -e "    \033[1;38;5;214m🥃  C O O P E R\033[0m"
+    echo -e "    \033[38;5;223mBarrel-proof containers for undiluted AI\033[0m"
+    echo ""
+    echo -e "    \033[38;5;108m◆\033[0m Network-isolated    \033[38;5;108m◆\033[0m SSL-inspected"
+    echo -e "    \033[38;5;108m◆\033[0m Caps dropped        \033[38;5;108m◆\033[0m Proxy filtered"
+    echo ""
+    echo -e "  \033[38;5;130m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+    echo ""
+    echo -e "    \033[38;5;245mInstall deps on the host, not inside the barrel.\033[0m"
     echo ""
 fi
 BANNER

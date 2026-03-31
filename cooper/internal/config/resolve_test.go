@@ -246,104 +246,6 @@ func TestResolvePythonLatestFutureEOLNotFiltered(t *testing.T) {
 	}
 }
 
-// --- Rust version resolution tests ---
-
-func TestResolveRustLatest(t *testing.T) {
-	tomlFixture := `
-[manifest]
-date = "2023-12-28"
-
-[pkg.rust]
-version = "1.75.0 (82e1608df 2023-12-21)"
-[pkg.rust.target.x86_64-unknown-linux-gnu]
-available = true
-url = "https://example.com/rust-1.75.0-x86_64-unknown-linux-gnu.tar.gz"
-
-[pkg.cargo]
-version = "1.75.0 (c1fa531d8 2023-12-22)"
-`
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, tomlFixture)
-	}))
-	defer server.Close()
-
-	origURL := rustStableURL
-	rustStableURL = server.URL
-	defer func() { rustStableURL = origURL }()
-
-	version, err := ResolveRustLatest()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if version != "1.75.0" {
-		t.Errorf("got %q, want \"1.75.0\"", version)
-	}
-}
-
-func TestResolveRustLatestNoVersion(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "[manifest]\ndate = \"2023-12-28\"\n")
-	}))
-	defer server.Close()
-
-	origURL := rustStableURL
-	rustStableURL = server.URL
-	defer func() { rustStableURL = origURL }()
-
-	_, err := ResolveRustLatest()
-	if err == nil {
-		t.Fatal("expected error when no version found in TOML")
-	}
-}
-
-func TestParseRustVersion(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		want    string
-		wantErr bool
-	}{
-		{
-			name:  "standard format",
-			input: `version = "1.75.0 (82e1608df 2023-12-21)"`,
-			want:  "1.75.0",
-		},
-		{
-			name:  "version only",
-			input: `version = "1.75.0"`,
-			want:  "1.75.0",
-		},
-		{
-			name:    "no version line",
-			input:   `date = "2023-12-28"`,
-			wantErr: true,
-		},
-		{
-			name:    "empty",
-			input:   "",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseRustVersion(tt.input)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 // --- npm registry resolution tests ---
 
 func TestResolveNPMPackageLatest(t *testing.T) {
@@ -485,7 +387,6 @@ func TestResolveLatestVersionDispatch(t *testing.T) {
 	origGo := goLatestURL
 	origNode := nodeLatestURL
 	origPython := pythonLatestURL
-	origRust := rustStableURL
 	origNPM := npmRegistryURL
 
 	goLatestURL = server.URL + "/?mode=json"
@@ -496,7 +397,6 @@ func TestResolveLatestVersionDispatch(t *testing.T) {
 		goLatestURL = origGo
 		nodeLatestURL = origNode
 		pythonLatestURL = origPython
-		rustStableURL = origRust
 		npmRegistryURL = origNPM
 	}()
 

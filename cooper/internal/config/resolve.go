@@ -34,8 +34,6 @@ func ResolveLatestVersion(toolName string) (string, error) {
 		return ResolveNodeLatest()
 	case "python":
 		return ResolvePythonLatest()
-	case "rust":
-		return ResolveRustLatest()
 	case "claude", "copilot", "codex", "opencode":
 		pkg, ok := npmPackageNames[toolName]
 		if !ok {
@@ -57,8 +55,6 @@ func ValidateVersion(toolName, version string) (bool, error) {
 		return validateNodeVersion(version)
 	case "python":
 		return validatePythonVersion(version)
-	case "rust":
-		return validateRustVersion(version)
 	case "claude", "copilot", "codex", "opencode":
 		pkg, ok := npmPackageNames[toolName]
 		if !ok {
@@ -259,58 +255,6 @@ func validatePythonVersion(version string) (bool, error) {
 	}
 
 	return false, nil
-}
-
-// --- Rust version resolution ---
-
-// rustStableURL is the endpoint for Rust stable channel metadata.
-var rustStableURL = "https://static.rust-lang.org/dist/channel-rust-stable.toml"
-
-// ResolveRustLatest fetches the latest stable Rust version by parsing the channel TOML.
-// We do a simple string search for the version field rather than pulling in a TOML parser.
-func ResolveRustLatest() (string, error) {
-	body, err := httpGet(rustStableURL)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch Rust stable channel: %w", err)
-	}
-
-	return parseRustVersion(string(body))
-}
-
-// parseRustVersion extracts the version from the Rust stable channel TOML.
-// It looks for a line matching: `version = "1.75.0 (date)"` in the [pkg.rust] section.
-func parseRustVersion(toml string) (string, error) {
-	// The TOML contains multiple version fields under different [pkg.*] sections.
-	// The canonical version is under [pkg.rust] which appears first.
-	// We look for the first `version = "X.Y.Z ...` line.
-	for _, line := range strings.Split(toml, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "version = ") {
-			// Extract the quoted value: version = "1.75.0 (82e1608df 2023-12-21)"
-			quoted := strings.TrimPrefix(trimmed, "version = ")
-			quoted = strings.Trim(quoted, "\"")
-			// Take just the version number before any space
-			parts := strings.Fields(quoted)
-			if len(parts) > 0 {
-				version := parts[0]
-				if semverRegex.MatchString(version) {
-					return version, nil
-				}
-			}
-		}
-	}
-
-	return "", fmt.Errorf("no version found in Rust stable channel TOML")
-}
-
-// validateRustVersion checks if the given version matches the current stable Rust version.
-// Rust only publishes the stable channel, so we check against that single version.
-func validateRustVersion(version string) (bool, error) {
-	latest, err := ResolveRustLatest()
-	if err != nil {
-		return false, err
-	}
-	return latest == version, nil
 }
 
 // --- npm registry resolution ---

@@ -28,7 +28,7 @@ RUN apk add --no-cache \
     curl
 
 ARG SQUID_VERSION=6.12
-RUN curl -Lo /tmp/squid-${SQUID_VERSION}.tar.xz \
+RUN curl --retry 3 --retry-delay 5 -Lo /tmp/squid-${SQUID_VERSION}.tar.xz \
         "http://www.squid-cache.org/Versions/v6/squid-${SQUID_VERSION}.tar.xz" && \
     mkdir -p /tmp/squid-build && \
     cd /tmp/squid-build && \

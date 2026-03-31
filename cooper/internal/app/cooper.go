@@ -101,14 +101,23 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 	report(2, "Verify CA certificate", nil)
 
 	// Step 3: Start execution bridge.
-	gatewayIP, gwErr := docker.GetGatewayIP(docker.NetworkExternal)
-	if gwErr != nil {
-		err := fmt.Errorf("could not discover Docker gateway IP: %w\n"+
-			"Bridge won't be reachable from containers. Check that cooper-external network exists", gwErr)
+	// Bind to both the cooper-external gateway and the default bridge gateway.
+	// host.docker.internal resolves to the default bridge gateway, which may
+	// differ from the cooper-external gateway.
+	var gatewayIPs []string
+	if ip, err := docker.GetGatewayIP(docker.NetworkExternal); err == nil {
+		gatewayIPs = append(gatewayIPs, ip)
+	}
+	if ip, err := docker.GetGatewayIP("bridge"); err == nil {
+		gatewayIPs = append(gatewayIPs, ip)
+	}
+	if len(gatewayIPs) == 0 {
+		err := fmt.Errorf("could not discover any Docker gateway IP\n" +
+			"Bridge won't be reachable from containers. Check that Docker networks exist")
 		report(3, "Start bridge", err)
 		return err
 	}
-	a.bridgeServer = bridge.NewBridgeServer(a.cfg.BridgeRoutes, a.cfg.BridgePort, gatewayIP, a.cfg.BridgePort)
+	a.bridgeServer = bridge.NewBridgeServer(a.cfg.BridgeRoutes, a.cfg.BridgePort, gatewayIPs)
 	if err := a.bridgeServer.Start(); err != nil {
 		report(3, "Start bridge", err)
 		return err

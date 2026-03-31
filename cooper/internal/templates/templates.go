@@ -26,9 +26,6 @@ type cliDockerfileData struct {
 	NodeVersion string
 	HasPython   bool
 	PythonVersion string
-	HasRust     bool
-	RustVersion string
-
 	HasClaudeCode    bool
 	ClaudeVersion    string // empty = install latest
 	HasCopilot       bool
@@ -56,6 +53,7 @@ type squidConfData struct {
 // Port forwarding rules are read from /etc/cooper/socat-rules.json at runtime,
 // not baked into the template. BridgePort is kept as a fallback default.
 type entrypointData struct {
+	HasGo         bool
 	HasClaudeCode bool
 	HasCopilot    bool
 	HasCodex      bool
@@ -106,8 +104,6 @@ func buildCLIDockerfileData(cfg *config.Config) cliDockerfileData {
 		NodeVersion:   getToolVersion(cfg.ProgrammingTools, "node"),
 		HasPython:     isToolEnabled(cfg.ProgrammingTools, "python"),
 		PythonVersion: getToolVersion(cfg.ProgrammingTools, "python"),
-		HasRust:       isToolEnabled(cfg.ProgrammingTools, "rust"),
-		RustVersion:   getToolVersion(cfg.ProgrammingTools, "rust"),
 		HasClaudeCode:   isToolEnabled(cfg.AITools, "claude"),
 		ClaudeVersion:   getToolVersion(cfg.AITools, "claude"),
 		HasCopilot:      isToolEnabled(cfg.AITools, "copilot"),
@@ -203,6 +199,7 @@ func RenderEntrypoint(cfg *config.Config) (string, error) {
 	}
 
 	data := entrypointData{
+		HasGo:         isToolEnabled(cfg.ProgrammingTools, "go"),
 		HasClaudeCode: isToolEnabled(cfg.AITools, "claude"),
 		HasCopilot:    isToolEnabled(cfg.AITools, "copilot"),
 		HasCodex:      isToolEnabled(cfg.AITools, "codex"),

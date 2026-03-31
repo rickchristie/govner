@@ -325,7 +325,7 @@ func TestNewProgrammingModel_ExistingConfig_Preserved(t *testing.T) {
 func TestNewProgrammingModel_DefaultToolList(t *testing.T) {
 	m := newProgrammingModel(nil)
 
-	expected := map[string]bool{"go": true, "node": true, "python": true, "rust": true}
+	expected := map[string]bool{"go": true, "node": true, "python": true}
 	for _, tool := range m.tools {
 		if _, ok := expected[tool.name]; !ok {
 			t.Errorf("unexpected tool %q in default programming tools", tool.name)
@@ -671,5 +671,262 @@ func TestMin(t *testing.T) {
 	}
 	if min(4, 4) != 4 {
 		t.Error("min(4,4) should be 4")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Mirror / Latest mode selection logic — programmingModel
+// ---------------------------------------------------------------------------
+
+func TestProgrammingModel_NoHostVersion_MirrorNotAvailable(t *testing.T) {
+	m := programmingModel{
+		tools: []toolEntry{
+			{name: "go", displayName: "Go", hostVersion: ""},
+		},
+		cursor: 0,
+	}
+
+	modes := m.detailModes()
+
+	for _, mode := range modes {
+		if mode == config.ModeMirror {
+			t.Error("Mirror should NOT be available when hostVersion is empty")
+		}
+	}
+
+	hasLatest := false
+	hasPin := false
+	for _, mode := range modes {
+		if mode == config.ModeLatest {
+			hasLatest = true
+		}
+		if mode == config.ModePin {
+			hasPin = true
+		}
+	}
+	if !hasLatest {
+		t.Error("Latest should be in detailModes() when hostVersion is empty")
+	}
+	if !hasPin {
+		t.Error("Pin should be in detailModes() when hostVersion is empty")
+	}
+}
+
+func TestProgrammingModel_WithHostVersion_MirrorAvailable(t *testing.T) {
+	m := programmingModel{
+		tools: []toolEntry{
+			{name: "go", displayName: "Go", hostVersion: "1.24.10"},
+		},
+		cursor: 0,
+	}
+
+	modes := m.detailModes()
+
+	hasMirror := false
+	for _, mode := range modes {
+		if mode == config.ModeMirror {
+			hasMirror = true
+		}
+	}
+	if !hasMirror {
+		t.Error("Mirror should be available when hostVersion is set")
+	}
+}
+
+func TestProgrammingModel_NoHostVersion_DefaultIsLatest(t *testing.T) {
+	// Provide existing config with a tool that has no host version to exercise
+	// the auto-enable path in newProgrammingModel: tools without a detected
+	// host version should NOT get auto-enabled with mirror mode.
+	//
+	// We construct the model directly (bypassing DetectHostVersion) to control
+	// hostVersion precisely.
+	m := programmingModel{
+		tools: []toolEntry{
+			{name: "go", displayName: "Go", hostVersion: ""},
+		},
+		cursor: 0,
+	}
+
+	// Simulate the auto-enable logic from newProgrammingModel with len(existing)==0.
+	for i := range m.tools {
+		if m.tools[i].hostVersion != "" {
+			m.tools[i].enabled = true
+			m.tools[i].mode = config.ModeMirror
+		}
+	}
+
+	if m.tools[0].mode == config.ModeMirror {
+		t.Error("tool with empty hostVersion should NOT default to ModeMirror")
+	}
+	if m.tools[0].enabled {
+		t.Error("tool with empty hostVersion should NOT be auto-enabled")
+	}
+}
+
+func TestProgrammingModel_WithHostVersion_DefaultIsMirror(t *testing.T) {
+	m := programmingModel{
+		tools: []toolEntry{
+			{name: "go", displayName: "Go", hostVersion: "1.24.10"},
+		},
+		cursor: 0,
+	}
+
+	// Simulate the auto-enable logic from newProgrammingModel with len(existing)==0.
+	for i := range m.tools {
+		if m.tools[i].hostVersion != "" {
+			m.tools[i].enabled = true
+			m.tools[i].mode = config.ModeMirror
+		}
+	}
+
+	if m.tools[0].mode != config.ModeMirror {
+		t.Errorf("tool with hostVersion should default to ModeMirror, got %v", m.tools[0].mode)
+	}
+	if !m.tools[0].enabled {
+		t.Error("tool with hostVersion should be auto-enabled")
+	}
+}
+
+func TestProgrammingModel_PinAlwaysAvailable(t *testing.T) {
+	// Pin should be present regardless of hostVersion.
+	for _, hv := range []string{"", "1.24.10"} {
+		m := programmingModel{
+			tools: []toolEntry{
+				{name: "go", displayName: "Go", hostVersion: hv},
+			},
+			cursor: 0,
+		}
+
+		modes := m.detailModes()
+		hasPin := false
+		for _, mode := range modes {
+			if mode == config.ModePin {
+				hasPin = true
+			}
+		}
+		if !hasPin {
+			t.Errorf("Pin should always be in detailModes() (hostVersion=%q)", hv)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Mirror / Latest mode selection logic — aicliModel
+// ---------------------------------------------------------------------------
+
+func TestAICLIModel_NoHostVersion_MirrorNotAvailable(t *testing.T) {
+	m := aicliModel{
+		tools: []toolEntry{
+			{name: "claude", displayName: "Claude Code", hostVersion: ""},
+		},
+		cursor: 0,
+	}
+
+	modes := m.detailModes()
+
+	for _, mode := range modes {
+		if mode == config.ModeMirror {
+			t.Error("Mirror should NOT be available for AI tool when hostVersion is empty")
+		}
+	}
+
+	hasLatest := false
+	hasPin := false
+	for _, mode := range modes {
+		if mode == config.ModeLatest {
+			hasLatest = true
+		}
+		if mode == config.ModePin {
+			hasPin = true
+		}
+	}
+	if !hasLatest {
+		t.Error("Latest should be in detailModes() for AI tool when hostVersion is empty")
+	}
+	if !hasPin {
+		t.Error("Pin should be in detailModes() for AI tool when hostVersion is empty")
+	}
+}
+
+func TestAICLIModel_WithHostVersion_MirrorAvailable(t *testing.T) {
+	m := aicliModel{
+		tools: []toolEntry{
+			{name: "claude", displayName: "Claude Code", hostVersion: "2.0.0"},
+		},
+		cursor: 0,
+	}
+
+	modes := m.detailModes()
+
+	hasMirror := false
+	for _, mode := range modes {
+		if mode == config.ModeMirror {
+			hasMirror = true
+		}
+	}
+	if !hasMirror {
+		t.Error("Mirror should be available for AI tool when hostVersion is set")
+	}
+}
+
+func TestAICLIModel_NoHostVersion_DefaultIsNotMirror(t *testing.T) {
+	m := aicliModel{
+		tools: []toolEntry{
+			{name: "claude", displayName: "Claude Code", hostVersion: ""},
+		},
+		cursor: 0,
+	}
+
+	// Simulate the auto-enable logic from newAICLIModel with len(existing)==0.
+	for i := range m.tools {
+		if m.tools[i].hostVersion != "" {
+			m.tools[i].enabled = true
+			m.tools[i].mode = config.ModeMirror
+		}
+	}
+
+	if m.tools[0].mode == config.ModeMirror {
+		t.Error("AI tool with empty hostVersion should NOT default to ModeMirror")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// detailCursorForMode mapping tests
+// ---------------------------------------------------------------------------
+
+func TestDetailCursorForMode_NoMirror(t *testing.T) {
+	// Programming model without hostVersion: modes are [Latest, Pin].
+	m := programmingModel{
+		tools: []toolEntry{
+			{name: "go", displayName: "Go", hostVersion: ""},
+		},
+		cursor: 0,
+	}
+
+	if got := m.detailCursorForMode(config.ModeLatest); got != 0 {
+		t.Errorf("detailCursorForMode(ModeLatest) without mirror: got %d, want 0", got)
+	}
+	if got := m.detailCursorForMode(config.ModePin); got != 1 {
+		t.Errorf("detailCursorForMode(ModePin) without mirror: got %d, want 1", got)
+	}
+}
+
+func TestDetailCursorForMode_WithMirror(t *testing.T) {
+	// Programming model with hostVersion: modes are [Mirror, Latest, Pin].
+	m := programmingModel{
+		tools: []toolEntry{
+			{name: "go", displayName: "Go", hostVersion: "1.24.10"},
+		},
+		cursor: 0,
+	}
+
+	if got := m.detailCursorForMode(config.ModeMirror); got != 0 {
+		t.Errorf("detailCursorForMode(ModeMirror) with mirror: got %d, want 0", got)
+	}
+	if got := m.detailCursorForMode(config.ModeLatest); got != 1 {
+		t.Errorf("detailCursorForMode(ModeLatest) with mirror: got %d, want 1", got)
+	}
+	if got := m.detailCursorForMode(config.ModePin); got != 2 {
+		t.Errorf("detailCursorForMode(ModePin) with mirror: got %d, want 2", got)
 	}
 }

@@ -576,23 +576,6 @@ func TestDetectHostVersionPython(t *testing.T) {
 	}
 }
 
-func TestDetectHostVersionRust(t *testing.T) {
-	origExecCommand := execCommand
-	defer func() { execCommand = origExecCommand }()
-
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		return exec.Command("echo", "rustc 1.75.0 (82e1608df 2023-12-21)")
-	}
-
-	version, err := DetectHostVersion("rust")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if version != "1.75.0" {
-		t.Errorf("got version %q, want \"1.75.0\"", version)
-	}
-}
-
 func TestDetectHostVersionClaude(t *testing.T) {
 	origExecCommand := execCommand
 	defer func() { execCommand = origExecCommand }()

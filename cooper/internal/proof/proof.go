@@ -362,7 +362,6 @@ func checkProgrammingToolVersions(container string, tools []string) []ProofResul
 		"go":     "go version",
 		"node":   "node --version",
 		"python": "python3 --version 2>/dev/null || python --version 2>/dev/null || echo notfound",
-		"rust":   "rustc --version 2>/dev/null || echo notfound",
 	}
 
 	var results []ProofResult

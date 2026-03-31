@@ -58,7 +58,7 @@ Then please read through /pgflock and notice the difference:
     - Programming Tool Setup Flow:
       - Sets up programming language environment in Dockerfile for the AI CLI to use.
       - This is important, because we want the AI to be able to run tests, run lints, run builds, etc.
-      - Out-of-the box support for: Golang, Nodejs (npm, yarn, bun), Python (pip, pipenv, poetry), Rust (cargo).
+      - Out-of-the box support for: Golang, Nodejs (npm, yarn, bun), Python (pip, pipenv, poetry).
         User is able to auto-generate Dockerfile for these.
       - User is instructed that they can add programming language/tools that they want manually if not in the list.
         - User customizations go in a separate file (`~/.cooper/cli/Dockerfile.user`) which is layered on top of the
@@ -80,7 +80,6 @@ Then please read through /pgflock and notice the difference:
             - Go: `go.dev/dl/?mode=json` API
             - Node.js: `nodejs.org/dist/index.json`
             - Python: `endoflife.date/api/python.json` or similar stable API
-            - Rust: `static.rust-lang.org/dist/channel-rust-stable.toml`
             - AI CLI tools (npm-based): npm registry HTTP API (`https://registry.npmjs.org/<package>`) queried
               directly from Go. Does NOT require npm installed on the host.
             All version resolution is done via HTTP APIs directly from Go — the only host dependencies are
@@ -293,7 +292,6 @@ Then please read through /pgflock and notice the difference:
       - Go: `$GOPATH/pkg/mod` (read-only), `~/.cache/go-build` (read-write), `GOFLAGS=-mod=readonly`
       - Node: `~/.npm` (read-only)
       - Python: `~/.cache/pip` (read-only)
-      - Rust: `~/.cargo/registry` (read-only)
     - Directories are created on host if they don't exist (`mkdir -p` before mount).
     - Dependency workflow per ecosystem (host-preload model — same pattern for all, different commands):
       - Go: `go mod download` on host populates `$GOPATH/pkg/mod`, mounted read-only. `GOFLAGS=-mod=readonly` enforced.
@@ -302,7 +300,6 @@ Then please read through /pgflock and notice the difference:
         created inside the workspace (e.g., `.venv/`) are accessible inside the container. `~/.cache/pip` is mounted ro
         for cached wheels. Cooper detects which Python tool is installed and generates the Dockerfile accordingly, but
         does not enforce a specific virtualenv layout — it just ensures `python` is available at the configured version.
-      - Rust: `cargo fetch` on host populates `~/.cargo/registry` (ro). `cargo build` inside container uses cached crates.
       - (UI) `cooper cli` welcome message reminds user: "Dependencies must be installed on the host. Run [command] on host, then re-enter the container."
   - Authentication / Token Management:
     - API keys and tokens are automatically resolved and forwarded into the container as environment variables.
@@ -344,7 +341,7 @@ Then please read through /pgflock and notice the difference:
   - Tests blocked domains are actually blocked (example.com, google.com).
   - Tests direct internet access is blocked (no route bypassing proxy).
   - Tests socat port forwarding (if configured).
-  - Verifies Go/Node/Python/Rust installations and versions (based on enabled tools).
+  - Verifies Go/Node/Python installations and versions (based on enabled tools).
   - Verifies AI CLI tool installations (Claude Code, Copilot, Codex, OpenCode — based on enabled tools).
   - Checks auth: Claude Code credentials, Copilot PAT, OpenAI API key.
   - Checks directory ownership and permissions.

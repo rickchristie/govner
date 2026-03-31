@@ -2,8 +2,7 @@
   "programming_tools": [
     {"name": "go", "enabled": true, "mode": "mirror", "host_version": "1.24.10"},
     {"name": "node", "enabled": true, "mode": "mirror", "host_version": "22.20.0"},
-    {"name": "python", "enabled": true, "mode": "mirror", "host_version": "3.11.2"},
-    {"name": "rust", "enabled": false, "mode": "off"}
+    {"name": "python", "enabled": true, "mode": "mirror", "host_version": "3.11.2"}
   ],
   "ai_tools": [
     {"name": "claude", "enabled": true, "mode": "mirror", "host_version": "2.1.87"},

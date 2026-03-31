@@ -16,7 +16,6 @@ func testConfig() *config.Config {
 			{Name: "go", Enabled: true, PinnedVersion: "1.24.10"},
 			{Name: "node", Enabled: true, PinnedVersion: "22.12.0"},
 			{Name: "python", Enabled: true, PinnedVersion: "3.12"},
-			{Name: "rust", Enabled: true, PinnedVersion: "1.83.0"},
 		},
 		AITools: []config.ToolConfig{
 			{Name: "claude", Enabled: true},
@@ -67,7 +66,6 @@ func noToolsConfig() *config.Config {
 			{Name: "go", Enabled: false},
 			{Name: "node", Enabled: false},
 			{Name: "python", Enabled: false},
-			{Name: "rust", Enabled: false},
 		},
 		AITools: []config.ToolConfig{
 			{Name: "claude", Enabled: false},
@@ -98,10 +96,6 @@ func TestRenderCLIDockerfile_DefaultConfig(t *testing.T) {
 
 	// Should have Python installation
 	assertContains(t, result, "python3")
-
-	// Should have Rust installation
-	assertContains(t, result, "rustup")
-	assertContains(t, result, "1.83.0")
 
 	// Should have bubblewrap build (because Codex is enabled)
 	assertContains(t, result, "bubblewrap")
@@ -168,8 +162,6 @@ func TestRenderCLIDockerfile_NoToolsEnabled(t *testing.T) {
 	// Should NOT have programming tools
 	assertNotContains(t, result, "golang:")
 	assertNotContains(t, result, "python3=")
-	assertNotContains(t, result, "rustup")
-
 	// Should NOT have AI tools
 	assertNotContains(t, result, "claude.ai/install.sh")
 	assertNotContains(t, result, "@github/copilot")
@@ -619,9 +611,6 @@ func TestIsToolEnabled(t *testing.T) {
 	if !isToolEnabled(tools, "node") {
 		t.Error("expected node to be enabled")
 	}
-	if isToolEnabled(tools, "rust") {
-		t.Error("expected rust (not in list) to be disabled")
-	}
 	// Case insensitive
 	if !isToolEnabled(tools, "Go") {
 		t.Error("expected Go (case insensitive) to be enabled")
@@ -633,7 +622,6 @@ func TestGetToolVersion(t *testing.T) {
 		{Name: "go", Enabled: true, PinnedVersion: "1.24.10"},
 		{Name: "python", Enabled: true, HostVersion: "3.12.1"},
 		{Name: "node", Enabled: true},
-		{Name: "rust", Enabled: false, PinnedVersion: "1.83.0"},
 	}
 
 	if v := getToolVersion(tools, "go"); v != "1.24.10" {
@@ -644,9 +632,6 @@ func TestGetToolVersion(t *testing.T) {
 	}
 	if v := getToolVersion(tools, "node"); v != "" {
 		t.Errorf("expected node version empty (no pinned/host), got %s", v)
-	}
-	if v := getToolVersion(tools, "rust"); v != "" {
-		t.Errorf("expected rust version empty (disabled), got %s", v)
 	}
 }
 
@@ -962,9 +947,6 @@ func TestBuildCLIDockerfileData(t *testing.T) {
 	}
 	if !data.HasPython {
 		t.Error("expected HasPython=true")
-	}
-	if !data.HasRust {
-		t.Error("expected HasRust=true")
 	}
 	if !data.HasClaudeCode {
 		t.Error("expected HasClaudeCode=true")
