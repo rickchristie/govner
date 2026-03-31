@@ -846,6 +846,68 @@ else
 fi
 
 # ============================================================================
+# Phase 13b: File/Folder Ownership on Mounted Volumes
+# ============================================================================
+# This catches the critical bug where Docker processes create files as a
+# different UID (e.g., squid user maps to systemd-network on host), making
+# them inaccessible to the host user on subsequent runs.
+section "Phase 13b: Mounted Volume Ownership"
+
+EXPECTED_UID=$(id -u)
+EXPECTED_GID=$(id -g)
+
+# Give proxy a moment to write log files.
+sleep 2
+
+# Check ~/.cooper/run/ directory and contents.
+check_ownership() {
+    local path=$1
+    local desc=$2
+    if [ ! -e "$path" ]; then
+        warn "${desc}: path does not exist (${path})"
+        return
+    fi
+    local actual_uid actual_gid
+    actual_uid=$(stat -c '%u' "$path" 2>/dev/null)
+    actual_gid=$(stat -c '%g' "$path" 2>/dev/null)
+    if [ "$actual_uid" = "$EXPECTED_UID" ] && [ "$actual_gid" = "$EXPECTED_GID" ]; then
+        pass "${desc} owned by ${actual_uid}:${actual_gid} (correct)"
+    else
+        fail "${desc} owned by ${actual_uid}:${actual_gid}, expected ${EXPECTED_UID}:${EXPECTED_GID}"
+    fi
+}
+
+# Proxy-created directories and files.
+check_ownership "${CONFIG_DIR}/run" "~/.cooper/run/ directory"
+check_ownership "${CONFIG_DIR}/logs" "~/.cooper/logs/ directory"
+
+# Check files INSIDE the directories (created by squid/socat at runtime).
+for f in "${CONFIG_DIR}/logs/"*; do
+    [ -e "$f" ] || continue
+    check_ownership "$f" "Log file $(basename "$f")"
+done
+for f in "${CONFIG_DIR}/run/"*; do
+    [ -e "$f" ] || continue
+    check_ownership "$f" "Socket/run file $(basename "$f")"
+done
+
+# Barrel-created files in workspace.
+barrel_exec "touch ${E2E_WORKSPACE}/ownership-test-file" > /dev/null 2>&1 || true
+if [ -f "${E2E_WORKSPACE}/ownership-test-file" ]; then
+    check_ownership "${E2E_WORKSPACE}/ownership-test-file" "Barrel-created workspace file"
+    rm -f "${E2E_WORKSPACE}/ownership-test-file"
+else
+    fail "Barrel could not create file in workspace"
+fi
+
+# Barrel-created files in mounted config dirs (if they exist).
+for dir in ~/.claude ~/.copilot ~/.codex; do
+    if [ -d "$dir" ]; then
+        check_ownership "$dir" "Mounted config dir $(basename "$dir")"
+    fi
+done
+
+# ============================================================================
 # Phase 14: Socat Live Reload
 # ============================================================================
 section "Phase 14: Socat Live Reload"

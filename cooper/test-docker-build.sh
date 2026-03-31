@@ -325,8 +325,69 @@ run_build_test() {
         fail "${mode}: CA cert not found in proxy"
     fi
 
-    # Cleanup proxy check container.
-    docker rm -f "$proxy_container" 2>/dev/null || true
+    # --- File ownership assertions ---
+    # Verify that processes inside the container create files as the host user's UID,
+    # not as root or a random container UID (e.g., squid → systemd-network).
+    info "${mode}: Checking file ownership in mounted volumes..."
+
+    local ownership_container="test-${mode}-ownership-check"
+    local ownership_dir="${test_dir}/ownership-test"
+    local ownership_logdir="${ownership_dir}/logs"
+    local ownership_rundir="${ownership_dir}/run"
+    mkdir -p "$ownership_logdir" "$ownership_rundir"
+
+    docker rm -f "$ownership_container" 2>/dev/null || true
+
+    # Start proxy image with mounted rw directories, let it write files.
+    docker run -d --name "$ownership_container" \
+        -v "${ownership_logdir}:/var/log/squid:rw" \
+        -v "${ownership_rundir}:/var/run/cooper:rw" \
+        "$proxy_image" sleep 10 >/dev/null 2>&1 || true
+
+    # Create files inside the container in the mounted dirs.
+    docker exec "$ownership_container" touch /var/log/squid/test.log 2>/dev/null || true
+    docker exec "$ownership_container" touch /var/run/cooper/test.sock 2>/dev/null || true
+    sleep 1
+
+    local expected_uid
+    expected_uid=$(id -u)
+
+    for f in "${ownership_logdir}/test.log" "${ownership_rundir}/test.sock"; do
+        if [ -f "$f" ]; then
+            local actual_uid
+            actual_uid=$(stat -c '%u' "$f")
+            if [ "$actual_uid" = "$expected_uid" ]; then
+                pass "${mode}: $(basename "$f") owned by UID ${actual_uid} (correct)"
+            else
+                fail "${mode}: $(basename "$f") owned by UID ${actual_uid}, expected ${expected_uid}"
+            fi
+        else
+            warn "${mode}: $(basename "$f") not created (container may not have started)"
+        fi
+    done
+
+    # Also check barrel image creates workspace files with correct UID.
+    local barrel_workspace="${ownership_dir}/workspace"
+    mkdir -p "$barrel_workspace"
+    docker run --rm \
+        -v "${barrel_workspace}:${barrel_workspace}:rw" \
+        "$barrel_image" \
+        touch "${barrel_workspace}/barrel-test-file" 2>/dev/null || true
+
+    if [ -f "${barrel_workspace}/barrel-test-file" ]; then
+        local barrel_uid
+        barrel_uid=$(stat -c '%u' "${barrel_workspace}/barrel-test-file")
+        if [ "$barrel_uid" = "$expected_uid" ]; then
+            pass "${mode}: Barrel-created file owned by UID ${barrel_uid} (correct)"
+        else
+            fail "${mode}: Barrel-created file owned by UID ${barrel_uid}, expected ${expected_uid}"
+        fi
+    else
+        warn "${mode}: Barrel could not create workspace file"
+    fi
+
+    docker rm -f "$ownership_container" 2>/dev/null || true
+    rm -rf "$ownership_dir"
 }
 
 cleanup_test() {
@@ -336,6 +397,7 @@ cleanup_test() {
 
     info "Cleaning up ${mode} test images and containers..."
     docker rm -f "test-${mode}-proxy-check" 2>/dev/null || true
+    docker rm -f "test-${mode}-ownership-check" 2>/dev/null || true
     docker rmi -f "${prefix}cooper-proxy" 2>/dev/null || true
     docker rmi -f "${prefix}cooper-barrel-base" 2>/dev/null || true
     docker rmi -f "${prefix}cooper-barrel" 2>/dev/null || true

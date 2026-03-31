@@ -2326,6 +2326,81 @@ func TestCooperApp_LoginShellPATH(t *testing.T) {
 	}
 }
 
+// TestCooperApp_MountedVolumeOwnership verifies that files created by
+// the proxy and barrel containers in mounted volumes are owned by the
+// host user's UID/GID, not by root or a random container UID.
+func TestCooperApp_MountedVolumeOwnership(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	defer app.Stop()
+
+	expectedUID := fmt.Sprintf("%d", os.Getuid())
+
+	// Wait for proxy to write logs.
+	time.Sleep(2 * time.Second)
+
+	// Check proxy-created files in mounted volumes.
+	checkPaths := []struct {
+		path string
+		desc string
+	}{
+		{filepath.Join(cooperDir, "run"), "run/ directory"},
+		{filepath.Join(cooperDir, "logs"), "logs/ directory"},
+	}
+
+	for _, cp := range checkPaths {
+		entries, err := os.ReadDir(cp.path)
+		if err != nil {
+			t.Logf("could not read %s: %v", cp.desc, err)
+			continue
+		}
+		for _, entry := range entries {
+			fullPath := filepath.Join(cp.path, entry.Name())
+			info, err := os.Stat(fullPath)
+			if err != nil {
+				continue
+			}
+			_ = info
+			// Get owner UID via exec since os.Stat doesn't expose UID portably.
+			out, err := exec.Command("stat", "-c", "%u", fullPath).Output()
+			if err != nil {
+				continue
+			}
+			actualUID := strings.TrimSpace(string(out))
+			if actualUID != expectedUID {
+				t.Errorf("%s/%s owned by UID %s, expected %s", cp.desc, entry.Name(), actualUID, expectedUID)
+			} else {
+				t.Logf("%s/%s owned by UID %s (correct)", cp.desc, entry.Name(), actualUID)
+			}
+		}
+	}
+
+	// Check barrel-created file in workspace.
+	workspaceDir := filepath.Join(cooperDir, "test-workspace")
+	testFile := filepath.Join(workspaceDir, "ownership-test")
+	_, err := barrelExec(barrelName, fmt.Sprintf("touch %s", testFile))
+	if err != nil {
+		t.Logf("barrel could not create test file: %v", err)
+	} else {
+		out, err := exec.Command("stat", "-c", "%u", testFile).Output()
+		if err == nil {
+			actualUID := strings.TrimSpace(string(out))
+			if actualUID != expectedUID {
+				t.Errorf("barrel-created file owned by UID %s, expected %s", actualUID, expectedUID)
+			} else {
+				t.Logf("barrel-created file owned by UID %s (correct)", actualUID)
+			}
+		}
+		os.Remove(testFile)
+	}
+}
+
 // Ensure imported packages are used. These variables exist solely to prevent
 // "imported and not used" compilation errors for packages that are used
 // conditionally or in specific test helpers above.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -167,7 +168,15 @@ func NewACLListener(socketPath string, timeout time.Duration) *ACLListener {
 func (l *ACLListener) Start() error {
 	// Remove stale socket file if it exists.
 	if err := os.Remove(l.socketPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove stale socket: %w", err)
+		// If permission denied (e.g., socket owned by a different UID from
+		// a previous Docker build), recreate the parent directory entirely.
+		dir := filepath.Dir(l.socketPath)
+		if rmErr := os.RemoveAll(dir); rmErr != nil {
+			return fmt.Errorf("failed to remove stale socket dir %s: %w (original: %v)", dir, rmErr, err)
+		}
+		if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
+			return fmt.Errorf("failed to recreate socket dir %s: %w", dir, mkErr)
+		}
 	}
 
 	ln, err := net.Listen("unix", l.socketPath)

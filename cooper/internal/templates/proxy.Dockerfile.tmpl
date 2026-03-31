@@ -46,7 +46,7 @@ RUN curl -Lo /tmp/squid-${SQUID_VERSION}.tar.xz \
         --enable-icap-client \
         --enable-external-acl-helpers=file_userip \
         --disable-arch-native \
-        --with-default-user=squid && \
+        --with-default-user=cooper && \
     make -j$(nproc) && \
     make DESTDIR=/squid-install install && \
     rm -rf /tmp/squid-build /tmp/squid-${SQUID_VERSION}.tar.xz
@@ -67,16 +67,21 @@ RUN apk add --no-cache \
 COPY --from=builder /squid-install/usr /usr
 COPY --from=builder /squid-install/etc/squid /etc/squid
 
-# Create squid user and directories
-RUN addgroup -S squid && adduser -S -G squid squid && \
+# Create user with matching host UID/GID so mounted volumes have correct ownership.
+# This prevents the "permission denied" problem where Docker creates files as a
+# different user that the host can't clean up.
+ARG USER_UID=1000
+ARG USER_GID=1000
+RUN addgroup -g ${USER_GID} -S cooper && \
+    adduser -u ${USER_UID} -G cooper -S -h /home/cooper cooper && \
     mkdir -p /var/log/squid /var/spool/squid /var/run/squid && \
-    chown -R squid:squid /var/log/squid /var/spool/squid /var/run/squid /etc/squid
+    chown -R ${USER_UID}:${USER_GID} /var/log/squid /var/spool/squid /var/run/squid /etc/squid
 
 # Initialize SSL certificate database for dynamic cert generation.
 # security_file_certgen creates the ssl_db directory itself — don't pre-create it.
 RUN mkdir -p /var/lib/squid && \
     /usr/lib/squid/security_file_certgen -c -s /var/lib/squid/ssl_db -M 4MB && \
-    chown -R squid:squid /var/lib/squid
+    chown -R ${USER_UID}:${USER_GID} /var/lib/squid
 
 # Copy default squid.conf (will be overridden by volume mount at runtime)
 COPY squid.conf /etc/squid/squid.conf
@@ -84,7 +89,7 @@ COPY squid.conf /etc/squid/squid.conf
 # Copy CA certificate for SSL bump
 COPY cooper-ca.pem /etc/squid/cooper-ca.pem
 COPY cooper-ca-key.pem /etc/squid/cooper-ca-key.pem
-RUN chown squid:squid /etc/squid/cooper-ca.pem /etc/squid/cooper-ca-key.pem && \
+RUN chown ${USER_UID}:${USER_GID} /etc/squid/cooper-ca.pem /etc/squid/cooper-ca-key.pem && \
     chmod 400 /etc/squid/cooper-ca-key.pem
 
 # Copy ACL helper binary from Go build stage
@@ -107,6 +112,10 @@ RUN printf '/var/log/squid/*.log {\n\
 # Create entrypoint that starts Squid + socat relays
 COPY proxy-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# Run as the cooper user (matching host UID/GID) so mounted volume files
+# are owned by the host user, not root or a random container UID.
+USER cooper
 
 EXPOSE {{.ProxyPort}}
 

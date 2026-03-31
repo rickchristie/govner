@@ -293,16 +293,27 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	}
 
 	// 6. Build proxy image (no-cache). Context = proxyDir.
+	// Pass host UID/GID so squid and all processes run as the host user.
+	// This prevents mounted volumes from getting files owned by a different UID.
 	fmt.Fprintln(os.Stderr, "Building proxy image...")
 	proxyDockerfile := filepath.Join(proxyDir, "proxy.Dockerfile")
-	if err := docker.BuildImage(docker.GetImageProxy(), proxyDockerfile, proxyDir, nil, true); err != nil {
+	proxyBuildArgs := map[string]string{
+		"USER_UID": fmt.Sprintf("%d", os.Getuid()),
+		"USER_GID": fmt.Sprintf("%d", os.Getgid()),
+	}
+	if err := docker.BuildImage(docker.GetImageProxy(), proxyDockerfile, proxyDir, proxyBuildArgs, true); err != nil {
 		return fmt.Errorf("build proxy image: %w", err)
 	}
 
 	// 7. Build barrel-base image (no-cache). Context = cliDir.
+	// Same UID/GID args so the user inside the container matches the host user.
 	fmt.Fprintln(os.Stderr, "Building barrel-base image...")
 	cliDockerfile := filepath.Join(cliDir, "Dockerfile")
-	if err := docker.BuildImage(docker.GetImageBarrelBase(), cliDockerfile, cliDir, nil, true); err != nil {
+	cliBuildArgs := map[string]string{
+		"USER_UID": fmt.Sprintf("%d", os.Getuid()),
+		"USER_GID": fmt.Sprintf("%d", os.Getgid()),
+	}
+	if err := docker.BuildImage(docker.GetImageBarrelBase(), cliDockerfile, cliDir, cliBuildArgs, true); err != nil {
 		return fmt.Errorf("build barrel-base image: %w", err)
 	}
 
@@ -921,7 +932,10 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(os.Stderr, "Rebuilding barrel-base image...")
 	cliDockerfile := filepath.Join(cliDir, "Dockerfile")
 	cacheBust := fmt.Sprintf("%d", time.Now().Unix())
-	buildArgs := map[string]string{}
+	buildArgs := map[string]string{
+		"USER_UID": fmt.Sprintf("%d", os.Getuid()),
+		"USER_GID": fmt.Sprintf("%d", os.Getgid()),
+	}
 	if langChanged {
 		buildArgs["CACHE_BUST_LANG"] = cacheBust
 	}
