@@ -105,9 +105,14 @@ Use -c to run a one-shot command:
 
 var proofCmd = &cobra.Command{
 	Use:   "proof",
-	Short: "Run diagnostics inside a CLI container",
-	Long:  `Runs diagnostic checks to verify proxy connectivity, SSL bump, whitelists, and tool installations.`,
-	RunE:  runProof,
+	Short: "Full lifecycle integration test",
+	Long: `Stands up the entire Cooper stack (networks, proxy, bridge, barrel),
+runs comprehensive diagnostics (SSL, proxy, tools, AI CLIs), and tears
+everything down. Output is designed to be copy-pasted into a GitHub issue.
+
+Requires: cooper configure + cooper build completed first.
+Refuses to run if cooper up is already running.`,
+	RunE: runProof,
 }
 
 var cleanupCmd = &cobra.Command{
@@ -606,12 +611,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 	mainProgram := tui.NewProgram(mainModel)
 
 	// Wire the shutdown callback: when the user confirms exit, run shutdown
-	// in a goroutine and send ShutdownCompleteMsg when done.
+	// steps in a goroutine, sending progress messages to drive the loading screen.
 	mainModel.SetOnShutdown(func() {
 		go func() {
-			cooperApp.Stop()
-			// Signal the TUI that shutdown is complete so it can quit.
-			mainProgram.Send(events.ShutdownCompleteMsg{})
+			cooperApp.StopWithProgress(func(step int) {
+				mainProgram.Send(events.ShutdownStepCompleteMsg{Index: step})
+			})
 		}()
 	})
 
@@ -755,36 +760,11 @@ func runCLI(cmd *cobra.Command, args []string) error {
 // ---------- cooper proof ----------
 
 func runProof(cmd *cobra.Command, args []string) error {
-	cfg, _, err := loadConfig()
+	cfg, cooperDir, err := loadConfig()
 	if err != nil {
 		return err
 	}
-
-	// Determine the barrel container for the current workspace.
-	workspaceDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("get working directory: %w", err)
-	}
-	containerName := docker.BarrelContainerName(workspaceDir)
-
-	// Check that the barrel is running.
-	running, err := docker.IsBarrelRunning(containerName)
-	if err != nil {
-		return fmt.Errorf("check barrel: %w", err)
-	}
-	if !running {
-		return fmt.Errorf("no barrel running for this workspace (%s). Start one with 'cooper cli' first", containerName)
-	}
-
-	// Run all checks.
-	results, err := proof.RunAllChecks(containerName, cfg)
-	if err != nil {
-		return fmt.Errorf("run diagnostics: %w", err)
-	}
-
-	// Format and print results.
-	fmt.Print(proof.FormatResults(results))
-	return nil
+	return proof.Run(cfg, cooperDir)
 }
 
 // ---------- cooper cleanup ----------

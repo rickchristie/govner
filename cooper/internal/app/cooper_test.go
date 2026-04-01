@@ -20,7 +20,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/names"
-	"github.com/rickchristie/govner/cooper/internal/proof"
+
 	"github.com/rickchristie/govner/cooper/internal/templates"
 )
 
@@ -2209,81 +2209,9 @@ func TestCooperApp_UpdateSelectiveRebuild(t *testing.T) {
 	}
 }
 
-// TestCooperApp_ProofDiagnostics starts the app with a barrel and runs
-// proof.RunAllChecks. Verifies that at least the proxy connectivity, SSL
-// bump, and blocked domain checks are present in the results and that
-// critical checks pass.
-func TestCooperApp_ProofDiagnostics(t *testing.T) {
-	skipIfNoDocker(t)
-	skipIfNoProxyImage(t)
-	skipIfNoBarrelImage(t)
-	docker.SetImagePrefix(testImagePrefix)
-
-	cooperDir, cfg := setupCooperDir(t)
-	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
-	t.Cleanup(func() {
-		exec.Command("docker", "rm", "-f", barrelName).Run()
-		app.Stop()
-		cleanupDocker(t)
-	})
-
-	// Run all diagnostic checks.
-	results, err := proof.RunAllChecks(barrelName, cfg)
-	if err != nil {
-		t.Fatalf("RunAllChecks() failed: %v", err)
-	}
-
-	if len(results) == 0 {
-		t.Fatal("RunAllChecks() returned 0 results")
-	}
-
-	// Log all results for debugging.
-	for _, r := range results {
-		t.Logf("proof: [%s] %s: %s", r.Status, r.Name, r.Detail)
-	}
-
-	// Build a map for easy lookup.
-	resultMap := make(map[string]proof.ProofResult)
-	for _, r := range results {
-		resultMap[r.Name] = r
-	}
-
-	// Verify proxy connectivity check exists and passes.
-	if r, ok := resultMap["Proxy Connectivity"]; ok {
-		if r.Status != proof.StatusOK {
-			t.Errorf("Proxy Connectivity check: status=%s detail=%s", r.Status, r.Detail)
-		}
-	} else {
-		t.Error("Proxy Connectivity check not found in results")
-	}
-
-	// Verify SSL bump check exists.
-	if r, ok := resultMap["SSL Bump"]; ok {
-		if r.Status == proof.StatusFAIL {
-			t.Errorf("SSL Bump check failed: %s", r.Detail)
-		}
-	} else {
-		t.Error("SSL Bump check not found in results")
-	}
-
-	// Verify blocked domain check exists (should confirm non-whitelisted domains are denied).
-	if r, ok := resultMap["Blocked Domain"]; ok {
-		if r.Status == proof.StatusFAIL {
-			t.Errorf("Blocked Domain check failed: %s", r.Detail)
-		}
-	} else {
-		t.Error("Blocked Domain check not found in results")
-	}
-
-	// Verify direct egress check exists (barrel should not have direct internet).
-	if r, ok := resultMap["Direct Egress"]; ok {
-		if r.Status == proof.StatusFAIL {
-			t.Errorf("Direct Egress check failed: %s", r.Detail)
-		}
-	} else {
-		t.Error("Direct Egress check not found in results")
-	}
-}
+// Note: TestCooperApp_ProofDiagnostics was removed because proof.Run is now
+// a self-contained lifecycle test that creates its own infrastructure.
+// Use `cooper proof` to run the full integration test.
 
 // TestCooperApp_LoginShellPATH verifies that interactive login shells have the
 // correct PATH including npm-global/bin and .local/bin. This catches the bug

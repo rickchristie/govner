@@ -11,7 +11,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/logging"
-	"github.com/rickchristie/govner/cooper/internal/proof"
+
 	"github.com/rickchristie/govner/cooper/internal/proxy"
 )
 
@@ -219,28 +219,44 @@ func (a *CooperApp) loadPersistedBridgeRoutes() {
 
 // Stop performs a graceful shutdown of all infrastructure components.
 func (a *CooperApp) Stop() error {
-	// Stop ACL listener.
+	return a.StopWithProgress(nil)
+}
+
+// StopWithProgress performs a graceful shutdown, calling onStep(i) after
+// each step completes so the caller can drive a progress UI.
+// Steps: 0=ACL, 1=bridge, 2=containers, 3=proxy, 4=sealed.
+func (a *CooperApp) StopWithProgress(onStep func(int)) error {
+	if onStep == nil {
+		onStep = func(int) {}
+	}
+
+	// Step 0: Stop ACL listener.
 	if a.aclListener != nil {
 		a.aclListener.Stop()
 	}
+	onStep(0)
 
-	// Stop bridge server.
+	// Step 1: Stop bridge server.
 	if a.bridgeServer != nil {
 		a.bridgeServer.Stop()
 	}
+	onStep(1)
 
-	// Stop all barrel containers.
+	// Step 2: Stop all barrel containers.
 	barrels, _ := docker.ListBarrels()
 	for _, b := range barrels {
 		docker.StopBarrel(b.Name)
 	}
+	onStep(2)
 
-	// Stop proxy container.
+	// Step 3: Stop proxy container.
 	docker.StopProxy()
+	onStep(3)
 
-	// Close loggers.
+	// Step 4: Sealed — close loggers.
 	a.bridgeLogger.Close()
 	a.aclLogger.Close()
+	onStep(4)
 
 	return nil
 }
@@ -410,13 +426,6 @@ func (a *CooperApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, brid
 	}
 
 	return nil
-}
-
-// ----- Diagnostics -----
-
-// RunProof executes all diagnostic checks inside the named barrel container.
-func (a *CooperApp) RunProof(containerName string) ([]ProofResult, error) {
-	return proof.RunAllChecks(containerName, a.cfg)
 }
 
 // ----- State accessors -----

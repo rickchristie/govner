@@ -52,7 +52,6 @@ func (t *TestApp) IsProxyRunning() bool                        { return t.proxyU
 func (t *TestApp) UpdatePortForwards(_ []config.PortForwardRule) error { return nil }
 func (t *TestApp) UpdateBridgeRoutes(_ []config.BridgeRoute) error     { return nil }
 func (t *TestApp) UpdateSettings(_, _, _, _ int) error                 { return nil }
-func (t *TestApp) RunProof(_ string) ([]ProofResult, error)            { return nil, nil }
 
 func (t *TestApp) Config() *config.Config    { return t.cfg }
 func (t *TestApp) CooperDir() string          { return "/tmp/cooper-test" }

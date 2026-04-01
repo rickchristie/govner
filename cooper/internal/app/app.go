@@ -54,9 +54,6 @@ type App interface {
 	// Settings (live update)
 	UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit int) error
 
-	// Diagnostics
-	RunProof(containerName string) ([]ProofResult, error)
-
 	// State
 	Config() *config.Config
 	CooperDir() string

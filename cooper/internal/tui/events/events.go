@@ -30,6 +30,15 @@ type TickMsg struct{}
 // ShutdownCompleteMsg signals that graceful shutdown has finished.
 type ShutdownCompleteMsg struct{}
 
+// ShutdownStepCompleteMsg signals that a shutdown step completed.
+type ShutdownStepCompleteMsg struct{ Index int }
+
+// ShutdownStepErrorMsg signals that a shutdown step failed.
+type ShutdownStepErrorMsg struct {
+	Index int
+	Err   error
+}
+
 // ACLDecisionMsg wraps a resolved ACL decision for the history tabs.
 type ACLDecisionMsg struct {
 	Event app.DecisionEvent

@@ -3,6 +3,7 @@ package tui
 import (
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
+	"github.com/rickchristie/govner/cooper/internal/tui/loading"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
@@ -47,7 +48,8 @@ type Model struct {
 	loadingModel SubModel
 
 	// Shutdown state.
-	shuttingDown bool
+	shuttingDown  bool
+	shutdownModel *loading.Model
 
 	// Callbacks.
 	onShutdown func()

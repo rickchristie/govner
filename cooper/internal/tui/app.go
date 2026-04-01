@@ -15,6 +15,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
 	"github.com/rickchristie/govner/cooper/internal/tui/events"
 	"github.com/rickchristie/govner/cooper/internal/tui/history"
+	"github.com/rickchristie/govner/cooper/internal/tui/loading"
 	"github.com/rickchristie/govner/cooper/internal/tui/proxymon"
 	"github.com/rickchristie/govner/cooper/internal/tui/settings"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
@@ -57,6 +58,11 @@ func (m *Model) Init() tea.Cmd {
 
 // Update is the root BubbleTea update function.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// During shutdown, route all messages through the shutdown loading screen.
+	if m.shuttingDown && m.shutdownModel != nil {
+		return m.updateShutdown(msg)
+	}
+
 	switch msg := msg.(type) {
 
 	// ---- Window resize ----
@@ -262,7 +268,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case events.ShutdownCompleteMsg:
-		m.shuttingDown = false
+		// Legacy fallback — new shutdown flow uses the loading screen.
 		return m, tea.Quit
 	}
 
@@ -360,9 +366,11 @@ func (m *Model) executeModalConfirm(modal *components.Modal) (tea.Model, tea.Cmd
 	case theme.ModalExit:
 		if m.onShutdown != nil {
 			m.shuttingDown = true
+			m.modal = nil
+			sdModel := loading.New(true)
+			m.shutdownModel = &sdModel
 			m.onShutdown()
-			// The shutdown callback will eventually send shutdownCompleteMsg.
-			return m, nil
+			return m, m.shutdownModel.Init()
 		}
 		if m.onQuit != nil {
 			m.onQuit()
@@ -370,6 +378,39 @@ func (m *Model) executeModalConfirm(modal *components.Modal) (tea.Model, tea.Cmd
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+// updateShutdown routes messages to the shutdown loading model. It converts
+// ShutdownStepCompleteMsg/ErrorMsg into the loading model's own step messages,
+// and forwards everything else (animation ticks, hold timer, window resize)
+// directly. When the loading model reports Done, it quits.
+func (m *Model) updateShutdown(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+
+	case events.ShutdownStepCompleteMsg:
+		updated, cmd := m.shutdownModel.Update(loading.StepCompleteMsg{Index: msg.Index})
+		m.shutdownModel = &updated
+		if updated.Done {
+			return m, tea.Quit
+		}
+		return m, cmd
+
+	case events.ShutdownStepErrorMsg:
+		updated, cmd := m.shutdownModel.Update(loading.StepErrorMsg{Index: msg.Index, Err: msg.Err})
+		m.shutdownModel = &updated
+		return m, cmd
+	}
+
+	// Forward all other messages (animTickMsg, holdDoneMsg, KeyMsg, etc.)
+	updated, cmd := m.shutdownModel.Update(msg)
+	m.shutdownModel = &updated
+	if updated.Done {
+		return m, tea.Quit
+	}
+	return m, cmd
 }
 
 // forwardToActive sends a message to the currently active sub-model
@@ -410,8 +451,13 @@ func (m *Model) setActiveSubModel(sm SubModel) {
 
 // View renders the full TUI screen.
 func (m *Model) View() string {
-	// During loading, delegate entirely to the loading model.
-	if m.loadingModel != nil && !m.shuttingDown {
+	// During shutdown, delegate to the shutdown loading model.
+	if m.shuttingDown && m.shutdownModel != nil {
+		return m.shutdownModel.View(m.width, m.height)
+	}
+
+	// During startup loading, delegate to the loading model.
+	if m.loadingModel != nil {
 		return m.loadingModel.View(m.width, m.height)
 	}
 

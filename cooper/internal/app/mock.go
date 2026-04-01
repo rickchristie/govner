@@ -32,8 +32,6 @@ type MockApp struct {
 	ListContainersErr   error
 	StopContainerErr    error
 	RestartContainerErr error
-	RunProofVal         []ProofResult
-	RunProofErr         error
 	ProxyRunning        bool
 
 	// Recorded calls for assertions.
@@ -209,12 +207,6 @@ func (m *MockApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridge
 	m.cfg.AllowedHistoryLimit = allowedLimit
 	m.cfg.BridgeLogLimit = bridgeLogLimit
 	return nil
-}
-
-// ----- Diagnostics -----
-
-func (m *MockApp) RunProof(_ string) ([]ProofResult, error) {
-	return m.RunProofVal, m.RunProofErr
 }
 
 // ----- State -----

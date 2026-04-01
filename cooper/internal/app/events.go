@@ -3,7 +3,6 @@ package app
 import (
 	"github.com/rickchristie/govner/cooper/internal/bridge"
 	"github.com/rickchristie/govner/cooper/internal/config"
-	"github.com/rickchristie/govner/cooper/internal/proof"
 	"github.com/rickchristie/govner/cooper/internal/proxy"
 )
 
@@ -31,9 +30,6 @@ type PortForwardRule = config.PortForwardRule
 
 // BridgeRoute maps an API path to a host script for the execution bridge.
 type BridgeRoute = config.BridgeRoute
-
-// ProofResult holds the outcome of a single diagnostic check.
-type ProofResult = proof.ProofResult
 
 // Re-export ACL decision constants so the TUI can reference them via app.DecisionAllow, etc.
 const (

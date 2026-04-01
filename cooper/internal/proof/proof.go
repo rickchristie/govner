@@ -1,307 +1,513 @@
+// Package proof implements the `cooper proof` diagnostic command — a fully
+// self-contained integration test that stands up the entire Cooper stack,
+// validates every layer (networking, proxy, SSL, tools, AI CLIs), and tears
+// it down. The output is plain text designed to be copy-pasted into a GitHub
+// issue for troubleshooting.
 package proof
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
-	"strconv"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 
+	"github.com/rickchristie/govner/cooper/internal/auth"
+	"github.com/rickchristie/govner/cooper/internal/bridge"
 	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/proxy"
 )
 
-// ProofResult holds the outcome of a single diagnostic check.
-type ProofResult struct {
-	Name   string // Human-readable check name.
-	Status string // "OK", "FAIL", or "INFO".
-	Detail string // Explanation of what was found.
+// ANSI color codes.
+const (
+	green  = "\033[32m"
+	red    = "\033[31m"
+	yellow = "\033[33m"
+	amber  = "\033[38;5;130m"
+	gray   = "\033[38;5;245m"
+	bold   = "\033[1m"
+	reset  = "\033[0m"
+)
+
+// Result holds the outcome of a single diagnostic check.
+type Result struct {
+	Name   string
+	Status string // "PASS", "FAIL", "WARN", "INFO"
+	Detail string
 }
 
 const (
-	StatusOK   = "OK"
+	StatusPASS = "PASS"
 	StatusFAIL = "FAIL"
+	StatusWARN = "WARN"
 	StatusINFO = "INFO"
 )
 
-// RunAllChecks executes every diagnostic check inside the given barrel
-// container and returns the collected results. Each check is independent;
-// a failure in one does not prevent the others from running.
-func RunAllChecks(containerName string, cfg *config.Config) ([]ProofResult, error) {
-	if containerName == "" {
-		return nil, fmt.Errorf("container name must not be empty")
-	}
+// ProofContext carries shared state across all proof phases.
+type ProofContext struct {
+	Cfg          *config.Config
+	CooperDir    string
+	WorkspaceDir string
+	Barrel       string // barrel container name
 
-	var results []ProofResult
+	// Infrastructure started by proof (cleaned up on teardown).
+	aclListener  *proxy.ACLListener
+	bridgeServer *bridge.BridgeServer
 
-	// Collect whitelisted domain strings for the domain reachability check.
-	var domains []string
-	for _, d := range cfg.WhitelistedDomains {
-		// Skip wildcard-prefix entries (e.g. ".anthropic.com") -- use the
-		// canonical hostname instead so curl has something to resolve.
-		domain := d.Domain
-		if strings.HasPrefix(domain, ".") {
-			domain = "api" + domain // e.g. ".anthropic.com" -> "api.anthropic.com"
-		}
-		domains = append(domains, domain)
-	}
+	// Resolved tokens for AI CLI smoke tests.
+	tokens []auth.TokenResult
 
-	// Collect tool names from enabled AI tools.
-	var aiTools []string
-	for _, t := range cfg.AITools {
-		if t.Enabled {
-			aiTools = append(aiTools, t.Name)
-		}
-	}
-
-	// Collect tool names from enabled programming tools.
-	var progTools []string
-	for _, t := range cfg.ProgrammingTools {
-		if t.Enabled {
-			progTools = append(progTools, t.Name)
-		}
-	}
-
-	proxyAddr := fmt.Sprintf("cooper-proxy:%d", cfg.ProxyPort)
-	bridgePort := strconv.Itoa(cfg.BridgePort)
-
-	// --- Run all checks ---
-
-	results = append(results, checkProxyConnectivity(containerName, proxyAddr))
-	results = append(results, checkSSLBump(containerName, proxyAddr, domains))
-	results = append(results, checkWhitelistedDomains(containerName, proxyAddr, domains)...)
-	results = append(results, checkBlockedDomains(containerName, proxyAddr))
-	results = append(results, checkDirectEgress(containerName))
-	results = append(results, checkPortForwarding(containerName, cfg.PortForwardRules)...)
-	results = append(results, checkProgrammingToolVersions(containerName, progTools)...)
-	results = append(results, checkToolInstallations(containerName, aiTools)...)
-	results = append(results, checkAuth(containerName))
-	results = append(results, checkBridgeReachability(containerName, bridgePort))
-
-	return results, nil
+	// For output.
+	results    []Result
+	startTime  time.Time
+	passCount  int
+	failCount  int
+	warnCount  int
+	infoCount  int
 }
 
-// dockerExec runs a command inside the container via "docker exec" and returns
-// combined stdout+stderr and the exit error (nil on success).
-func dockerExec(container, shellCmd string) (string, error) {
-	cmd := exec.Command("docker", "exec", container, "bash", "-c", shellCmd)
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+// Run is the main entry point. It orchestrates all phases, prints results
+// in real-time, and always cleans up — even on failure.
+func Run(cfg *config.Config, cooperDir string) error {
+	workspaceDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get working directory: %w", err)
+	}
+
+	ctx := &ProofContext{
+		Cfg:          cfg,
+		CooperDir:    cooperDir,
+		WorkspaceDir: workspaceDir,
+		Barrel:       docker.BarrelContainerName(workspaceDir),
+		startTime:    time.Now(),
+	}
+
+	// Print header.
+	fmt.Println()
+	fmt.Printf("  %s%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n", amber, bold, reset)
+	fmt.Printf("  %s🥃 C O O P E R   P R O O F%s\n", bold, reset)
+	fmt.Printf("  %sFull lifecycle integration test%s\n", gray, reset)
+	fmt.Printf("  %s%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n", amber, bold, reset)
+	fmt.Println()
+
+	// Always tear down, even if a phase fails.
+	defer ctx.phaseTeardown()
+
+	ctx.phasePreflight()
+	if ctx.failCount > 0 {
+		ctx.printSummary()
+		return fmt.Errorf("preflight failed")
+	}
+
+	ctx.phaseStartup()
+	if ctx.failCount > 0 {
+		ctx.printSummary()
+		return fmt.Errorf("startup failed")
+	}
+
+	ctx.phaseContainer()
+	if ctx.failCount > 0 {
+		ctx.printSummary()
+		return fmt.Errorf("container failed")
+	}
+
+	ctx.phaseNetworkSecurity()
+	ctx.phaseTools()
+	ctx.phaseAICLI()
+	ctx.phasePortForwarding()
+
+	ctx.printSummary()
+	if ctx.failCount > 0 {
+		return fmt.Errorf("%d checks failed", ctx.failCount)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
-// Individual check functions
+// Phase 1: Preflight
 // ---------------------------------------------------------------------------
 
-// checkProxyConnectivity verifies that the Squid proxy port inside the
-// cooper-internal network is reachable from the barrel container.
-func checkProxyConnectivity(container, proxyAddr string) ProofResult {
-	// Use curl to hit the proxy; any response (even 400) means it's up.
+func (ctx *ProofContext) phasePreflight() {
+	ctx.printPhase("Phase 1: Preflight")
+
+	// Docker daemon reachable.
+	if out, err := exec.Command("docker", "info", "--format", "{{.ServerVersion}}").CombinedOutput(); err != nil {
+		ctx.fail("Docker daemon", "Docker is not reachable — is it running?")
+	} else {
+		ctx.pass("Docker daemon", fmt.Sprintf("Docker %s", strings.TrimSpace(string(out))))
+	}
+
+	// Config loaded.
+	if ctx.Cfg == nil {
+		ctx.fail("Config loaded", "config.json not found — run 'cooper configure' first")
+		return
+	}
+	ctx.pass("Config loaded", ctx.CooperDir+"/config.json")
+
+	// CA certificate exists.
+	caPath := filepath.Join(ctx.CooperDir, "ca", "cooper-ca.pem")
+	if _, err := os.Stat(caPath); err != nil {
+		ctx.fail("CA certificate", "Not found — run 'cooper build' first")
+	} else {
+		ctx.pass("CA certificate", caPath)
+	}
+
+	// Images built.
+	for _, img := range []string{docker.GetImageProxy(), docker.GetImageBarrel()} {
+		exists, err := docker.ImageExists(img)
+		if err != nil || !exists {
+			ctx.fail("Image: "+img, "Not found — run 'cooper build' first")
+		} else {
+			ctx.pass("Image: "+img, "exists")
+		}
+	}
+
+	// No cooper up already running (proxy container check).
+	running, _ := docker.IsProxyRunning()
+	if running {
+		ctx.fail("No cooper-up running", "cooper-proxy is already running — stop it first with 'cooper up' then quit, or 'docker rm -f cooper-proxy'")
+	} else {
+		ctx.pass("No cooper-up running", "clean slate")
+	}
+
+	// No barrel running for this workspace.
+	barrelRunning, _ := docker.IsBarrelRunning(ctx.Barrel)
+	if barrelRunning {
+		ctx.fail("No barrel running", fmt.Sprintf("%s is already running — stop it first", ctx.Barrel))
+	} else {
+		ctx.pass("No barrel running", "clean slate")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: Startup (mirrors cooper up)
+// ---------------------------------------------------------------------------
+
+func (ctx *ProofContext) phaseStartup() {
+	ctx.printPhase("Phase 2: Startup")
+
+	// Create networks.
+	if err := docker.EnsureNetworks(); err != nil {
+		ctx.fail("Create networks", err.Error())
+		return
+	}
+	ctx.pass("Create networks", "cooper-external + cooper-internal")
+
+	// Start proxy.
+	if err := docker.StartProxy(ctx.Cfg, ctx.CooperDir); err != nil {
+		ctx.fail("Start proxy", err.Error())
+		return
+	}
+	ctx.pass("Start proxy", "cooper-proxy running")
+
+	// Start bridge.
+	var gatewayIPs []string
+	if ip, err := docker.GetGatewayIP(docker.NetworkExternal); err == nil {
+		gatewayIPs = append(gatewayIPs, ip)
+	}
+	if ip, err := docker.GetGatewayIP("bridge"); err == nil {
+		gatewayIPs = append(gatewayIPs, ip)
+	}
+	if len(gatewayIPs) == 0 {
+		ctx.fail("Start bridge", "no Docker gateway IP found")
+		return
+	}
+	ctx.bridgeServer = bridge.NewBridgeServer(ctx.Cfg.BridgeRoutes, ctx.Cfg.BridgePort, gatewayIPs)
+	if err := ctx.bridgeServer.Start(); err != nil {
+		ctx.fail("Start bridge", err.Error())
+		return
+	}
+	ctx.pass("Start bridge", fmt.Sprintf("listening on %s", strings.Join(gatewayIPs, ", ")))
+
+	// Start ACL listener.
+	socketPath := filepath.Join(ctx.CooperDir, "run", "acl.sock")
+	timeout := time.Duration(ctx.Cfg.MonitorTimeoutSecs) * time.Second
+	ctx.aclListener = proxy.NewACLListener(socketPath, timeout)
+	if err := ctx.aclListener.Start(); err != nil {
+		ctx.fail("Start ACL listener", err.Error())
+		return
+	}
+	ctx.pass("Start ACL listener", socketPath)
+
+	// Resolve auth tokens for AI CLI tests.
+	var enabledTools []string
+	for _, t := range ctx.Cfg.AITools {
+		if t.Enabled {
+			enabledTools = append(enabledTools, t.Name)
+		}
+	}
+	ctx.tokens, _ = auth.ResolveTokens(ctx.WorkspaceDir, ctx.CooperDir, enabledTools)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: Container
+// ---------------------------------------------------------------------------
+
+func (ctx *ProofContext) phaseContainer() {
+	ctx.printPhase("Phase 3: Container")
+
+	// Start barrel.
+	if err := docker.StartBarrel(ctx.Cfg, ctx.WorkspaceDir, ctx.CooperDir); err != nil {
+		ctx.fail("Start barrel", err.Error())
+		return
+	}
+	ctx.pass("Start barrel", ctx.Barrel)
+
+	// Wait for barrel to be ready.
+	ready := false
+	for i := 0; i < 30; i++ {
+		if running, _ := docker.IsBarrelRunning(ctx.Barrel); running {
+			ready = true
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !ready {
+		ctx.fail("Barrel ready", "container did not start within 15s")
+		return
+	}
+
+	// DNS resolution.
+	out, err := dockerExec(ctx.Barrel, "getent hosts cooper-proxy")
+	if err != nil {
+		ctx.fail("DNS: cooper-proxy", fmt.Sprintf("cannot resolve — %s", truncate(out, 100)))
+		return
+	}
+	ip := strings.Fields(out)[0]
+	ctx.pass("DNS: cooper-proxy", fmt.Sprintf("resolves to %s", ip))
+
+	// Proxy connectivity.
+	proxyAddr := fmt.Sprintf("cooper-proxy:%d", ctx.Cfg.ProxyPort)
 	shellCmd := fmt.Sprintf(
 		`curl -so /dev/null -w '%%{http_code}' --connect-timeout 5 -x http://%s http://connectivity-check.invalid 2>&1 || true`,
 		proxyAddr,
 	)
-	out, _ := dockerExec(container, shellCmd)
-
-	// Squid returns a status code (e.g. 503 for denied, 407 for auth) when
-	// reachable. A completely empty or "000" response means no connectivity.
+	out, _ = dockerExec(ctx.Barrel, shellCmd)
 	if out != "" && out != "000" {
-		return ProofResult{
-			Name:   "Proxy Connectivity",
-			Status: StatusOK,
-			Detail: fmt.Sprintf("Squid proxy reachable at %s (HTTP %s)", proxyAddr, out),
-		}
-	}
-	return ProofResult{
-		Name:   "Proxy Connectivity",
-		Status: StatusFAIL,
-		Detail: fmt.Sprintf("Squid proxy NOT reachable at %s", proxyAddr),
+		ctx.pass("Proxy reachable", fmt.Sprintf("%s (HTTP %s)", proxyAddr, out))
+	} else {
+		ctx.fail("Proxy reachable", fmt.Sprintf("%s not responding", proxyAddr))
 	}
 }
 
-// checkSSLBump makes an HTTPS request through the proxy to a whitelisted
-// domain and verifies no certificate errors occur. This is the critical
-// end-to-end validation of the CA chain: generated -> injected into
-// container -> trusted by system CA store -> SSL bump decryption works.
-func checkSSLBump(container, proxyAddr string, whitelistedDomains []string) ProofResult {
-	// Pick a whitelisted domain to test against. Prefer an API endpoint
-	// that is likely to return quickly.
-	target := "https://api.anthropic.com"
-	for _, d := range whitelistedDomains {
-		if strings.Contains(d, "anthropic.com") {
-			target = "https://" + d
+// ---------------------------------------------------------------------------
+// Phase 4: Network Security
+// ---------------------------------------------------------------------------
+
+func (ctx *ProofContext) phaseNetworkSecurity() {
+	ctx.printPhase("Phase 4: Network Security")
+
+	proxyAddr := fmt.Sprintf("cooper-proxy:%d", ctx.Cfg.ProxyPort)
+
+	// SSL bump — HTTPS through proxy without --insecure.
+	sslTarget := "https://api.anthropic.com"
+	for _, d := range ctx.Cfg.WhitelistedDomains {
+		if strings.Contains(d.Domain, "anthropic.com") && !strings.HasPrefix(d.Domain, ".") {
+			sslTarget = "https://" + d.Domain
 			break
 		}
 	}
-
-	// The key here: we do NOT pass --insecure. If the CA chain is broken,
-	// curl will fail with a certificate error.
 	shellCmd := fmt.Sprintf(
 		`curl -so /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s %s 2>&1`,
-		proxyAddr, target,
+		proxyAddr, sslTarget,
 	)
-	out, err := dockerExec(container, shellCmd)
-
+	out, err := dockerExec(ctx.Barrel, shellCmd)
 	if err == nil && out != "" && out != "000" {
-		return ProofResult{
-			Name:   "SSL Bump (CA Chain)",
-			Status: StatusOK,
-			Detail: fmt.Sprintf("HTTPS through proxy succeeded without cert errors (%s -> HTTP %s)", target, out),
+		ctx.pass("SSL bump (CA chain)", fmt.Sprintf("%s -> HTTP %s", sslTarget, out))
+	} else {
+		detail := fmt.Sprintf("HTTPS failed for %s", sslTarget)
+		if out != "" {
+			detail += fmt.Sprintf(" (output: %s)", truncate(out, 120))
 		}
+		ctx.fail("SSL bump (CA chain)", detail)
 	}
 
-	detail := fmt.Sprintf("HTTPS through proxy FAILED for %s", target)
-	if out != "" {
-		detail += fmt.Sprintf(" (output: %s)", out)
-	}
-	return ProofResult{
-		Name:   "SSL Bump (CA Chain)",
-		Status: StatusFAIL,
-		Detail: detail,
-	}
-}
-
-// checkWhitelistedDomains curls each whitelisted domain through the proxy
-// and verifies it is reachable (any 2xx/3xx/4xx from the origin counts).
-func checkWhitelistedDomains(container, proxyAddr string, domains []string) []ProofResult {
-	if len(domains) == 0 {
-		return []ProofResult{{
-			Name:   "Whitelisted Domains",
-			Status: StatusINFO,
-			Detail: "No whitelisted domains configured",
-		}}
-	}
-
-	var results []ProofResult
-	for _, domain := range domains {
-		url := "https://" + domain
-		shellCmd := fmt.Sprintf(
-			`curl -so /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s %s 2>&1`,
-			proxyAddr, url,
-		)
-		out, _ := dockerExec(container, shellCmd)
-
-		name := fmt.Sprintf("Whitelist: %s", domain)
-
-		// A real HTTP status (2xx-5xx) from the origin means the proxy
-		// allowed the connection through.
-		if out != "" && out != "000" {
-			code := 0
-			fmt.Sscanf(out, "%d", &code)
-			if code >= 200 && code < 600 {
-				results = append(results, ProofResult{
-					Name:   name,
-					Status: StatusOK,
-					Detail: fmt.Sprintf("Reachable (HTTP %s)", out),
-				})
-				continue
-			}
-		}
-
-		results = append(results, ProofResult{
-			Name:   name,
-			Status: StatusFAIL,
-			Detail: fmt.Sprintf("Not reachable (got: %s)", out),
-		})
-	}
-	return results
-}
-
-// checkBlockedDomains verifies that non-whitelisted domains are blocked by
-// the proxy (expecting HTTP 403 from Squid).
-func checkBlockedDomains(container, proxyAddr string) ProofResult {
+	// Blocked domains.
 	blocked := []string{"example.com", "google.com"}
-	var failures []string
-
+	allBlocked := true
+	var leaks []string
 	for _, domain := range blocked {
-		url := "https://" + domain
-		// Fetch the HTTP status code through the proxy -- Squid should
-		// return 403 for blocked domains.
 		shellCmd := fmt.Sprintf(
-			`curl -so /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s %s 2>&1`,
-			proxyAddr, url,
+			`curl -so /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s https://%s 2>&1`,
+			proxyAddr, domain,
 		)
-		out, _ := dockerExec(container, shellCmd)
-
-		// Parse the HTTP status code. Squid returns 403 for denied
-		// domains. Any 2xx/3xx response means the request leaked through.
+		out, _ := dockerExec(ctx.Barrel, shellCmd)
 		code := 0
 		fmt.Sscanf(out, "%d", &code)
 		if code >= 200 && code < 400 {
-			failures = append(failures, fmt.Sprintf("%s (HTTP %d)", domain, code))
+			allBlocked = false
+			leaks = append(leaks, fmt.Sprintf("%s (HTTP %d)", domain, code))
 		}
-		// 403, 000 (connection refused), or other 4xx/5xx are all fine
-		// -- the domain was blocked.
+	}
+	if allBlocked {
+		ctx.pass("Blocked domains", fmt.Sprintf("%s correctly denied", strings.Join(blocked, ", ")))
+	} else {
+		ctx.fail("Blocked domains", fmt.Sprintf("LEAK: %s", strings.Join(leaks, ", ")))
 	}
 
-	if len(failures) == 0 {
-		return ProofResult{
-			Name:   "Blocked Domains",
-			Status: StatusOK,
-			Detail: fmt.Sprintf("Non-whitelisted domains correctly blocked (%s)", strings.Join(blocked, ", ")),
-		}
-	}
-	return ProofResult{
-		Name:   "Blocked Domains",
-		Status: StatusFAIL,
-		Detail: fmt.Sprintf("LEAK: the following domains were accessible: %s", strings.Join(failures, ", ")),
+	// Direct egress blocked (bypass proxy).
+	shellCmd = `curl -so /dev/null --noproxy '*' --connect-timeout 5 https://example.com 2>&1`
+	out, err = dockerExec(ctx.Barrel, shellCmd)
+	if err != nil {
+		ctx.pass("Direct egress blocked", "no route from internal network")
+	} else {
+		ctx.fail("Direct egress blocked", "LEAK: direct internet access succeeded (network isolation broken)")
 	}
 }
 
-// checkDirectEgress attempts to reach the internet directly (bypassing the
-// proxy). On the cooper-internal network this MUST fail with "no route to
-// host" or similar -- NOT a proxy error. This validates the --internal
-// network has no gateway.
-func checkDirectEgress(container string) ProofResult {
-	// --noproxy '*' forces curl to ignore proxy env vars and connect directly.
-	shellCmd := `curl -so /dev/null --noproxy '*' --connect-timeout 5 https://example.com 2>&1`
-	out, err := dockerExec(container, shellCmd)
+// ---------------------------------------------------------------------------
+// Phase 5: Tools
+// ---------------------------------------------------------------------------
 
-	if err != nil {
-		// Any failure is expected. Distinguish between network-level failure
-		// (good) and proxy-level failure (bad -- means proxy vars leaked).
-		lower := strings.ToLower(out)
-		if strings.Contains(lower, "no route to host") ||
-			strings.Contains(lower, "network is unreachable") ||
-			strings.Contains(lower, "connection timed out") ||
-			strings.Contains(lower, "couldn't connect to server") ||
-			strings.Contains(lower, "connection refused") {
-			return ProofResult{
-				Name:   "Direct Egress Blocked",
-				Status: StatusOK,
-				Detail: "Direct internet access correctly blocked (no route from internal network)",
+func (ctx *ProofContext) phaseTools() {
+	ctx.printPhase("Phase 5: Tools")
+
+	// Programming tools.
+	progCmds := map[string]string{
+		"go":     "go version",
+		"node":   "node --version",
+		"python": "python3 --version 2>/dev/null || python --version",
+	}
+	for _, t := range ctx.Cfg.ProgrammingTools {
+		if !t.Enabled {
+			continue
+		}
+		cmd, ok := progCmds[t.Name]
+		if !ok {
+			cmd = t.Name + " --version"
+		}
+		out, err := dockerExec(ctx.Barrel, cmd)
+		if err == nil && out != "" {
+			ctx.pass(t.Name, truncate(out, 80))
+		} else {
+			ctx.fail(t.Name, "not found in container")
+		}
+	}
+
+	// AI tool installations.
+	aiCmds := map[string]string{
+		"claude":   "claude --version",
+		"copilot":  "copilot --version 2>/dev/null || github-copilot-cli --version",
+		"codex":    "codex --version",
+		"opencode": "opencode --version",
+	}
+	for _, t := range ctx.Cfg.AITools {
+		if !t.Enabled {
+			continue
+		}
+		cmd, ok := aiCmds[t.Name]
+		if !ok {
+			cmd = t.Name + " --version"
+		}
+		out, err := dockerExec(ctx.Barrel, cmd)
+		if err == nil && out != "" && !strings.Contains(out, "not found") {
+			ctx.pass(t.Name, truncate(out, 80))
+		} else {
+			ctx.fail(t.Name, fmt.Sprintf("not found in container (%s)", truncate(out, 80)))
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6: AI CLI Smoke Test
+// ---------------------------------------------------------------------------
+
+func (ctx *ProofContext) phaseAICLI() {
+	ctx.printPhase("Phase 6: AI CLI Smoke Test")
+
+	// Build env args for the docker exec (tokens).
+	var envArgs []string
+	for _, t := range ctx.tokens {
+		envArgs = append(envArgs, fmt.Sprintf("%s=%s", t.Name, t.Value))
+	}
+
+	// For each enabled AI tool, try to send a message or verify connectivity.
+	for _, t := range ctx.Cfg.AITools {
+		if !t.Enabled {
+			continue
+		}
+
+		start := time.Now()
+		var cmd string
+		var name string
+		switch t.Name {
+		case "claude":
+			name = "Claude Code"
+			cmd = `claude -p "Reply with only the word: ok" --max-turns 1 2>&1`
+		case "codex":
+			name = "Codex"
+			cmd = `codex --dangerously-bypass-approvals-and-sandbox -q "Reply with only the word: ok" 2>&1`
+		case "copilot":
+			name = "Copilot CLI"
+			// Copilot CLI is not a chat tool — verify it can reach its API
+			// by checking that the version command succeeds (it phones home).
+			cmd = `copilot --version 2>&1`
+		case "opencode":
+			name = "OpenCode"
+			// OpenCode may not have a one-shot mode — verify API reachability.
+			cmd = `opencode --version 2>&1`
+		default:
+			continue
+		}
+
+		out, err := dockerExecWithEnv(ctx.Barrel, cmd, envArgs)
+		elapsed := time.Since(start).Round(100 * time.Millisecond)
+
+		switch t.Name {
+		case "claude", "codex":
+			// These are chat CLIs — we expect a response containing text.
+			if err == nil && out != "" && !strings.Contains(strings.ToLower(out), "error") {
+				ctx.pass(name, fmt.Sprintf("response received (%s)", elapsed))
+			} else {
+				detail := truncate(out, 150)
+				if detail == "" {
+					detail = "no output"
+				}
+				if err != nil {
+					detail = truncate(fmt.Sprintf("%v: %s", err, out), 150)
+				}
+				ctx.warn(name, fmt.Sprintf("no response — %s", detail))
+			}
+		default:
+			// Version check tools — just verify they ran.
+			if err == nil && out != "" {
+				ctx.pass(name, fmt.Sprintf("reachable (%s)", elapsed))
+			} else {
+				ctx.warn(name, fmt.Sprintf("not reachable — %s", truncate(out, 100)))
 			}
 		}
-		// Some other failure -- still blocked, but report what we saw.
-		return ProofResult{
-			Name:   "Direct Egress Blocked",
-			Status: StatusOK,
-			Detail: fmt.Sprintf("Direct internet access blocked (%s)", truncate(out, 120)),
-		}
 	}
 
-	// If curl succeeded, direct egress is possible -- this is a security leak.
-	return ProofResult{
-		Name:   "Direct Egress Blocked",
-		Status: StatusFAIL,
-		Detail: "LEAK: direct internet access succeeded bypassing proxy (network isolation broken)",
+	if len(ctx.Cfg.AITools) == 0 {
+		ctx.info("AI CLI", "no AI tools enabled")
 	}
 }
 
-// checkPortForwarding tests connectivity for each configured port forwarding
-// rule from inside the container. Ports are forwarded via socat through the
-// proxy container. For range rules, a sample of ports is probed (first,
-// middle, last) rather than every port in the range.
-func checkPortForwarding(container string, rules []config.PortForwardRule) []ProofResult {
-	if len(rules) == 0 {
-		return []ProofResult{{
-			Name:   "Port Forwarding",
-			Status: StatusINFO,
-			Detail: "No port forwarding rules configured",
-		}}
+// ---------------------------------------------------------------------------
+// Phase 7: Port Forwarding & Bridge
+// ---------------------------------------------------------------------------
+
+func (ctx *ProofContext) phasePortForwarding() {
+	ctx.printPhase("Phase 7: Port Forwarding & Bridge")
+
+	// Bridge health.
+	bridgePort := ctx.Cfg.BridgePort
+	shellCmd := fmt.Sprintf(
+		`curl -s --connect-timeout 5 http://localhost:%d/health 2>&1`,
+		bridgePort,
+	)
+	out, err := dockerExec(ctx.Barrel, shellCmd)
+	if err == nil && strings.Contains(out, "ok") {
+		ctx.pass("Bridge /health", fmt.Sprintf("port %d -> {\"status\":\"ok\"}", bridgePort))
+	} else {
+		ctx.fail("Bridge /health", fmt.Sprintf("port %d — %s", bridgePort, truncate(out, 100)))
 	}
 
-	var results []ProofResult
-	for _, rule := range rules {
-		// For range rules, probe a sample: first, middle, and last port.
+	// Port forwarding rules.
+	for _, rule := range ctx.Cfg.PortForwardRules {
 		var samplePorts []int
 		if rule.IsRange && rule.RangeEnd > rule.ContainerPort {
 			first := rule.ContainerPort
@@ -317,264 +523,145 @@ func checkPortForwarding(container string, rules []config.PortForwardRule) []Pro
 		}
 
 		for _, port := range samplePorts {
-			name := fmt.Sprintf("Port Forward: %d", port)
+			name := fmt.Sprintf("Port %d", port)
 			if rule.Description != "" {
-				name = fmt.Sprintf("Port Forward: %d (%s)", port, rule.Description)
+				name = fmt.Sprintf("Port %d (%s)", port, rule.Description)
 			}
-
-			shellCmd := fmt.Sprintf(
-				`bash -c 'echo > /dev/tcp/localhost/%d' 2>&1`,
-				port,
-			)
-			_, err := dockerExec(container, shellCmd)
-
+			shellCmd := fmt.Sprintf(`bash -c 'echo > /dev/tcp/localhost/%d' 2>&1`, port)
+			_, err := dockerExec(ctx.Barrel, shellCmd)
 			if err == nil {
-				results = append(results, ProofResult{
-					Name:   name,
-					Status: StatusOK,
-					Detail: fmt.Sprintf("Port %d reachable from inside container", port),
-				})
+				ctx.pass(name, "connected")
 			} else {
-				results = append(results, ProofResult{
-					Name:   name,
-					Status: StatusFAIL,
-					Detail: fmt.Sprintf("Port %d NOT reachable from inside container", port),
-				})
+				ctx.fail(name, "not reachable from container")
 			}
 		}
 	}
-	return results
-}
-
-// checkProgrammingToolVersions verifies each enabled programming tool is
-// installed in the container and reports its version.
-func checkProgrammingToolVersions(container string, tools []string) []ProofResult {
-	if len(tools) == 0 {
-		return []ProofResult{{
-			Name:   "Programming Tools",
-			Status: StatusINFO,
-			Detail: "No programming tools enabled",
-		}}
-	}
-
-	// Map tool names to their version-check commands.
-	versionCmds := map[string]string{
-		"go":     "go version",
-		"node":   "node --version",
-		"python": "python3 --version 2>/dev/null || python --version 2>/dev/null || echo notfound",
-	}
-
-	var results []ProofResult
-	for _, tool := range tools {
-		cmd, ok := versionCmds[tool]
-		if !ok {
-			cmd = fmt.Sprintf("%s --version 2>/dev/null || echo notfound", tool)
-		}
-
-		out, err := dockerExec(container, cmd)
-		name := fmt.Sprintf("Prog Tool: %s", tool)
-
-		if err == nil && !strings.Contains(out, "notfound") && out != "" {
-			results = append(results, ProofResult{
-				Name:   name,
-				Status: StatusOK,
-				Detail: fmt.Sprintf("Installed (%s)", truncate(out, 80)),
-			})
-		} else {
-			results = append(results, ProofResult{
-				Name:   name,
-				Status: StatusFAIL,
-				Detail: fmt.Sprintf("%s not found in container", tool),
-			})
-		}
-	}
-	return results
-}
-
-// checkToolInstallations verifies each enabled AI tool is installed and
-// responds to --version.
-func checkToolInstallations(container string, tools []string) []ProofResult {
-	if len(tools) == 0 {
-		return []ProofResult{{
-			Name:   "Tool Installations",
-			Status: StatusINFO,
-			Detail: "No AI tools enabled",
-		}}
-	}
-
-	// Map tool names to their version-check commands.
-	versionCmds := map[string]string{
-		"claude":  "claude --version",
-		"copilot": "github-copilot-cli --version 2>/dev/null || copilot --version 2>/dev/null || echo notfound",
-		"codex":   "codex --version 2>/dev/null || echo notfound",
-		"opencode": "opencode --version 2>/dev/null || echo notfound",
-	}
-
-	var results []ProofResult
-	for _, tool := range tools {
-		cmd, ok := versionCmds[tool]
-		if !ok {
-			// Unknown tool -- just try "<tool> --version".
-			cmd = fmt.Sprintf("%s --version 2>/dev/null || echo notfound", tool)
-		}
-
-		out, err := dockerExec(container, cmd)
-		name := fmt.Sprintf("Tool: %s", tool)
-
-		if err == nil && !strings.Contains(out, "notfound") && out != "" {
-			results = append(results, ProofResult{
-				Name:   name,
-				Status: StatusOK,
-				Detail: fmt.Sprintf("Installed (%s)", truncate(out, 80)),
-			})
-		} else {
-			results = append(results, ProofResult{
-				Name:   name,
-				Status: StatusFAIL,
-				Detail: fmt.Sprintf("%s not found in container", tool),
-			})
-		}
-	}
-	return results
-}
-
-// checkAuth verifies that authentication credentials are present inside the
-// container for the various AI tools. Returns FAIL if no credentials are
-// found at all, OK if at least one credential source is configured.
-func checkAuth(container string) ProofResult {
-	var findings []string
-	anyFound := false
-
-	// OPENAI_API_KEY
-	out, _ := dockerExec(container, `bash -c 'test -n "$OPENAI_API_KEY" && echo set || echo unset'`)
-	if strings.Contains(out, "set") {
-		findings = append(findings, "OPENAI_API_KEY: set")
-		anyFound = true
-	} else {
-		findings = append(findings, "OPENAI_API_KEY: not set")
-	}
-
-	// Copilot PAT (~/.copilot/.gh_token or GH_TOKEN/GITHUB_TOKEN env)
-	out, _ = dockerExec(container, `bash -c '
-		if [ -n "$GH_TOKEN" ] || [ -n "$GITHUB_TOKEN" ]; then
-			echo "env"
-		elif [ -f ~/.copilot/.gh_token ]; then
-			echo "file"
-		else
-			echo "missing"
-		fi
-	'`)
-	switch {
-	case strings.Contains(out, "env"):
-		findings = append(findings, "Copilot PAT: set via env")
-		anyFound = true
-	case strings.Contains(out, "file"):
-		findings = append(findings, "Copilot PAT: ~/.copilot/.gh_token")
-		anyFound = true
-	default:
-		findings = append(findings, "Copilot PAT: not configured")
-	}
-
-	// Claude credentials (~/.claude directory)
-	out, _ = dockerExec(container, `test -d ~/.claude && echo exists || echo missing`)
-	if strings.Contains(out, "exists") {
-		findings = append(findings, "~/.claude: present")
-		anyFound = true
-	} else {
-		findings = append(findings, "~/.claude: missing")
-	}
-
-	status := StatusFAIL
-	if anyFound {
-		status = StatusOK
-	}
-	return ProofResult{
-		Name:   "Auth Credentials",
-		Status: status,
-		Detail: strings.Join(findings, "; "),
-	}
-}
-
-// checkBridgeReachability curls the execution bridge health endpoint from
-// inside the container.
-func checkBridgeReachability(container, bridgePort string) ProofResult {
-	shellCmd := fmt.Sprintf(
-		`curl -so /dev/null -w '%%{http_code}' --connect-timeout 5 http://localhost:%s/health 2>&1`,
-		bridgePort,
-	)
-	out, err := dockerExec(container, shellCmd)
-
-	if err == nil && out != "" && out != "000" {
-		return ProofResult{
-			Name:   "Bridge Reachability",
-			Status: StatusOK,
-			Detail: fmt.Sprintf("Bridge health endpoint reachable on port %s (HTTP %s)", bridgePort, out),
-		}
-	}
-	return ProofResult{
-		Name:   "Bridge Reachability",
-		Status: StatusFAIL,
-		Detail: fmt.Sprintf("Bridge health endpoint NOT reachable on port %s", bridgePort),
-	}
 }
 
 // ---------------------------------------------------------------------------
-// Formatting
+// Teardown (always runs)
 // ---------------------------------------------------------------------------
 
-// FormatResults renders the proof results as a human-readable string with
-// colored OK/FAIL/INFO prefixes using ANSI escape codes.
-func FormatResults(results []ProofResult) string {
-	if len(results) == 0 {
-		return "No diagnostic checks were run."
+func (ctx *ProofContext) phaseTeardown() {
+	ctx.printPhase("Teardown")
+
+	// Stop ACL listener.
+	if ctx.aclListener != nil {
+		ctx.aclListener.Stop()
+		ctx.info("ACL listener", "stopped")
 	}
 
-	// ANSI color codes for terminal output.
-	const (
-		green  = "\033[32m"
-		red    = "\033[31m"
-		yellow = "\033[33m"
-		bold   = "\033[1m"
-		reset  = "\033[0m"
-	)
-
-	var b strings.Builder
-	b.WriteString(bold + "=== Cooper Proof ===" + reset + "\n\n")
-
-	okCount, failCount, infoCount := 0, 0, 0
-
-	for _, r := range results {
-		var prefix string
-		switch r.Status {
-		case StatusOK:
-			prefix = green + bold + "  OK" + reset
-			okCount++
-		case StatusFAIL:
-			prefix = red + bold + "FAIL" + reset
-			failCount++
-		case StatusINFO:
-			prefix = yellow + bold + "INFO" + reset
-			infoCount++
-		default:
-			prefix = "  ??"
-		}
-		b.WriteString(fmt.Sprintf("  %s  %-30s %s\n", prefix, r.Name, r.Detail))
+	// Stop bridge.
+	if ctx.bridgeServer != nil {
+		ctx.bridgeServer.Stop()
+		ctx.info("Bridge server", "stopped")
 	}
 
-	b.WriteString("\n")
-	summary := fmt.Sprintf("  %s%d passed%s", green, okCount, reset)
-	if failCount > 0 {
-		summary += fmt.Sprintf("  %s%d failed%s", red, failCount, reset)
+	// Stop barrel.
+	if running, _ := docker.IsBarrelRunning(ctx.Barrel); running {
+		docker.StopBarrel(ctx.Barrel)
+		ctx.info("Barrel", "stopped")
 	}
-	if infoCount > 0 {
-		summary += fmt.Sprintf("  %s%d info%s", yellow, infoCount, reset)
-	}
-	b.WriteString(summary + "\n")
 
-	return b.String()
+	// Stop proxy.
+	if running, _ := docker.IsProxyRunning(); running {
+		docker.StopProxy()
+		ctx.info("Proxy", "stopped")
+	}
+
+	// Remove networks.
+	docker.RemoveNetworks()
+	ctx.info("Networks", "removed")
 }
 
-// truncate shortens s to at most maxLen characters, appending "..." if cut.
+// ---------------------------------------------------------------------------
+// Output helpers
+// ---------------------------------------------------------------------------
+
+func (ctx *ProofContext) printPhase(name string) {
+	fmt.Printf("\n  %s%s%s\n", bold, name, reset)
+}
+
+func (ctx *ProofContext) emit(status, name, detail string) {
+	var prefix string
+	switch status {
+	case StatusPASS:
+		prefix = green + "  PASS" + reset
+		ctx.passCount++
+	case StatusFAIL:
+		prefix = red + bold + "  FAIL" + reset
+		ctx.failCount++
+	case StatusWARN:
+		prefix = yellow + "  WARN" + reset
+		ctx.warnCount++
+	case StatusINFO:
+		prefix = gray + "  info" + reset
+		ctx.infoCount++
+	}
+
+	ctx.results = append(ctx.results, Result{Name: name, Status: status, Detail: detail})
+	fmt.Printf("  %s  %-28s %s\n", prefix, name, detail)
+}
+
+func (ctx *ProofContext) pass(name, detail string) { ctx.emit(StatusPASS, name, detail) }
+func (ctx *ProofContext) fail(name, detail string) { ctx.emit(StatusFAIL, name, detail) }
+func (ctx *ProofContext) warn(name, detail string) { ctx.emit(StatusWARN, name, detail) }
+func (ctx *ProofContext) info(name, detail string) { ctx.emit(StatusINFO, name, detail) }
+
+func (ctx *ProofContext) printSummary() {
+	elapsed := time.Since(ctx.startTime).Round(time.Second)
+
+	fmt.Println()
+	fmt.Printf("  %s%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n", amber, bold, reset)
+
+	summary := fmt.Sprintf("  %s%d passed%s", green, ctx.passCount, reset)
+	if ctx.failCount > 0 {
+		summary += fmt.Sprintf("  %s%s%d failed%s", red, bold, ctx.failCount, reset)
+	}
+	if ctx.warnCount > 0 {
+		summary += fmt.Sprintf("  %s%d warnings%s", yellow, ctx.warnCount, reset)
+	}
+	fmt.Println(summary)
+	fmt.Printf("  %sCompleted in %s%s\n", gray, elapsed, reset)
+
+	// System info for GitHub issues.
+	fmt.Println()
+	fmt.Printf("  %sSystem:%s %s %s\n", gray, reset, runtime.GOOS, kernelVersion())
+	if v, err := exec.Command("docker", "version", "--format", "{{.Server.Version}}").Output(); err == nil {
+		fmt.Printf("  %sDocker:%s %s\n", gray, reset, strings.TrimSpace(string(v)))
+	}
+	fmt.Printf("  %sConfig:%s %s\n", gray, reset, filepath.Join(ctx.CooperDir, "config.json"))
+	fmt.Printf("  %sImages:%s %s, %s\n", gray, reset, docker.GetImageProxy(), docker.GetImageBarrel())
+	fmt.Println()
+}
+
+// ---------------------------------------------------------------------------
+// Docker helpers
+// ---------------------------------------------------------------------------
+
+// dockerExec runs a command inside the container via "docker exec".
+func dockerExec(container, shellCmd string) (string, error) {
+	cmd := exec.Command("docker", "exec", container, "bash", "-c", shellCmd)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// dockerExecWithEnv runs a command inside the container with extra env vars.
+func dockerExecWithEnv(container, shellCmd string, envArgs []string) (string, error) {
+	args := []string{"exec"}
+	for _, env := range envArgs {
+		args = append(args, "-e", env)
+	}
+	args = append(args, container, "bash", "-c", shellCmd)
+	cmd := exec.Command("docker", args...)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
@@ -583,4 +670,11 @@ func truncate(s string, maxLen int) string {
 		return s[:maxLen]
 	}
 	return s[:maxLen-3] + "..."
+}
+
+func kernelVersion() string {
+	if out, err := exec.Command("uname", "-r").Output(); err == nil {
+		return strings.TrimSpace(string(out))
+	}
+	return "unknown"
 }
