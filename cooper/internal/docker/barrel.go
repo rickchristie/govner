@@ -19,12 +19,12 @@ type BarrelInfo struct {
 }
 
 // BarrelContainerName returns the container name for a barrel based on the
-// workspace directory. The format is "barrel-{dirname}". If a container
-// with that name already exists for a different workspace path, a short
-// hash of the absolute path is appended (e.g., "barrel-myproject-a3f1").
-func BarrelContainerName(workspaceDir string) string {
+// workspace directory and tool name. The format is "barrel-{dirname}-{tool}".
+// If a container with that name already exists for a different workspace path,
+// a short hash of the absolute path is appended (e.g., "barrel-myproject-claude-a3f1").
+func BarrelContainerName(workspaceDir, toolName string) string {
 	base := filepath.Base(workspaceDir)
-	name := "barrel-" + base
+	name := "barrel-" + base + "-" + toolName
 
 	// Check if a container with this name already exists.
 	absPath, _ := filepath.Abs(workspaceDir)
@@ -54,7 +54,7 @@ func containerWorkspacePath(name string) string {
 	return strings.TrimSpace(string(output))
 }
 
-// StartBarrel creates and starts a barrel container for the given workspace.
+// StartBarrel creates and starts a barrel container for the given workspace and tool.
 //
 // The barrel runs on cooper-internal only (no internet access), with all
 // traffic forced through the proxy. Security hardening includes dropping
@@ -62,15 +62,15 @@ func containerWorkspacePath(name string) string {
 // and PID 1 init process.
 //
 // cooperDir is the path to ~/.cooper.
-func StartBarrel(cfg *config.Config, workspaceDir, cooperDir string) error {
-	name := BarrelContainerName(workspaceDir)
+func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) error {
+	name := BarrelContainerName(workspaceDir, toolName)
 	absWorkspace, err := filepath.Abs(workspaceDir)
 	if err != nil {
 		return fmt.Errorf("resolve workspace path: %w", err)
 	}
 
 	// Create host directories that may not exist yet.
-	if err := ensureBarrelHostDirs(absWorkspace); err != nil {
+	if err := ensureBarrelHostDirs(absWorkspace, toolName); err != nil {
 		return fmt.Errorf("create host directories: %w", err)
 	}
 
@@ -100,7 +100,7 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir string) error {
 	}
 
 	// Volume mounts.
-	args = appendVolumeMounts(args, absWorkspace, homeDir, cfg, cooperDir)
+	args = appendVolumeMounts(args, absWorkspace, homeDir, cfg, cooperDir, toolName)
 
 	// Proxy environment variables -- all traffic goes through cooper-proxy.
 	args = append(args,
@@ -119,8 +119,8 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir string) error {
 	// Working directory inside the container matches host workspace.
 	args = append(args, "-w", absWorkspace)
 
-	// Image and command.
-	args = append(args, GetImageBarrel(), "sleep", "infinity")
+	// Image and command — use tool-specific image.
+	args = append(args, GetImageCLI(toolName), "sleep", "infinity")
 
 	cmd := exec.Command("docker", args...)
 	output, err := cmd.CombinedOutput()
@@ -139,7 +139,8 @@ const containerHome = "/home/user"
 
 // appendVolumeMounts adds all volume mount flags to the docker run args.
 // cooperDir is used to locate the socat-rules.json config file.
-func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config.Config, cooperDir string) []string {
+// toolName scopes which AI tool auth directories are mounted.
+func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config.Config, cooperDir, toolName string) []string {
 	// Workspace directory (read-write) -- symmetrical mount so IDE
 	// integration (e.g. VS Code) can resolve paths correctly.
 	args = append(args, "-v", fmt.Sprintf("%s:%s:rw", absWorkspace, absWorkspace))
@@ -152,26 +153,22 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 		args = append(args, "-v", fmt.Sprintf("%s:%s:ro", gitHooksDir, gitHooksDir))
 	}
 
-	// AI tool auth/config directories (read-write).
-	// These are mapped to the container user's home so tools running as
-	// "user" inside the barrel can find their config.
-	aiAuthRelPaths := []string{
-		".claude",
-		".copilot",
-		".codex",
-		filepath.Join(".config", "opencode"),
-		filepath.Join(".local", "share", "opencode"),
-	}
-	for _, rel := range aiAuthRelPaths {
-		hostPath := filepath.Join(homeDir, rel)
-		containerPath := filepath.Join(containerHome, rel)
-		args = append(args, "-v", fmt.Sprintf("%s:%s:rw", hostPath, containerPath))
-	}
-
-	// Claude JSON config file (read-write).
-	claudeJSON := filepath.Join(homeDir, ".claude.json")
-	if fileExists(claudeJSON) {
-		args = append(args, "-v", fmt.Sprintf("%s:%s:rw", claudeJSON, filepath.Join(containerHome, ".claude.json")))
+	// Per-tool auth/config directories (read-write).
+	// Only mount auth dirs for the specific tool.
+	switch toolName {
+	case "claude":
+		mountRW(homeDir, ".claude", &args)
+		claudeJSON := filepath.Join(homeDir, ".claude.json")
+		if fileExists(claudeJSON) {
+			args = append(args, "-v", fmt.Sprintf("%s:%s:rw", claudeJSON, filepath.Join(containerHome, ".claude.json")))
+		}
+	case "copilot":
+		mountRW(homeDir, ".copilot", &args)
+	case "codex":
+		mountRW(homeDir, ".codex", &args)
+	case "opencode":
+		mountRW(homeDir, filepath.Join(".config", "opencode"), &args)
+		mountRW(homeDir, filepath.Join(".local", "share", "opencode"), &args)
 	}
 
 	// Git config (read-only).
@@ -198,6 +195,13 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 	}
 
 	return args
+}
+
+// mountRW appends a read-write volume mount for a directory relative to home.
+func mountRW(homeDir, relPath string, args *[]string) {
+	hostPath := filepath.Join(homeDir, relPath)
+	containerPath := filepath.Join(containerHome, relPath)
+	*args = append(*args, "-v", fmt.Sprintf("%s:%s:rw", hostPath, containerPath))
 }
 
 // appendLanguageCacheMounts adds cache volume mounts based on which
@@ -237,7 +241,7 @@ func appendLanguageCacheMounts(args []string, homeDir string, cfg *config.Config
 
 // ensureBarrelHostDirs creates directories on the host that must exist
 // before Docker can mount them as volumes.
-func ensureBarrelHostDirs(absWorkspace string) error {
+func ensureBarrelHostDirs(absWorkspace, toolName string) error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("get home dir: %w", err)
@@ -248,17 +252,29 @@ func ensureBarrelHostDirs(absWorkspace string) error {
 		gopath = filepath.Join(homeDir, "go")
 	}
 
-	dirs := []string{
-		filepath.Join(homeDir, ".claude"),
-		filepath.Join(homeDir, ".copilot"),
-		filepath.Join(homeDir, ".codex"),
-		filepath.Join(homeDir, ".config", "opencode"),
-		filepath.Join(homeDir, ".local", "share", "opencode"),
+	// Tool-specific auth dirs.
+	var dirs []string
+	switch toolName {
+	case "claude":
+		dirs = append(dirs, filepath.Join(homeDir, ".claude"))
+	case "copilot":
+		dirs = append(dirs, filepath.Join(homeDir, ".copilot"))
+	case "codex":
+		dirs = append(dirs, filepath.Join(homeDir, ".codex"))
+	case "opencode":
+		dirs = append(dirs,
+			filepath.Join(homeDir, ".config", "opencode"),
+			filepath.Join(homeDir, ".local", "share", "opencode"),
+		)
+	}
+
+	// Language cache dirs (always needed).
+	dirs = append(dirs,
 		filepath.Join(homeDir, ".npm"),
 		filepath.Join(homeDir, ".cache", "pip"),
 		filepath.Join(homeDir, ".cache", "go-build"),
 		filepath.Join(gopath, "pkg", "mod"),
-	}
+	)
 
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {

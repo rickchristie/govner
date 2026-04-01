@@ -10,6 +10,7 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/aclsrc"
 	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/docker"
 )
 
 //go:embed *.tmpl
@@ -18,24 +19,29 @@ var templateFS embed.FS
 //go:embed doctor.sh
 var doctorScript []byte
 
-// cliDockerfileData holds template data for the CLI Dockerfile.
-type cliDockerfileData struct {
+// baseDockerfileData holds template data for the base image Dockerfile.
+type baseDockerfileData struct {
 	HasGo       bool
 	GoVersion   string
 	HasNode     bool
 	NodeVersion string
 	HasPython   bool
-	PythonVersion string
-	HasClaudeCode    bool
-	ClaudeVersion    string // empty = install latest
-	HasCopilot       bool
-	CopilotVersion   string
-	HasCodex         bool
-	CodexVersion     string
-	HasOpenCode      bool
-	OpenCodeVersion  string
+	// Runtime deps flags (needed even though tools install in child images)
+	HasCodex    bool // Controls bubblewrap build
+	HasOpenCode bool // Controls xvfb/xclip install
+	ProxyPort   int
+}
 
-	ProxyPort int
+// cliToolDockerfileData holds template data for per-tool Dockerfiles.
+type cliToolDockerfileData struct {
+	BaseImage       string   // "cooper-base" or "{prefix}cooper-base"
+	ToolName        string   // "claude", "copilot", "codex", "opencode"
+	ToolDisplayName string   // "Claude Code", "Copilot CLI", etc.
+	Version         string   // Resolved version (empty = latest)
+	AutoApproveFlag string   // Tool-specific auto-approve CLI flag
+	InstallCommands string   // Pre-rendered install RUN commands
+	ToolDirs        []string // Directories to create (e.g. /home/user/.claude)
+	ProxyPort       int      // Proxy port to restore after install
 }
 
 // proxyDockerfileData holds template data for the proxy Dockerfile.
@@ -53,12 +59,8 @@ type squidConfData struct {
 // Port forwarding rules are read from /etc/cooper/socat-rules.json at runtime,
 // not baked into the template. BridgePort is kept as a fallback default.
 type entrypointData struct {
-	HasGo         bool
-	HasClaudeCode bool
-	HasCopilot    bool
-	HasCodex      bool
-	HasOpenCode   bool
-	BridgePort    int
+	HasGo      bool
+	BridgePort int
 }
 
 // proxyEntrypointData holds template data for the proxy entrypoint script.
@@ -95,39 +97,131 @@ func getToolVersion(tools []config.ToolConfig, name string) string {
 	return ""
 }
 
-// buildCLIDockerfileData constructs template data from a Config.
-func buildCLIDockerfileData(cfg *config.Config) cliDockerfileData {
-	return cliDockerfileData{
-		HasGo:         isToolEnabled(cfg.ProgrammingTools, "go"),
-		GoVersion:     getToolVersion(cfg.ProgrammingTools, "go"),
-		HasNode:       isToolEnabled(cfg.ProgrammingTools, "node"),
-		NodeVersion:   getToolVersion(cfg.ProgrammingTools, "node"),
-		HasPython:     isToolEnabled(cfg.ProgrammingTools, "python"),
-		PythonVersion: getToolVersion(cfg.ProgrammingTools, "python"),
-		HasClaudeCode:   isToolEnabled(cfg.AITools, "claude"),
-		ClaudeVersion:   getToolVersion(cfg.AITools, "claude"),
-		HasCopilot:      isToolEnabled(cfg.AITools, "copilot"),
-		CopilotVersion:  getToolVersion(cfg.AITools, "copilot"),
-		HasCodex:        isToolEnabled(cfg.AITools, "codex"),
-		CodexVersion:    getToolVersion(cfg.AITools, "codex"),
-		HasOpenCode:     isToolEnabled(cfg.AITools, "opencode"),
-		OpenCodeVersion: getToolVersion(cfg.AITools, "opencode"),
-		ProxyPort:       cfg.ProxyPort,
+// buildBaseDockerfileData constructs template data for the base image from a Config.
+func buildBaseDockerfileData(cfg *config.Config) baseDockerfileData {
+	return baseDockerfileData{
+		HasGo:       isToolEnabled(cfg.ProgrammingTools, "go"),
+		GoVersion:   getToolVersion(cfg.ProgrammingTools, "go"),
+		HasNode:     isToolEnabled(cfg.ProgrammingTools, "node"),
+		NodeVersion: getToolVersion(cfg.ProgrammingTools, "node"),
+		HasPython:   isToolEnabled(cfg.ProgrammingTools, "python"),
+		HasCodex:    isToolEnabled(cfg.AITools, "codex"),
+		HasOpenCode: isToolEnabled(cfg.AITools, "opencode"),
+		ProxyPort:   cfg.ProxyPort,
 	}
 }
 
-// RenderCLIDockerfile renders the CLI container Dockerfile from config.
-func RenderCLIDockerfile(cfg *config.Config) (string, error) {
-	tmpl, err := template.ParseFS(templateFS, "cli.Dockerfile.tmpl")
+// RenderBaseDockerfile renders the base image Dockerfile from config.
+func RenderBaseDockerfile(cfg *config.Config) (string, error) {
+	tmpl, err := template.ParseFS(templateFS, "base.Dockerfile.tmpl")
 	if err != nil {
-		return "", fmt.Errorf("failed to parse CLI Dockerfile template: %w", err)
+		return "", fmt.Errorf("failed to parse base Dockerfile template: %w", err)
 	}
 
-	data := buildCLIDockerfileData(cfg)
+	data := buildBaseDockerfileData(cfg)
 
 	var buf strings.Builder
 	if err := tmpl.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("failed to execute CLI Dockerfile template: %w", err)
+		return "", fmt.Errorf("failed to execute base Dockerfile template: %w", err)
+	}
+
+	return buf.String(), nil
+}
+
+// toolDefinition holds the static metadata for each built-in AI tool.
+type toolDefinition struct {
+	DisplayName     string
+	AutoApproveFlag string
+	ToolDirs        []string
+}
+
+// builtinTools maps tool name to its static definition.
+var builtinTools = map[string]toolDefinition{
+	"claude": {
+		DisplayName:     "Claude Code",
+		AutoApproveFlag: "--dangerously-skip-permissions",
+		ToolDirs:        []string{"/home/user/.claude"},
+	},
+	"copilot": {
+		DisplayName:     "Copilot CLI",
+		AutoApproveFlag: "--allow-all-tools",
+		ToolDirs:        []string{"/home/user/.copilot"},
+	},
+	"codex": {
+		DisplayName:     "Codex CLI",
+		AutoApproveFlag: "--dangerously-bypass-approvals-and-sandbox",
+		ToolDirs:        []string{"/home/user/.codex"},
+	},
+	"opencode": {
+		DisplayName:     "OpenCode",
+		AutoApproveFlag: "--auto-approve",
+		ToolDirs:        []string{"/home/user/.config/opencode", "/home/user/.cache/opencode"},
+	},
+}
+
+// renderInstallCommands returns the Dockerfile RUN commands for installing a tool.
+func renderInstallCommands(toolName, version string) (string, error) {
+	switch toolName {
+	case "claude":
+		if version != "" {
+			// When version is pinned, don't run `claude install` — it upgrades to latest.
+			// The curl installer already handles shell integration setup.
+			return fmt.Sprintf("RUN curl -fsSL https://claude.ai/install.sh | bash -s -- %s", version), nil
+		}
+		return "RUN curl -fsSL https://claude.ai/install.sh | bash && \\\n    /home/user/.local/bin/claude install", nil
+	case "copilot":
+		if version != "" {
+			return fmt.Sprintf("RUN npm install -g @github/copilot@%s", version), nil
+		}
+		return "RUN npm install -g @github/copilot", nil
+	case "codex":
+		if version != "" {
+			return fmt.Sprintf("RUN npm install -g @openai/codex@%s", version), nil
+		}
+		return "RUN npm install -g @openai/codex", nil
+	case "opencode":
+		mkdirCmd := "RUN mkdir -p /home/user/.config/opencode"
+		if version != "" {
+			return fmt.Sprintf("RUN curl -fsSL https://opencode.ai/install | bash -s -- --version %s\n%s", version, mkdirCmd), nil
+		}
+		return fmt.Sprintf("RUN curl -fsSL https://opencode.ai/install | bash\n%s", mkdirCmd), nil
+	default:
+		return "", fmt.Errorf("unknown tool: %s", toolName)
+	}
+}
+
+// RenderCLIToolDockerfile renders a per-tool Dockerfile from config and tool name.
+func RenderCLIToolDockerfile(cfg *config.Config, toolName string) (string, error) {
+	def, ok := builtinTools[toolName]
+	if !ok {
+		return "", fmt.Errorf("unknown AI tool: %s", toolName)
+	}
+
+	version := getToolVersion(cfg.AITools, toolName)
+	installCmds, err := renderInstallCommands(toolName, version)
+	if err != nil {
+		return "", err
+	}
+
+	tmpl, err := template.ParseFS(templateFS, "cli-tool.Dockerfile.tmpl")
+	if err != nil {
+		return "", fmt.Errorf("failed to parse cli-tool Dockerfile template: %w", err)
+	}
+
+	data := cliToolDockerfileData{
+		BaseImage:       docker.GetImageBase(),
+		ToolName:        toolName,
+		ToolDisplayName: def.DisplayName,
+		Version:         version,
+		AutoApproveFlag: def.AutoApproveFlag,
+		InstallCommands: installCmds,
+		ToolDirs:        def.ToolDirs,
+		ProxyPort:       cfg.ProxyPort,
+	}
+
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("failed to execute cli-tool Dockerfile template: %w", err)
 	}
 
 	return buf.String(), nil
@@ -199,12 +293,8 @@ func RenderEntrypoint(cfg *config.Config) (string, error) {
 	}
 
 	data := entrypointData{
-		HasGo:         isToolEnabled(cfg.ProgrammingTools, "go"),
-		HasClaudeCode: isToolEnabled(cfg.AITools, "claude"),
-		HasCopilot:    isToolEnabled(cfg.AITools, "copilot"),
-		HasCodex:      isToolEnabled(cfg.AITools, "codex"),
-		HasOpenCode:   isToolEnabled(cfg.AITools, "opencode"),
-		BridgePort:    cfg.BridgePort,
+		HasGo:      isToolEnabled(cfg.ProgrammingTools, "go"),
+		BridgePort: cfg.BridgePort,
 	}
 
 	var buf strings.Builder
@@ -215,32 +305,78 @@ func RenderEntrypoint(cfg *config.Config) (string, error) {
 	return buf.String(), nil
 }
 
-// WriteAllTemplates writes all generated files to the output directory.
-// The directory is created if it does not exist.
-func WriteAllTemplates(dir string, cfg *config.Config) error {
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create output directory: %w", err)
+// WriteAllTemplates writes all generated files for the base image to the base directory,
+// and per-tool Dockerfiles to cli/<tool>/ directories.
+// baseDir is the path to ~/.cooper/base/.
+// cliDir is the path to ~/.cooper/cli/.
+func WriteAllTemplates(baseDir, cliDir string, cfg *config.Config) error {
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		return fmt.Errorf("failed to create base directory: %w", err)
 	}
 
-	// Generate and write CLI Dockerfile
-	cliDockerfile, err := RenderCLIDockerfile(cfg)
+	// Generate and write base Dockerfile.
+	baseDockerfile, err := RenderBaseDockerfile(cfg)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(cliDockerfile), 0644); err != nil {
-		return fmt.Errorf("failed to write CLI Dockerfile: %w", err)
+	if err := os.WriteFile(filepath.Join(baseDir, "Dockerfile"), []byte(baseDockerfile), 0644); err != nil {
+		return fmt.Errorf("failed to write base Dockerfile: %w", err)
 	}
 
-	// Generate and write proxy Dockerfile
+	// Write doctor.sh diagnostic script (embedded, not generated).
+	if err := os.WriteFile(filepath.Join(baseDir, "doctor.sh"), doctorScript, 0755); err != nil {
+		return fmt.Errorf("failed to write doctor.sh: %w", err)
+	}
+
+	// Generate and write entrypoint.sh.
+	entrypoint, err := RenderEntrypoint(cfg)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "entrypoint.sh"), []byte(entrypoint), 0755); err != nil {
+		return fmt.Errorf("failed to write entrypoint.sh: %w", err)
+	}
+
+	// Write per-tool Dockerfiles.
+	for _, tool := range cfg.AITools {
+		if !tool.Enabled {
+			continue
+		}
+		// Skip custom tools (user-managed).
+		if _, ok := builtinTools[tool.Name]; !ok {
+			continue
+		}
+		toolDir := filepath.Join(cliDir, tool.Name)
+		if err := os.MkdirAll(toolDir, 0755); err != nil {
+			return fmt.Errorf("failed to create tool directory %s: %w", tool.Name, err)
+		}
+		dockerfile, err := RenderCLIToolDockerfile(cfg, tool.Name)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(toolDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
+			return fmt.Errorf("failed to write %s Dockerfile: %w", tool.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// WriteProxyTemplates writes proxy-specific templates (proxy.Dockerfile,
+// squid.conf, proxy-entrypoint.sh) into the given directory.
+func WriteProxyTemplates(dir string, cfg *config.Config) error {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create proxy directory: %w", err)
+	}
+
 	proxyDockerfile, err := RenderProxyDockerfile(cfg)
 	if err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(dir, "proxy.Dockerfile"), []byte(proxyDockerfile), 0644); err != nil {
-		return fmt.Errorf("failed to write proxy Dockerfile: %w", err)
+		return fmt.Errorf("failed to write proxy.Dockerfile: %w", err)
 	}
 
-	// Generate and write squid.conf
 	squidConf, err := RenderSquidConf(cfg)
 	if err != nil {
 		return err
@@ -249,21 +385,6 @@ func WriteAllTemplates(dir string, cfg *config.Config) error {
 		return fmt.Errorf("failed to write squid.conf: %w", err)
 	}
 
-	// Write doctor.sh diagnostic script (embedded, not generated).
-	if err := os.WriteFile(filepath.Join(dir, "doctor.sh"), doctorScript, 0755); err != nil {
-		return fmt.Errorf("failed to write doctor.sh: %w", err)
-	}
-
-	// Generate and write entrypoint.sh
-	entrypoint, err := RenderEntrypoint(cfg)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(dir, "entrypoint.sh"), []byte(entrypoint), 0755); err != nil {
-		return fmt.Errorf("failed to write entrypoint.sh: %w", err)
-	}
-
-	// Generate and write proxy-entrypoint.sh
 	proxyEntrypoint, err := RenderProxyEntrypoint(cfg)
 	if err != nil {
 		return err

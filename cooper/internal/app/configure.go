@@ -163,9 +163,10 @@ func (a *ConfigureApp) Save() error {
 	}
 
 	// Ensure cooperDir and subdirectories exist.
+	baseDir := filepath.Join(a.cooperDir, "base")
 	cliDir := filepath.Join(a.cooperDir, "cli")
 	proxyDir := filepath.Join(a.cooperDir, "proxy")
-	for _, dir := range []string{a.cooperDir, cliDir, proxyDir} {
+	for _, dir := range []string{a.cooperDir, baseDir, cliDir, proxyDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("create directory %s: %w", dir, err)
 		}
@@ -177,26 +178,14 @@ func (a *ConfigureApp) Save() error {
 		return fmt.Errorf("save config: %w", err)
 	}
 
-	// Generate CLI templates.
-	if err := templates.WriteAllTemplates(cliDir, a.cfg); err != nil {
+	// Generate base + per-tool CLI templates.
+	if err := templates.WriteAllTemplates(baseDir, cliDir, a.cfg); err != nil {
 		return fmt.Errorf("write CLI templates: %w", err)
 	}
 
 	// Generate proxy templates.
-	proxyDockerfile, err := templates.RenderProxyDockerfile(a.cfg)
-	if err != nil {
-		return fmt.Errorf("render proxy Dockerfile: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(proxyDir, "proxy.Dockerfile"), []byte(proxyDockerfile), 0644); err != nil {
-		return fmt.Errorf("write proxy.Dockerfile: %w", err)
-	}
-
-	squidConf, err := templates.RenderSquidConf(a.cfg)
-	if err != nil {
-		return fmt.Errorf("render squid.conf: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(proxyDir, "squid.conf"), []byte(squidConf), 0644); err != nil {
-		return fmt.Errorf("write squid.conf: %w", err)
+	if err := templates.WriteProxyTemplates(proxyDir, a.cfg); err != nil {
+		return fmt.Errorf("write proxy templates: %w", err)
 	}
 
 	// Ensure CA certificate.

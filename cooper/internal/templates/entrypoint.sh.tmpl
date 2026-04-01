@@ -19,49 +19,51 @@ fi
 SOCAT_RULES="/etc/cooper/socat-rules.json"
 
 # ============================================================================
-# Auto-approve aliases (container is network-isolated, so sandbox is redundant)
+# PATH setup (login shells reset PATH, so we must re-export in .profile)
+# .profile is sourced by login shells (bash -l) regardless of interactivity,
+# unlike .bashrc which has an interactive-only guard on Debian.
 # ============================================================================
-if ! grep -q "Cooper: Auto-approve aliases" /home/user/.bashrc 2>/dev/null; then
-    cat >> /home/user/.bashrc << 'ALIASES'
+if ! grep -q "Cooper: PATH" /home/user/.profile 2>/dev/null; then
+    cat >> /home/user/.profile << 'PATHSETUP'
 
-# Cooper: Ensure PATH includes tool directories (login shells reset PATH)
-export PATH="/home/user/.local/bin:/home/user/.npm-global/bin{{- if .HasOpenCode}}:/home/user/.opencode/bin{{- end}}{{- if .HasGo}}:/usr/local/go/bin:/go/bin{{- end}}:$PATH"
-
-# Cooper: Auto-approve aliases (container is network-isolated)
-{{- if .HasClaudeCode}}
-alias claude='claude --dangerously-skip-permissions'
-{{- end}}
-{{- if .HasCopilot}}
-alias copilot='copilot --allow-all-tools'
-{{- end}}
-{{- if .HasCodex}}
-alias codex='codex --dangerously-bypass-approvals-and-sandbox'
-{{- end}}
-{{- if .HasOpenCode}}
-alias opencode='opencode --auto-approve'
-{{- end}}
-ALIASES
-fi
-{{if .HasOpenCode}}
-# ============================================================================
-# OpenCode setup
-# ============================================================================
-# Virtual display for headless clipboard/TUI support
-if ! grep -q "Cooper: DISPLAY" /home/user/.bashrc 2>/dev/null; then
-    echo '# Cooper: DISPLAY for headless clipboard support' >> /home/user/.bashrc
-    echo 'export DISPLAY=:99.0' >> /home/user/.bashrc
+# Cooper: PATH — ensure tool directories are on PATH for login shells
+export PATH="/home/user/.local/bin:/home/user/.npm-global/bin:/home/user/.opencode/bin{{- if .HasGo}}:/usr/local/go/bin:/go/bin{{- end}}:$PATH"
+PATHSETUP
 fi
 
-# OpenCode config: create defaults only if not already present (dir is host-mounted)
-mkdir -p /home/user/.config/opencode/plugins /home/user/.config/opencode/commands
-if [ ! -f /home/user/.config/opencode/opencode.json ]; then
-    echo '{"$schema": "https://opencode.ai/config.json", "autoupdate": false}' > /home/user/.config/opencode/opencode.json
+# ============================================================================
+# Auto-approve alias (set per tool image via ENV)
+# ============================================================================
+if [ -n "$COOPER_CLI_TOOL" ] && [ -n "$COOPER_CLI_AUTO_APPROVE" ]; then
+    if ! grep -q "Cooper: Auto-approve alias" /home/user/.bashrc 2>/dev/null; then
+        cat >> /home/user/.bashrc << ALIAS
+
+# Cooper: Auto-approve alias
+alias $COOPER_CLI_TOOL='$COOPER_CLI_TOOL $COOPER_CLI_AUTO_APPROVE'
+ALIAS
+    fi
 fi
 
-# Start Xvfb virtual display for headless clipboard/display support
-Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
-export DISPLAY=:99.0
-{{end}}
+# ============================================================================
+# OpenCode setup (conditional on tool type)
+# ============================================================================
+if [ "$COOPER_CLI_TOOL" = "opencode" ]; then
+    if ! grep -q "Cooper: DISPLAY" /home/user/.bashrc 2>/dev/null; then
+        echo '# Cooper: DISPLAY for headless clipboard support' >> /home/user/.bashrc
+        echo 'export DISPLAY=:99.0' >> /home/user/.bashrc
+    fi
+
+    # OpenCode config: create defaults only if not already present (dir is host-mounted)
+    mkdir -p /home/user/.config/opencode/plugins /home/user/.config/opencode/commands
+    if [ ! -f /home/user/.config/opencode/opencode.json ]; then
+        echo '{"$schema": "https://opencode.ai/config.json", "autoupdate": false}' > /home/user/.config/opencode/opencode.json
+    fi
+
+    # Start Xvfb virtual display for headless clipboard/display support
+    Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
+    export DISPLAY=:99.0
+fi
+
 # ============================================================================
 # SOCAT PORT FORWARDING (live-reloadable via SIGHUP)
 # ============================================================================

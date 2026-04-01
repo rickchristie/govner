@@ -15,9 +15,8 @@ var (
 	imagePrefix = ""
 
 	// Default image names (with prefix applied via functions).
-	defaultImageProxy     = "cooper-proxy"
-	defaultImageBarrelBase = "cooper-barrel-base"
-	defaultImageBarrel     = "cooper-barrel"
+	defaultImageProxy = "cooper-proxy"
+	defaultImageBase  = "cooper-base"
 )
 
 // SetImagePrefix sets a prefix for all Docker image names.
@@ -33,21 +32,37 @@ func ImagePrefix() string {
 	return imagePrefix
 }
 
-// ImageProxy returns the proxy image name (with prefix).
+// GetImageProxy returns the proxy image name (with prefix).
 func GetImageProxy() string { return imagePrefix + defaultImageProxy }
 
-// ImageBarrelBase returns the barrel base image name (with prefix).
-func GetImageBarrelBase() string { return imagePrefix + defaultImageBarrelBase }
+// GetImageBase returns the base image name (with prefix).
+func GetImageBase() string { return imagePrefix + defaultImageBase }
 
-// ImageBarrel returns the barrel image name (with prefix).
-func GetImageBarrel() string { return imagePrefix + defaultImageBarrel }
+// GetImageCLI returns the CLI tool image name for a given tool (with prefix).
+func GetImageCLI(toolName string) string {
+	return imagePrefix + "cooper-cli-" + toolName
+}
 
-// Keep constants for backward compatibility — code that uses these directly
-// will get the unprefixed names. New code should use Get*() functions.
+// ListCLIImages returns all cooper-cli-* image names that exist locally.
+func ListCLIImages() ([]string, error) {
+	filter := fmt.Sprintf("reference=%scooper-cli-*", imagePrefix)
+	cmd := exec.Command("docker", "images", "--format", "{{.Repository}}", "--filter", filter)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("docker images list failed: %w\n%s", err, string(output))
+	}
+	var images []string
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if line != "" {
+			images = append(images, line)
+		}
+	}
+	return images, nil
+}
+
+// Keep constants for backward compatibility.
 const (
-	ImageProxy     = "cooper-proxy"
-	ImageBarrelBase = "cooper-barrel-base"
-	ImageBarrel     = "cooper-barrel"
+	ImageProxy = "cooper-proxy"
 )
 
 // BuildImage builds a Docker image with the given name from the specified

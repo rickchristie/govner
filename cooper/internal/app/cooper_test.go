@@ -72,34 +72,23 @@ func setupCooperDir(t *testing.T) (string, *config.Config) {
 
 	// Render ALL templates using the real template pipeline.
 	// This generates squid.conf, proxy-entrypoint.sh, cli entrypoint, etc.
+	baseDir := filepath.Join(cooperDir, "base")
 	cliDir := filepath.Join(cooperDir, "cli")
 	proxyDir := filepath.Join(cooperDir, "proxy")
-	for _, dir := range []string{cliDir, proxyDir} {
+	for _, dir := range []string{baseDir, cliDir, proxyDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
 
-	// Render CLI templates (entrypoint.sh, Dockerfile).
-	if err := templates.WriteAllTemplates(cliDir, cfg); err != nil {
+	// Render base + per-tool CLI templates (entrypoint.sh, base Dockerfile, per-tool Dockerfiles).
+	if err := templates.WriteAllTemplates(baseDir, cliDir, cfg); err != nil {
 		t.Fatalf("write cli templates: %v", err)
 	}
 
 	// Render proxy templates (squid.conf, proxy.Dockerfile, proxy-entrypoint.sh).
-	squidConf, err := templates.RenderSquidConf(cfg)
-	if err != nil {
-		t.Fatalf("render squid.conf: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(proxyDir, "squid.conf"), []byte(squidConf), 0644); err != nil {
-		t.Fatalf("write squid.conf: %v", err)
-	}
-
-	proxyEntrypoint, err := templates.RenderProxyEntrypoint(cfg)
-	if err != nil {
-		t.Fatalf("render proxy-entrypoint.sh: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(proxyDir, "proxy-entrypoint.sh"), []byte(proxyEntrypoint), 0755); err != nil {
-		t.Fatalf("write proxy-entrypoint.sh: %v", err)
+	if err := templates.WriteProxyTemplates(proxyDir, cfg); err != nil {
+		t.Fatalf("write proxy templates: %v", err)
 	}
 
 	// Write socat rules config.
@@ -1046,7 +1035,7 @@ func TestCooperApp_ContainerStats(t *testing.T) {
 func skipIfNoBarrelImage(t *testing.T) {
 	t.Helper()
 	docker.SetImagePrefix(testImagePrefix)
-	imageName := docker.GetImageBarrel()
+	imageName := docker.GetImageCLI("claude")
 	exists, err := docker.ImageExists(imageName)
 	if err != nil || !exists {
 		t.Skipf("barrel image %s not found; run test-docker-build.sh first", imageName)
@@ -1082,12 +1071,12 @@ func startAppAndBarrel(t *testing.T, cfg *config.Config, cooperDir string) (*Coo
 	workspaceDir := t.TempDir()
 
 	// Start the barrel container.
-	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir); err != nil {
+	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "claude"); err != nil {
 		app.Stop()
 		t.Fatalf("StartBarrel() failed: %v", err)
 	}
 
-	barrelName := docker.BarrelContainerName(workspaceDir)
+	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
 
 	// Wait for barrel container to be running.
 	waitForContainer(t, barrelName, 15*time.Second)
@@ -1614,13 +1603,13 @@ func TestCooperApp_CLIReusesContainer(t *testing.T) {
 	workspaceDir := strings.TrimSpace(string(wsOut))
 
 	// Call BarrelContainerName for the same workspace -- should return same name.
-	secondName := docker.BarrelContainerName(workspaceDir)
+	secondName := docker.BarrelContainerName(workspaceDir, "claude")
 	if secondName != barrelName {
 		t.Errorf("BarrelContainerName returned %q on second call, want %q (reuse)", secondName, barrelName)
 	}
 
 	// Call StartBarrel again for the same workspace (it removes and recreates).
-	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir); err != nil {
+	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "claude"); err != nil {
 		t.Fatalf("second StartBarrel() failed: %v", err)
 	}
 
@@ -2014,11 +2003,11 @@ func TestCooperApp_ContainerNamingCollision(t *testing.T) {
 	}
 
 	// Start first barrel.
-	if err := docker.StartBarrel(cfg, ws1, cooperDir); err != nil {
+	if err := docker.StartBarrel(cfg, ws1, cooperDir, "claude"); err != nil {
 		app.Stop()
 		t.Fatalf("StartBarrel(ws1) failed: %v", err)
 	}
-	name1 := docker.BarrelContainerName(ws1)
+	name1 := docker.BarrelContainerName(ws1, "claude")
 	t.Logf("barrel 1: name=%s workspace=%s", name1, ws1)
 
 	t.Cleanup(func() {
@@ -2028,11 +2017,11 @@ func TestCooperApp_ContainerNamingCollision(t *testing.T) {
 	waitForContainer(t, name1, 15*time.Second)
 
 	// Start second barrel with a different absolute path but same dir name.
-	if err := docker.StartBarrel(cfg, ws2, cooperDir); err != nil {
+	if err := docker.StartBarrel(cfg, ws2, cooperDir, "claude"); err != nil {
 		app.Stop()
 		t.Fatalf("StartBarrel(ws2) failed: %v", err)
 	}
-	name2 := docker.BarrelContainerName(ws2)
+	name2 := docker.BarrelContainerName(ws2, "claude")
 	t.Logf("barrel 2: name=%s workspace=%s", name2, ws2)
 
 	t.Cleanup(func() {
@@ -2135,77 +2124,43 @@ func TestCooperApp_Cleanup(t *testing.T) {
 	cleanupDocker(t)
 }
 
-// TestCooperApp_UpdateSelectiveRebuild modifies config to change only AI
-// tools and verifies the generated Dockerfile template contains the correct
-// CACHE_BUST_AI ARG while CACHE_BUST_LANG remains at the default value.
-// This validates the selective rebuild mechanism used by `cooper update`.
-func TestCooperApp_UpdateSelectiveRebuild(t *testing.T) {
-	skipIfNoDocker(t)
-	skipIfNoProxyImage(t)
+// TestCooperApp_PerToolDockerfiles verifies that the multi-image architecture
+// generates separate Dockerfiles for each tool that reference the base image
+// and do not contain CACHE_BUST args (removed concept).
+func TestCooperApp_PerToolDockerfiles(t *testing.T) {
 	docker.SetImagePrefix(testImagePrefix)
-	t.Cleanup(func() { cleanupDocker(t) })
 
-	// Create a config with specific AI and programming tools.
 	cfg := config.DefaultConfig()
 
-	// Render the initial Dockerfile.
-	initialDockerfile, err := templates.RenderCLIDockerfile(cfg)
+	// Render per-tool Dockerfiles and verify they reference the base image.
+	for _, tool := range []string{"claude", "copilot", "codex", "opencode"} {
+		df, err := templates.RenderCLIToolDockerfile(cfg, tool)
+		if err != nil {
+			t.Fatalf("RenderCLIToolDockerfile(%s) failed: %v", tool, err)
+		}
+		if !strings.Contains(df, "FROM "+docker.GetImageBase()) {
+			t.Errorf("%s Dockerfile missing FROM %s", tool, docker.GetImageBase())
+		}
+		if strings.Contains(df, "CACHE_BUST") {
+			t.Errorf("%s Dockerfile should not contain CACHE_BUST (removed concept)", tool)
+		}
+		if !strings.Contains(df, "COOPER_CLI_TOOL="+tool) {
+			t.Errorf("%s Dockerfile missing COOPER_CLI_TOOL=%s", tool, tool)
+		}
+	}
+
+	// Render base Dockerfile and verify no AI tools leak in.
+	base, err := templates.RenderBaseDockerfile(cfg)
 	if err != nil {
-		t.Fatalf("RenderCLIDockerfile (initial) failed: %v", err)
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
-
-	// The initial Dockerfile should contain both CACHE_BUST_LANG and CACHE_BUST_AI
-	// with their default value of 1.
-	if !strings.Contains(initialDockerfile, "CACHE_BUST_LANG=1") {
-		t.Error("initial Dockerfile missing CACHE_BUST_LANG=1")
+	if strings.Contains(base, "CACHE_BUST") {
+		t.Error("base Dockerfile should not contain CACHE_BUST")
 	}
-	if !strings.Contains(initialDockerfile, "CACHE_BUST_AI=1") {
-		t.Error("initial Dockerfile missing CACHE_BUST_AI=1")
-	}
-
-	// Simulate what `cooper update` does when only AI tools changed:
-	// it passes CACHE_BUST_AI as a build arg with a new value (timestamp),
-	// but does NOT pass CACHE_BUST_LANG. Docker uses the Dockerfile default
-	// for CACHE_BUST_LANG (=1, cached) and the new value for CACHE_BUST_AI
-	// (cache-busted).
-
-	// Verify the build args logic: when aiChanged=true, langChanged=false.
-	aiChanged := true
-	langChanged := false
-
-	buildArgs := map[string]string{}
-	cacheBust := fmt.Sprintf("%d", time.Now().Unix())
-	if langChanged {
-		buildArgs["CACHE_BUST_LANG"] = cacheBust
-	}
-	if aiChanged {
-		buildArgs["CACHE_BUST_AI"] = cacheBust
-	}
-
-	// CACHE_BUST_AI should be set with a timestamp.
-	if _, ok := buildArgs["CACHE_BUST_AI"]; !ok {
-		t.Error("CACHE_BUST_AI should be in buildArgs when AI tools changed")
-	}
-
-	// CACHE_BUST_LANG should NOT be set (left at Dockerfile default).
-	if _, ok := buildArgs["CACHE_BUST_LANG"]; ok {
-		t.Error("CACHE_BUST_LANG should NOT be in buildArgs when only AI tools changed")
-	}
-
-	// Now verify the reverse: when only lang tools changed.
-	buildArgs2 := map[string]string{}
-	if true { // langChanged
-		buildArgs2["CACHE_BUST_LANG"] = cacheBust
-	}
-	if false { // aiChanged
-		buildArgs2["CACHE_BUST_AI"] = cacheBust
-	}
-
-	if _, ok := buildArgs2["CACHE_BUST_LANG"]; !ok {
-		t.Error("CACHE_BUST_LANG should be in buildArgs when lang tools changed")
-	}
-	if _, ok := buildArgs2["CACHE_BUST_AI"]; ok {
-		t.Error("CACHE_BUST_AI should NOT be in buildArgs when only lang tools changed")
+	for _, tool := range []string{"claude", "copilot", "codex", "opencode"} {
+		if strings.Contains(base, "COOPER_CLI_TOOL="+tool) {
+			t.Errorf("base Dockerfile should not contain COOPER_CLI_TOOL=%s", tool)
+		}
 	}
 }
 
@@ -2327,6 +2282,254 @@ func TestCooperApp_MountedVolumeOwnership(t *testing.T) {
 		}
 		os.Remove(testFile)
 	}
+}
+
+// TestCooperApp_MultipleToolBarrels starts two barrels for the same workspace
+// (claude and codex) and verifies they run simultaneously, mount the same
+// workspace, and use the correct images.
+func TestCooperApp_MultipleToolBarrels(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+
+	app := NewCooperApp(cfg, cooperDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	t.Cleanup(func() {
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	workspaceDir := t.TempDir()
+
+	// Start claude barrel.
+	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "claude"); err != nil {
+		t.Fatalf("StartBarrel(claude) failed: %v", err)
+	}
+	claudeBarrel := docker.BarrelContainerName(workspaceDir, "claude")
+	t.Cleanup(func() { docker.StopBarrel(claudeBarrel) })
+	waitForContainer(t, claudeBarrel, 15*time.Second)
+
+	// Start codex barrel for the same workspace.
+	codexImage := docker.GetImageCLI("codex")
+	codexExists, _ := docker.ImageExists(codexImage)
+	if !codexExists {
+		t.Skipf("codex image %s not found", codexImage)
+	}
+	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "codex"); err != nil {
+		t.Fatalf("StartBarrel(codex) failed: %v", err)
+	}
+	codexBarrel := docker.BarrelContainerName(workspaceDir, "codex")
+	t.Cleanup(func() { docker.StopBarrel(codexBarrel) })
+	waitForContainer(t, codexBarrel, 15*time.Second)
+
+	// Both should be running.
+	claudeRunning, _ := docker.IsBarrelRunning(claudeBarrel)
+	codexRunning, _ := docker.IsBarrelRunning(codexBarrel)
+	if !claudeRunning {
+		t.Error("claude barrel not running")
+	}
+	if !codexRunning {
+		t.Error("codex barrel not running")
+	}
+
+	// Both should have different names.
+	if claudeBarrel == codexBarrel {
+		t.Errorf("barrel names should differ: claude=%s, codex=%s", claudeBarrel, codexBarrel)
+	}
+
+	// Both see the same workspace: claude writes a file, codex reads it.
+	testFile := filepath.Join(workspaceDir, "multi-barrel-test.txt")
+	if _, err := barrelExec(claudeBarrel, fmt.Sprintf("echo hello > %s", testFile)); err != nil {
+		t.Fatalf("claude barrel failed to write file: %v", err)
+	}
+	out, err := barrelExec(codexBarrel, fmt.Sprintf("cat %s", testFile))
+	if err != nil {
+		t.Fatalf("codex barrel failed to read file: %v", err)
+	}
+	if !strings.Contains(out, "hello") {
+		t.Errorf("codex barrel read %q, expected 'hello'", out)
+	}
+}
+
+// TestCooperApp_ToolBarrelIsolation verifies that each tool barrel contains
+// only its own AI tool binary and has the correct COOPER_CLI_TOOL env var.
+func TestCooperApp_ToolBarrelIsolation(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+
+	app := NewCooperApp(cfg, cooperDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	t.Cleanup(func() {
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	workspaceDir := t.TempDir()
+
+	// Start a claude barrel.
+	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "claude"); err != nil {
+		t.Fatalf("StartBarrel(claude) failed: %v", err)
+	}
+	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
+	t.Cleanup(func() { docker.StopBarrel(barrelName) })
+	waitForContainer(t, barrelName, 15*time.Second)
+
+	// COOPER_CLI_TOOL should be "claude".
+	out, err := barrelExec(barrelName, "echo $COOPER_CLI_TOOL")
+	if err != nil {
+		t.Fatalf("failed to check COOPER_CLI_TOOL: %v", err)
+	}
+	if strings.TrimSpace(out) != "claude" {
+		t.Errorf("COOPER_CLI_TOOL = %q, want %q", strings.TrimSpace(out), "claude")
+	}
+
+	// Other AI tool binaries should NOT be present.
+	for _, other := range []string{"copilot", "codex"} {
+		out, err := barrelExec(barrelName, "which "+other+" 2>/dev/null")
+		if err == nil && strings.TrimSpace(out) != "" {
+			t.Errorf("%s binary found in claude barrel at %s (should not be present)", other, strings.TrimSpace(out))
+		}
+	}
+}
+
+// TestCooperApp_ToolBarrelAuthMounts verifies that each tool barrel only
+// mounts its own auth directory, not other tools' auth directories.
+func TestCooperApp_ToolBarrelAuthMounts(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+
+	app := NewCooperApp(cfg, cooperDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	t.Cleanup(func() {
+		app.Stop()
+		cleanupDocker(t)
+	})
+
+	workspaceDir := t.TempDir()
+
+	// Start a claude barrel.
+	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "claude"); err != nil {
+		t.Fatalf("StartBarrel(claude) failed: %v", err)
+	}
+	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
+	t.Cleanup(func() { docker.StopBarrel(barrelName) })
+	waitForContainer(t, barrelName, 15*time.Second)
+
+	// Claude barrel should have .claude mounted.
+	out, err := barrelExec(barrelName, "mount | grep '/home/user/.claude'")
+	if err != nil || strings.TrimSpace(out) == "" {
+		t.Error("claude barrel should have /home/user/.claude mounted")
+	}
+
+	// Claude barrel should NOT have .copilot or .codex mounted.
+	for _, dir := range []string{".copilot", ".codex"} {
+		out, err := barrelExec(barrelName, "mount | grep '/home/user/"+dir+"'")
+		if err == nil && strings.TrimSpace(out) != "" {
+			t.Errorf("claude barrel should NOT have /home/user/%s mounted", dir)
+		}
+	}
+}
+
+// TestCooperApp_CustomToolImage creates a custom Dockerfile in cli/my-custom/,
+// verifies it's picked up by DiscoverCLITools-style logic, and can be built.
+func TestCooperApp_CustomToolImage(t *testing.T) {
+	skipIfNoDocker(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	// Create a custom tool directory with a Dockerfile.
+	customDir := filepath.Join(cooperDir, "cli", "my-custom")
+	if err := os.MkdirAll(customDir, 0755); err != nil {
+		t.Fatalf("mkdir custom dir: %v", err)
+	}
+	dockerfile := fmt.Sprintf("FROM %s\nRUN echo custom-test > /tmp/custom-marker.txt\nENV COOPER_CLI_TOOL=my-custom\n", docker.GetImageBase())
+	if err := os.WriteFile(filepath.Join(customDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
+		t.Fatalf("write custom Dockerfile: %v", err)
+	}
+
+	// Verify the custom dir is discoverable by scanning cli/.
+	cliDir := filepath.Join(cooperDir, "cli")
+	entries, err := os.ReadDir(cliDir)
+	if err != nil {
+		t.Fatalf("ReadDir cli: %v", err)
+	}
+	builtinNames := map[string]bool{"claude": true, "copilot": true, "codex": true, "opencode": true}
+	found := false
+	for _, e := range entries {
+		if e.IsDir() && !builtinNames[e.Name()] && e.Name() == "my-custom" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("my-custom not discovered in cli/ directory")
+	}
+
+	// Verify the custom image name follows convention.
+	imageName := docker.GetImageCLI("my-custom")
+	expected := testImagePrefix + "cooper-cli-my-custom"
+	if imageName != expected {
+		t.Errorf("GetImageCLI(my-custom) = %q, want %q", imageName, expected)
+	}
+
+	// Build the custom image (requires base image to exist).
+	baseExists, _ := docker.ImageExists(docker.GetImageBase())
+	if !baseExists {
+		t.Skip("base image not found; run test-docker-build.sh first")
+	}
+	if err := docker.BuildImage(imageName, filepath.Join(customDir, "Dockerfile"), customDir, nil, false); err != nil {
+		t.Fatalf("BuildImage(my-custom) failed: %v", err)
+	}
+	t.Cleanup(func() { docker.RemoveImage(imageName) })
+
+	// Verify the image exists and has custom content.
+	exists, _ := docker.ImageExists(imageName)
+	if !exists {
+		t.Fatal("custom image should exist after build")
+	}
+
+	out, err := exec.Command("docker", "run", "--rm", "--entrypoint", "", imageName, "cat", "/tmp/custom-marker.txt").CombinedOutput()
+	if err != nil {
+		t.Fatalf("custom image run failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "custom-test") {
+		t.Errorf("custom image content = %q, want 'custom-test'", string(out))
+	}
+
+	// Verify COOPER_CLI_TOOL env.
+	out, err = exec.Command("docker", "run", "--rm", "--entrypoint", "", imageName, "bash", "-c", "echo $COOPER_CLI_TOOL").CombinedOutput()
+	if err != nil {
+		t.Fatalf("custom image env check failed: %v", err)
+	}
+	if strings.TrimSpace(string(out)) != "my-custom" {
+		t.Errorf("COOPER_CLI_TOOL = %q, want 'my-custom'", strings.TrimSpace(string(out)))
+	}
+
+	_ = cfg // cfg used by setupCooperDir
 }
 
 // Ensure imported packages are used. These variables exist solely to prevent

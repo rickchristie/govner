@@ -93,13 +93,20 @@ var tuiTestScreen string
 var regenerateCA bool
 
 var cliCmd = &cobra.Command{
-	Use:   "cli",
+	Use:   "cli [tool-name]",
 	Short: "Open a CLI container for the current workspace",
 	Long: `Opens an interactive shell inside a network-isolated CLI container.
 The current directory is mounted as the workspace.
 
+Specify which AI tool to launch:
+  cooper cli claude       # Launch Claude Code barrel
+  cooper cli codex        # Launch Codex CLI barrel
+  cooper cli copilot      # Launch Copilot CLI barrel
+  cooper cli opencode     # Launch OpenCode barrel
+
 Use -c to run a one-shot command:
-  cooper cli -c "go test ./..."`,
+  cooper cli claude -c "go test ./..."`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runCLI,
 }
 
@@ -153,6 +160,9 @@ func init() {
 
 	configureCmd.Flags().BoolVar(&regenerateCA, "regenerate-ca", false,
 		"Regenerate the CA certificate and key (requires cooper build afterward)")
+
+	buildCmd.Flags().BoolVar(&buildClean, "clean", false,
+		"Force clean rebuild (ignore Docker cache)")
 
 	rootCmd.AddCommand(configureCmd)
 	rootCmd.AddCommand(buildCmd)
@@ -234,6 +244,8 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 
 // ---------- cooper build ----------
 
+var buildClean bool
+
 func runBuild(cmd *cobra.Command, args []string) error {
 	cfg, cooperDir, err := loadConfig()
 	if err != nil {
@@ -241,13 +253,13 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	}
 
 	// 1. Generate templates.
+	baseDir := filepath.Join(cooperDir, "base")
 	cliDir := filepath.Join(cooperDir, "cli")
 	proxyDir := filepath.Join(cooperDir, "proxy")
-	if err := os.MkdirAll(cliDir, 0755); err != nil {
-		return fmt.Errorf("create cli dir: %w", err)
-	}
-	if err := os.MkdirAll(proxyDir, 0755); err != nil {
-		return fmt.Errorf("create proxy dir: %w", err)
+	for _, d := range []string{baseDir, cliDir, proxyDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			return fmt.Errorf("create dir %s: %w", d, err)
+		}
 	}
 
 	// Resolve latest versions for tools in ModeLatest so PinnedVersion is concrete.
@@ -255,11 +267,10 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	resolveLatestVersions(cfg)
 
 	fmt.Fprintln(os.Stderr, "Generating templates...")
-	if err := templates.WriteAllTemplates(cliDir, cfg); err != nil {
+	if err := templates.WriteAllTemplates(baseDir, cliDir, cfg); err != nil {
 		return fmt.Errorf("write templates: %w", err)
 	}
-	// Write proxy-specific templates into the proxy directory.
-	if err := writeProxyTemplates(proxyDir, cfg); err != nil {
+	if err := templates.WriteProxyTemplates(proxyDir, cfg); err != nil {
 		return fmt.Errorf("write proxy templates: %w", err)
 	}
 
@@ -270,31 +281,17 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("ensure CA: %w", err)
 	}
 
-	// 3. Remove existing images before building to ensure a clean slate.
-	fmt.Fprintln(os.Stderr, "Removing existing images...")
-	for _, img := range []string{docker.GetImageProxy(), docker.GetImageBarrelBase(), docker.GetImageBarrel()} {
-		if err := removeImageIfExists(img); err != nil {
-			fmt.Fprintf(os.Stderr, "  Warning: could not remove %s: %v\n", img, err)
-		}
-	}
-
-	// 4. Write ACL helper source into the proxy build context.
-	// The proxy Dockerfile compiles it inside Docker (multi-stage build),
-	// so `cooper build` is self-contained — no host Go installation required.
+	// 3. Write ACL helper source into the proxy build context.
 	fmt.Fprintln(os.Stderr, "Writing ACL helper source...")
 	if err := templates.WriteACLHelperSource(proxyDir); err != nil {
 		return fmt.Errorf("write acl helper source: %w", err)
 	}
 
-	// 5. Stage CA files into each build context subdirectory.
-	// The Dockerfiles use COPY with root-relative paths (e.g. COPY cooper-ca.pem),
-	// so these files must be present in each image's build context directory.
+	// 4. Stage CA files into build contexts.
 	fmt.Fprintln(os.Stderr, "Staging CA files into build contexts...")
-	// CLI image needs the CA cert.
-	if err := copyFile(caCertPath, filepath.Join(cliDir, "cooper-ca.pem")); err != nil {
-		return fmt.Errorf("stage CA cert into cli dir: %w", err)
+	if err := copyFile(caCertPath, filepath.Join(baseDir, "cooper-ca.pem")); err != nil {
+		return fmt.Errorf("stage CA cert into base dir: %w", err)
 	}
-	// Proxy image needs both the CA cert and key.
 	if err := copyFile(caCertPath, filepath.Join(proxyDir, "cooper-ca.pem")); err != nil {
 		return fmt.Errorf("stage CA cert into proxy dir: %w", err)
 	}
@@ -302,48 +299,59 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("stage CA key into proxy dir: %w", err)
 	}
 
-	// 6. Build proxy image (no-cache). Context = proxyDir.
-	// Pass host UID/GID so squid and all processes run as the host user.
-	// This prevents mounted volumes from getting files owned by a different UID.
+	noCache := buildClean
+
+	// 5. Build proxy image.
 	fmt.Fprintln(os.Stderr, "Building proxy image...")
 	proxyDockerfile := filepath.Join(proxyDir, "proxy.Dockerfile")
-	proxyBuildArgs := map[string]string{
+	uidGidArgs := map[string]string{
 		"USER_UID": fmt.Sprintf("%d", os.Getuid()),
 		"USER_GID": fmt.Sprintf("%d", os.Getgid()),
 	}
-	if err := docker.BuildImage(docker.GetImageProxy(), proxyDockerfile, proxyDir, proxyBuildArgs, true); err != nil {
+	if err := docker.BuildImage(docker.GetImageProxy(), proxyDockerfile, proxyDir, uidGidArgs, noCache); err != nil {
 		return fmt.Errorf("build proxy image: %w", err)
 	}
 
-	// 7. Build barrel-base image (no-cache). Context = cliDir.
-	// Same UID/GID args so the user inside the container matches the host user.
-	fmt.Fprintln(os.Stderr, "Building barrel-base image...")
-	cliDockerfile := filepath.Join(cliDir, "Dockerfile")
-	cliBuildArgs := map[string]string{
-		"USER_UID": fmt.Sprintf("%d", os.Getuid()),
-		"USER_GID": fmt.Sprintf("%d", os.Getgid()),
-	}
-	if err := docker.BuildImage(docker.GetImageBarrelBase(), cliDockerfile, cliDir, cliBuildArgs, true); err != nil {
-		return fmt.Errorf("build barrel-base image: %w", err)
+	// 6. Build base image (no AI tools).
+	fmt.Fprintln(os.Stderr, "Building base image...")
+	baseDockerfile := filepath.Join(baseDir, "Dockerfile")
+	if err := docker.BuildImage(docker.GetImageBase(), baseDockerfile, baseDir, uidGidArgs, noCache); err != nil {
+		return fmt.Errorf("build base image: %w", err)
 	}
 
-	// 8. If Dockerfile.user exists, build barrel from it; else tag barrel-base.
-	userDockerfile := filepath.Join(cliDir, "Dockerfile.user")
-	if fileExists(userDockerfile) {
-		fmt.Fprintln(os.Stderr, "Building barrel image from Dockerfile.user...")
-		if err := docker.BuildImage(docker.GetImageBarrel(), userDockerfile, cliDir, nil, true); err != nil {
-			return fmt.Errorf("build barrel image: %w", err)
+	// 7. Build each enabled AI tool image.
+	for _, tool := range cfg.AITools {
+		if !tool.Enabled {
+			continue
 		}
-	} else {
-		fmt.Fprintln(os.Stderr, "Tagging barrel-base as barrel...")
-		if err := docker.TagImage(docker.GetImageBarrelBase(), docker.GetImageBarrel()); err != nil {
-			return fmt.Errorf("tag barrel image: %w", err)
+		toolDir := filepath.Join(cliDir, tool.Name)
+		imageName := docker.GetImageCLI(tool.Name)
+		dockerfile := filepath.Join(toolDir, "Dockerfile")
+		fmt.Fprintf(os.Stderr, "Building %s image...\n", tool.Name)
+		if err := docker.BuildImage(imageName, dockerfile, toolDir, nil, noCache); err != nil {
+			return fmt.Errorf("build %s image: %w", tool.Name, err)
+		}
+	}
+
+	// 8. Build user-custom images (directories in cli/ not matching built-in tool names).
+	builtinNames := map[string]bool{"claude": true, "copilot": true, "codex": true, "opencode": true}
+	entries, _ := os.ReadDir(cliDir)
+	for _, e := range entries {
+		if !e.IsDir() || builtinNames[e.Name()] {
+			continue
+		}
+		customDir := filepath.Join(cliDir, e.Name())
+		customDockerfile := filepath.Join(customDir, "Dockerfile")
+		if fileExists(customDockerfile) {
+			imageName := docker.GetImageCLI(e.Name())
+			fmt.Fprintf(os.Stderr, "Building custom image %s...\n", e.Name())
+			if err := docker.BuildImage(imageName, customDockerfile, customDir, nil, noCache); err != nil {
+				return fmt.Errorf("build custom image %s: %w", e.Name(), err)
+			}
 		}
 	}
 
 	// 9. Update ContainerVersion in config to reflect what was just built.
-	// This ensures version comparisons in `cooper up` and `cooper update`
-	// work correctly instead of comparing against empty/stale values.
 	updateContainerVersions(cfg)
 	configPath := filepath.Join(cooperDir, "config.json")
 	if err := config.SaveConfig(configPath, cfg); err != nil {
@@ -395,43 +403,8 @@ func resolveLatestVersions(cfg *config.Config) {
 	}
 }
 
-// writeProxyTemplates writes the proxy-specific templates (proxy.Dockerfile,
-// squid.conf, proxy-entrypoint.sh) into the given directory.
-func writeProxyTemplates(dir string, cfg *config.Config) error {
-	proxyDockerfile, err := templates.RenderProxyDockerfile(cfg)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(dir, "proxy.Dockerfile"), []byte(proxyDockerfile), 0644); err != nil {
-		return fmt.Errorf("write proxy.Dockerfile: %w", err)
-	}
-
-	squidConf, err := templates.RenderSquidConf(cfg)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(dir, "squid.conf"), []byte(squidConf), 0644); err != nil {
-		return fmt.Errorf("write squid.conf: %w", err)
-	}
-
-	proxyEntrypoint, err := templates.RenderProxyEntrypoint(cfg)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(dir, "proxy-entrypoint.sh"), []byte(proxyEntrypoint), 0755); err != nil {
-		return fmt.Errorf("write proxy-entrypoint.sh: %w", err)
-	}
-
-	return nil
-}
 
 // ---------- cooper up ----------
-
-// loadingProgram is the BubbleTea program used during startup and shutdown.
-// It is stored at package level so the background goroutine can send messages.
-type loadingProgram struct {
-	program *tea.Program
-}
 
 func runUp(cmd *cobra.Command, args []string) error {
 	cfg, cooperDir, err := loadConfig()
@@ -672,7 +645,33 @@ func (a *loadingAdapter) View() string {
 // ---------- cooper cli ----------
 
 func runCLI(cmd *cobra.Command, args []string) error {
-	// 1. Check proxy is running.
+	// 1. Determine which tool.
+	if len(args) == 0 {
+		// List available tools.
+		images, _ := docker.ListCLIImages()
+		if len(images) == 0 {
+			return fmt.Errorf("specify a tool: cooper cli <tool-name>\nNo tool images found. Run 'cooper build' first")
+		}
+		msg := "specify a tool: cooper cli <tool-name>\nAvailable:"
+		for _, img := range images {
+			// Extract tool name from image name (e.g., "cooper-cli-claude" -> "claude").
+			parts := strings.SplitN(img, "cooper-cli-", 2)
+			if len(parts) == 2 {
+				msg += " " + parts[1]
+			}
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	toolName := args[0]
+
+	// 2. Validate tool image exists.
+	imageName := docker.GetImageCLI(toolName)
+	exists, _ := docker.ImageExists(imageName)
+	if !exists {
+		return fmt.Errorf("no image found for '%s'. Run 'cooper build' first", toolName)
+	}
+
+	// 3. Check proxy is running.
 	running, err := docker.IsProxyRunning()
 	if err != nil {
 		return fmt.Errorf("check proxy: %w", err)
@@ -681,61 +680,54 @@ func runCLI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("proxy is not running. Start it with 'cooper up' first")
 	}
 
-	// 2. Load config.
+	// 4. Load config.
 	cfg, cooperDir, err := loadConfig()
 	if err != nil {
 		return err
 	}
 
-	// 3. Resolve tokens.
+	// 5. Resolve tokens (only for the specified tool).
 	workspaceDir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get working directory: %w", err)
 	}
 
-	var enabledTools []string
-	for _, t := range cfg.AITools {
-		if t.Enabled {
-			enabledTools = append(enabledTools, t.Name)
-		}
-	}
-
-	tokens, err := auth.ResolveTokens(workspaceDir, cooperDir, enabledTools)
+	tokens, err := auth.ResolveTokens(workspaceDir, cooperDir, []string{toolName})
 	if err != nil {
 		return fmt.Errorf("resolve tokens: %w", err)
 	}
 
-	// 4. Determine barrel container name.
-	containerName := docker.BarrelContainerName(workspaceDir)
+	// 6. Determine barrel container name (includes tool name).
+	containerName := docker.BarrelContainerName(workspaceDir, toolName)
 
-	// 5. If barrel not running, start it.
+	// 7. If barrel not running, start it.
 	barrelRunning, err := docker.IsBarrelRunning(containerName)
 	if err != nil {
 		return fmt.Errorf("check barrel: %w", err)
 	}
 	if !barrelRunning {
 		fmt.Fprintf(os.Stderr, "Starting barrel container %s...\n", containerName)
-		if err := docker.StartBarrel(cfg, workspaceDir, cooperDir); err != nil {
+		if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, toolName); err != nil {
 			return fmt.Errorf("start barrel: %w", err)
 		}
 	}
 
-	// 6. Generate random name.
+	// 8. Generate random name.
 	sessionName := names.Generate(workspaceDir)
 	defer names.Release(sessionName)
 
-	// 7. Set terminal title.
+	// 9. Set terminal title.
 	dirName := filepath.Base(workspaceDir)
-	termTitle := fmt.Sprintf("%s-%s", dirName, sessionName)
+	termTitle := fmt.Sprintf("%s-%s-%s", dirName, toolName, sessionName)
 	fmt.Fprintf(os.Stdout, "\033]0;%s\007", termTitle)
 
-	// 8. Build environment variables for the exec.
+	// 10. Build environment variables for the exec.
 	var envArgs []string
 	for _, t := range tokens {
 		envArgs = append(envArgs, fmt.Sprintf("%s=%s", t.Name, t.Value))
 	}
 
-	// 9. Execute shell or one-shot command.
+	// 11. Execute shell or one-shot command.
 	var execCmd []string
 	if cliOneShot != "" {
 		execCmd = []string{"bash", "-c", cliOneShot}
@@ -789,9 +781,17 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Warning: could not stop proxy: %v\n", err)
 	}
 
-	// 3. Remove images.
+	// 3. Remove all CLI images.
 	fmt.Fprintln(os.Stderr, "Removing Docker images...")
-	for _, img := range []string{docker.GetImageBarrel(), docker.GetImageBarrelBase(), docker.GetImageProxy()} {
+	cliImages, _ := docker.ListCLIImages()
+	for _, img := range cliImages {
+		fmt.Fprintf(os.Stderr, "  Removing %s...\n", img)
+		if err := docker.RemoveImage(img); err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: %v\n", err)
+		}
+	}
+	// Remove base and proxy images.
+	for _, img := range []string{docker.GetImageBase(), docker.GetImageProxy()} {
 		exists, err := docker.ImageExists(img)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  Warning: could not check image %s: %v\n", img, err)
@@ -841,17 +841,14 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	langChanged := false
-	aiChanged := false
+	baseChanged := false
+	toolsChanged := map[string]bool{}
 
-	// 1. Check each tool in latest/mirror mode for mismatches.
-	allTools := append(cfg.ProgrammingTools, cfg.AITools...)
-	for i, tool := range allTools {
+	// 1. Check programming tools for mismatches.
+	for i, tool := range cfg.ProgrammingTools {
 		if !tool.Enabled {
 			continue
 		}
-		isProg := i < len(cfg.ProgrammingTools)
-
 		switch tool.Mode {
 		case config.ModeLatest:
 			fmt.Fprintf(os.Stderr, "Checking latest version for %s...\n", tool.Name)
@@ -863,15 +860,9 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 			if latest != tool.ContainerVersion {
 				fmt.Fprintf(os.Stderr, "  %s: container=%s, latest=%s (mismatch)\n",
 					tool.Name, tool.ContainerVersion, latest)
-				if isProg {
-					langChanged = true
-					cfg.ProgrammingTools[i].PinnedVersion = latest
-				} else {
-					aiChanged = true
-					cfg.AITools[i-len(cfg.ProgrammingTools)].PinnedVersion = latest
-				}
+				baseChanged = true
+				cfg.ProgrammingTools[i].PinnedVersion = latest
 			}
-
 		case config.ModeMirror:
 			fmt.Fprintf(os.Stderr, "Checking host version for %s...\n", tool.Name)
 			hostVer, err := config.DetectHostVersion(tool.Name)
@@ -882,81 +873,120 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 			if hostVer != tool.ContainerVersion {
 				fmt.Fprintf(os.Stderr, "  %s: container=%s, host=%s (mismatch)\n",
 					tool.Name, tool.ContainerVersion, hostVer)
-				if isProg {
-					langChanged = true
-					cfg.ProgrammingTools[i].HostVersion = hostVer
-				} else {
-					aiChanged = true
-					cfg.AITools[i-len(cfg.ProgrammingTools)].HostVersion = hostVer
-				}
+				baseChanged = true
+				cfg.ProgrammingTools[i].HostVersion = hostVer
 			}
 		}
 	}
 
-	if !langChanged && !aiChanged {
+	// 2. Check AI tools for mismatches.
+	for i, tool := range cfg.AITools {
+		if !tool.Enabled {
+			continue
+		}
+		switch tool.Mode {
+		case config.ModeLatest:
+			fmt.Fprintf(os.Stderr, "Checking latest version for %s...\n", tool.Name)
+			latest, err := config.ResolveLatestVersion(tool.Name)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  Warning: could not resolve latest %s: %v\n", tool.Name, err)
+				continue
+			}
+			if latest != tool.ContainerVersion {
+				fmt.Fprintf(os.Stderr, "  %s: container=%s, latest=%s (mismatch)\n",
+					tool.Name, tool.ContainerVersion, latest)
+				toolsChanged[tool.Name] = true
+				cfg.AITools[i].PinnedVersion = latest
+			}
+		case config.ModeMirror:
+			fmt.Fprintf(os.Stderr, "Checking host version for %s...\n", tool.Name)
+			hostVer, err := config.DetectHostVersion(tool.Name)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  Warning: could not detect host %s: %v\n", tool.Name, err)
+				continue
+			}
+			if hostVer != tool.ContainerVersion {
+				fmt.Fprintf(os.Stderr, "  %s: container=%s, host=%s (mismatch)\n",
+					tool.Name, tool.ContainerVersion, hostVer)
+				toolsChanged[tool.Name] = true
+				cfg.AITools[i].HostVersion = hostVer
+			}
+		}
+	}
+
+	if !baseChanged && len(toolsChanged) == 0 {
 		fmt.Fprintln(os.Stderr, "All tool versions match. No rebuild needed.")
 		return nil
 	}
 
 	// Only reload Squid if an AI tool changed (AI tools affect the domain whitelist).
-	needsSquidReload := aiChanged
+	needsSquidReload := len(toolsChanged) > 0
 
-	// 2. Regenerate templates.
+	// 3. Regenerate templates.
 	fmt.Fprintln(os.Stderr, "Regenerating templates...")
+	baseDir := filepath.Join(cooperDir, "base")
 	cliDir := filepath.Join(cooperDir, "cli")
-	if err := templates.WriteAllTemplates(cliDir, cfg); err != nil {
+	if err := templates.WriteAllTemplates(baseDir, cliDir, cfg); err != nil {
 		return fmt.Errorf("write templates: %w", err)
 	}
 
-	// Regenerate squid.conf only if AI tools changed.
-	if aiChanged {
+	if needsSquidReload {
 		proxyDir := filepath.Join(cooperDir, "proxy")
-		if err := writeProxyTemplates(proxyDir, cfg); err != nil {
+		if err := templates.WriteProxyTemplates(proxyDir, cfg); err != nil {
 			return fmt.Errorf("write proxy templates: %w", err)
 		}
 	}
 
-	// 3. Stage CA cert into CLI build context (same fix as runBuild).
+	// 4. Stage CA cert into base build context.
 	caCert := filepath.Join(cooperDir, "ca", "cooper-ca.pem")
 	if fileExists(caCert) {
-		if err := copyFile(caCert, filepath.Join(cliDir, "cooper-ca.pem")); err != nil {
-			return fmt.Errorf("stage CA cert for CLI: %w", err)
+		if err := copyFile(caCert, filepath.Join(baseDir, "cooper-ca.pem")); err != nil {
+			return fmt.Errorf("stage CA cert: %w", err)
 		}
 	}
 
-	// 4. Rebuild CLI image with selective cache bust: only bust the layer
-	// for the tool category that actually changed.
-	fmt.Fprintln(os.Stderr, "Rebuilding barrel-base image...")
-	cliDockerfile := filepath.Join(cliDir, "Dockerfile")
-	cacheBust := fmt.Sprintf("%d", time.Now().Unix())
-	buildArgs := map[string]string{
-		"USER_UID": fmt.Sprintf("%d", os.Getuid()),
-		"USER_GID": fmt.Sprintf("%d", os.Getgid()),
-	}
-	if langChanged {
-		buildArgs["CACHE_BUST_LANG"] = cacheBust
-	}
-	if aiChanged {
-		buildArgs["CACHE_BUST_AI"] = cacheBust
-	}
-	if err := docker.BuildImage(docker.GetImageBarrelBase(), cliDockerfile, cliDir, buildArgs, false); err != nil {
-		return fmt.Errorf("rebuild barrel-base: %w", err)
+	// 5. Rebuild base if programming tools changed.
+	if baseChanged {
+		fmt.Fprintln(os.Stderr, "Rebuilding base image...")
+		baseDockerfile := filepath.Join(baseDir, "Dockerfile")
+		buildArgs := map[string]string{
+			"USER_UID": fmt.Sprintf("%d", os.Getuid()),
+			"USER_GID": fmt.Sprintf("%d", os.Getgid()),
+		}
+		if err := docker.BuildImage(docker.GetImageBase(), baseDockerfile, baseDir, buildArgs, false); err != nil {
+			return fmt.Errorf("rebuild base image: %w", err)
+		}
 	}
 
-	// Rebuild or re-tag barrel.
-	userDockerfile := filepath.Join(cliDir, "Dockerfile.user")
-	if fileExists(userDockerfile) {
-		fmt.Fprintln(os.Stderr, "Rebuilding barrel from Dockerfile.user...")
-		if err := docker.BuildImage(docker.GetImageBarrel(), userDockerfile, cliDir, nil, false); err != nil {
-			return fmt.Errorf("rebuild barrel: %w", err)
+	// 6. Rebuild tool images.
+	// If base changed, ALL tool images need rebuilding (FROM changed).
+	// If only specific tools changed, only those images rebuild.
+	if baseChanged {
+		for _, tool := range cfg.AITools {
+			if !tool.Enabled {
+				continue
+			}
+			toolDir := filepath.Join(cliDir, tool.Name)
+			imageName := docker.GetImageCLI(tool.Name)
+			dockerfile := filepath.Join(toolDir, "Dockerfile")
+			fmt.Fprintf(os.Stderr, "Rebuilding %s image...\n", tool.Name)
+			if err := docker.BuildImage(imageName, dockerfile, toolDir, nil, false); err != nil {
+				return fmt.Errorf("rebuild %s: %w", tool.Name, err)
+			}
 		}
 	} else {
-		if err := docker.TagImage(docker.GetImageBarrelBase(), docker.GetImageBarrel()); err != nil {
-			return fmt.Errorf("re-tag barrel: %w", err)
+		for name := range toolsChanged {
+			toolDir := filepath.Join(cliDir, name)
+			imageName := docker.GetImageCLI(name)
+			dockerfile := filepath.Join(toolDir, "Dockerfile")
+			fmt.Fprintf(os.Stderr, "Rebuilding %s image...\n", name)
+			if err := docker.BuildImage(imageName, dockerfile, toolDir, nil, false); err != nil {
+				return fmt.Errorf("rebuild %s: %w", name, err)
+			}
 		}
 	}
 
-	// 4. Hot-reload squid if needed.
+	// 7. Hot-reload squid if needed.
 	if needsSquidReload {
 		proxyRunning, _ := docker.IsProxyRunning()
 		if proxyRunning {
@@ -967,7 +997,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 5. Update ContainerVersion and save config.
+	// 8. Update ContainerVersion and save config.
 	updateContainerVersions(cfg)
 	configPath := filepath.Join(cooperDir, "config.json")
 	if err := config.SaveConfig(configPath, cfg); err != nil {
@@ -1111,19 +1141,6 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 	p := tea.NewProgram(mainModel, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
-}
-
-// removeImageIfExists removes a Docker image if it exists.
-// Returns nil when the image does not exist (tolerates "not found").
-func removeImageIfExists(name string) error {
-	exists, err := docker.ImageExists(name)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return nil
-	}
-	return docker.RemoveImage(name)
 }
 
 // checkToolVersions inspects each enabled tool for version mismatches.

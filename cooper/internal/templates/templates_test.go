@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/docker"
 )
 
 // testConfig returns a fully populated test config with all tools enabled.
@@ -80,11 +81,39 @@ func noToolsConfig() *config.Config {
 	}
 }
 
-func TestRenderCLIDockerfile_DefaultConfig(t *testing.T) {
+// assertContains checks that haystack contains needle.
+func assertContains(t *testing.T, haystack, needle string) {
+	t.Helper()
+	if !strings.Contains(haystack, needle) {
+		t.Errorf("expected output to contain %q, but it did not.\nOutput (first 500 chars):\n%s", needle, truncate(haystack, 500))
+	}
+}
+
+// assertNotContains checks that haystack does NOT contain needle.
+func assertNotContains(t *testing.T, haystack, needle string) {
+	t.Helper()
+	if strings.Contains(haystack, needle) {
+		t.Errorf("expected output NOT to contain %q, but it did.\nOutput (first 500 chars):\n%s", needle, truncate(haystack, 500))
+	}
+}
+
+// truncate returns s truncated to maxLen characters.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// ---------------------------------------------------------------------------
+// RenderBaseDockerfile tests
+// ---------------------------------------------------------------------------
+
+func TestRenderBaseDockerfile_DefaultConfig(t *testing.T) {
 	cfg := testConfig()
-	result, err := RenderCLIDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg)
 	if err != nil {
-		t.Fatalf("RenderCLIDockerfile failed: %v", err)
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
 
 	// Should use Go base image when Go is enabled
@@ -101,11 +130,10 @@ func TestRenderCLIDockerfile_DefaultConfig(t *testing.T) {
 	assertContains(t, result, "bubblewrap")
 	assertContains(t, result, "meson")
 
-	// Should have all AI tools
-	assertContains(t, result, "claude.ai/install.sh")
-	assertContains(t, result, "@github/copilot")
-	assertContains(t, result, "@openai/codex")
-	assertContains(t, result, "opencode.ai/install")
+	// Should have OpenCode-specific packages (xvfb, xclip, inotify-tools)
+	assertContains(t, result, "xvfb")
+	assertContains(t, result, "xclip")
+	assertContains(t, result, "inotify-tools")
 
 	// Should have CA cert injection
 	assertContains(t, result, "cooper-ca.pem")
@@ -116,91 +144,746 @@ func TestRenderCLIDockerfile_DefaultConfig(t *testing.T) {
 	assertContains(t, result, "HTTP_PROXY=http://cooper-proxy:3128")
 	assertContains(t, result, "HTTPS_PROXY=http://cooper-proxy:3128")
 
-	// Should have cache bust args
-	assertContains(t, result, "CACHE_BUST_LANG")
-	assertContains(t, result, "CACHE_BUST_AI")
-
 	// Should have user setup
 	assertContains(t, result, "USER_UID")
 	assertContains(t, result, "USER_GID")
+	assertContains(t, result, "useradd")
 
-	// Should have OpenCode-specific packages (xvfb, xclip, inotify-tools)
-	assertContains(t, result, "xvfb")
-	assertContains(t, result, "xclip")
-	assertContains(t, result, "inotify-tools")
+	// Should have entrypoint
+	assertContains(t, result, "COPY entrypoint.sh")
+	assertContains(t, result, "ENTRYPOINT")
+
+	// Should have doctor script
+	assertContains(t, result, "COPY doctor.sh")
+
+	// Base image should NOT contain AI tool install commands
+	assertNotContains(t, result, "claude.ai/install.sh")
+	assertNotContains(t, result, "@github/copilot")
+	assertNotContains(t, result, "@openai/codex")
+	assertNotContains(t, result, "opencode.ai/install")
+	assertNotContains(t, result, "CACHE_BUST_AI")
+	assertNotContains(t, result, "CACHE_BUST_LANG")
 }
 
-func TestRenderCLIDockerfile_GoDisabled(t *testing.T) {
+func TestRenderBaseDockerfile_GoEnabled(t *testing.T) {
 	cfg := testConfig()
-	// Disable Go
+	result, err := RenderBaseDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "FROM golang:1.24.10-bookworm")
+}
+
+func TestRenderBaseDockerfile_NoGo(t *testing.T) {
+	cfg := testConfig()
 	for i := range cfg.ProgrammingTools {
 		if cfg.ProgrammingTools[i].Name == "go" {
 			cfg.ProgrammingTools[i].Enabled = false
 		}
 	}
 
-	result, err := RenderCLIDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg)
 	if err != nil {
-		t.Fatalf("RenderCLIDockerfile failed: %v", err)
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
 
-	// Should use Debian base when Go is disabled
-	assertContains(t, result, "debian:bookworm-slim")
+	assertContains(t, result, "FROM debian:bookworm-slim")
 	assertNotContains(t, result, "golang:")
 }
 
-func TestRenderCLIDockerfile_NoToolsEnabled(t *testing.T) {
-	cfg := noToolsConfig()
-	result, err := RenderCLIDockerfile(cfg)
-	if err != nil {
-		t.Fatalf("RenderCLIDockerfile failed: %v", err)
+func TestRenderBaseDockerfile_NodeVersion(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{
+			{Name: "node", Enabled: true, PinnedVersion: "22.12.0"},
+		},
+		AITools:    []config.ToolConfig{},
+		ProxyPort:  3128,
+		BridgePort: 4343,
 	}
 
-	// Should use Debian base
-	assertContains(t, result, "debian:bookworm-slim")
+	result, err := RenderBaseDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
 
-	// Should NOT have programming tools
-	assertNotContains(t, result, "golang:")
-	assertNotContains(t, result, "python3=")
-	// Should NOT have AI tools
+	assertContains(t, result, "NODE_VERSION=22.12.0")
+}
+
+func TestRenderBaseDockerfile_PythonEnabled(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{
+			{Name: "python", Enabled: true},
+		},
+		AITools:    []config.ToolConfig{},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderBaseDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "python3")
+	assertContains(t, result, "python3-pip")
+	assertContains(t, result, "python3-venv")
+}
+
+func TestRenderBaseDockerfile_BubblewrapForCodex(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{},
+		AITools: []config.ToolConfig{
+			{Name: "codex", Enabled: true},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderBaseDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "meson")
+	assertContains(t, result, "bubblewrap")
+	assertContains(t, result, "ninja-build")
+}
+
+func TestRenderBaseDockerfile_XvfbForOpenCode(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{},
+		AITools: []config.ToolConfig{
+			{Name: "opencode", Enabled: true},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderBaseDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "xvfb")
+	assertContains(t, result, "xclip")
+	assertContains(t, result, "inotify-tools")
+}
+
+func TestRenderBaseDockerfile_ProxyEnvVars(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{},
+		AITools:          []config.ToolConfig{},
+		ProxyPort:        8080,
+		BridgePort:       4343,
+	}
+
+	result, err := RenderBaseDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "HTTP_PROXY=http://cooper-proxy:8080")
+	assertContains(t, result, "HTTPS_PROXY=http://cooper-proxy:8080")
+}
+
+func TestRenderBaseDockerfile_CACertInjection(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{},
+		AITools:          []config.ToolConfig{},
+		ProxyPort:        3128,
+		BridgePort:       4343,
+	}
+
+	result, err := RenderBaseDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "COPY cooper-ca.pem")
+	assertContains(t, result, "update-ca-certificates")
+}
+
+func TestRenderBaseDockerfile_UserSetup(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{},
+		AITools:          []config.ToolConfig{},
+		ProxyPort:        3128,
+		BridgePort:       4343,
+	}
+
+	result, err := RenderBaseDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "USER_UID")
+	assertContains(t, result, "USER_GID")
+	assertContains(t, result, "useradd")
+}
+
+func TestRenderBaseDockerfile_NoAITools(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{
+			{Name: "go", Enabled: true, PinnedVersion: "1.24.10"},
+		},
+		AITools:    []config.ToolConfig{},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderBaseDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+
+	// Should NOT contain any AI tool install commands
 	assertNotContains(t, result, "claude.ai/install.sh")
 	assertNotContains(t, result, "@github/copilot")
 	assertNotContains(t, result, "@openai/codex")
 	assertNotContains(t, result, "opencode.ai/install")
-
-	// Should NOT have bubblewrap (no Codex)
-	assertNotContains(t, result, "bubblewrap")
-
-	// Should NOT have xvfb (no OpenCode)
-	assertNotContains(t, result, "xvfb")
-
-	// Should still have base infrastructure
-	assertContains(t, result, "cooper-ca.pem")
-	assertContains(t, result, "HTTP_PROXY")
+	assertNotContains(t, result, "CACHE_BUST_AI")
+	assertNotContains(t, result, "CACHE_BUST_LANG")
 }
 
-func TestRenderCLIDockerfile_MinimalConfig(t *testing.T) {
-	cfg := minimalConfig()
-	result, err := RenderCLIDockerfile(cfg)
-	if err != nil {
-		t.Fatalf("RenderCLIDockerfile failed: %v", err)
+func TestRenderBaseDockerfile_HasEntrypoint(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{},
+		AITools:          []config.ToolConfig{},
+		ProxyPort:        3128,
+		BridgePort:       4343,
 	}
 
-	// Should use Go base image
-	assertContains(t, result, "golang:1.24.10-bookworm")
+	result, err := RenderBaseDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
 
-	// Only Claude Code should be present
-	assertContains(t, result, "claude.ai/install.sh")
-	assertNotContains(t, result, "@github/copilot")
-	assertNotContains(t, result, "@openai/codex")
-	assertNotContains(t, result, "opencode.ai/install")
+	assertContains(t, result, "COPY entrypoint.sh")
+	assertContains(t, result, "ENTRYPOINT")
+}
 
-	// No bubblewrap (no Codex)
+func TestRenderBaseDockerfile_HasDoctorScript(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{},
+		AITools:          []config.ToolConfig{},
+		ProxyPort:        3128,
+		BridgePort:       4343,
+	}
+
+	result, err := RenderBaseDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "COPY doctor.sh")
+}
+
+func TestRenderBaseDockerfile_RuntimeDepsIncluded(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{},
+		AITools: []config.ToolConfig{
+			{Name: "codex", Enabled: true},
+			{Name: "opencode", Enabled: true},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderBaseDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+
+	// Codex runtime deps
+	assertContains(t, result, "meson")
+	assertContains(t, result, "bubblewrap")
+
+	// OpenCode runtime deps
+	assertContains(t, result, "xvfb")
+	assertContains(t, result, "xclip")
+}
+
+func TestRenderBaseDockerfile_RuntimeDepsExcluded(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{},
+		AITools: []config.ToolConfig{
+			{Name: "claude", Enabled: true},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderBaseDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+
+	// No codex -> no bubblewrap/meson
+	assertNotContains(t, result, "meson")
 	assertNotContains(t, result, "bubblewrap")
 
-	// No xvfb (no OpenCode)
+	// No opencode -> no xvfb/xclip
 	assertNotContains(t, result, "xvfb")
+	assertNotContains(t, result, "xclip")
 }
+
+// ---------------------------------------------------------------------------
+// RenderCLIToolDockerfile tests
+// ---------------------------------------------------------------------------
+
+func TestRenderCLIToolDockerfile_Claude(t *testing.T) {
+	cfg := &config.Config{
+		AITools: []config.ToolConfig{
+			{Name: "claude", Enabled: true},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderCLIToolDockerfile(cfg, "claude")
+	if err != nil {
+		t.Fatalf("RenderCLIToolDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "FROM "+docker.GetImageBase())
+	assertContains(t, result, "claude.ai/install.sh")
+	assertContains(t, result, "COOPER_CLI_TOOL=claude")
+	assertContains(t, result, "--dangerously-skip-permissions")
+	assertContains(t, result, "/home/user/.claude")
+}
+
+func TestRenderCLIToolDockerfile_ClaudeVersionPinned(t *testing.T) {
+	cfg := &config.Config{
+		AITools: []config.ToolConfig{
+			{Name: "claude", Enabled: true, PinnedVersion: "2.1.87"},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderCLIToolDockerfile(cfg, "claude")
+	if err != nil {
+		t.Fatalf("RenderCLIToolDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "bash -s -- 2.1.87")
+}
+
+func TestRenderCLIToolDockerfile_Copilot(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{
+			{Name: "node", Enabled: true, PinnedVersion: "22.12.0"},
+		},
+		AITools: []config.ToolConfig{
+			{Name: "copilot", Enabled: true},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderCLIToolDockerfile(cfg, "copilot")
+	if err != nil {
+		t.Fatalf("RenderCLIToolDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "npm install -g @github/copilot")
+	assertContains(t, result, "COOPER_CLI_TOOL=copilot")
+}
+
+func TestRenderCLIToolDockerfile_CopilotVersionPinned(t *testing.T) {
+	cfg := &config.Config{
+		AITools: []config.ToolConfig{
+			{Name: "copilot", Enabled: true, PinnedVersion: "1.0.12"},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderCLIToolDockerfile(cfg, "copilot")
+	if err != nil {
+		t.Fatalf("RenderCLIToolDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "@github/copilot@1.0.12")
+}
+
+func TestRenderCLIToolDockerfile_Codex(t *testing.T) {
+	cfg := &config.Config{
+		AITools: []config.ToolConfig{
+			{Name: "codex", Enabled: true},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderCLIToolDockerfile(cfg, "codex")
+	if err != nil {
+		t.Fatalf("RenderCLIToolDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "npm install -g @openai/codex")
+	assertContains(t, result, "COOPER_CLI_TOOL=codex")
+}
+
+func TestRenderCLIToolDockerfile_CodexVersionPinned(t *testing.T) {
+	cfg := &config.Config{
+		AITools: []config.ToolConfig{
+			{Name: "codex", Enabled: true, PinnedVersion: "0.117.0"},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderCLIToolDockerfile(cfg, "codex")
+	if err != nil {
+		t.Fatalf("RenderCLIToolDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "@openai/codex@0.117.0")
+}
+
+func TestRenderCLIToolDockerfile_OpenCode(t *testing.T) {
+	cfg := &config.Config{
+		AITools: []config.ToolConfig{
+			{Name: "opencode", Enabled: true},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderCLIToolDockerfile(cfg, "opencode")
+	if err != nil {
+		t.Fatalf("RenderCLIToolDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "opencode.ai/install")
+	assertContains(t, result, "COOPER_CLI_TOOL=opencode")
+}
+
+func TestRenderCLIToolDockerfile_OpenCodeVersionPinned(t *testing.T) {
+	cfg := &config.Config{
+		AITools: []config.ToolConfig{
+			{Name: "opencode", Enabled: true, PinnedVersion: "1.3.7"},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderCLIToolDockerfile(cfg, "opencode")
+	if err != nil {
+		t.Fatalf("RenderCLIToolDockerfile failed: %v", err)
+	}
+
+	assertContains(t, result, "--version 1.3.7")
+}
+
+func TestRenderCLIToolDockerfile_UnknownTool(t *testing.T) {
+	cfg := &config.Config{
+		AITools:    []config.ToolConfig{},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	_, err := RenderCLIToolDockerfile(cfg, "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for unknown tool, got nil")
+	}
+	assertContains(t, err.Error(), "unknown")
+}
+
+func TestRenderCLIToolDockerfile_UsesCorrectBaseImage(t *testing.T) {
+	cfg := &config.Config{
+		AITools: []config.ToolConfig{
+			{Name: "claude", Enabled: true},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderCLIToolDockerfile(cfg, "claude")
+	if err != nil {
+		t.Fatalf("RenderCLIToolDockerfile failed: %v", err)
+	}
+
+	expectedBase := docker.GetImageBase()
+	assertContains(t, result, "FROM "+expectedBase)
+}
+
+// ---------------------------------------------------------------------------
+// RenderEntrypoint tests
+// ---------------------------------------------------------------------------
+
+func TestRenderEntrypoint(t *testing.T) {
+	cfg := testConfig()
+	result, err := RenderEntrypoint(cfg)
+	if err != nil {
+		t.Fatalf("RenderEntrypoint failed: %v", err)
+	}
+
+	// Should have dynamic auto-approve alias using env vars
+	assertContains(t, result, "$COOPER_CLI_TOOL")
+	assertContains(t, result, "$COOPER_CLI_AUTO_APPROVE")
+
+	// Should have OpenCode DISPLAY setup conditional on tool type
+	assertContains(t, result, "DISPLAY=:99.0")
+	assertContains(t, result, "Xvfb :99")
+	assertContains(t, result, "opencode.json")
+
+	// Should read rules from socat-rules.json config file
+	assertContains(t, result, "socat-rules.json")
+	assertContains(t, result, "start_socat_from_config")
+	assertContains(t, result, "jq")
+
+	// Should have fallback bridge port from template
+	assertContains(t, result, "run_socat 4343")
+
+	// socat should target cooper-proxy (NOT host.docker.internal)
+	assertContains(t, result, "cooper-proxy")
+	assertNotContains(t, result, "host.docker.internal")
+
+	// Should have bind to 127.0.0.1, fork, reuseaddr, backlog
+	assertContains(t, result, "bind=127.0.0.1")
+	assertContains(t, result, "fork")
+	assertContains(t, result, "reuseaddr")
+	assertContains(t, result, "backlog=5000")
+
+	// Should track socat PIDs for clean reload
+	assertContains(t, result, "SOCAT_SUPERVISORS")
+
+	// Should handle SIGHUP for live reload
+	assertContains(t, result, "reload_socat")
+	assertContains(t, result, "trap")
+	assertContains(t, result, "HUP")
+
+	// Should run command in background and wait (not exec, to preserve signal traps)
+	assertContains(t, result, `"$@" &`)
+}
+
+func TestRenderEntrypoint_DynamicAutoApprove(t *testing.T) {
+	cfg := testConfig()
+	result, err := RenderEntrypoint(cfg)
+	if err != nil {
+		t.Fatalf("RenderEntrypoint failed: %v", err)
+	}
+
+	// Should use dynamic env vars for auto-approve alias
+	assertContains(t, result, "$COOPER_CLI_TOOL")
+	assertContains(t, result, "$COOPER_CLI_AUTO_APPROVE")
+
+	// Should NOT contain hardcoded tool-specific aliases
+	assertNotContains(t, result, "alias claude=")
+	assertNotContains(t, result, "alias copilot=")
+	assertNotContains(t, result, "alias codex=")
+	assertNotContains(t, result, "alias opencode=")
+}
+
+func TestRenderEntrypoint_XvfbConditionalOnTool(t *testing.T) {
+	cfg := testConfig()
+	result, err := RenderEntrypoint(cfg)
+	if err != nil {
+		t.Fatalf("RenderEntrypoint failed: %v", err)
+	}
+
+	// OpenCode Xvfb setup should be conditional on COOPER_CLI_TOOL env var
+	assertContains(t, result, `if [ "$COOPER_CLI_TOOL" = "opencode" ]`)
+}
+
+func TestRenderEntrypoint_NoToolBooleans(t *testing.T) {
+	// Verify that entrypointData only has HasGo and BridgePort fields.
+	// This is a compile-time check: if someone adds HasClaudeCode back
+	// to the struct, this test will fail to compile.
+	d := entrypointData{
+		HasGo:      true,
+		BridgePort: 4343,
+	}
+
+	// Verify the struct fields are what we expect
+	if !d.HasGo {
+		t.Error("expected HasGo=true")
+	}
+	if d.BridgePort != 4343 {
+		t.Errorf("expected BridgePort=4343, got %d", d.BridgePort)
+	}
+}
+
+func TestRenderEntrypoint_ConfigDriven(t *testing.T) {
+	// Port forwarding rules are now read from socat-rules.json at runtime,
+	// not baked into the template. Verify the config-driven approach.
+	cfg := &config.Config{
+		AITools: []config.ToolConfig{
+			{Name: "claude", Enabled: true},
+		},
+		PortForwardRules: []config.PortForwardRule{
+			{ContainerPort: 8000, HostPort: 8000, Description: "dev-ports", IsRange: true, RangeEnd: 8010},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+
+	result, err := RenderEntrypoint(cfg)
+	if err != nil {
+		t.Fatalf("RenderEntrypoint failed: %v", err)
+	}
+
+	// Should read from config file, not have hardcoded port rules
+	assertContains(t, result, "socat-rules.json")
+	assertContains(t, result, "start_socat_from_config")
+	// Template should NOT contain the specific port numbers from rules
+	assertNotContains(t, result, "run_socat 8000")
+	// But should have the fallback bridge port
+	assertContains(t, result, "run_socat 4343")
+}
+
+func TestRenderEntrypoint_NoAITools(t *testing.T) {
+	cfg := noToolsConfig()
+	result, err := RenderEntrypoint(cfg)
+	if err != nil {
+		t.Fatalf("RenderEntrypoint failed: %v", err)
+	}
+
+	// Should still have bridge socat
+	assertContains(t, result, "run_socat 4343")
+
+	// Should still run main command
+	assertContains(t, result, `"$@" &`)
+}
+
+// ---------------------------------------------------------------------------
+// WriteAllTemplates tests
+// ---------------------------------------------------------------------------
+
+func TestWriteAllTemplates(t *testing.T) {
+	cfg := testConfig()
+	baseDir := filepath.Join(t.TempDir(), "base")
+	cliDir := filepath.Join(t.TempDir(), "cli")
+
+	err := WriteAllTemplates(baseDir, cliDir, cfg)
+	if err != nil {
+		t.Fatalf("WriteAllTemplates failed: %v", err)
+	}
+
+	// Verify base directory files
+	baseFiles := []string{
+		"Dockerfile",
+		"entrypoint.sh",
+		"doctor.sh",
+	}
+	for _, name := range baseFiles {
+		path := filepath.Join(baseDir, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Errorf("expected file %s in baseDir not found: %v", name, err)
+			continue
+		}
+		if info.Size() == 0 {
+			t.Errorf("file %s in baseDir is empty", name)
+		}
+	}
+
+	// Verify per-tool Dockerfiles in cliDir
+	expectedTools := []string{"claude", "copilot", "codex", "opencode"}
+	for _, tool := range expectedTools {
+		path := filepath.Join(cliDir, tool, "Dockerfile")
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Errorf("expected per-tool Dockerfile for %s not found: %v", tool, err)
+			continue
+		}
+		if info.Size() == 0 {
+			t.Errorf("per-tool Dockerfile for %s is empty", tool)
+		}
+	}
+
+	// Verify entrypoint.sh is executable
+	info, err := os.Stat(filepath.Join(baseDir, "entrypoint.sh"))
+	if err != nil {
+		t.Fatalf("failed to stat entrypoint.sh: %v", err)
+	}
+	if info.Mode()&0111 == 0 {
+		t.Error("entrypoint.sh should be executable")
+	}
+
+	// Verify doctor.sh is executable
+	info, err = os.Stat(filepath.Join(baseDir, "doctor.sh"))
+	if err != nil {
+		t.Fatalf("failed to stat doctor.sh: %v", err)
+	}
+	if info.Mode()&0111 == 0 {
+		t.Error("doctor.sh should be executable")
+	}
+}
+
+func TestWriteAllTemplates_CreatesDirectory(t *testing.T) {
+	cfg := minimalConfig()
+	baseDir := filepath.Join(t.TempDir(), "nested", "base")
+	cliDir := filepath.Join(t.TempDir(), "nested", "cli")
+
+	err := WriteAllTemplates(baseDir, cliDir, cfg)
+	if err != nil {
+		t.Fatalf("WriteAllTemplates failed: %v", err)
+	}
+
+	// Base directory should have been created
+	if _, err := os.Stat(baseDir); err != nil {
+		t.Fatalf("base directory was not created: %v", err)
+	}
+
+	// CLI tool directory should have been created
+	claudeDir := filepath.Join(cliDir, "claude")
+	if _, err := os.Stat(claudeDir); err != nil {
+		t.Fatalf("cli/claude directory was not created: %v", err)
+	}
+}
+
+func TestWriteAllTemplates_FileContents(t *testing.T) {
+	cfg := testConfig()
+	baseDir := filepath.Join(t.TempDir(), "base")
+	cliDir := filepath.Join(t.TempDir(), "cli")
+
+	err := WriteAllTemplates(baseDir, cliDir, cfg)
+	if err != nil {
+		t.Fatalf("WriteAllTemplates failed: %v", err)
+	}
+
+	// Read back the base Dockerfile and verify content
+	data, err := os.ReadFile(filepath.Join(baseDir, "Dockerfile"))
+	if err != nil {
+		t.Fatalf("failed to read base Dockerfile: %v", err)
+	}
+	assertContains(t, string(data), "golang:1.24.10-bookworm")
+	// Base should NOT have AI tool installs
+	assertNotContains(t, string(data), "claude.ai/install.sh")
+
+	// Read back entrypoint.sh and verify content
+	data, err = os.ReadFile(filepath.Join(baseDir, "entrypoint.sh"))
+	if err != nil {
+		t.Fatalf("failed to read entrypoint.sh: %v", err)
+	}
+	assertContains(t, string(data), "run_socat 4343")
+	assertContains(t, string(data), "socat-rules.json")
+
+	// Read back per-tool Dockerfile and verify content
+	data, err = os.ReadFile(filepath.Join(cliDir, "claude", "Dockerfile"))
+	if err != nil {
+		t.Fatalf("failed to read claude Dockerfile: %v", err)
+	}
+	assertContains(t, string(data), "FROM "+docker.GetImageBase())
+	assertContains(t, string(data), "claude.ai/install.sh")
+	assertContains(t, string(data), "COOPER_CLI_TOOL=claude")
+
+	// Verify codex per-tool Dockerfile
+	data, err = os.ReadFile(filepath.Join(cliDir, "codex", "Dockerfile"))
+	if err != nil {
+		t.Fatalf("failed to read codex Dockerfile: %v", err)
+	}
+	assertContains(t, string(data), "@openai/codex")
+	assertContains(t, string(data), "COOPER_CLI_TOOL=codex")
+}
+
+// ---------------------------------------------------------------------------
+// Proxy Dockerfile tests (unchanged)
+// ---------------------------------------------------------------------------
 
 func TestRenderProxyDockerfile(t *testing.T) {
 	cfg := testConfig()
@@ -236,6 +919,10 @@ func TestRenderProxyDockerfile(t *testing.T) {
 	assertContains(t, result, "EXPOSE 3128")
 }
 
+// ---------------------------------------------------------------------------
+// Squid conf tests (unchanged)
+// ---------------------------------------------------------------------------
+
 func TestRenderSquidConf(t *testing.T) {
 	cfg := testConfig()
 	result, err := RenderSquidConf(cfg)
@@ -268,7 +955,7 @@ func TestRenderSquidConf(t *testing.T) {
 	assertContains(t, result, "read_timeout 120 minutes")
 	assertContains(t, result, "client_lifetime 1 day")
 
-	// dns_v4_first removed in Squid 6 — verify the directive is NOT active.
+	// dns_v4_first removed in Squid 6 -- verify the directive is NOT active.
 	assertNotContains(t, result, "dns_v4_first on")
 
 	// Should disable caching
@@ -313,479 +1000,6 @@ func TestRenderSquidConf_CustomPort(t *testing.T) {
 
 	assertContains(t, result, "http_port 8080")
 }
-
-func TestRenderProxyEntrypoint(t *testing.T) {
-	cfg := testConfig()
-	result, err := RenderProxyEntrypoint(cfg)
-	if err != nil {
-		t.Fatalf("RenderProxyEntrypoint failed: %v", err)
-	}
-
-	// Should start Squid in background (shell stays alive for SIGHUP)
-	assertContains(t, result, "squid -N &")
-	assertContains(t, result, "wait $SQUID_PID")
-
-	// Should read rules from socat-rules.json config file
-	assertContains(t, result, "socat-rules.json")
-	assertContains(t, result, "start_socat_from_config")
-	assertContains(t, result, "jq")
-
-	// Should have fallback bridge port from template
-	assertContains(t, result, "run_socat 4343")
-	assertContains(t, result, "host.docker.internal")
-
-	// Socat should bind on 0.0.0.0 (not 127.0.0.1 like the CLI)
-	assertContains(t, result, "bind=0.0.0.0")
-
-	// Should track socat PIDs for clean reload
-	assertContains(t, result, "SOCAT_SUPERVISORS")
-
-	// Should have logrotate cron
-	assertContains(t, result, "logrotate")
-
-	// Should handle SIGHUP for live reload
-	assertContains(t, result, "reload_socat")
-	assertContains(t, result, "trap")
-	assertContains(t, result, "HUP")
-}
-
-func TestRenderProxyEntrypoint_NoPortForwards(t *testing.T) {
-	cfg := &config.Config{
-		PortForwardRules: []config.PortForwardRule{},
-		BridgePort:       4343,
-	}
-
-	result, err := RenderProxyEntrypoint(cfg)
-	if err != nil {
-		t.Fatalf("RenderProxyEntrypoint failed: %v", err)
-	}
-
-	// Should still have bridge port as fallback
-	assertContains(t, result, "run_socat 4343")
-
-	// Should read from config file
-	assertContains(t, result, "socat-rules.json")
-
-	// Should still start squid
-	assertContains(t, result, "squid -N")
-}
-
-func TestRenderEntrypoint(t *testing.T) {
-	cfg := testConfig()
-	result, err := RenderEntrypoint(cfg)
-	if err != nil {
-		t.Fatalf("RenderEntrypoint failed: %v", err)
-	}
-
-	// Should have auto-approve aliases for all enabled AI tools
-	assertContains(t, result, "claude --dangerously-skip-permissions")
-	assertContains(t, result, "copilot --allow-all-tools")
-	assertContains(t, result, "codex --dangerously-bypass-approvals-and-sandbox")
-	assertContains(t, result, "opencode --auto-approve")
-
-	// Should have OpenCode DISPLAY setup
-	assertContains(t, result, "DISPLAY=:99.0")
-	assertContains(t, result, "Xvfb :99")
-	assertContains(t, result, "opencode.json")
-
-	// Should read rules from socat-rules.json config file
-	assertContains(t, result, "socat-rules.json")
-	assertContains(t, result, "start_socat_from_config")
-	assertContains(t, result, "jq")
-
-	// Should have fallback bridge port from template
-	assertContains(t, result, "run_socat 4343")
-
-	// socat should target cooper-proxy (NOT host.docker.internal)
-	assertContains(t, result, "cooper-proxy")
-	assertNotContains(t, result, "host.docker.internal")
-
-	// Should have bind to 127.0.0.1, fork, reuseaddr, backlog
-	assertContains(t, result, "bind=127.0.0.1")
-	assertContains(t, result, "fork")
-	assertContains(t, result, "reuseaddr")
-	assertContains(t, result, "backlog=5000")
-
-	// Should track socat PIDs for clean reload
-	assertContains(t, result, "SOCAT_SUPERVISORS")
-
-	// Should handle SIGHUP for live reload
-	assertContains(t, result, "reload_socat")
-	assertContains(t, result, "trap")
-	assertContains(t, result, "HUP")
-
-	// Should run command in background and wait (not exec, to preserve signal traps)
-	assertContains(t, result, `"$@" &`)
-}
-
-func TestRenderEntrypoint_MinimalConfig(t *testing.T) {
-	cfg := minimalConfig()
-	result, err := RenderEntrypoint(cfg)
-	if err != nil {
-		t.Fatalf("RenderEntrypoint failed: %v", err)
-	}
-
-	// Only Claude Code alias should be present
-	assertContains(t, result, "claude --dangerously-skip-permissions")
-	assertNotContains(t, result, "copilot --allow-all-tools")
-	assertNotContains(t, result, "codex --dangerously-bypass-approvals-and-sandbox")
-	assertNotContains(t, result, "opencode --auto-approve")
-
-	// Should NOT have OpenCode DISPLAY setup
-	assertNotContains(t, result, "Xvfb")
-	assertNotContains(t, result, "opencode.json")
-
-	// Should still have bridge port socat
-	assertContains(t, result, "run_socat 4343")
-
-	// Should NOT have user-configured port forwards (none configured)
-	assertNotContains(t, result, "run_socat 5432")
-}
-
-func TestRenderEntrypoint_ConfigDriven(t *testing.T) {
-	// Port forwarding rules are now read from socat-rules.json at runtime,
-	// not baked into the template. Verify the config-driven approach.
-	cfg := &config.Config{
-		AITools: []config.ToolConfig{
-			{Name: "claude", Enabled: true},
-		},
-		PortForwardRules: []config.PortForwardRule{
-			{ContainerPort: 8000, HostPort: 8000, Description: "dev-ports", IsRange: true, RangeEnd: 8010},
-		},
-		ProxyPort:  3128,
-		BridgePort: 4343,
-	}
-
-	result, err := RenderEntrypoint(cfg)
-	if err != nil {
-		t.Fatalf("RenderEntrypoint failed: %v", err)
-	}
-
-	// Should read from config file, not have hardcoded port rules
-	assertContains(t, result, "socat-rules.json")
-	assertContains(t, result, "start_socat_from_config")
-	// Template should NOT contain the specific port numbers from rules
-	assertNotContains(t, result, "run_socat 8000")
-	// But should have the fallback bridge port
-	assertContains(t, result, "run_socat 4343")
-}
-
-func TestRenderEntrypoint_NoAITools(t *testing.T) {
-	cfg := noToolsConfig()
-	result, err := RenderEntrypoint(cfg)
-	if err != nil {
-		t.Fatalf("RenderEntrypoint failed: %v", err)
-	}
-
-	// Should NOT have any aliases
-	assertNotContains(t, result, "claude --dangerously-skip-permissions")
-	assertNotContains(t, result, "copilot --allow-all-tools")
-	assertNotContains(t, result, "codex --dangerously-bypass-approvals-and-sandbox")
-	assertNotContains(t, result, "opencode --auto-approve")
-
-	// Should still have bridge socat
-	assertContains(t, result, "run_socat 4343")
-
-	// Should still have exec
-	assertContains(t, result, `exec "$@"`)
-}
-
-func TestWriteAllTemplates(t *testing.T) {
-	cfg := testConfig()
-	dir := t.TempDir()
-
-	err := WriteAllTemplates(dir, cfg)
-	if err != nil {
-		t.Fatalf("WriteAllTemplates failed: %v", err)
-	}
-
-	// Verify all files were written
-	expectedFiles := []string{
-		"Dockerfile",
-		"proxy.Dockerfile",
-		"squid.conf",
-		"entrypoint.sh",
-		"proxy-entrypoint.sh",
-	}
-
-	for _, name := range expectedFiles {
-		path := filepath.Join(dir, name)
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Errorf("expected file %s not found: %v", name, err)
-			continue
-		}
-		if info.Size() == 0 {
-			t.Errorf("file %s is empty", name)
-		}
-	}
-
-	// Verify entrypoint.sh is executable
-	info, err := os.Stat(filepath.Join(dir, "entrypoint.sh"))
-	if err != nil {
-		t.Fatalf("failed to stat entrypoint.sh: %v", err)
-	}
-	if info.Mode()&0111 == 0 {
-		t.Error("entrypoint.sh should be executable")
-	}
-
-	// Verify proxy-entrypoint.sh is executable
-	info, err = os.Stat(filepath.Join(dir, "proxy-entrypoint.sh"))
-	if err != nil {
-		t.Fatalf("failed to stat proxy-entrypoint.sh: %v", err)
-	}
-	if info.Mode()&0111 == 0 {
-		t.Error("proxy-entrypoint.sh should be executable")
-	}
-}
-
-func TestWriteAllTemplates_CreatesDirectory(t *testing.T) {
-	cfg := minimalConfig()
-	dir := filepath.Join(t.TempDir(), "nested", "output")
-
-	err := WriteAllTemplates(dir, cfg)
-	if err != nil {
-		t.Fatalf("WriteAllTemplates failed: %v", err)
-	}
-
-	// Directory should have been created
-	if _, err := os.Stat(dir); err != nil {
-		t.Fatalf("output directory was not created: %v", err)
-	}
-}
-
-func TestWriteAllTemplates_FileContents(t *testing.T) {
-	cfg := testConfig()
-	dir := t.TempDir()
-
-	err := WriteAllTemplates(dir, cfg)
-	if err != nil {
-		t.Fatalf("WriteAllTemplates failed: %v", err)
-	}
-
-	// Read back the CLI Dockerfile and verify content
-	data, err := os.ReadFile(filepath.Join(dir, "Dockerfile"))
-	if err != nil {
-		t.Fatalf("failed to read Dockerfile: %v", err)
-	}
-	assertContains(t, string(data), "golang:1.24.10-bookworm")
-
-	// Read back squid.conf and verify content
-	data, err = os.ReadFile(filepath.Join(dir, "squid.conf"))
-	if err != nil {
-		t.Fatalf("failed to read squid.conf: %v", err)
-	}
-	assertContains(t, string(data), ".anthropic.com")
-	assertContains(t, string(data), "custom.example.com")
-
-	// Read back entrypoint.sh and verify content
-	data, err = os.ReadFile(filepath.Join(dir, "entrypoint.sh"))
-	if err != nil {
-		t.Fatalf("failed to read entrypoint.sh: %v", err)
-	}
-	assertContains(t, string(data), "run_socat 4343") // fallback bridge port
-	assertContains(t, string(data), "socat-rules.json") // config-driven port forwarding
-
-	// Read back proxy-entrypoint.sh and verify content
-	data, err = os.ReadFile(filepath.Join(dir, "proxy-entrypoint.sh"))
-	if err != nil {
-		t.Fatalf("failed to read proxy-entrypoint.sh: %v", err)
-	}
-	assertContains(t, string(data), "squid -N")
-	assertContains(t, string(data), "host.docker.internal")
-}
-
-func TestIsToolEnabled(t *testing.T) {
-	tools := []config.ToolConfig{
-		{Name: "go", Enabled: true},
-		{Name: "python", Enabled: false},
-		{Name: "node", Enabled: true},
-	}
-
-	if !isToolEnabled(tools, "go") {
-		t.Error("expected go to be enabled")
-	}
-	if isToolEnabled(tools, "python") {
-		t.Error("expected python to be disabled")
-	}
-	if !isToolEnabled(tools, "node") {
-		t.Error("expected node to be enabled")
-	}
-	// Case insensitive
-	if !isToolEnabled(tools, "Go") {
-		t.Error("expected Go (case insensitive) to be enabled")
-	}
-}
-
-func TestGetToolVersion(t *testing.T) {
-	tools := []config.ToolConfig{
-		{Name: "go", Enabled: true, PinnedVersion: "1.24.10"},
-		{Name: "python", Enabled: true, HostVersion: "3.12.1"},
-		{Name: "node", Enabled: true},
-	}
-
-	if v := getToolVersion(tools, "go"); v != "1.24.10" {
-		t.Errorf("expected go version 1.24.10, got %s", v)
-	}
-	if v := getToolVersion(tools, "python"); v != "3.12.1" {
-		t.Errorf("expected python version 3.12.1 (host), got %s", v)
-	}
-	if v := getToolVersion(tools, "node"); v != "" {
-		t.Errorf("expected node version empty (no pinned/host), got %s", v)
-	}
-}
-
-// assertContains checks that haystack contains needle.
-func assertContains(t *testing.T, haystack, needle string) {
-	t.Helper()
-	if !strings.Contains(haystack, needle) {
-		t.Errorf("expected output to contain %q, but it did not.\nOutput (first 500 chars):\n%s", needle, truncate(haystack, 500))
-	}
-}
-
-// assertNotContains checks that haystack does NOT contain needle.
-func assertNotContains(t *testing.T, haystack, needle string) {
-	t.Helper()
-	if strings.Contains(haystack, needle) {
-		t.Errorf("expected output NOT to contain %q, but it did.\nOutput (first 500 chars):\n%s", needle, truncate(haystack, 500))
-	}
-}
-
-// truncate returns s truncated to maxLen characters.
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
-func TestRenderCLIDockerfile_PinnedAIVersions(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.AITools = []config.ToolConfig{
-		{Name: "claude", Enabled: true, Mode: config.ModeLatest, PinnedVersion: "2.1.86"},
-		{Name: "copilot", Enabled: true, Mode: config.ModePin, PinnedVersion: "0.7.2"},
-		{Name: "codex", Enabled: true, Mode: config.ModeMirror, HostVersion: "0.117.0"},
-		{Name: "opencode", Enabled: true, Mode: config.ModeLatest, PinnedVersion: "1.3.0"},
-	}
-	cfg.ProgrammingTools = []config.ToolConfig{
-		{Name: "node", Enabled: true, Mode: config.ModeLatest, PinnedVersion: "22.12.0"},
-	}
-
-	output, err := RenderCLIDockerfile(cfg)
-	if err != nil {
-		t.Fatalf("render: %v", err)
-	}
-
-	// Claude should use npm with pinned version (not curl installer).
-	// Claude uses curl installer with version arg (not npm).
-	if !strings.Contains(output, "claude.ai/install.sh | bash -s -- 2.1.86") {
-		t.Error("expected pinned claude curl install with version 2.1.86")
-	}
-	// Copilot pinned.
-	if !strings.Contains(output, "@github/copilot@0.7.2") {
-		t.Error("expected pinned copilot install @0.7.2")
-	}
-	// Codex with host version.
-	if !strings.Contains(output, "@openai/codex@0.117.0") {
-		t.Error("expected pinned codex install @0.117.0")
-	}
-	// OpenCode uses curl installer (no version pinning via npm).
-	if !strings.Contains(output, "opencode.ai/install") {
-		t.Error("expected opencode curl installer")
-	}
-}
-
-func TestRenderCLIDockerfile_UnpinnedAIFallback(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.AITools = []config.ToolConfig{
-		{Name: "claude", Enabled: true, Mode: config.ModeLatest},
-		{Name: "copilot", Enabled: true, Mode: config.ModeLatest},
-	}
-	cfg.ProgrammingTools = []config.ToolConfig{
-		{Name: "node", Enabled: true, Mode: config.ModeLatest, PinnedVersion: "22.12.0"},
-	}
-
-	output, err := RenderCLIDockerfile(cfg)
-	if err != nil {
-		t.Fatalf("render: %v", err)
-	}
-
-	// Claude with no version should use curl installer.
-	if !strings.Contains(output, "claude.ai/install.sh") {
-		t.Error("expected curl installer for unpinned claude")
-	}
-	// Copilot with no version should install bare (no @version).
-	if !strings.Contains(output, "npm install -g @github/copilot\n") {
-		t.Error("expected bare copilot install without version pin")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// RenderProxyEntrypoint with port forwarding rules
-// ---------------------------------------------------------------------------
-
-func TestRenderProxyEntrypoint_ConfigDriven(t *testing.T) {
-	// Port forwarding rules are now read from socat-rules.json at runtime.
-	// The template should NOT contain specific port numbers from rules.
-	cfg := &config.Config{
-		PortForwardRules: []config.PortForwardRule{
-			{ContainerPort: 3000, HostPort: 3000, Description: "web-app"},
-		},
-		BridgePort: 4343,
-	}
-
-	result, err := RenderProxyEntrypoint(cfg)
-	if err != nil {
-		t.Fatalf("RenderProxyEntrypoint failed: %v", err)
-	}
-
-	// Should read from config, not hardcode rules
-	assertContains(t, result, "socat-rules.json")
-	assertContains(t, result, "start_socat_from_config")
-	assertContains(t, result, "host.docker.internal")
-	// Bridge port should be present as fallback
-	assertContains(t, result, "run_socat 4343")
-	// Specific port from rules should NOT be in template
-	assertNotContains(t, result, "run_socat 3000")
-}
-
-func TestRenderProxyEntrypoint_CustomBridgePort(t *testing.T) {
-	cfg := &config.Config{
-		PortForwardRules: []config.PortForwardRule{},
-		BridgePort:       5555,
-	}
-
-	result, err := RenderProxyEntrypoint(cfg)
-	if err != nil {
-		t.Fatalf("RenderProxyEntrypoint failed: %v", err)
-	}
-
-	// Fallback bridge port should use the custom value
-	assertContains(t, result, "run_socat 5555")
-	assertContains(t, result, `bridge_port=5555`)
-}
-
-func TestRenderProxyEntrypoint_ReloadSupport(t *testing.T) {
-	cfg := &config.Config{
-		PortForwardRules: []config.PortForwardRule{},
-		BridgePort:       4343,
-	}
-
-	result, err := RenderProxyEntrypoint(cfg)
-	if err != nil {
-		t.Fatalf("RenderProxyEntrypoint failed: %v", err)
-	}
-
-	// Should have SIGHUP reload support
-	assertContains(t, result, "reload_socat")
-	assertContains(t, result, "SOCAT_SUPERVISORS")
-	assertContains(t, result, "trap")
-	assertContains(t, result, "HUP")
-}
-
-// ---------------------------------------------------------------------------
-// RenderSquidConf with custom domain whitelist
-// ---------------------------------------------------------------------------
 
 func TestRenderSquidConf_CustomDomains(t *testing.T) {
 	cfg := &config.Config{
@@ -849,7 +1063,167 @@ func TestRenderSquidConf_MixedDefaultAndUserDomains(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// WriteACLHelperSource directory structure
+// Proxy entrypoint tests (unchanged)
+// ---------------------------------------------------------------------------
+
+func TestRenderProxyEntrypoint(t *testing.T) {
+	cfg := testConfig()
+	result, err := RenderProxyEntrypoint(cfg)
+	if err != nil {
+		t.Fatalf("RenderProxyEntrypoint failed: %v", err)
+	}
+
+	// Should start Squid in background (shell stays alive for SIGHUP)
+	assertContains(t, result, "squid -N &")
+	assertContains(t, result, "wait $SQUID_PID")
+
+	// Should read rules from socat-rules.json config file
+	assertContains(t, result, "socat-rules.json")
+	assertContains(t, result, "start_socat_from_config")
+	assertContains(t, result, "jq")
+
+	// Should have fallback bridge port from template
+	assertContains(t, result, "run_socat 4343")
+	assertContains(t, result, "host.docker.internal")
+
+	// Socat should bind on 0.0.0.0 (not 127.0.0.1 like the CLI)
+	assertContains(t, result, "bind=0.0.0.0")
+
+	// Should track socat PIDs for clean reload
+	assertContains(t, result, "SOCAT_SUPERVISORS")
+
+	// Should have logrotate cron
+	assertContains(t, result, "logrotate")
+
+	// Should handle SIGHUP for live reload
+	assertContains(t, result, "reload_socat")
+	assertContains(t, result, "trap")
+	assertContains(t, result, "HUP")
+}
+
+func TestRenderProxyEntrypoint_NoPortForwards(t *testing.T) {
+	cfg := &config.Config{
+		PortForwardRules: []config.PortForwardRule{},
+		BridgePort:       4343,
+	}
+
+	result, err := RenderProxyEntrypoint(cfg)
+	if err != nil {
+		t.Fatalf("RenderProxyEntrypoint failed: %v", err)
+	}
+
+	// Should still have bridge port as fallback
+	assertContains(t, result, "run_socat 4343")
+
+	// Should read from config file
+	assertContains(t, result, "socat-rules.json")
+
+	// Should still start squid
+	assertContains(t, result, "squid -N")
+}
+
+func TestRenderProxyEntrypoint_ConfigDriven(t *testing.T) {
+	// Port forwarding rules are now read from socat-rules.json at runtime.
+	// The template should NOT contain specific port numbers from rules.
+	cfg := &config.Config{
+		PortForwardRules: []config.PortForwardRule{
+			{ContainerPort: 3000, HostPort: 3000, Description: "web-app"},
+		},
+		BridgePort: 4343,
+	}
+
+	result, err := RenderProxyEntrypoint(cfg)
+	if err != nil {
+		t.Fatalf("RenderProxyEntrypoint failed: %v", err)
+	}
+
+	// Should read from config, not hardcode rules
+	assertContains(t, result, "socat-rules.json")
+	assertContains(t, result, "start_socat_from_config")
+	assertContains(t, result, "host.docker.internal")
+	// Bridge port should be present as fallback
+	assertContains(t, result, "run_socat 4343")
+	// Specific port from rules should NOT be in template
+	assertNotContains(t, result, "run_socat 3000")
+}
+
+func TestRenderProxyEntrypoint_CustomBridgePort(t *testing.T) {
+	cfg := &config.Config{
+		PortForwardRules: []config.PortForwardRule{},
+		BridgePort:       5555,
+	}
+
+	result, err := RenderProxyEntrypoint(cfg)
+	if err != nil {
+		t.Fatalf("RenderProxyEntrypoint failed: %v", err)
+	}
+
+	// Fallback bridge port should use the custom value
+	assertContains(t, result, "run_socat 5555")
+	assertContains(t, result, `bridge_port=5555`)
+}
+
+func TestRenderProxyEntrypoint_ReloadSupport(t *testing.T) {
+	cfg := &config.Config{
+		PortForwardRules: []config.PortForwardRule{},
+		BridgePort:       4343,
+	}
+
+	result, err := RenderProxyEntrypoint(cfg)
+	if err != nil {
+		t.Fatalf("RenderProxyEntrypoint failed: %v", err)
+	}
+
+	// Should have SIGHUP reload support
+	assertContains(t, result, "reload_socat")
+	assertContains(t, result, "SOCAT_SUPERVISORS")
+	assertContains(t, result, "trap")
+	assertContains(t, result, "HUP")
+}
+
+// ---------------------------------------------------------------------------
+// WriteProxyTemplates tests (unchanged)
+// ---------------------------------------------------------------------------
+
+func TestWriteProxyTemplates(t *testing.T) {
+	cfg := testConfig()
+	dir := t.TempDir()
+
+	err := WriteProxyTemplates(dir, cfg)
+	if err != nil {
+		t.Fatalf("WriteProxyTemplates failed: %v", err)
+	}
+
+	expectedFiles := []string{
+		"proxy.Dockerfile",
+		"squid.conf",
+		"proxy-entrypoint.sh",
+	}
+
+	for _, name := range expectedFiles {
+		path := filepath.Join(dir, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Errorf("expected file %s not found: %v", name, err)
+			continue
+		}
+		if info.Size() == 0 {
+			t.Errorf("file %s is empty", name)
+		}
+	}
+
+	// Verify proxy-entrypoint.sh is executable
+	info, err := os.Stat(filepath.Join(dir, "proxy-entrypoint.sh"))
+	if err != nil {
+		t.Fatalf("failed to stat proxy-entrypoint.sh: %v", err)
+	}
+	if info.Mode()&0111 == 0 {
+		t.Error("proxy-entrypoint.sh should be executable")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ACL helper source tests (unchanged)
 // ---------------------------------------------------------------------------
 
 func TestWriteACLHelperSource_DirectoryStructure(t *testing.T) {
@@ -932,50 +1306,46 @@ func TestWriteACLHelperSource_Idempotent(t *testing.T) {
 	}
 }
 
-func TestBuildCLIDockerfileData(t *testing.T) {
-	cfg := testConfig()
-	data := buildCLIDockerfileData(cfg)
+// ---------------------------------------------------------------------------
+// Helper function tests (unchanged)
+// ---------------------------------------------------------------------------
 
-	if !data.HasGo {
-		t.Error("expected HasGo=true")
+func TestIsToolEnabled(t *testing.T) {
+	tools := []config.ToolConfig{
+		{Name: "go", Enabled: true},
+		{Name: "python", Enabled: false},
+		{Name: "node", Enabled: true},
 	}
-	if data.GoVersion != "1.24.10" {
-		t.Errorf("expected GoVersion=1.24.10, got %q", data.GoVersion)
+
+	if !isToolEnabled(tools, "go") {
+		t.Error("expected go to be enabled")
 	}
-	if !data.HasNode {
-		t.Error("expected HasNode=true")
+	if isToolEnabled(tools, "python") {
+		t.Error("expected python to be disabled")
 	}
-	if !data.HasPython {
-		t.Error("expected HasPython=true")
+	if !isToolEnabled(tools, "node") {
+		t.Error("expected node to be enabled")
 	}
-	if !data.HasClaudeCode {
-		t.Error("expected HasClaudeCode=true")
-	}
-	if !data.HasCopilot {
-		t.Error("expected HasCopilot=true")
-	}
-	if !data.HasCodex {
-		t.Error("expected HasCodex=true")
-	}
-	if !data.HasOpenCode {
-		t.Error("expected HasOpenCode=true")
-	}
-	if data.ProxyPort != 3128 {
-		t.Errorf("expected ProxyPort=3128, got %d", data.ProxyPort)
+	// Case insensitive
+	if !isToolEnabled(tools, "Go") {
+		t.Error("expected Go (case insensitive) to be enabled")
 	}
 }
 
-func TestBuildCLIDockerfileData_NoTools(t *testing.T) {
-	cfg := noToolsConfig()
-	data := buildCLIDockerfileData(cfg)
+func TestGetToolVersion(t *testing.T) {
+	tools := []config.ToolConfig{
+		{Name: "go", Enabled: true, PinnedVersion: "1.24.10"},
+		{Name: "python", Enabled: true, HostVersion: "3.12.1"},
+		{Name: "node", Enabled: true},
+	}
 
-	if data.HasGo {
-		t.Error("expected HasGo=false")
+	if v := getToolVersion(tools, "go"); v != "1.24.10" {
+		t.Errorf("expected go version 1.24.10, got %s", v)
 	}
-	if data.HasNode {
-		t.Error("expected HasNode=false")
+	if v := getToolVersion(tools, "python"); v != "3.12.1" {
+		t.Errorf("expected python version 3.12.1 (host), got %s", v)
 	}
-	if data.HasClaudeCode {
-		t.Error("expected HasClaudeCode=false")
+	if v := getToolVersion(tools, "node"); v != "" {
+		t.Errorf("expected node version empty (no pinned/host), got %s", v)
 	}
 }

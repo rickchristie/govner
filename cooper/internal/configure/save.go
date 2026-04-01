@@ -117,7 +117,9 @@ func (m *saveModel) doSave() error {
 	m.doneMsgs = append(m.doneMsgs, fmt.Sprintf("Generated templates in %s", m.cooperDir))
 	m.doneMsgs = append(m.doneMsgs, "CA certificate ensured")
 	m.doneMsgs = append(m.doneMsgs, "")
-	m.doneMsgs = append(m.doneMsgs, "Configuration saved. Run 'cooper build' to rebuild images, then 'cooper up' to start.")
+	m.doneMsgs = append(m.doneMsgs, "Configuration saved. Run 'cooper build' to rebuild images.")
+	m.doneMsgs = append(m.doneMsgs, "  Base image: rebuilds only if programming tools changed.")
+	m.doneMsgs = append(m.doneMsgs, "  AI tool images: each tool rebuilds independently.")
 
 	return nil
 }
@@ -180,8 +182,9 @@ func (m *saveModel) view(width, height int) string {
 		{cooperPath + "/config.json", "configuration"},
 		{cooperPath + "/proxy/proxy.Dockerfile", "proxy image"},
 		{cooperPath + "/proxy/squid.conf", "proxy config"},
-		{cooperPath + "/cli/Dockerfile", "CLI container base image"},
-		{cooperPath + "/cli/entrypoint.sh", "CLI container entrypoint"},
+		{cooperPath + "/base/Dockerfile", "base image"},
+		{cooperPath + "/base/entrypoint.sh", "base entrypoint"},
+		{cooperPath + "/cli/<tool>/Dockerfile", "per-tool images"},
 	}
 	for _, f := range files {
 		content += fmt.Sprintf("   %s  %s\n",

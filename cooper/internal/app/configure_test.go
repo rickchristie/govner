@@ -211,10 +211,22 @@ func TestConfigureApp_Save(t *testing.T) {
 		t.Errorf("loaded config ProgrammingTools mismatch: %+v", loaded.ProgrammingTools)
 	}
 
-	// Check that CLI templates were written.
+	// Check that base templates were written.
+	baseDir := filepath.Join(cooperDir, "base")
+	for _, name := range []string{"Dockerfile", "entrypoint.sh", "doctor.sh"} {
+		path := filepath.Join(baseDir, name)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			t.Errorf("expected %s to exist after Save", path)
+		}
+	}
+
+	// Check that per-tool Dockerfiles were written for enabled tools.
 	cliDir := filepath.Join(cooperDir, "cli")
-	for _, name := range []string{"Dockerfile", "entrypoint.sh"} {
-		path := filepath.Join(cliDir, name)
+	for _, tool := range ca.Config().AITools {
+		if !tool.Enabled {
+			continue
+		}
+		path := filepath.Join(cliDir, tool.Name, "Dockerfile")
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			t.Errorf("expected %s to exist after Save", path)
 		}
@@ -222,7 +234,7 @@ func TestConfigureApp_Save(t *testing.T) {
 
 	// Check that proxy templates were written.
 	proxyDir := filepath.Join(cooperDir, "proxy")
-	for _, name := range []string{"proxy.Dockerfile", "squid.conf"} {
+	for _, name := range []string{"proxy.Dockerfile", "squid.conf", "proxy-entrypoint.sh"} {
 		path := filepath.Join(proxyDir, name)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			t.Errorf("expected %s to exist after Save", path)

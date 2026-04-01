@@ -51,7 +51,9 @@ type ProofContext struct {
 	Cfg          *config.Config
 	CooperDir    string
 	WorkspaceDir string
-	Barrel       string // barrel container name
+
+	// Per-tool barrel container names (populated during phaseContainer).
+	barrels map[string]string // tool name -> container name
 
 	// Infrastructure started by proof (cleaned up on teardown).
 	aclListener  *proxy.ACLListener
@@ -81,7 +83,7 @@ func Run(cfg *config.Config, cooperDir string) error {
 		Cfg:          cfg,
 		CooperDir:    cooperDir,
 		WorkspaceDir: workspaceDir,
-		Barrel:       docker.BarrelContainerName(workspaceDir),
+		barrels:      make(map[string]string),
 		startTime:    time.Now(),
 	}
 
@@ -155,8 +157,21 @@ func (ctx *ProofContext) phasePreflight() {
 		ctx.pass("CA certificate", caPath)
 	}
 
-	// Images built.
-	for _, img := range []string{docker.GetImageProxy(), docker.GetImageBarrel()} {
+	// Images built: proxy + base.
+	for _, img := range []string{docker.GetImageProxy(), docker.GetImageBase()} {
+		exists, err := docker.ImageExists(img)
+		if err != nil || !exists {
+			ctx.fail("Image: "+img, "Not found — run 'cooper build' first")
+		} else {
+			ctx.pass("Image: "+img, "exists")
+		}
+	}
+	// Per-tool images.
+	for _, t := range ctx.Cfg.AITools {
+		if !t.Enabled {
+			continue
+		}
+		img := docker.GetImageCLI(t.Name)
 		exists, err := docker.ImageExists(img)
 		if err != nil || !exists {
 			ctx.fail("Image: "+img, "Not found — run 'cooper build' first")
@@ -171,14 +186,6 @@ func (ctx *ProofContext) phasePreflight() {
 		ctx.fail("No cooper-up running", "cooper-proxy is already running — stop it first with 'cooper up' then quit, or 'docker rm -f cooper-proxy'")
 	} else {
 		ctx.pass("No cooper-up running", "clean slate")
-	}
-
-	// No barrel running for this workspace.
-	barrelRunning, _ := docker.IsBarrelRunning(ctx.Barrel)
-	if barrelRunning {
-		ctx.fail("No barrel running", fmt.Sprintf("%s is already running — stop it first", ctx.Barrel))
-	} else {
-		ctx.pass("No barrel running", "clean slate")
 	}
 }
 
@@ -247,50 +254,75 @@ func (ctx *ProofContext) phaseStartup() {
 // ---------------------------------------------------------------------------
 
 func (ctx *ProofContext) phaseContainer() {
-	ctx.printPhase("Phase 3: Container")
+	ctx.printPhase("Phase 3: Per-Tool Containers")
 
-	// Start barrel.
-	if err := docker.StartBarrel(ctx.Cfg, ctx.WorkspaceDir, ctx.CooperDir); err != nil {
-		ctx.fail("Start barrel", err.Error())
-		return
-	}
-	ctx.pass("Start barrel", ctx.Barrel)
-
-	// Wait for barrel to be ready.
-	ready := false
-	for i := 0; i < 30; i++ {
-		if running, _ := docker.IsBarrelRunning(ctx.Barrel); running {
-			ready = true
-			break
+	// Start a barrel for each enabled AI tool.
+	for _, t := range ctx.Cfg.AITools {
+		if !t.Enabled {
+			continue
 		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	if !ready {
-		ctx.fail("Barrel ready", "container did not start within 15s")
-		return
-	}
 
-	// DNS resolution.
-	out, err := dockerExec(ctx.Barrel, "getent hosts cooper-proxy")
-	if err != nil {
-		ctx.fail("DNS: cooper-proxy", fmt.Sprintf("cannot resolve — %s", truncate(out, 100)))
-		return
-	}
-	ip := strings.Fields(out)[0]
-	ctx.pass("DNS: cooper-proxy", fmt.Sprintf("resolves to %s", ip))
+		barrelName := docker.BarrelContainerName(ctx.WorkspaceDir, t.Name)
+		ctx.barrels[t.Name] = barrelName
 
-	// Proxy connectivity.
-	proxyAddr := fmt.Sprintf("cooper-proxy:%d", ctx.Cfg.ProxyPort)
-	shellCmd := fmt.Sprintf(
-		`curl -so /dev/null -w '%%{http_code}' --connect-timeout 5 -x http://%s http://connectivity-check.invalid 2>&1 || true`,
-		proxyAddr,
-	)
-	out, _ = dockerExec(ctx.Barrel, shellCmd)
-	if out != "" && out != "000" {
-		ctx.pass("Proxy reachable", fmt.Sprintf("%s (HTTP %s)", proxyAddr, out))
-	} else {
-		ctx.fail("Proxy reachable", fmt.Sprintf("%s not responding", proxyAddr))
+		if err := docker.StartBarrel(ctx.Cfg, ctx.WorkspaceDir, ctx.CooperDir, t.Name); err != nil {
+			ctx.fail(fmt.Sprintf("Start barrel (%s)", t.Name), err.Error())
+			continue
+		}
+		ctx.pass(fmt.Sprintf("Start barrel (%s)", t.Name), barrelName)
+
+		// Wait for barrel to be ready.
+		ready := false
+		for i := 0; i < 30; i++ {
+			if running, _ := docker.IsBarrelRunning(barrelName); running {
+				ready = true
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if !ready {
+			ctx.fail(fmt.Sprintf("Barrel ready (%s)", t.Name), "container did not start within 15s")
+			continue
+		}
+
+		// DNS resolution.
+		out, err := dockerExec(barrelName, "getent hosts cooper-proxy")
+		if err != nil {
+			ctx.fail(fmt.Sprintf("DNS: cooper-proxy (%s)", t.Name), fmt.Sprintf("cannot resolve — %s", truncate(out, 100)))
+			continue
+		}
+		ip := strings.Fields(out)[0]
+		ctx.pass(fmt.Sprintf("DNS: cooper-proxy (%s)", t.Name), fmt.Sprintf("resolves to %s", ip))
+
+		// Proxy connectivity.
+		proxyAddr := fmt.Sprintf("cooper-proxy:%d", ctx.Cfg.ProxyPort)
+		shellCmd := fmt.Sprintf(
+			`curl -so /dev/null -w '%%{http_code}' --connect-timeout 5 -x http://%s http://connectivity-check.invalid 2>&1 || true`,
+			proxyAddr,
+		)
+		out, _ = dockerExec(barrelName, shellCmd)
+		if out != "" && out != "000" {
+			ctx.pass(fmt.Sprintf("Proxy reachable (%s)", t.Name), fmt.Sprintf("%s (HTTP %s)", proxyAddr, out))
+		} else {
+			ctx.fail(fmt.Sprintf("Proxy reachable (%s)", t.Name), fmt.Sprintf("%s not responding", proxyAddr))
+		}
+
+		// Verify COOPER_CLI_TOOL env var.
+		out, _ = dockerExec(barrelName, "echo $COOPER_CLI_TOOL")
+		if strings.TrimSpace(out) == t.Name {
+			ctx.pass(fmt.Sprintf("COOPER_CLI_TOOL (%s)", t.Name), t.Name)
+		} else {
+			ctx.fail(fmt.Sprintf("COOPER_CLI_TOOL (%s)", t.Name), fmt.Sprintf("expected %s, got %s", t.Name, out))
+		}
 	}
+}
+
+// firstBarrel returns the name of any running barrel for tests that only need one.
+func (ctx *ProofContext) firstBarrel() string {
+	for _, name := range ctx.barrels {
+		return name
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +346,7 @@ func (ctx *ProofContext) phaseNetworkSecurity() {
 		`curl -so /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s %s 2>&1`,
 		proxyAddr, sslTarget,
 	)
-	out, err := dockerExec(ctx.Barrel, shellCmd)
+	out, err := dockerExec(ctx.firstBarrel(), shellCmd)
 	if err == nil && out != "" && out != "000" {
 		ctx.pass("SSL bump (CA chain)", fmt.Sprintf("%s -> HTTP %s", sslTarget, out))
 	} else {
@@ -334,7 +366,7 @@ func (ctx *ProofContext) phaseNetworkSecurity() {
 			`curl -so /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s https://%s 2>&1`,
 			proxyAddr, domain,
 		)
-		out, _ := dockerExec(ctx.Barrel, shellCmd)
+		out, _ := dockerExec(ctx.firstBarrel(), shellCmd)
 		code := 0
 		fmt.Sscanf(out, "%d", &code)
 		if code >= 200 && code < 400 {
@@ -350,7 +382,7 @@ func (ctx *ProofContext) phaseNetworkSecurity() {
 
 	// Direct egress blocked (bypass proxy).
 	shellCmd = `curl -so /dev/null --noproxy '*' --connect-timeout 5 https://example.com 2>&1`
-	out, err = dockerExec(ctx.Barrel, shellCmd)
+	out, err = dockerExec(ctx.firstBarrel(), shellCmd)
 	if err != nil {
 		ctx.pass("Direct egress blocked", "no route from internal network")
 	} else {
@@ -365,7 +397,13 @@ func (ctx *ProofContext) phaseNetworkSecurity() {
 func (ctx *ProofContext) phaseTools() {
 	ctx.printPhase("Phase 5: Tools")
 
-	// Programming tools.
+	// Programming tools — check in the first available barrel (base layers are shared).
+	barrel := ctx.firstBarrel()
+	if barrel == "" {
+		ctx.fail("Programming tools", "no barrel running")
+		return
+	}
+
 	progCmds := map[string]string{
 		"go":     "go version",
 		"node":   "node --version",
@@ -379,7 +417,7 @@ func (ctx *ProofContext) phaseTools() {
 		if !ok {
 			cmd = t.Name + " --version"
 		}
-		out, err := dockerExec(ctx.Barrel, cmd)
+		out, err := dockerExec(barrel, cmd)
 		if err == nil && out != "" {
 			ctx.pass(t.Name, truncate(out, 80))
 		} else {
@@ -387,7 +425,7 @@ func (ctx *ProofContext) phaseTools() {
 		}
 	}
 
-	// AI tool installations.
+	// AI tool installations — check in each tool's own barrel.
 	aiCmds := map[string]string{
 		"claude":   "claude --version",
 		"copilot":  "copilot --version 2>/dev/null || github-copilot-cli --version",
@@ -398,11 +436,16 @@ func (ctx *ProofContext) phaseTools() {
 		if !t.Enabled {
 			continue
 		}
+		toolBarrel, ok := ctx.barrels[t.Name]
+		if !ok {
+			ctx.fail(t.Name, "no barrel running for this tool")
+			continue
+		}
 		cmd, ok := aiCmds[t.Name]
 		if !ok {
 			cmd = t.Name + " --version"
 		}
-		out, err := dockerExec(ctx.Barrel, cmd)
+		out, err := dockerExec(toolBarrel, cmd)
 		if err == nil && out != "" && !strings.Contains(out, "not found") {
 			ctx.pass(t.Name, truncate(out, 80))
 		} else {
@@ -453,7 +496,12 @@ func (ctx *ProofContext) phaseAICLI() {
 			continue
 		}
 
-		out, err := dockerExecWithEnv(ctx.Barrel, cmd, envArgs)
+		toolBarrel, ok := ctx.barrels[t.Name]
+		if !ok {
+			ctx.warn(name, "no barrel running for this tool")
+			continue
+		}
+		out, err := dockerExecWithEnv(toolBarrel, cmd, envArgs)
 		elapsed := time.Since(start).Round(100 * time.Millisecond)
 
 		switch t.Name {
@@ -499,7 +547,7 @@ func (ctx *ProofContext) phasePortForwarding() {
 		`curl -s --connect-timeout 5 http://localhost:%d/health 2>&1`,
 		bridgePort,
 	)
-	out, err := dockerExec(ctx.Barrel, shellCmd)
+	out, err := dockerExec(ctx.firstBarrel(), shellCmd)
 	if err == nil && strings.Contains(out, "ok") {
 		ctx.pass("Bridge /health", fmt.Sprintf("port %d -> {\"status\":\"ok\"}", bridgePort))
 	} else {
@@ -528,7 +576,7 @@ func (ctx *ProofContext) phasePortForwarding() {
 				name = fmt.Sprintf("Port %d (%s)", port, rule.Description)
 			}
 			shellCmd := fmt.Sprintf(`bash -c 'echo > /dev/tcp/localhost/%d' 2>&1`, port)
-			_, err := dockerExec(ctx.Barrel, shellCmd)
+			_, err := dockerExec(ctx.firstBarrel(), shellCmd)
 			if err == nil {
 				ctx.pass(name, "connected")
 			} else {
@@ -557,10 +605,12 @@ func (ctx *ProofContext) phaseTeardown() {
 		ctx.info("Bridge server", "stopped")
 	}
 
-	// Stop barrel.
-	if running, _ := docker.IsBarrelRunning(ctx.Barrel); running {
-		docker.StopBarrel(ctx.Barrel)
-		ctx.info("Barrel", "stopped")
+	// Stop all barrels.
+	for tool, name := range ctx.barrels {
+		if running, _ := docker.IsBarrelRunning(name); running {
+			docker.StopBarrel(name)
+			ctx.info(fmt.Sprintf("Barrel (%s)", tool), "stopped")
+		}
 	}
 
 	// Stop proxy.
@@ -631,7 +681,7 @@ func (ctx *ProofContext) printSummary() {
 		fmt.Printf("  %sDocker:%s %s\n", gray, reset, strings.TrimSpace(string(v)))
 	}
 	fmt.Printf("  %sConfig:%s %s\n", gray, reset, filepath.Join(ctx.CooperDir, "config.json"))
-	fmt.Printf("  %sImages:%s %s, %s\n", gray, reset, docker.GetImageProxy(), docker.GetImageBarrel())
+	fmt.Printf("  %sImages:%s %s, %s\n", gray, reset, docker.GetImageProxy(), docker.GetImageBase())
 	fmt.Println()
 }
 
