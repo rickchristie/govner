@@ -12,6 +12,15 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
+// portModalResult is returned by portModal.update.
+type portModalResult int
+
+const (
+	portModalNone      portModalResult = iota
+	portModalSaved                     // user confirmed — savedRule is populated
+	portModalCancelled                 // user cancelled
+)
+
 // portModal manages the add/edit port forwarding modal.
 type portModal struct {
 	active             bool
@@ -23,6 +32,7 @@ type portModal struct {
 	isRange            bool
 	focusField         int // 0=container, 1=host, 2=desc, 3=range toggle, 4=confirm, 5=cancel
 	err                string
+	savedRule          config.PortForwardRule // populated on portModalSaved
 }
 
 func (m *portModal) open(editing bool, index int, rule config.PortForwardRule) {
@@ -54,19 +64,22 @@ func (m *portModal) open(editing bool, index int, rule config.PortForwardRule) {
 	}
 }
 
-func (m *whitelistModel) updatePortModal(msg tea.Msg) whitelistResult {
-	pm := &m.portModal
+func (pm *portModal) close() {
+	pm.active = false
+	pm.containerPortInput.Blur()
+	pm.hostPortInput.Blur()
+	pm.descInput.Blur()
+}
+
+func (pm *portModal) update(msg tea.Msg) portModalResult {
 	const portModalFields = 6 // 0=container, 1=host, 2=desc, 3=range toggle, 4=confirm, 5=cancel
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
-			pm.active = false
-			pm.containerPortInput.Blur()
-			pm.hostPortInput.Blur()
-			pm.descInput.Blur()
-			return whitelistNone
+			pm.close()
+			return portModalCancelled
 
 		case "down":
 			pm.focusField = (pm.focusField + 1) % portModalFields
@@ -81,7 +94,7 @@ func (m *whitelistModel) updatePortModal(msg tea.Msg) whitelistResult {
 			case 2:
 				pm.descInput.Focus()
 			}
-			return whitelistNone
+			return portModalNone
 
 		case "up":
 			pm.focusField = (pm.focusField - 1 + portModalFields) % portModalFields
@@ -96,39 +109,29 @@ func (m *whitelistModel) updatePortModal(msg tea.Msg) whitelistResult {
 			case 2:
 				pm.descInput.Focus()
 			}
-			return whitelistNone
+			return portModalNone
 
 		case " ":
 			if pm.focusField == 3 {
 				pm.isRange = !pm.isRange
-				return whitelistNone
+				return portModalNone
 			}
 
 		case "enter":
 			// Cancel button.
 			if pm.focusField == 5 {
-				pm.active = false
-				pm.containerPortInput.Blur()
-				pm.hostPortInput.Blur()
-				pm.descInput.Blur()
-				return whitelistNone
+				pm.close()
+				return portModalCancelled
 			}
 			// Confirm button or any other field.
 			rule, err := pm.parseRule()
 			if err != "" {
 				pm.err = err
-				return whitelistNone
+				return portModalNone
 			}
-			if pm.editing {
-				m.portRules[pm.editIndex] = rule
-			} else {
-				m.portRules = append(m.portRules, rule)
-			}
-			pm.active = false
-			pm.containerPortInput.Blur()
-			pm.hostPortInput.Blur()
-			pm.descInput.Blur()
-			return whitelistNone
+			pm.savedRule = rule
+			pm.close()
+			return portModalSaved
 		}
 
 		// Route keys to the focused input.
@@ -141,7 +144,7 @@ func (m *whitelistModel) updatePortModal(msg tea.Msg) whitelistResult {
 			pm.descInput.handleKey(msg.String())
 		}
 	}
-	return whitelistNone
+	return portModalNone
 }
 
 // parseRule validates and parses the modal inputs into a PortForwardRule.

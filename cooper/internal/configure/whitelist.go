@@ -1,9 +1,6 @@
 package configure
 
 import (
-	"fmt"
-	"strings"
-
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -20,14 +17,6 @@ const (
 	whitelistBack
 )
 
-// whitelistSubTab identifies the active sub-tab.
-type whitelistSubTab int
-
-const (
-	subTabDomains whitelistSubTab = iota
-	subTabPorts
-)
-
 // domainModal tracks the add/edit domain modal state.
 type domainModal struct {
 	active            bool
@@ -38,29 +27,21 @@ type domainModal struct {
 	focusField        int // 0 = domain, 1 = subdomain toggle, 2 = confirm, 3 = cancel
 }
 
-// whitelistModel manages the Proxy Whitelist screen, including both
-// domain whitelist and port forwarding sub-tabs.
+// whitelistModel manages the Proxy Whitelist screen (domains only).
 type whitelistModel struct {
-	subTab whitelistSubTab
-
 	// Domain whitelist.
 	defaultDomains []config.DomainEntry
 	userDomains    []config.DomainEntry
 	domainCursor   int
 	modal          domainModal
 
-	// Port forwarding.
-	portRules  []config.PortForwardRule
-	portCursor int
-	portModal  portModal
-
 	// Scroll state for layout.
-	scrollOffset     int
-	lastHeight       int // cached terminal height for scroll calculations in Update
-	lastMaxScroll    int // cached max scroll offset from last render
+	scrollOffset  int
+	lastHeight    int
+	lastMaxScroll int
 }
 
-func newWhitelistModel(domains []config.DomainEntry, rules []config.PortForwardRule) whitelistModel {
+func newWhitelistModel(domains []config.DomainEntry) whitelistModel {
 	var defaultDomains, userDomains []config.DomainEntry
 	for _, d := range domains {
 		if d.Source == "default" {
@@ -73,37 +54,17 @@ func newWhitelistModel(domains []config.DomainEntry, rules []config.PortForwardR
 	return whitelistModel{
 		defaultDomains: defaultDomains,
 		userDomains:    userDomains,
-		portRules:      append([]config.PortForwardRule{}, rules...),
 		modal: domainModal{
 			domainInput: newTextInput("e.g., api.example.com", 40),
-		},
-		portModal: portModal{
-			containerPortInput: newTextInput("e.g., 5432", 20),
-			hostPortInput:      newTextInput("e.g., 5432", 20),
-			descInput:          newTextInput("e.g., PostgreSQL", 30),
 		},
 	}
 }
 
 func (m *whitelistModel) update(msg tea.Msg) whitelistResult {
-	// Handle modal first if active.
 	if m.modal.active {
 		return m.updateDomainModal(msg)
 	}
-	if m.portModal.active {
-		return m.updatePortModal(msg)
-	}
 
-	switch m.subTab {
-	case subTabDomains:
-		return m.updateDomains(msg)
-	case subTabPorts:
-		return m.updatePorts(msg)
-	}
-	return whitelistNone
-}
-
-func (m *whitelistModel) updateDomains(msg tea.Msg) whitelistResult {
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
 		handleMouseScroll(msg, &m.scrollOffset, m.lastMaxScroll)
@@ -158,9 +119,6 @@ func (m *whitelistModel) updateDomains(msg tea.Msg) whitelistResult {
 			if m.scrollOffset > m.lastMaxScroll {
 				m.scrollOffset = m.lastMaxScroll
 			}
-		case "tab":
-			m.subTab = subTabPorts
-			m.scrollOffset = 0
 		case "esc":
 			return whitelistBack
 		}
@@ -233,107 +191,20 @@ func (m *whitelistModel) updateDomainModal(msg tea.Msg) whitelistResult {
 	return whitelistNone
 }
 
-func (m *whitelistModel) updatePorts(msg tea.Msg) whitelistResult {
-	switch msg := msg.(type) {
-	case tea.MouseMsg:
-		handleMouseScroll(msg, &m.scrollOffset, m.lastMaxScroll)
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "up", "k":
-			if len(m.portRules) > 0 && m.portCursor > 0 {
-				m.portCursor--
-				ensureLineVisible(&m.scrollOffset, 4+m.portCursor, m.lastHeight, 5, 1)
-			} else if m.scrollOffset > 0 {
-				m.scrollOffset--
-			}
-		case "down", "j":
-			if len(m.portRules) > 0 && m.portCursor < len(m.portRules)-1 {
-				m.portCursor++
-				ensureLineVisible(&m.scrollOffset, 4+m.portCursor, m.lastHeight, 5, 1)
-			} else if m.scrollOffset < m.lastMaxScroll {
-				m.scrollOffset++
-			}
-		case "n":
-			m.portModal.open(false, -1, config.PortForwardRule{})
-		case "e", "enter":
-			if len(m.portRules) > 0 {
-				m.portModal.open(true, m.portCursor, m.portRules[m.portCursor])
-			}
-		case "x":
-			if len(m.portRules) > 0 && m.portCursor < len(m.portRules) {
-				m.portRules = append(m.portRules[:m.portCursor], m.portRules[m.portCursor+1:]...)
-				if m.portCursor >= len(m.portRules) && m.portCursor > 0 {
-					m.portCursor--
-				}
-			}
-		case "pgup", "ctrl+u":
-			m.scrollOffset -= 10
-			if m.scrollOffset < 0 {
-				m.scrollOffset = 0
-			}
-		case "pgdown", "ctrl+d":
-			m.scrollOffset += 10
-			if m.scrollOffset > m.lastMaxScroll {
-				m.scrollOffset = m.lastMaxScroll
-			}
-		case "tab":
-			m.subTab = subTabDomains
-			m.scrollOffset = 0
-		case "esc":
-			return whitelistBack
-		}
-	}
-	return whitelistNone
-}
-
 func (m *whitelistModel) view(width, height int) string {
 	m.lastHeight = height
 	breadcrumb := breadcrumbStyle().Render(theme.BarrelEmoji+" Configure > ") +
 		lipgloss.NewStyle().Foreground(theme.ColorAmber).Bold(true).Render("Proxy Whitelist")
 
-	// Sub-tab bar.
-	domainTab := lipgloss.NewStyle().Foreground(theme.ColorDusty).Render("Domains")
-	portTab := lipgloss.NewStyle().Foreground(theme.ColorDusty).Render("Port Forwarding")
-	if m.subTab == subTabDomains {
-		domainTab = lipgloss.NewStyle().Foreground(theme.ColorVerdigris).Bold(true).Underline(true).Render("Domains")
-	} else {
-		portTab = lipgloss.NewStyle().Foreground(theme.ColorVerdigris).Bold(true).Underline(true).Render("Port Forwarding")
-	}
+	header := breadcrumb
 
-	// Header: breadcrumb, separator, tabs (active tab has underline decoration — single line, no gap).
-	headerSep := lipgloss.NewStyle().Foreground(theme.ColorOakLight).Render(strings.Repeat("─", width))
-	header := breadcrumb + "\n" +
-		headerSep + "\n" +
-		domainTab + "  " + portTab + "\n"
-
-	var content string
-	var footer string
-
-	switch m.subTab {
-	case subTabDomains:
-		content, footer = m.viewDomains(width)
-	case subTabPorts:
-		content, footer = m.viewPorts(width)
-	}
+	content, footer := m.viewDomains(width)
 
 	ly := newLayout(header, content, footer, width, height)
-	ly.hideTopSep = true // tab underlines replace the top separator
 	ly.scrollOffset = m.scrollOffset
-	// Auto-scroll to keep cursor visible based on active sub-tab.
-	switch m.subTab {
-	case subTabDomains:
-		if len(m.userDomains) > 0 {
-			// User domain rows start after: default header (1) + default separator (1)
-			// + default domain lines + blank line (1) + custom header (1) + custom separator (1).
-			cursorLine := 5 + len(m.defaultDomains) + m.domainCursor
-			ly.EnsureVisible(cursorLine)
-		}
-	case subTabPorts:
-		if len(m.portRules) > 0 {
-			// Port rows start after: description (1) + blank (1) + header (1) + separator (1).
-			cursorLine := 4 + m.portCursor
-			ly.EnsureVisible(cursorLine)
-		}
+	if len(m.userDomains) > 0 {
+		cursorLine := 5 + len(m.defaultDomains) + m.domainCursor
+		ly.EnsureVisible(cursorLine)
 	}
 	s := ly.Render()
 	m.scrollOffset = ly.scrollOffset
@@ -342,9 +213,6 @@ func (m *whitelistModel) view(width, height int) string {
 	// Overlay modal if active.
 	if m.modal.active {
 		s = overlayModal(s, m.viewDomainModal(width), width, height)
-	}
-	if m.portModal.active {
-		s = overlayModal(s, m.portModal.view(width), width, height)
 	}
 
 	return s
@@ -448,7 +316,7 @@ func (m *whitelistModel) viewDomains(width int) (string, string) {
 		" For ad-hoc access, use the Monitor tab in cooper up to approve\n"+
 		" individual requests in real-time.", width)
 
-	footer := " " + helpBar("[n New]", "[e Edit]", "[x Delete]", "[Tab Ports]", "[Esc Back]")
+	footer := " " + helpBar("[n New]", "[e Edit]", "[x Delete]", "[Esc Back]")
 	return content, footer
 }
 
@@ -508,76 +376,9 @@ func (m *whitelistModel) viewDomainModal(width int) string {
 	return boxStyle.Render(inner)
 }
 
-func (m *whitelistModel) viewPorts(width int) (string, string) {
-	var content string
-
-	content += lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(
-		" Port forwarding routes traffic from CLI container to host services.") + "\n\n"
-
-	// Build table for port forwarding rules.
-	tbl := tableutil.NewTable("CLI PORT", "HOST PORT", "DESCRIPTION")
-	tbl.SetHeaderStyle(theme.ColorDusty, true)
-	sepColor := theme.ColorOakLight
-	tbl.SetSeparator(theme.BorderH, &sepColor)
-
-	for _, r := range m.portRules {
-		cliPort := fmt.Sprintf("%d", r.ContainerPort)
-		hostPort := fmt.Sprintf("%d", r.HostPort)
-		if r.IsRange {
-			cliPort = fmt.Sprintf("%d-%d", r.ContainerPort, r.RangeEnd)
-			hostPort = fmt.Sprintf("%d-%d", r.HostPort, r.HostPort+(r.RangeEnd-r.ContainerPort))
-		}
-
-		tbl.AddRow(
-			lipgloss.NewStyle().Foreground(theme.ColorParchment).Render(cliPort),
-			lipgloss.NewStyle().Foreground(theme.ColorParchment).Render(hostPort),
-			lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(r.Description))
-	}
-
-	// Render header and separator with same indent as data rows.
-	rowIndent := "   " // 3 spaces — matches non-selected row prefix.
-	content += rowIndent + tbl.RenderHeader() + "\n"
-	content += rowIndent + tbl.RenderSeparator(0) + "\n"
-
-	if len(m.portRules) == 0 {
-		content += rowIndent + lipgloss.NewStyle().Foreground(theme.ColorFaded).Italic(true).Render("(no rules configured)") + "\n"
-	}
-
-	// Render each row with selection arrow.
-	_, rows := tbl.RenderRows(0)
-	for i, row := range rows {
-		prefix := rowIndent
-		if i == m.portCursor {
-			prefix = " " + lipgloss.NewStyle().Foreground(theme.ColorAmber).Bold(true).Render(theme.IconArrowRight) + " "
-		}
-
-		line := prefix + row
-		if i == m.portCursor {
-			line = lipgloss.NewStyle().Background(theme.ColorOakMid).Render(line)
-		}
-		content += line + "\n"
-	}
-
-	content += "\n"
-	content += infoBox(" "+theme.IconWarn+" Host services must bind to 0.0.0.0 or the Docker gateway IP to\n"+
-		" be reachable from containers. Services bound to 127.0.0.1 only will\n"+
-		" NOT be accessible through port forwarding.\n\n"+
-		" Forwarding uses a two-hop relay:\n"+
-		" CLI container "+theme.IconArrowRight+" cooper-proxy "+theme.IconArrowRight+" host machine", width)
-
-	footer := " " + helpBar("[n New]", "[e Edit]", "[x Delete]", "[Tab Domains]", "[Esc Back]")
-	return content, footer
-}
-
 func (m *whitelistModel) toDomainEntries() []config.DomainEntry {
 	result := make([]config.DomainEntry, 0, len(m.defaultDomains)+len(m.userDomains))
 	result = append(result, m.defaultDomains...)
 	result = append(result, m.userDomains...)
-	return result
-}
-
-func (m *whitelistModel) toPortForwardRules() []config.PortForwardRule {
-	result := make([]config.PortForwardRule, len(m.portRules))
-	copy(result, m.portRules)
 	return result
 }

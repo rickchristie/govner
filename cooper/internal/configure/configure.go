@@ -25,6 +25,7 @@ const (
 	ScreenProgramming
 	ScreenAICLI
 	ScreenWhitelist
+	ScreenPortForward
 	ScreenProxy
 	ScreenSave
 )
@@ -49,6 +50,7 @@ type model struct {
 	programming programmingModel
 	aicli       aicliModel
 	whitelist   whitelistModel
+	portForward portFwdModel
 	proxySetup  proxyModel
 	save        saveModel
 }
@@ -86,8 +88,10 @@ func checkDocker() error {
 type RunResult struct {
 	// Saved is true if the user saved the configuration.
 	Saved bool
-	// BuildRequested is true if the user chose "Save & Build".
+	// BuildRequested is true if the user chose "Save & Build" or "Save & Clean Build".
 	BuildRequested bool
+	// CleanBuild is true if the user chose "Save & Clean Build" (no Docker cache).
+	CleanBuild bool
 }
 
 // Run is the entry point called from main.go. It accepts a ConfigureApp
@@ -115,8 +119,13 @@ func Run(ca *app.ConfigureApp) (RunResult, error) {
 	if fm, ok := finalModel.(*model); ok && fm.save.saved {
 		result.Saved = true
 		result.BuildRequested = fm.save.buildRequested
+		result.CleanBuild = fm.save.cleanBuildRequested
 		if fm.save.buildRequested {
-			fmt.Fprintln(os.Stderr, "\nConfiguration saved. Starting build...")
+			if fm.save.cleanBuildRequested {
+				fmt.Fprintln(os.Stderr, "\nConfiguration saved. Starting clean build (no cache)...")
+			} else {
+				fmt.Fprintln(os.Stderr, "\nConfiguration saved. Starting build...")
+			}
 		} else {
 			fmt.Fprintln(os.Stderr, "\nConfiguration saved.")
 		}
@@ -142,7 +151,8 @@ func newModel(cfg *config.Config, cooperDir string, ca *app.ConfigureApp, existi
 	m.welcome = newWelcomeModel(existing)
 	m.programming = newProgrammingModel(cfg.ProgrammingTools)
 	m.aicli = newAICLIModel(cfg.AITools)
-	m.whitelist = newWhitelistModel(cfg.WhitelistedDomains, cfg.PortForwardRules)
+	m.whitelist = newWhitelistModel(cfg.WhitelistedDomains)
+	m.portForward = newPortFwdModel(cfg.PortForwardRules)
 	m.proxySetup = newProxyModel(cfg.ProxyPort, cfg.BridgePort)
 	m.save = newSaveModel(cfg, cooperDir, configPath, ca)
 	return m
@@ -201,6 +211,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateAICLI(msg)
 	case ScreenWhitelist:
 		return m.updateWhitelist(msg)
+	case ScreenPortForward:
+		return m.updatePortForward(msg)
 	case ScreenProxy:
 		return m.updateProxy(msg)
 	case ScreenSave:
@@ -223,7 +235,8 @@ func (m *model) isTextInputActive() bool {
 		if m.whitelist.modal.active {
 			return true
 		}
-		if m.whitelist.portModal.active {
+	case ScreenPortForward:
+		if m.portForward.portModal.active {
 			return true
 		}
 	case ScreenProxy:
@@ -245,6 +258,8 @@ func (m *model) View() string {
 		content = m.aicli.view(m.width, m.height)
 	case ScreenWhitelist:
 		content = m.whitelist.view(m.width, m.height)
+	case ScreenPortForward:
+		content = m.portForward.view(m.width, m.height)
 	case ScreenProxy:
 		content = m.proxySetup.view(m.width, m.height)
 	case ScreenSave:
@@ -298,7 +313,7 @@ func (m *model) syncConfigFromSubModels() {
 	m.cfg.ProgrammingTools = m.programming.toToolConfigs()
 	m.cfg.AITools = m.aicli.toToolConfigs()
 	m.cfg.WhitelistedDomains = m.whitelist.toDomainEntries()
-	m.cfg.PortForwardRules = m.whitelist.toPortForwardRules()
+	m.cfg.PortForwardRules = m.portForward.toPortForwardRules()
 	m.cfg.ProxyPort = m.proxySetup.proxyPort
 	m.cfg.BridgePort = m.proxySetup.bridgePort
 }
@@ -329,8 +344,10 @@ func (m *model) updateWelcome(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case 2:
 			m.navigateTo(ScreenWhitelist)
 		case 3:
-			m.navigateTo(ScreenProxy)
+			m.navigateTo(ScreenPortForward)
 		case 4:
+			m.navigateTo(ScreenProxy)
+		case 5:
 			m.navigateTo(ScreenSave)
 		}
 	}
@@ -356,6 +373,14 @@ func (m *model) updateAICLI(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) updateWhitelist(msg tea.Msg) (tea.Model, tea.Cmd) {
 	result := m.whitelist.update(msg)
 	if result == whitelistBack {
+		m.navigateTo(ScreenWelcome)
+	}
+	return m, nil
+}
+
+func (m *model) updatePortForward(msg tea.Msg) (tea.Model, tea.Cmd) {
+	result := m.portForward.update(msg)
+	if result == portFwdBack {
 		m.navigateTo(ScreenWelcome)
 	}
 	return m, nil
@@ -405,7 +430,8 @@ func newWelcomeModel(existing bool) welcomeModel {
 		items: []welcomeItem{
 			{label: "Programming Tools", desc: "Go, Node.js, Python"},
 			{label: "AI CLI Tools", desc: "Claude Code, Copilot, Codex, OpenCode"},
-			{label: "Proxy Whitelist", desc: "Domain whitelist, port forwarding"},
+			{label: "Proxy Whitelist", desc: "Domain whitelist for network access"},
+			{label: "Port Forwarding to Host", desc: "Route container ports to host services"},
 			{label: "Proxy Settings", desc: "Proxy port, bridge port"},
 			{label: "Save & Build", desc: "Write config, build images"},
 		},
@@ -440,6 +466,9 @@ func (w *welcomeModel) update(msg tea.Msg) welcomeResult {
 			return welcomeSelect
 		case "5":
 			w.cursor = 4
+			return welcomeSelect
+		case "6":
+			w.cursor = 5
 			return welcomeSelect
 		}
 	}

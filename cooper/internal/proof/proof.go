@@ -90,7 +90,7 @@ func Run(cfg *config.Config, cooperDir string) error {
 	// Print header.
 	fmt.Println()
 	fmt.Printf("  %s%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n", amber, bold, reset)
-	fmt.Printf("  %s🥃 C O O P E R   P R O O F%s\n", bold, reset)
+	fmt.Printf("  %s🥃 c o o p e r   p r o o f%s\n", bold, reset)
 	fmt.Printf("  %sFull lifecycle integration test%s\n", gray, reset)
 	fmt.Printf("  %s%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n", amber, bold, reset)
 	fmt.Println()

@@ -184,15 +184,15 @@ start_socat_from_config
 # ============================================================================
 # WELCOME BANNER (interactive bash sessions only)
 # ============================================================================
-if ! grep -q "Cooper: Welcome v2" /home/user/.bashrc 2>/dev/null; then
+if ! grep -q "Cooper: Welcome v3" /home/user/.bashrc 2>/dev/null; then
     cat >> /home/user/.bashrc << 'BANNER'
 
-# Cooper: Welcome v2
+# Cooper: Welcome v3
 if [[ $- == *i* ]]; then
     echo ""
     echo -e "  \033[38;5;130m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
     echo ""
-    echo -e "    \033[1;38;5;214m🥃  C O O P E R\033[0m"
+    echo -e "    \033[1;38;5;214m🥃  c o o p e r\033[0m"
     echo -e "    \033[38;5;223mBarrel-proof containers for undiluted AI\033[0m"
     echo ""
     echo -e "    \033[38;5;108m◆\033[0m Network-isolated    \033[38;5;108m◆\033[0m SSL-inspected"
@@ -200,10 +200,29 @@ if [[ $- == *i* ]]; then
     echo ""
     echo -e "  \033[38;5;130m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
     echo ""
+    echo -e "    \033[38;5;245mYou are inside a network-isolated container.\033[0m"
     echo -e "    \033[38;5;245mInstall deps on the host, not inside the barrel.\033[0m"
     echo ""
 fi
 BANNER
+fi
+
+# ============================================================================
+# AUTO-START TOOL (one-shot, written by cooper cli)
+# ============================================================================
+if ! grep -q "Cooper: Autostart" /home/user/.bashrc 2>/dev/null; then
+    cat >> /home/user/.bashrc << 'AUTOSTART'
+
+# Cooper: Autostart — run tool on first interactive session, then remove marker
+if [[ $- == *i* ]] && [ -f /tmp/.cooper-autostart ]; then
+    _cooper_tool=$(cat /tmp/.cooper-autostart)
+    rm -f /tmp/.cooper-autostart
+    if [ -n "$_cooper_tool" ]; then
+        $_cooper_tool
+    fi
+    unset _cooper_tool
+fi
+AUTOSTART
 fi
 
 # Run the command in the background so the shell stays as PID 1 (or PID 2

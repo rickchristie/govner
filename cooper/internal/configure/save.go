@@ -22,15 +22,16 @@ const (
 
 // saveModel manages the Save & Build screen.
 type saveModel struct {
-	cfg            *config.Config
-	cooperDir      string
-	configPath     string
-	configureApp   *app.ConfigureApp
-	saved          bool
-	buildRequested bool
-	saveErr        string
-	doneMsgs       []string
-	focusBtn       int // 0=save&build, 1=save only
+	cfg                 *config.Config
+	cooperDir           string
+	configPath          string
+	configureApp        *app.ConfigureApp
+	saved               bool
+	buildRequested      bool
+	cleanBuildRequested bool
+	saveErr             string
+	doneMsgs            []string
+	focusBtn            int // 0=save&build, 1=save only
 
 	// Scroll state for layout.
 	scrollOffset  int
@@ -73,6 +74,16 @@ func (m *saveModel) update(msg tea.Msg) saveResult {
 				m.saveErr = err.Error()
 				return saveNone
 			}
+			m.saved = true
+			return saveQuit
+		case "c":
+			// Save & Clean Build (no Docker cache).
+			if err := m.doSave(); err != nil {
+				m.saveErr = err.Error()
+				return saveNone
+			}
+			m.buildRequested = true
+			m.cleanBuildRequested = true
 			m.saved = true
 			return saveQuit
 		case "left", "h":
@@ -203,13 +214,17 @@ func (m *saveModel) view(width, height int) string {
 
 	saveBuildBtn := lipgloss.NewStyle().Foreground(theme.ColorProof).Bold(true).
 		Render("[Enter " + theme.IconCheck + " Save & Build]")
+	cleanBuildBtn := lipgloss.NewStyle().Foreground(theme.ColorFlame).
+		Render("[c Clean Build]")
 	saveOnlyBtn := lipgloss.NewStyle().Foreground(theme.ColorAmber).
 		Render("[s Save Only]")
 	cancelBtn := lipgloss.NewStyle().Foreground(theme.ColorDusty).
 		Render("[Esc Cancel]")
 
-	inner := center("Save configuration and build images?", min(66, width-12)) + "\n\n" +
-		center(saveBuildBtn+"   "+saveOnlyBtn+"   "+cancelBtn, min(66, width-12))
+	boxWidth := min(66, width-12)
+	inner := center("Save configuration and build images?", boxWidth) + "\n\n" +
+		center(saveBuildBtn+"   "+cleanBuildBtn, boxWidth) + "\n" +
+		center(saveOnlyBtn+"   "+cancelBtn, boxWidth)
 
 	content += actionBox.Render(inner) + "\n"
 
@@ -221,7 +236,7 @@ func (m *saveModel) view(width, height int) string {
 		content += " " + lipgloss.NewStyle().Foreground(theme.ColorProof).Render(theme.IconCheck+" "+dm) + "\n"
 	}
 
-	footer := " " + helpBar("[Enter Build]", "[s Save]", "[Esc Cancel]")
+	footer := " " + helpBar("[Enter Build]", "[c Clean Build]", "[s Save]", "[Esc Cancel]")
 
 	ly := newLayout(header, content, footer, width, height)
 	ly.scrollOffset = m.scrollOffset

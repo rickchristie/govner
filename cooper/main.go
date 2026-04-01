@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -94,17 +95,18 @@ var regenerateCA bool
 
 var cliCmd = &cobra.Command{
 	Use:   "cli [tool-name]",
-	Short: "Open a CLI container for the current workspace",
-	Long: `Opens an interactive shell inside a network-isolated CLI container.
-The current directory is mounted as the workspace.
+	Short: "Launch an AI tool in a network-isolated barrel",
+	Long: `Launches an AI CLI tool inside a network-isolated barrel container.
+The current directory is mounted as the workspace. The tool starts
+automatically with auto-approve enabled.
 
-Specify which AI tool to launch:
-  cooper cli claude       # Launch Claude Code barrel
-  cooper cli codex        # Launch Codex CLI barrel
-  cooper cli copilot      # Launch Copilot CLI barrel
-  cooper cli opencode     # Launch OpenCode barrel
+  cooper cli claude       Launch Claude Code
+  cooper cli codex        Launch Codex CLI
+  cooper cli copilot      Launch Copilot CLI
+  cooper cli opencode     Launch OpenCode
+  cooper cli list         List available tool images
 
-Use -c to run a one-shot command:
+Use -c to run a one-shot command instead:
   cooper cli claude -c "go test ./..."`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runCLI,
@@ -237,6 +239,9 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	}
 
 	if result.BuildRequested {
+		if result.CleanBuild {
+			buildClean = true
+		}
 		return runBuild(cmd, args)
 	}
 	return nil
@@ -644,24 +649,34 @@ func (a *loadingAdapter) View() string {
 
 // ---------- cooper cli ----------
 
+func listCLITools() {
+	images, _ := docker.ListCLIImages()
+	if len(images) == 0 {
+		fmt.Fprintln(os.Stderr, "No tool images found. Run 'cooper build' first.")
+		return
+	}
+	fmt.Fprintln(os.Stderr, "Available CLI tool images:")
+	for _, img := range images {
+		parts := strings.SplitN(img, "cooper-cli-", 2)
+		if len(parts) == 2 {
+			fmt.Fprintf(os.Stderr, "  %s\n", parts[1])
+		}
+	}
+}
+
 func runCLI(cmd *cobra.Command, args []string) error {
 	// 1. Determine which tool.
 	if len(args) == 0 {
-		// List available tools.
-		images, _ := docker.ListCLIImages()
-		if len(images) == 0 {
-			return fmt.Errorf("specify a tool: cooper cli <tool-name>\nNo tool images found. Run 'cooper build' first")
-		}
-		msg := "specify a tool: cooper cli <tool-name>\nAvailable:"
-		for _, img := range images {
-			// Extract tool name from image name (e.g., "cooper-cli-claude" -> "claude").
-			parts := strings.SplitN(img, "cooper-cli-", 2)
-			if len(parts) == 2 {
-				msg += " " + parts[1]
-			}
-		}
-		return fmt.Errorf("%s", msg)
+		listCLITools()
+		return fmt.Errorf("specify a tool: cooper cli <tool-name>")
 	}
+
+	// Handle "cooper cli list" subcommand.
+	if args[0] == "list" {
+		listCLITools()
+		return nil
+	}
+
 	toolName := args[0]
 
 	// 2. Validate tool image exists.
@@ -700,7 +715,7 @@ func runCLI(cmd *cobra.Command, args []string) error {
 	// 6. Determine barrel container name (includes tool name).
 	containerName := docker.BarrelContainerName(workspaceDir, toolName)
 
-	// 7. If barrel not running, start it.
+	// 7. If barrel not running, start it and wait for entrypoint readiness.
 	barrelRunning, err := docker.IsBarrelRunning(containerName)
 	if err != nil {
 		return fmt.Errorf("check barrel: %w", err)
@@ -709,6 +724,16 @@ func runCLI(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Starting barrel container %s...\n", containerName)
 		if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, toolName); err != nil {
 			return fmt.Errorf("start barrel: %w", err)
+		}
+		// Wait for entrypoint to finish writing .bashrc (welcome banner).
+		// The entrypoint writes "Cooper: Welcome" to .bashrc as one of its last steps.
+		for i := 0; i < 50; i++ {
+			out, err := exec.Command("docker", "exec", containerName, "grep", "-q", "Cooper: Welcome", "/home/user/.bashrc").CombinedOutput()
+			_ = out
+			if err == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 
@@ -727,11 +752,18 @@ func runCLI(cmd *cobra.Command, args []string) error {
 		envArgs = append(envArgs, fmt.Sprintf("%s=%s", t.Name, t.Value))
 	}
 
-	// 11. Execute shell or one-shot command.
+	// 11. Execute: one-shot command, or auto-launch the tool interactively.
 	var execCmd []string
 	if cliOneShot != "" {
 		execCmd = []string{"bash", "-c", cliOneShot}
 	} else {
+		// Write a one-shot autostart marker. The .bashrc autostart block
+		// (written by the entrypoint) checks for this file, runs the tool,
+		// then deletes the marker. This gives the tool full TTY control
+		// (important for TUI apps like opencode) and drops the user into
+		// a bash shell when the tool exits.
+		_ = exec.Command("docker", "exec", containerName, "bash", "-c",
+			fmt.Sprintf("echo '%s' > /tmp/.cooper-autostart", toolName)).Run()
 		execCmd = []string{"bash", "-l"}
 	}
 
@@ -1144,15 +1176,17 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 }
 
 // checkToolVersions inspects each enabled tool for version mismatches.
-// For Mirror mode it detects the host version; for Latest mode it resolves
+// For Mirror mode it detects the live host version and updates cfg.HostVersion
+// so the About screen displays correct values. For Latest mode it resolves
 // the latest upstream version (with a short timeout so startup is not blocked
 // forever). Returns a slice of human-readable warning strings.
 func checkToolVersions(cfg *config.Config) []string {
 	var warnings []string
-	allTools := append(cfg.ProgrammingTools, cfg.AITools...)
-	for _, tool := range allTools {
+
+	// Helper: check a single tool, update its HostVersion in the config.
+	check := func(tool *config.ToolConfig) {
 		if !tool.Enabled || tool.Mode == config.ModeOff {
-			continue
+			return
 		}
 
 		var expected string
@@ -1160,12 +1194,12 @@ func checkToolVersions(cfg *config.Config) []string {
 		case config.ModeMirror:
 			hostVer, err := config.DetectHostVersion(tool.Name)
 			if err != nil {
-				// Cannot detect host version; skip silently.
-				continue
+				return
 			}
+			// Update the config's HostVersion so the About screen shows the live value.
+			tool.HostVersion = hostVer
 			expected = hostVer
 		case config.ModeLatest:
-			// Use a short timeout so we don't block startup.
 			type result struct {
 				ver string
 				err error
@@ -1178,17 +1212,16 @@ func checkToolVersions(cfg *config.Config) []string {
 			select {
 			case r := <-ch:
 				if r.err != nil {
-					continue
+					return
 				}
 				expected = r.ver
 			case <-time.After(5 * time.Second):
-				// Timed out resolving latest version; skip.
-				continue
+				return
 			}
 		case config.ModePin:
 			expected = tool.PinnedVersion
 		default:
-			continue
+			return
 		}
 
 		status := config.CompareVersions(tool.ContainerVersion, expected, tool.Mode)
@@ -1198,6 +1231,13 @@ func checkToolVersions(cfg *config.Config) []string {
 				tool.Name, tool.ContainerVersion, expected, tool.Mode,
 			))
 		}
+	}
+
+	for i := range cfg.ProgrammingTools {
+		check(&cfg.ProgrammingTools[i])
+	}
+	for i := range cfg.AITools {
+		check(&cfg.AITools[i])
 	}
 	return warnings
 }
