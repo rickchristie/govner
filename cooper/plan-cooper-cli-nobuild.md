@@ -1303,3 +1303,208 @@ The TUI flow runs within `cooper up` where networks are already created.
 - `main.go` — install-ai command, split version resolution, build changes
 - `test-docker-build.sh` — AI tools install phase
 - `test-e2e.sh` — AI tools install phase, volume mount
+
+---
+
+## Appendix: Verified Assumptions (2026-04-01)
+
+Each assumption in the plan was tested in Docker containers. Results and
+required plan adjustments are documented below.
+
+### A1. Node.js tarball extraction to `/usr/` — VERIFIED OK
+
+**Test:** Extracted `node-v22.12.0-linux-x64.tar.xz` with
+`tar -xJ -C /usr --strip-components=1` on `debian:bookworm-slim`.
+
+**Result:** No conflicts. `node` at `/usr/bin/node`, `npm` at `/usr/bin/npm`,
+`npx` at `/usr/bin/npx`. npm's `lib/node_modules/` lands at
+`/usr/lib/node_modules/` without colliding with Debian system libraries.
+All three commands work correctly.
+
+**No plan changes needed.**
+
+### A2. `npm install -g --prefix /usr/local` symlinks — VERIFIED OK
+
+**Test:** With Node at `/usr/bin/` and a clean `/usr/local/`, ran:
+```
+npm install -g --prefix /usr/local @github/copilot
+npm install -g --prefix /usr/local @openai/codex
+```
+
+**Result:** Both tools installed correctly:
+- `/usr/local/bin/copilot` → `../lib/node_modules/@github/copilot/npm-loader.js`
+- `/usr/local/bin/codex` → `../lib/node_modules/@openai/codex/bin/codex.js`
+- `copilot --version` → "GitHub Copilot CLI 1.0.14"
+- `codex --version` → "codex-cli 0.118.0"
+
+**No plan changes needed.**
+
+### A3. Claude Code installer `HOME` override — VERIFIED, PLAN ADJUSTMENT NEEDED
+
+**Test:** Ran `HOME=/tmp/claude-install bash install.sh` inside container.
+
+**Result:** The installer works with HOME override, but the output paths are
+DIFFERENT from what the plan assumes:
+
+| Plan assumes | Actual (2026-04-01, Claude Code 2.1.89) |
+|---|---|
+| Binary at `$HOME/.local/bin/claude` | **Symlink** at `$HOME/.local/bin/claude` → `$HOME/.local/share/claude/versions/2.1.89` |
+| Directory at `$HOME/.local/lib/claude` | **Does not exist.** Claude stores data at `$HOME/.local/share/claude/` |
+
+The binary is a single file at `$HOME/.local/share/claude/versions/<version>`.
+The `$HOME/.local/bin/claude` path is a symlink, not the binary itself.
+
+**Plan adjustment (WP2, install-ai.sh.tmpl, Claude section):**
+```bash
+# REPLACE the current Claude copy logic with:
+if [ -L "$CLAUDE_HOME/.local/bin/claude" ] || [ -f "$CLAUDE_HOME/.local/bin/claude" ]; then
+    cp -L "$CLAUDE_HOME/.local/bin/claude" /usr/local/bin/claude
+    chmod +x /usr/local/bin/claude
+fi
+```
+Key change: `cp -L` (dereference symlinks) instead of `cp -r`.
+Remove the check for `$HOME/.local/lib/claude` — it does not exist.
+
+### A4. OpenCode installer `HOME` override — VERIFIED OK
+
+**Test:** Inspected the install script from `https://opencode.ai/install`.
+
+**Result:** The installer uses `INSTALL_DIR=$HOME/.opencode/bin` and places
+the binary at `$HOME/.opencode/bin/opencode` (via `mv` or `cp` + `chmod 755`).
+The HOME override works correctly. The plan's approach of copying from
+`$CLAUDE_HOME/.opencode/bin/` is correct.
+
+**No plan changes needed** (the plan already handles this correctly).
+
+### A5. Go at `/usr/local/go/` hidden by mount — CRITICAL, PLAN ADJUSTMENT NEEDED
+
+**Test:** Confirmed that when `HasGo` is true, the Dockerfile uses
+`FROM golang:{{.GoVersion}}-bookworm` as the base image. Go is installed at
+`/usr/local/go/` in this image. There is NO multi-stage COPY — the golang
+image IS the base.
+
+**Impact:** Mounting `~/.cooper/ai-tools/` as `/usr/local/` would completely
+**hide Go**, breaking all Go-enabled barrels.
+
+**Fix verified:** Moving Go to `/usr/go/` works correctly:
+```
+mv /usr/local/go /usr/go
+export GOROOT=/usr/go
+```
+Tested with `go version`, `go build`, and running the compiled binary — all
+work.
+
+**Plan adjustment (WP3, cli.Dockerfile.tmpl):**
+Add after the `FROM golang:` line:
+```dockerfile
+{{- if .HasGo}}
+FROM golang:{{.GoVersion}}-bookworm
+# Relocate Go out of /usr/local/ so the AI tools volume mount doesn't hide it.
+RUN mv /usr/local/go /usr/go
+ENV GOROOT=/usr/go
+ENV PATH=/usr/go/bin:$PATH
+{{- else}}
+FROM debian:bookworm-slim
+{{- end}}
+```
+
+**Plan adjustment (WP4, entrypoint.sh.tmpl):**
+Update PATH from `/usr/local/go/bin` to `/usr/go/bin`:
+```bash
+export PATH="...{{- if .HasGo}}:/usr/go/bin:/go/bin{{- end}}:$PATH"
+```
+
+**Plan adjustment (WP3.7, PATH):**
+Ensure the Dockerfile PATH also uses `/usr/go/bin` instead of
+`/usr/local/go/bin`.
+
+### A6. UID/GID file ownership — VERIFIED OK
+
+**Test:** Created host directory as UID 1000, mounted into container, ran
+write/mkdir/rm operations as container user (UID 1000).
+
+**Result:** All operations succeed. Files created in the mount are owned by
+1000:1000. This matches the barrel user because `ensureBarrelHostDirs()`
+creates `~/.cooper/ai-tools/` as the host user, and the barrel-base image's
+`USER user` has the same UID (built with `ARG USER_UID` matching the host).
+
+**Important note:** The installer container inherits `USER user` from the
+barrel-base image, so it runs as UID 1000 by default. No `--user` flag is
+needed in the `docker run` command. If the install script runs `npm install -g`
+or `mkdir`, these operations succeed because the mount is owned by the same UID.
+
+**No plan changes needed.** But the plan should note that the installer
+container does NOT need `--user` — the barrel-base `USER user` directive
+handles this automatically.
+
+### A7. CA certificate handling after `/usr/local` mount — VERIFIED OK
+
+**Test:** Verified that:
+1. `/etc/ssl/certs/ca-certificates.crt` is NOT under `/usr/local/` — it
+   survives the mount.
+2. The Dockerfile's `chmod 666` on that file persists (it's in the image layer).
+3. The entrypoint's `cat >> /etc/ssl/certs/ca-certificates.crt` works.
+4. `NODE_EXTRA_CA_CERTS=/etc/cooper/cooper-ca.pem` (the runtime override)
+   points to the bind-mounted CA file, which is outside `/usr/local/`.
+
+**Result:** The CA trust chain works through two independent paths:
+- **System trust store:** Build-time CA baked into the image at
+  `/etc/ssl/certs/ca-certificates.crt`. The mount doesn't affect this file.
+  Runtime append via `cat >>` adds fresh CAs.
+- **Node.js:** `NODE_EXTRA_CA_CERTS` overridden to `/etc/cooper/cooper-ca.pem`
+  at runtime. This file is a direct bind mount from the host, completely
+  independent of `/usr/local/`.
+
+**No plan changes needed.**
+
+### A8. Network availability for `cooper install-ai` — VERIFIED, MINOR CLARIFICATION
+
+**Test:** Confirmed that `docker.EnsureNetworks()` exists in
+`internal/docker/network.go:24` and is idempotent (creates networks only if
+they don't exist).
+
+**Result:** The utility exists and works. `runUpdate()` does NOT call it, but
+the `cooper install-ai` command can simply call `docker.EnsureNetworks()` at
+the start.
+
+**Plan adjustment (WP12):** Add explicit call in `runInstallAI()`:
+```go
+func runInstallAI(cmd *cobra.Command, args []string) error {
+    // Ensure networks exist (installer runs on cooper-external).
+    if err := docker.EnsureNetworks(); err != nil {
+        return fmt.Errorf("create networks: %w", err)
+    }
+    // ... rest of function
+}
+```
+
+Also add cleanup: if `cooper install-ai` created the networks and no `cooper up`
+is running, remove them after installation completes (optional, nice-to-have).
+
+### A9. Backward compatibility of Dockerfile base image — NO ISSUE
+
+**Test:** Confirmed the Dockerfile conditionally selects the base image:
+```dockerfile
+{{- if .HasGo}}
+FROM golang:{{.GoVersion}}-bookworm
+{{- else}}
+FROM debian:bookworm-slim
+{{- end}}
+```
+
+When Go is NOT enabled, the base image is `debian:bookworm-slim` which has
+nothing in `/usr/local/go/`. The mount only needs to account for Node.js and
+bubblewrap relocation, both of which are handled by WP3.
+
+**No plan changes needed.**
+
+### Summary of Required Plan Adjustments
+
+| # | Section | Issue | Fix |
+|---|---------|-------|-----|
+| 1 | WP2 (install-ai.sh.tmpl) | Claude copy uses `cp -r` on a symlink | Use `cp -L` to dereference; remove `.local/lib/claude` check |
+| 2 | WP3 (Dockerfile) | Go at `/usr/local/go/` hidden by mount | Add `RUN mv /usr/local/go /usr/go` + `ENV GOROOT=/usr/go` |
+| 3 | WP3.7 + WP4 (PATH) | PATH references `/usr/local/go/bin` | Change to `/usr/go/bin` everywhere |
+| 4 | WP12 (install-ai command) | Networks may not exist | Add `docker.EnsureNetworks()` call |
+
+All other assumptions in the plan are confirmed correct as written.
