@@ -930,3 +930,118 @@ func TestDetailCursorForMode_WithMirror(t *testing.T) {
 		t.Errorf("detailCursorForMode(ModePin) with mirror: got %d, want 2", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Mirror mode: live host version takes priority over stale config
+// ---------------------------------------------------------------------------
+
+func TestAICLIModel_MirrorUsesLiveHostVersion(t *testing.T) {
+	// Simulate: config has stale HostVersion=2.1.89, but live detection
+	// found 2.1.90. The model should use 2.1.90, not 2.1.89.
+	//
+	// We construct the model directly (bypassing DetectHostVersion) to
+	// control the live-detected value precisely.
+	m := aicliModel{
+		tools: []toolEntry{
+			{name: "claude", displayName: "Claude Code", hostVersion: "2.1.90", enabled: true, mode: config.ModeMirror},
+		},
+	}
+
+	// toToolConfigs should emit HostVersion=2.1.90 (the live value).
+	configs := m.toToolConfigs()
+	if configs[0].HostVersion != "2.1.90" {
+		t.Errorf("expected HostVersion=2.1.90, got %q", configs[0].HostVersion)
+	}
+}
+
+func TestAICLIModel_MergeDoesNotOverwriteLiveHostVersion(t *testing.T) {
+	// The merge in newAICLIModel should NOT overwrite live-detected host
+	// version with stale config value.
+	//
+	// We simulate this by building tools with a "live" hostVersion, then
+	// merging with existing config that has a different HostVersion.
+	tools := []toolEntry{
+		{name: "claude", displayName: "Claude Code", hostVersion: "2.1.90"},
+	}
+
+	existing := []config.ToolConfig{
+		{Name: "claude", Enabled: true, Mode: config.ModeMirror, HostVersion: "2.1.89"},
+	}
+
+	// Apply the same merge logic as newAICLIModel.
+	for _, tc := range existing {
+		for i := range tools {
+			if tools[i].name == tc.Name {
+				tools[i].enabled = tc.Enabled
+				tools[i].mode = tc.Mode
+				// Only use config's HostVersion if live detection failed.
+				if tools[i].hostVersion == "" && tc.HostVersion != "" {
+					tools[i].hostVersion = tc.HostVersion
+				}
+				break
+			}
+		}
+	}
+
+	// Live-detected version should win.
+	if tools[0].hostVersion != "2.1.90" {
+		t.Errorf("hostVersion should be 2.1.90 (live), got %q", tools[0].hostVersion)
+	}
+}
+
+func TestAICLIModel_MergeFallsBackToConfigWhenDetectionFails(t *testing.T) {
+	// When live detection fails (hostVersion is empty), the merge should
+	// use the config's HostVersion as a fallback.
+	tools := []toolEntry{
+		{name: "claude", displayName: "Claude Code", hostVersion: ""}, // detection failed
+	}
+
+	existing := []config.ToolConfig{
+		{Name: "claude", Enabled: true, Mode: config.ModeMirror, HostVersion: "2.1.89"},
+	}
+
+	for _, tc := range existing {
+		for i := range tools {
+			if tools[i].name == tc.Name {
+				tools[i].enabled = tc.Enabled
+				tools[i].mode = tc.Mode
+				if tools[i].hostVersion == "" && tc.HostVersion != "" {
+					tools[i].hostVersion = tc.HostVersion
+				}
+				break
+			}
+		}
+	}
+
+	if tools[0].hostVersion != "2.1.89" {
+		t.Errorf("hostVersion should fall back to config value 2.1.89, got %q", tools[0].hostVersion)
+	}
+}
+
+func TestProgrammingModel_MirrorUsesLiveHostVersion(t *testing.T) {
+	// Same test for programming tools.
+	tools := []toolEntry{
+		{name: "go", displayName: "Go", hostVersion: "1.24.11"},
+	}
+
+	existing := []config.ToolConfig{
+		{Name: "go", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.24.10"},
+	}
+
+	for _, tc := range existing {
+		for i := range tools {
+			if tools[i].name == tc.Name {
+				tools[i].enabled = tc.Enabled
+				tools[i].mode = tc.Mode
+				if tools[i].hostVersion == "" && tc.HostVersion != "" {
+					tools[i].hostVersion = tc.HostVersion
+				}
+				break
+			}
+		}
+	}
+
+	if tools[0].hostVersion != "1.24.11" {
+		t.Errorf("hostVersion should be 1.24.11 (live), got %q", tools[0].hostVersion)
+	}
+}

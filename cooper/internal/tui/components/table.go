@@ -191,13 +191,11 @@ func buildScrollIndicator(totalItems, scrollOffset, visibleHeight int) []string 
 		return result
 	}
 
-	arrowUp := lipgloss.NewStyle().Foreground(theme.ColorDusty).Render("\u25b2")
-	arrowDown := lipgloss.NewStyle().Foreground(theme.ColorDusty).Render("\u25bc")
-	track := lipgloss.NewStyle().Foreground(theme.ColorStave).Render(theme.IconShade)
-	thumb := lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(theme.IconBlock)
+	track := lipgloss.NewStyle().Foreground(theme.ColorStave).Render("┊")
+	thumb := lipgloss.NewStyle().Foreground(theme.ColorCopper).Render("┃")
 
-	// Track area is between the arrows.
-	trackHeight := visibleHeight - 2
+	// Full height is the track — no arrows.
+	trackHeight := visibleHeight
 	if trackHeight < 1 {
 		trackHeight = 1
 	}
@@ -222,15 +220,13 @@ func buildScrollIndicator(totalItems, scrollOffset, visibleHeight int) []string 
 	}
 
 	col := make([]string, visibleHeight)
-	col[0] = arrowUp
 	for i := 0; i < trackHeight; i++ {
 		if i >= thumbPos && i < thumbPos+thumbSize {
-			col[i+1] = thumb
+			col[i] = thumb
 		} else {
-			col[i+1] = track
+			col[i] = track
 		}
 	}
-	col[visibleHeight-1] = arrowDown
 
 	return col
 }

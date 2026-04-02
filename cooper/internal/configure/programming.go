@@ -21,12 +21,13 @@ const (
 
 // toolEntry represents a single tool in the list view.
 type toolEntry struct {
-	name        string // internal name (e.g., "go", "node")
-	displayName string // display name (e.g., "Go", "Node.js")
-	enabled     bool
-	mode        config.VersionMode
-	hostVersion string
-	pinVersion  string
+	name             string // internal name (e.g., "go", "node")
+	displayName      string // display name (e.g., "Go", "Node.js")
+	enabled          bool
+	mode             config.VersionMode
+	hostVersion      string // live-detected host version
+	pinVersion       string // user-pinned version
+	containerVersion string // version currently built into the container image
 }
 
 // programmingModel manages the Programming Tools screen.
@@ -67,15 +68,18 @@ func newProgrammingModel(existing []config.ToolConfig) programmingModel {
 	}
 
 	// Merge with existing config.
+	// Note: hostVersion is NOT overwritten from config — the live-detected
+	// value takes priority over the stale value from last build.
 	for _, tc := range existing {
 		for i := range tools {
 			if tools[i].name == tc.Name {
 				tools[i].enabled = tc.Enabled
 				tools[i].mode = tc.Mode
+				tools[i].containerVersion = tc.ContainerVersion
 				if tc.PinnedVersion != "" {
 					tools[i].pinVersion = tc.PinnedVersion
 				}
-				if tc.HostVersion != "" {
+				if tools[i].hostVersion == "" && tc.HostVersion != "" {
 					tools[i].hostVersion = tc.HostVersion
 				}
 				break
@@ -262,7 +266,7 @@ func (m *programmingModel) viewList(width, height int) string {
 	// Build table with all columns: PREFIX, TOOL, STATUS, VERSION, HOST VERSION, MODE.
 	// PREFIX contains the arrow and toggle indicator; it is part of the table
 	// so that all columns align regardless of content width.
-	tbl := tableutil.NewTable("", "TOOL", "STATUS", "VERSION", "HOST VERSION", "MODE")
+	tbl := tableutil.NewTable("", "TOOL", "STATUS", "BUILT", "HOST", "NEW", "MODE")
 	tbl.SetHeaderStyle(theme.ColorDusty, true)
 	sepColor := theme.ColorOakLight
 	tbl.SetSeparator(theme.BorderH, &sepColor)
@@ -275,14 +279,25 @@ func (m *programmingModel) viewList(width, height int) string {
 			status = onStyle.Render("on")
 		}
 
-		ver := lipgloss.NewStyle().Foreground(theme.ColorFaded).Render(theme.BorderH)
-		if t.enabled {
-			ver = lipgloss.NewStyle().Foreground(theme.ColorLinen).Render(resolvedVersion(t))
+		builtVer := lipgloss.NewStyle().Foreground(theme.ColorFaded).Render(theme.BorderH)
+		if t.containerVersion != "" {
+			builtVer = lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(t.containerVersion)
 		}
 
 		hostVer := lipgloss.NewStyle().Foreground(theme.ColorFaded).Italic(true).Render("(not detected)")
 		if t.hostVersion != "" {
 			hostVer = lipgloss.NewStyle().Foreground(theme.ColorLinen).Render(t.hostVersion)
+		}
+
+		newVer := lipgloss.NewStyle().Foreground(theme.ColorFaded).Render(theme.BorderH)
+		if t.enabled {
+			resolved := resolvedVersion(t)
+			// Highlight if new version differs from built version.
+			if t.containerVersion != "" && resolved != t.containerVersion && resolved != "latest" && resolved != theme.BorderH {
+				newVer = lipgloss.NewStyle().Foreground(theme.ColorCopper).Bold(true).Render(resolved)
+			} else {
+				newVer = lipgloss.NewStyle().Foreground(theme.ColorProof).Render(resolved)
+			}
 		}
 
 		modeStr := lipgloss.NewStyle().Foreground(theme.ColorFaded).Render(theme.BorderH)
@@ -292,7 +307,7 @@ func (m *programmingModel) viewList(width, height int) string {
 			}
 		}
 
-		tbl.AddRow(toggle, t.displayName, status, ver, hostVer, modeStr)
+		tbl.AddRow(toggle, t.displayName, status, builtVer, hostVer, newVer, modeStr)
 	}
 
 	// Render header and separator with the same left margin as data rows.
@@ -437,10 +452,11 @@ func (m *programmingModel) toToolConfigs() []config.ToolConfig {
 	result := make([]config.ToolConfig, len(m.tools))
 	for i, t := range m.tools {
 		tc := config.ToolConfig{
-			Name:        t.name,
-			Enabled:     t.enabled,
-			Mode:        t.mode,
-			HostVersion: t.hostVersion,
+			Name:             t.name,
+			Enabled:          t.enabled,
+			Mode:             t.mode,
+			HostVersion:      t.hostVersion,
+			ContainerVersion: t.containerVersion,
 		}
 		if t.mode == config.ModePin {
 			tc.PinnedVersion = t.pinVersion

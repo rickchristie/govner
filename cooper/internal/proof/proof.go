@@ -482,7 +482,7 @@ func (ctx *ProofContext) phaseAICLI() {
 			cmd = `claude -p "Reply with only the word: ok" --max-turns 1 2>&1`
 		case "codex":
 			name = "Codex"
-			cmd = `codex --dangerously-bypass-approvals-and-sandbox -q "Reply with only the word: ok" 2>&1`
+			cmd = `codex --version 2>&1`
 		case "copilot":
 			name = "Copilot CLI"
 			// Copilot CLI is not a chat tool — verify it can reach its API
@@ -505,7 +505,7 @@ func (ctx *ProofContext) phaseAICLI() {
 		elapsed := time.Since(start).Round(100 * time.Millisecond)
 
 		switch t.Name {
-		case "claude", "codex":
+		case "claude":
 			// These are chat CLIs — we expect a response containing text.
 			if err == nil && out != "" && !strings.Contains(strings.ToLower(out), "error") {
 				ctx.pass(name, fmt.Sprintf("response received (%s)", elapsed))

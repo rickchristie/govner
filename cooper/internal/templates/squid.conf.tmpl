@@ -76,6 +76,13 @@ http_access allow pending_review
 http_access deny all
 
 # ============================================================================
+# CUSTOM ERROR PAGES
+# ============================================================================
+# Custom error page that guides AI agents to exhaust local options first,
+# then ask the user to approve access via the Cooper monitor.
+error_directory /etc/squid/errors
+
+# ============================================================================
 # CACHING AND LOGGING
 # ============================================================================
 

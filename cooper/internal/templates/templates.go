@@ -19,6 +19,9 @@ var templateFS embed.FS
 //go:embed doctor.sh
 var doctorScript []byte
 
+//go:embed ERR_ACCESS_DENIED
+var errAccessDenied []byte
+
 // baseDockerfileData holds template data for the base image Dockerfile.
 type baseDockerfileData struct {
 	HasGo       bool
@@ -391,6 +394,11 @@ func WriteProxyTemplates(dir string, cfg *config.Config) error {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "proxy-entrypoint.sh"), []byte(proxyEntrypoint), 0755); err != nil {
 		return fmt.Errorf("failed to write proxy-entrypoint.sh: %w", err)
+	}
+
+	// Custom error page for blocked requests.
+	if err := os.WriteFile(filepath.Join(dir, "ERR_ACCESS_DENIED"), errAccessDenied, 0644); err != nil {
+		return fmt.Errorf("failed to write ERR_ACCESS_DENIED: %w", err)
 	}
 
 	return nil

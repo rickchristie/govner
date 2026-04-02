@@ -348,6 +348,17 @@ func renderRoutesEmpty(width, height int) string {
 
 // renderEditModal renders the add/edit route modal overlay.
 func (m *RoutesModel) renderEditModal(width, height int) string {
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(theme.ColorAmber).
+		Padding(1, 3).
+		Width(50)
+
+	titleStyle := lipgloss.NewStyle().Foreground(theme.ColorParchment).Bold(true)
+	labelStyle := lipgloss.NewStyle().Foreground(theme.ColorLinen)
+	hintStyle := lipgloss.NewStyle().Foreground(theme.ColorDusty)
+	cursor := lipgloss.NewStyle().Foreground(theme.ColorAmber).Bold(true).Render("_")
+
 	var titleText string
 	if m.editMode == routeAdding {
 		titleText = theme.IconPlug + " Add Bridge Route"
@@ -355,51 +366,38 @@ func (m *RoutesModel) renderEditModal(width, height int) string {
 		titleText = theme.IconPlug + " Edit Bridge Route"
 	}
 
-	title := theme.ModalTitleStyle.Render(titleText)
-	divider := theme.ModalDividerStyle.Render(strings.Repeat(theme.BorderH, 38))
-
-	// API path field.
-	apiBrackets := theme.InputInactiveStyle
-	scriptBrackets := theme.InputInactiveStyle
-	if m.editField == fieldAPIPath {
-		apiBrackets = theme.InputActiveStyle
-	} else {
-		scriptBrackets = theme.InputActiveStyle
+	makeInput := func(value string, active bool) string {
+		borderColor := theme.ColorOakLight
+		if active {
+			borderColor = theme.ColorAmber
+		}
+		display := value
+		if active {
+			display += cursor
+		}
+		return lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(borderColor).
+			Foreground(theme.ColorParchment).
+			Width(30).
+			Render(display)
 	}
-	apiLabel := lipgloss.NewStyle().Foreground(theme.ColorLinen).Render("API Path:")
-	apiValue := apiBrackets.Render("[") +
-		theme.InputTextStyle.Render(padRight(m.editAPI, 30)) +
-		apiBrackets.Render("]")
 
-	scriptLabel := lipgloss.NewStyle().Foreground(theme.ColorLinen).Render("Script Path:")
-	scriptValue := scriptBrackets.Render("[") +
-		theme.InputTextStyle.Render(padRight(m.editScript, 30)) +
-		scriptBrackets.Render("]")
+	var inner string
+	inner += titleStyle.Render(titleText) + "\n\n"
 
-	confirm := theme.ModalConfirmStyle.Render("[Enter " + theme.IconCheck + " Save]")
-	cancel := theme.ModalCancelStyle.Render("[Esc Cancel]")
-	buttons := lipgloss.NewStyle().Width(44).Align(lipgloss.Center).Render(confirm + "    " + cancel)
+	inner += labelStyle.Render("API Path:") + "\n"
+	inner += makeInput(m.editAPI, m.editField == fieldAPIPath) + "\n\n"
 
-	inner := lipgloss.JoinVertical(lipgloss.Center,
-		"",
-		title,
-		"",
-		divider,
-		"",
-		apiLabel,
-		apiValue,
-		"",
-		scriptLabel,
-		scriptValue,
-		"",
-		divider,
-		"",
-		buttons,
-		"",
-	)
+	inner += labelStyle.Render("Script Path:") + "\n"
+	inner += makeInput(m.editScript, m.editField == fieldScriptPath) + "\n\n"
 
-	box := theme.ModalBorderStyle.Render(inner)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+	inner += hintStyle.Render("Tab/Up/Down: switch fields") + "\n\n"
+	inner += lipgloss.NewStyle().Foreground(theme.ColorProof).Bold(true).Render("[Enter "+theme.IconCheck+" Save]") +
+		"    " + lipgloss.NewStyle().Foreground(theme.ColorDusty).Render("[Esc Cancel]")
+
+	modal := boxStyle.Render(inner)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
 }
 
 // renderDeleteModal renders the delete confirmation modal.

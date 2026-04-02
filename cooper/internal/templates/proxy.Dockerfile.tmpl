@@ -86,6 +86,10 @@ RUN mkdir -p /var/lib/squid && \
 # Copy default squid.conf (will be overridden by volume mount at runtime)
 COPY squid.conf /etc/squid/squid.conf
 
+# Custom error pages for AI-friendly blocked request messaging
+RUN mkdir -p /etc/squid/errors
+COPY ERR_ACCESS_DENIED /etc/squid/errors/ERR_ACCESS_DENIED
+
 # Copy CA certificate for SSL bump
 COPY cooper-ca.pem /etc/squid/cooper-ca.pem
 COPY cooper-ca-key.pem /etc/squid/cooper-ca-key.pem

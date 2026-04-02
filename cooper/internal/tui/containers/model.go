@@ -135,7 +135,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 			}
 		}
 	case "enter":
-		m.expanded = !m.expanded
+		// Detail pane disabled — info is already in the table columns.
 	}
 	return m, nil
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/tableutil"
+	"github.com/rickchristie/govner/cooper/internal/tui/components"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 	"github.com/rickchristie/govner/cooper/meta"
 )
@@ -41,6 +42,10 @@ type Model struct {
 
 	// Startup warnings from the version mismatch check.
 	startupWarnings []string
+
+	// Scrollable viewport for content.
+	viewport   components.ScrollableContent
+	lastHeight int
 }
 
 // New creates a new about model populated from the given config.
@@ -118,12 +123,18 @@ func (m *Model) Update(msg tea.Msg) (theme.SubModel, tea.Cmd) {
 				return m, func() tea.Msg { return RunUpdateMsg{} }
 			}
 		}
+		m.viewport.HandleKey(msg, m.lastHeight)
+	case tea.MouseMsg:
+		m.viewport.HandleMouse(msg, m.lastHeight)
 	}
 	return m, nil
 }
 
 // View satisfies the SubModel interface.
 func (m *Model) View(width, height int) string {
+	m.lastHeight = height
+
+	// Render all content into a string, then display through the viewport.
 	var b strings.Builder
 
 	// Version header.
@@ -175,7 +186,8 @@ func (m *Model) View(width, height int) string {
 	b.WriteString(renderInfraRow("Proxy Port", fmt.Sprintf("%d", m.proxyPort)))
 	b.WriteString(renderInfraRow("Bridge Port", fmt.Sprintf("%d", m.bridgePort)))
 
-	return b.String()
+	m.viewport.SetContent(b.String())
+	return m.viewport.View(width, height)
 }
 
 // ----- Rendering helpers -----

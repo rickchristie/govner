@@ -16,6 +16,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tui/events"
 	"github.com/rickchristie/govner/cooper/internal/tui/history"
 	"github.com/rickchristie/govner/cooper/internal/tui/loading"
+	"github.com/rickchristie/govner/cooper/internal/tui/portfwd"
 	"github.com/rickchristie/govner/cooper/internal/tui/proxymon"
 	"github.com/rickchristie/govner/cooper/internal/tui/settings"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
@@ -207,7 +208,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case settings.PortForwardChangedMsg:
+	case portfwd.PortForwardChangedMsg:
 		// Show a "Reloading..." modal and run the reload in the background.
 		modal := components.NewModal(
 			theme.ModalReloadSocat,
@@ -239,7 +240,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				oldRules = m.app.Config().PortForwardRules
 			}
 			resultCmd = func() tea.Msg {
-				return settings.PFApplyResultMsg{OK: false, ErrMsg: msg.Err.Error(), Rules: oldRules}
+				return portfwd.PFApplyResultMsg{OK: false, ErrMsg: msg.Err.Error(), Rules: oldRules}
 			}
 		} else {
 			modal := components.NewModal(
@@ -251,10 +252,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 			m.modal = &modal
 			resultCmd = func() tea.Msg {
-				return settings.PFApplyResultMsg{OK: true, Rules: msg.Rules}
+				return portfwd.PFApplyResultMsg{OK: true, Rules: msg.Rules}
 			}
 		}
 		return m, resultCmd
+
+	case portfwd.PFApplyResultMsg:
+		// Always route to the port forward model regardless of active tab.
+		if m.portForwardModel != nil {
+			var sm SubModel
+			sm, _ = m.portForwardModel.Update(msg)
+			m.portForwardModel = sm
+		}
+		return m, nil
 
 	case about.RunUpdateMsg:
 		modal := components.NewModal(
@@ -309,23 +319,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showExitModal()
 		return m, nil
 
-	case "1":
-		return m.switchTab(theme.TabContainers)
-	case "2":
-		return m.switchTab(theme.TabMonitor)
-	case "3":
-		return m.switchTab(theme.TabBlocked)
-	case "4":
-		return m.switchTab(theme.TabAllowed)
-	case "5":
-		return m.switchTab(theme.TabBridgeLogs)
-	case "6":
-		return m.switchTab(theme.TabBridgeRoutes)
-	case "7":
-		return m.switchTab(theme.TabConfigure)
-	case "8":
-		return m.switchTab(theme.TabAbout)
-
 	case "tab":
 		m.tabBar.Next()
 		m.activeTab = m.tabBar.ActiveTab
@@ -341,12 +334,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// switchTab changes the active tab.
-func (m *Model) switchTab(tab theme.TabID) (tea.Model, tea.Cmd) {
-	m.activeTab = tab
-	m.tabBar.SetActive(tab)
-	return m, nil
-}
 
 // showExitModal displays the exit confirmation modal.
 func (m *Model) showExitModal() {
@@ -440,8 +427,10 @@ func (m *Model) setActiveSubModel(sm SubModel) {
 		m.bridgeLogsModel = sm
 	case theme.TabBridgeRoutes:
 		m.bridgeRoutesModel = sm
-	case theme.TabConfigure:
-		m.settingsModel = sm
+	case theme.TabRuntime:
+		m.runtimeModel = sm
+	case theme.TabPortForward:
+		m.portForwardModel = sm
 	case theme.TabAbout:
 		m.aboutModel = sm
 	}
@@ -503,12 +492,9 @@ func (m *Model) View() string {
 
 	screen := strings.Join(sections, "\n")
 
-	// If a modal is active, dim the background and overlay the modal.
+	// If a modal is active, show only the modal (full screen, centered).
 	if m.modal != nil && m.modal.Active {
-		dimmed := components.DimContent(screen)
-		overlay := m.modal.View(m.width, m.height)
-		return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, dimmed) +
-			"\r" + overlay
+		return m.modal.View(m.width, m.height)
 	}
 
 	return screen
@@ -550,7 +536,7 @@ func (m *Model) headerBar(width int) string {
 func (m *Model) helpBar(width int) string {
 	bindings := []HelpBinding{
 		{Key: "q", Desc: "Quit"},
-		{Key: "1-8", Desc: "Tabs"},
+		{Key: "Tab", Desc: "Switch"},
 		{Key: "\u2191\u2193", Desc: "Navigate"},
 	}
 
@@ -571,11 +557,15 @@ func (m *Model) helpBar(width int) string {
 			HelpBinding{Key: "n", Desc: "New"},
 			HelpBinding{Key: "x", Desc: "Delete"},
 		)
-	case theme.TabConfigure:
+	case theme.TabRuntime:
 		bindings = append(bindings,
-			HelpBinding{Key: "Tab", Desc: "Section"},
+			HelpBinding{Key: "Enter", Desc: "Edit"},
+		)
+	case theme.TabPortForward:
+		bindings = append(bindings,
 			HelpBinding{Key: "n", Desc: "New"},
 			HelpBinding{Key: "x", Desc: "Delete"},
+			HelpBinding{Key: "Enter", Desc: "Edit"},
 		)
 	}
 

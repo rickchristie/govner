@@ -140,7 +140,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 	case "enter":
 		m.detailOpen = !m.detailOpen
 	case "esc":
-		m.detailOpen = false
+		if m.detailOpen {
+			m.detailOpen = false
+			return m, nil
+		}
 	}
 	return m, nil
 }
@@ -150,13 +153,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 // syncListGeometry updates the scrollable list dimensions based on the
 // current tab size and whether the detail pane is open.
 func (m *Model) syncListGeometry() {
-	listHeight := m.height
-	if m.detailOpen {
-		// List takes top half, detail takes bottom half.
-		listHeight = m.height / 2
-	}
-	// Subtract 1 for the column header row.
-	listHeight -= 1
+	// Detail is now a modal overlay, so list always gets full height minus header.
+	listHeight := m.height - 1
 	if listHeight < 1 {
 		listHeight = 1
 	}

@@ -724,6 +724,14 @@ test_blocked "example.com"
 test_blocked "google.com"
 test_blocked "evil-exfiltration.example.org"
 
+# Verify custom Cooper error page is returned for blocked requests.
+blocked_body=$(barrel_exec "curl -s --connect-timeout 5 --max-time 10 'https://example.com' 2>&1 || true")
+if echo "$blocked_body" | grep -q "not on the proxy whitelist"; then
+    pass "Custom Cooper error page returned for blocked requests"
+else
+    fail "Default Squid error page returned instead of custom Cooper page"
+fi
+
 # ============================================================================
 # Phase 6: Multiple Barrels Sharing Workspace
 # ============================================================================
@@ -850,6 +858,121 @@ else
     fail "socat-rules.json content unexpected (bridge_port=${bridge_port_val}, rules=${rules_count})"
 fi
 
+# Helper: check if a port is listening inside the barrel.
+port_open() {
+    barrel_exec "bash -c 'echo > /dev/tcp/localhost/$1' 2>/dev/null" >/dev/null 2>&1
+}
+
+# Verify socat is listening on forwarded ports inside the barrel.
+for port in 5432 6379; do
+    if port_open "$port"; then
+        pass "socat listening on port ${port} in barrel"
+    else
+        fail "socat NOT listening on port ${port} in barrel"
+    fi
+done
+
+# Verify bridge port socat is listening.
+if port_open 4343; then
+    pass "socat listening on bridge port 4343 in barrel"
+else
+    fail "socat NOT listening on bridge port 4343 in barrel"
+fi
+
+# ============================================================================
+# Phase 7b: Port Forwarding Live Config Change
+# ============================================================================
+section "Phase 7b: Port Forwarding Live Config Change"
+
+# Remove the Redis rule (6379), keep PostgreSQL (5432).
+cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_REMOVE_EOF'
+{
+  "bridge_port": 4343,
+  "rules": [
+    {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"}
+  ]
+}
+SOCAT_REMOVE_EOF
+
+# Send SIGHUP to barrel PID 1 to trigger socat reload.
+# Restart barrel to pick up the new socat config.
+# SIGHUP-based reload is unreliable under tini --init, so we restart the container.
+docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
+sleep 3  # Wait for entrypoint to start socat with new config.
+
+# After removing Redis rule, port 5432 should still listen, port 6379 should stop.
+if port_open 5432; then
+    pass "Port 5432 still forwarded after removing 6379 rule"
+else
+    fail "Port 5432 stopped working after removing 6379 rule"
+fi
+
+if ! port_open 6379; then
+    pass "Port 6379 no longer forwarded after rule removal"
+else
+    fail "Port 6379 still listening after rule was removed"
+fi
+
+# Add Redis back.
+cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_READD_EOF'
+{
+  "bridge_port": 4343,
+  "rules": [
+    {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"},
+    {"container_port": 6379, "host_port": 6379, "description": "Redis"}
+  ]
+}
+SOCAT_READD_EOF
+
+docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
+sleep 3
+
+if port_open 6379; then
+    pass "Port 6379 forwarding restored after re-adding rule"
+else
+    fail "Port 6379 not restored after re-adding rule"
+fi
+
+# Test range port forwarding.
+cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_RANGE_EOF'
+{
+  "bridge_port": 4343,
+  "rules": [
+    {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"},
+    {"container_port": 6379, "host_port": 6379, "description": "Redis"},
+    {"container_port": 9100, "host_port": 9100, "description": "range-test", "is_range": true, "range_end": 9102}
+  ]
+}
+SOCAT_RANGE_EOF
+
+docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
+sleep 3
+
+# Check that ports 9100, 9101, 9102 are all listening.
+range_ok=true
+for port in 9100 9101 9102; do
+    if ! port_open "$port"; then
+        range_ok=false
+        fail "Range port ${port} not listening in barrel"
+    fi
+done
+if [ "$range_ok" = true ]; then
+    pass "Range port forwarding (9100-9102) all listening"
+fi
+
+# Restore original rules.
+cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_RESTORE_EOF'
+{
+  "bridge_port": 4343,
+  "rules": [
+    {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"},
+    {"container_port": 6379, "host_port": 6379, "description": "Redis"}
+  ]
+}
+SOCAT_RESTORE_EOF
+docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
+sleep 3
+
 # ============================================================================
 # Phase 8: Socat Live Reload
 # ============================================================================
@@ -903,6 +1026,10 @@ if [ -n "$squid_running" ]; then
 else
     fail "Squid process not running after reconfigure"
 fi
+
+# NOTE: Bridge HTTP API tests are not run here because the bridge server is
+# started by `cooper up`, not by the e2e test. Bridge tests are covered by
+# `cooper proof` and the Go integration tests in internal/app/cooper_test.go.
 
 # ============================================================================
 # Phase 10: File/Folder Ownership on Mounted Volumes

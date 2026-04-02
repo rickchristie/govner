@@ -19,15 +19,24 @@ fi
 SOCAT_RULES="/etc/cooper/socat-rules.json"
 
 # ============================================================================
-# PATH setup (login shells reset PATH, so we must re-export in .profile)
-# .profile is sourced by login shells (bash -l) regardless of interactivity,
-# unlike .bashrc which has an interactive-only guard on Debian.
+# PATH setup — written to the TOP of .bashrc (before Debian's interactive guard)
+# so it's available to both interactive shells and autostart commands.
+# Also written to .profile for non-bash login shells.
 # ============================================================================
-if ! grep -q "Cooper: PATH" /home/user/.profile 2>/dev/null; then
-    cat >> /home/user/.profile << 'PATHSETUP'
+COOPER_PATH_LINE='export PATH="/home/user/.local/bin:/home/user/.npm-global/bin:/home/user/.opencode/bin{{- if .HasGo}}:/usr/local/go/bin:/go/bin{{- end}}:$PATH"'
 
-# Cooper: PATH — ensure tool directories are on PATH for login shells
-export PATH="/home/user/.local/bin:/home/user/.npm-global/bin:/home/user/.opencode/bin{{- if .HasGo}}:/usr/local/go/bin:/go/bin{{- end}}:$PATH"
+if ! grep -q "Cooper: PATH" /home/user/.bashrc 2>/dev/null; then
+    # Prepend to .bashrc (before the interactive guard) so PATH is set
+    # even when .bashrc is sourced from .profile in non-interactive context.
+    { echo "# Cooper: PATH"; echo "$COOPER_PATH_LINE"; echo ""; cat /home/user/.bashrc 2>/dev/null; } > /home/user/.bashrc.tmp
+    mv /home/user/.bashrc.tmp /home/user/.bashrc
+fi
+
+if ! grep -q "Cooper: PATH" /home/user/.profile 2>/dev/null; then
+    cat >> /home/user/.profile << PATHSETUP
+
+# Cooper: PATH
+$COOPER_PATH_LINE
 PATHSETUP
 fi
 
@@ -205,24 +214,6 @@ if [[ $- == *i* ]]; then
     echo ""
 fi
 BANNER
-fi
-
-# ============================================================================
-# AUTO-START TOOL (one-shot, written by cooper cli)
-# ============================================================================
-if ! grep -q "Cooper: Autostart" /home/user/.bashrc 2>/dev/null; then
-    cat >> /home/user/.bashrc << 'AUTOSTART'
-
-# Cooper: Autostart — run tool on first interactive session, then remove marker
-if [[ $- == *i* ]] && [ -f /tmp/.cooper-autostart ]; then
-    _cooper_tool=$(cat /tmp/.cooper-autostart)
-    rm -f /tmp/.cooper-autostart
-    if [ -n "$_cooper_tool" ]; then
-        $_cooper_tool
-    fi
-    unset _cooper_tool
-fi
-AUTOSTART
 fi
 
 # Run the command in the background so the shell stays as PID 1 (or PID 2

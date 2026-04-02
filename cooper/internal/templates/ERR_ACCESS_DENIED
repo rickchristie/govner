@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Cooper: Access Denied</title>
+<style>
+* { font-family: monospace; }
+body { background: #1a1a1a; color: #d4c5a9; margin: 0; padding: 40px; }
+h1 { color: #c87533; font-size: 18px; border-bottom: 1px solid #4a3f2f; padding-bottom: 12px; }
+.domain { color: #e8a849; font-weight: bold; }
+.section { color: #8b9e7e; margin-top: 20px; font-weight: bold; }
+.hint { color: #9a9a9a; margin-left: 16px; line-height: 1.8; }
+.action { color: #c87533; margin-left: 16px; line-height: 1.8; }
+pre { background: #111; padding: 16px; border-left: 3px solid #c87533; color: #d4c5a9; overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<h1>ACCESS DENIED — Network proxy blocked this request</h1>
+
+<p>Domain: <span class="domain">%H</span></p>
+<p>Reason: This domain is not on the proxy whitelist.</p>
+
+<p class="section">Context:</p>
+<p class="hint">
+You are running inside a network-isolated container managed by Cooper.<br>
+All outbound traffic goes through a filtering proxy that only allows whitelisted domains.<br>
+This block is intentional — it prevents unauthorized data exfiltration and supply-chain attacks.
+</p>
+
+<p class="section">Before requesting access, try these first:</p>
+<p class="hint">
+1. Complete the task using only local files, cached data, and already-available resources.<br>
+2. Check if an alternative whitelisted domain provides what you need.<br>
+3. Do not install packages at runtime — dependencies are installed at build time on the host.
+</p>
+
+<p class="section">If you truly need access to this domain:</p>
+<p class="action">
+Tell your user:<br>
+</p>
+<pre>I need access to %H but it's blocked by the Cooper network proxy.
+Please approve it in the Cooper monitor (cooper up → Monitor tab),
+or add it permanently via cooper configure → Proxy Whitelist.</pre>
+
+<p class="hint">
+Your user can approve the request in real-time from the Monitor tab,<br>
+or add the domain permanently via <b>cooper configure</b>.
+</p>
+
+</body>
+</html>

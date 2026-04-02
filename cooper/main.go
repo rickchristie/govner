@@ -31,6 +31,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tui/events"
 	"github.com/rickchristie/govner/cooper/internal/tui/history"
 	"github.com/rickchristie/govner/cooper/internal/tui/loading"
+	"github.com/rickchristie/govner/cooper/internal/tui/portfwd"
 	"github.com/rickchristie/govner/cooper/internal/tui/proxymon"
 	"github.com/rickchristie/govner/cooper/internal/tui/settings"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
@@ -140,7 +141,8 @@ visually inspect every screen without needing Docker or a running proxy.
 Use --screen to jump directly to a specific tab:
   cooper tui-test --screen monitor
   cooper tui-test --screen containers
-  cooper tui-test --screen configure`,
+  cooper tui-test --screen configure
+  cooper tui-test --screen ports`,
 	RunE: runTUITest,
 }
 
@@ -176,7 +178,7 @@ func init() {
 	rootCmd.AddCommand(tuiTestCmd)
 
 	tuiTestCmd.Flags().StringVar(&tuiTestScreen, "screen", "",
-		"Jump to a specific screen: containers, monitor, blocked, allowed, bridge-logs, bridge-routes, settings, about, loading, configure")
+		"Jump to a specific screen: containers, monitor, blocked, allowed, bridge-logs, bridge-routes, settings, ports, about, loading, configure")
 }
 
 func main() {
@@ -568,14 +570,17 @@ func runUp(cmd *cobra.Command, args []string) error {
 	bridgeRoutesModel.SetRoutes(cfg.BridgeRoutes)
 	mainModel.SetBridgeRoutesModel(bridgeRoutesModel)
 
-	settingsModel := settings.New(
+	runtimeModel := settings.New(
 		cfg.MonitorTimeoutSecs,
 		cfg.BlockedHistoryLimit,
 		cfg.AllowedHistoryLimit,
 		cfg.BridgeLogLimit,
 	)
-	settingsModel.SetPortForwardRules(cfg.PortForwardRules)
-	mainModel.SetSettingsModel(settingsModel)
+	mainModel.SetRuntimeModel(runtimeModel)
+
+	portForwardModel := portfwd.New()
+	portForwardModel.SetPortForwardRules(cfg.PortForwardRules)
+	mainModel.SetPortForwardModel(portForwardModel)
 
 	aboutModel := about.New(cfg)
 	// Send startup version warnings collected during loading.
@@ -752,18 +757,11 @@ func runCLI(cmd *cobra.Command, args []string) error {
 		envArgs = append(envArgs, fmt.Sprintf("%s=%s", t.Name, t.Value))
 	}
 
-	// 11. Execute: one-shot command, or auto-launch the tool interactively.
+	// 11. Execute: one-shot command or interactive shell.
 	var execCmd []string
 	if cliOneShot != "" {
 		execCmd = []string{"bash", "-c", cliOneShot}
 	} else {
-		// Write a one-shot autostart marker. The .bashrc autostart block
-		// (written by the entrypoint) checks for this file, runs the tool,
-		// then deletes the marker. This gives the tool full TTY control
-		// (important for TUI apps like opencode) and drops the user into
-		// a bash shell when the tool exits.
-		_ = exec.Command("docker", "exec", containerName, "bash", "-c",
-			fmt.Sprintf("echo '%s' > /tmp/.cooper-autostart", toolName)).Run()
 		execCmd = []string{"bash", "-l"}
 	}
 
@@ -1122,14 +1120,18 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 	routesModel.SetRoutes(cfg.BridgeRoutes)
 	mainModel.SetBridgeRoutesModel(routesModel)
 
-	tuiSettingsModel := settings.New(
+	tuiRuntimeModel := settings.New(
 		cfg.MonitorTimeoutSecs,
 		cfg.BlockedHistoryLimit,
 		cfg.AllowedHistoryLimit,
 		cfg.BridgeLogLimit,
 	)
-	tuiSettingsModel.SetPortForwardRules(cfg.PortForwardRules)
-	mainModel.SetSettingsModel(tuiSettingsModel)
+	mainModel.SetRuntimeModel(tuiRuntimeModel)
+
+	tuiPortFwdModel := portfwd.New()
+	tuiPortFwdModel.SetPortForwardRules(cfg.PortForwardRules)
+	mainModel.SetPortForwardModel(tuiPortFwdModel)
+
 	mainModel.SetAboutModel(about.New(cfg))
 
 	// Jump to requested screen if --screen flag is set.
@@ -1147,8 +1149,10 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 			mainModel.SetActiveTab(theme.TabBridgeLogs)
 		case "bridge-routes":
 			mainModel.SetActiveTab(theme.TabBridgeRoutes)
-		case "settings":
-			mainModel.SetActiveTab(theme.TabConfigure)
+		case "settings", "runtime":
+			mainModel.SetActiveTab(theme.TabRuntime)
+		case "ports", "portforward", "port-forward":
+			mainModel.SetActiveTab(theme.TabPortForward)
 		case "about":
 			mainModel.SetActiveTab(theme.TabAbout)
 		case "loading":
@@ -1165,7 +1169,7 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 			_, err := configure.Run(testCA)
 			return err
 		default:
-			return fmt.Errorf("unknown screen: %s\nAvailable: containers, monitor, blocked, allowed, bridge-logs, bridge-routes, settings, about, loading, configure", tuiTestScreen)
+			return fmt.Errorf("unknown screen: %s\nAvailable: containers, monitor, blocked, allowed, bridge-logs, bridge-routes, settings, ports, about, loading, configure", tuiTestScreen)
 		}
 	}
 

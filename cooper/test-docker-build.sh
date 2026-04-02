@@ -486,6 +486,13 @@ run_build_test() {
         fail "${mode}: ACL helper binary not found in proxy"
     fi
 
+    # Custom error page.
+    if proxy_run test -f /etc/squid/errors/ERR_ACCESS_DENIED; then
+        pass "${mode}: Custom Cooper error page in proxy"
+    else
+        fail "${mode}: Custom Cooper error page not found in proxy"
+    fi
+
     # socat installed.
     local socat_check
     socat_check=$(docker exec "$proxy_container" which socat 2>&1 || true)

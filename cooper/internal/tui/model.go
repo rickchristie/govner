@@ -35,14 +35,15 @@ type Model struct {
 
 	// Sub-models, one per tab. These are nil until the corresponding tab
 	// package supplies a concrete implementation (Work Packages 4C-4I).
-	containersModel   SubModel
-	proxyMonModel     SubModel
-	blockedModel      SubModel
-	allowedModel      SubModel
-	bridgeLogsModel   SubModel
-	bridgeRoutesModel SubModel
-	settingsModel     SubModel
-	aboutModel        SubModel
+	containersModel    SubModel
+	proxyMonModel      SubModel
+	blockedModel       SubModel
+	allowedModel       SubModel
+	bridgeLogsModel    SubModel
+	bridgeRoutesModel  SubModel
+	runtimeModel       SubModel
+	portForwardModel   SubModel
+	aboutModel         SubModel
 
 	// Loading screen (nil after startup completes).
 	loadingModel SubModel
@@ -98,8 +99,11 @@ func (m *Model) SetBridgeLogsModel(sm SubModel) { m.bridgeLogsModel = sm }
 // SetBridgeRoutesModel wires the bridge routes tab.
 func (m *Model) SetBridgeRoutesModel(sm SubModel) { m.bridgeRoutesModel = sm }
 
-// SetSettingsModel wires the settings tab.
-func (m *Model) SetSettingsModel(sm SubModel) { m.settingsModel = sm }
+// SetRuntimeModel wires the runtime settings tab.
+func (m *Model) SetRuntimeModel(sm SubModel) { m.runtimeModel = sm }
+
+// SetPortForwardModel wires the port forwarding tab.
+func (m *Model) SetPortForwardModel(sm SubModel) { m.portForwardModel = sm }
 
 // SetAboutModel wires the about tab.
 func (m *Model) SetAboutModel(sm SubModel) { m.aboutModel = sm }
@@ -135,8 +139,10 @@ func (m *Model) activeSubModel() SubModel {
 		return m.bridgeLogsModel
 	case theme.TabBridgeRoutes:
 		return m.bridgeRoutesModel
-	case theme.TabConfigure:
-		return m.settingsModel
+	case theme.TabRuntime:
+		return m.runtimeModel
+	case theme.TabPortForward:
+		return m.portForwardModel
 	case theme.TabAbout:
 		return m.aboutModel
 	}

@@ -34,6 +34,9 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	// Merge any new default domains added in code updates.
+	cfg.MergeDefaultDomains()
+
 	return &cfg, nil
 }
 
@@ -88,6 +91,22 @@ func defaultWhitelistedDomains() []DomainEntry {
 		{Domain: "default.exp-tas.com", IncludeSubdomains: false, Source: "default"},
 		{Domain: "raw.githubusercontent.com", IncludeSubdomains: false, Source: "default"},
 		{Domain: "statsig.anthropic.com", IncludeSubdomains: false, Source: "default"},
+		{Domain: ".opencode.ai", IncludeSubdomains: true, Source: "default"},
+	}
+}
+
+// MergeDefaultDomains ensures all default whitelisted domains are present
+// in the config. New defaults added in code updates are merged into existing
+// configs so users don't have to reconfigure to pick up new tool domains.
+func (c *Config) MergeDefaultDomains() {
+	existing := make(map[string]bool)
+	for _, d := range c.WhitelistedDomains {
+		existing[d.Domain] = true
+	}
+	for _, d := range defaultWhitelistedDomains() {
+		if !existing[d.Domain] {
+			c.WhitelistedDomains = append(c.WhitelistedDomains, d)
+		}
 	}
 }
 

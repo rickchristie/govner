@@ -241,6 +241,7 @@ func (m *whitelistModel) viewDomains(width int) (string, string) {
 		"collector.github.com":                    "Copilot",
 		"default.exp-tas.com":                     "Copilot",
 		"raw.githubusercontent.com":               "GitHub",
+		".opencode.ai":                            "OpenCode",
 	}
 
 	var content string

@@ -19,22 +19,89 @@ func (m *Model) render(width, height int) string {
 	// Column header row.
 	sections = append(sections, m.renderColumnHeader(width))
 
-	// Scrollable list.
+	// Scrollable list — takes full available height (no inline detail split).
 	listView := m.renderList(width, m.list.Height)
 	sections = append(sections, listView)
 
-	// Detail pane (bottom half when open).
+	result := strings.Join(sections, "\n")
+
+	// Detail shown as modal overlay when open.
 	if m.detailOpen {
 		if entry := m.selectedEntry(); entry != nil {
-			detailHeight := height - height/2 - 1 // remaining after header + list
-			if detailHeight < 3 {
-				detailHeight = 3
+			// Pad result to fill height so the overlay covers the full area.
+			resultLines := strings.Split(result, "\n")
+			for len(resultLines) < height {
+				resultLines = append(resultLines, "")
 			}
-			sections = append(sections, m.renderDetail(*entry, width, detailHeight))
+			bg := strings.Join(resultLines, "\n")
+
+			modal := m.renderDetailModal(*entry, width, height)
+			return lipgloss.Place(width, height, lipgloss.Left, lipgloss.Top,
+				components.DimContent(bg)) + "\r" + modal
 		}
 	}
 
-	return strings.Join(sections, "\n")
+	return result
+}
+
+// renderDetailModal renders the detail as a centered modal overlay.
+func (m *Model) renderDetailModal(entry HistoryEntry, width, height int) string {
+	var titleStyle lipgloss.Style
+	if m.mode == ModeBlocked {
+		titleStyle = lipgloss.NewStyle().Foreground(theme.ColorFlame).Bold(true)
+	} else {
+		titleStyle = lipgloss.NewStyle().Foreground(theme.ColorProof).Bold(true)
+	}
+
+	// Build detail content.
+	var lines []string
+
+	url := "https://" + entry.Request.Domain
+	if entry.Request.Port != "" && entry.Request.Port != "443" {
+		url += ":" + entry.Request.Port
+	}
+	lines = append(lines, detailRow("URL", url))
+	lines = append(lines, detailRow("Method", "CONNECT"))
+	lines = append(lines, detailRow("Source", entry.Request.SourceIP))
+	lines = append(lines, detailRow("Time", entry.Timestamp.Format("15:04:05")))
+
+	if m.mode == ModeBlocked {
+		var reason string
+		switch entry.Decision {
+		case "timeout":
+			reason = "timeout (expired)"
+		case "denied":
+			reason = "denied by user"
+		default:
+			reason = entry.Decision
+		}
+		lines = append(lines, detailRow("Reason", reason))
+	} else {
+		lines = append(lines, detailRow("Type", entry.Decision))
+		if entry.ResponseStatus > 0 {
+			lines = append(lines, detailRow("Status", fmt.Sprintf("%d", entry.ResponseStatus)))
+		}
+	}
+
+	inner := strings.Join(lines, "\n")
+
+	var titleText string
+	if m.mode == ModeBlocked {
+		titleText = "Blocked Request Detail"
+	} else {
+		titleText = "Allowed Request Detail"
+	}
+
+	boxWidth := min(60, width-8)
+	box := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(theme.ColorOakLight).
+		Padding(1, 3).
+		Width(boxWidth).
+		Render(titleStyle.Render(titleText) + "\n\n" + inner + "\n\n" +
+			lipgloss.NewStyle().Foreground(theme.ColorDusty).Render("[Esc/Enter] Close"))
+
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
 }
 
 // renderColumnHeader renders the table column header.

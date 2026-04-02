@@ -45,6 +45,10 @@ type model struct {
 	showQuitModal    bool
 	quitModalConfirm bool // true = Confirm focused, false = Cancel focused
 
+	// Version changes modal — shown on startup when mirror versions changed.
+	showChangesModal  bool
+	versionChanges    []string // e.g. "claude: 2.1.89 → 2.1.90"
+
 	// Sub-screen models.
 	welcome     welcomeModel
 	programming programmingModel
@@ -155,7 +159,32 @@ func newModel(cfg *config.Config, cooperDir string, ca *app.ConfigureApp, existi
 	m.portForward = newPortFwdModel(cfg.PortForwardRules)
 	m.proxySetup = newProxyModel(cfg.ProxyPort, cfg.BridgePort)
 	m.save = newSaveModel(cfg, cooperDir, configPath, ca)
+
+	// Detect version changes for mirror mode tools.
+	m.versionChanges = m.detectMirrorChanges()
+	if len(m.versionChanges) > 0 {
+		m.showChangesModal = true
+	}
+
 	return m
+}
+
+// detectMirrorChanges finds mirror-mode tools where the host version
+// differs from the built container version.
+func (m *model) detectMirrorChanges() []string {
+	var changes []string
+	allTools := [][]toolEntry{m.programming.tools, m.aicli.tools}
+	for _, tools := range allTools {
+		for _, t := range tools {
+			if !t.enabled || t.mode != config.ModeMirror {
+				continue
+			}
+			if t.containerVersion != "" && t.hostVersion != "" && t.containerVersion != t.hostVersion {
+				changes = append(changes, fmt.Sprintf("%s: %s → %s", t.displayName, t.containerVersion, t.hostVersion))
+			}
+		}
+	}
+	return changes
 }
 
 func (m *model) Init() tea.Cmd {
@@ -170,6 +199,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// Handle version changes modal when it is showing.
+		if m.showChangesModal {
+			switch msg.String() {
+			case "enter", "esc", " ":
+				m.showChangesModal = false
+			}
+			return m, nil
+		}
+
 		// Handle quit confirmation modal when it is showing.
 		if m.showQuitModal {
 			switch msg.String() {
@@ -268,11 +306,42 @@ func (m *model) View() string {
 		content = "Unknown screen"
 	}
 
+	if m.showChangesModal {
+		content = overlayModal(content, m.viewChangesModal(), m.width, m.height)
+	}
+
 	if m.showQuitModal {
 		content = overlayModal(content, m.viewQuitModal(), m.width, m.height)
 	}
 
 	return content
+}
+
+// viewChangesModal renders the version changes notification modal.
+func (m *model) viewChangesModal() string {
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(theme.ColorCopper).
+		Padding(1, 3).
+		Width(min(60, m.width-10))
+
+	titleStyle := lipgloss.NewStyle().Foreground(theme.ColorCopper).Bold(true)
+	changeStyle := lipgloss.NewStyle().Foreground(theme.ColorParchment)
+	hintStyle := lipgloss.NewStyle().Foreground(theme.ColorDusty)
+
+	var inner string
+	inner += "  " + titleStyle.Render(theme.IconWarn+" Version Changes Detected") + "\n\n"
+	inner += "  " + hintStyle.Render("Mirror mode tools have new host versions:") + "\n\n"
+
+	for _, change := range m.versionChanges {
+		inner += "  " + changeStyle.Render("  "+theme.IconArrowRight+" "+change) + "\n"
+	}
+
+	inner += "\n"
+	inner += "  " + hintStyle.Render("Go to Save & Build to apply these changes.") + "\n\n"
+	inner += "  " + lipgloss.NewStyle().Foreground(theme.ColorProof).Render("[Enter] OK")
+
+	return boxStyle.Render(inner)
 }
 
 // viewQuitModal renders the quit confirmation modal.
