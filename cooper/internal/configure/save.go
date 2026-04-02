@@ -94,6 +94,14 @@ func (m *saveModel) update(msg tea.Msg) saveResult {
 			if m.focusBtn < 1 {
 				m.focusBtn++
 			}
+		case "up", "k":
+			if m.scrollOffset > 0 {
+				m.scrollOffset--
+			}
+		case "down", "j":
+			if m.scrollOffset < m.lastMaxScroll {
+				m.scrollOffset++
+			}
 		case "pgup", "ctrl+u":
 			m.scrollOffset -= 10
 			if m.scrollOffset < 0 {
