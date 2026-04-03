@@ -445,6 +445,8 @@ Concrete target docker args:
 -e PLAYWRIGHT_BROWSERS_PATH=/home/user/.cache/ms-playwright
 -e DISPLAY=127.0.0.1:99
 -e XAUTHORITY=/home/user/.cooper-clipboard.xauth
+-e COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99
+-e COOPER_CLIPBOARD_XAUTHORITY=/home/user/.cooper-clipboard.xauth
 --shm-size=1g
 ```
 
@@ -455,6 +457,8 @@ Barrels should expose this environment:
 ```bash
 export DISPLAY=127.0.0.1:99
 export XAUTHORITY=/home/user/.cooper-clipboard.xauth
+export COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99
+export COOPER_CLIPBOARD_XAUTHORITY=/home/user/.cooper-clipboard.xauth
 export PLAYWRIGHT_BROWSERS_PATH=/home/user/.cache/ms-playwright
 ```
 
@@ -465,6 +469,12 @@ This environment should be visible to:
 3. `docker exec` sessions
 4. AI CLI subprocesses
 5. repo-local Playwright commands
+
+Implementation note:
+
+- do not let generic Playwright/X11 env drift from the clipboard-bridge env
+- `DISPLAY` must match `COOPER_CLIPBOARD_DISPLAY`
+- `XAUTHORITY` must match `COOPER_CLIPBOARD_XAUTHORITY`
 
 ### X11 runtime contract
 
@@ -478,6 +488,9 @@ Implementation rules:
 3. keep the clipboard-bridge native X11 path on the same display
 4. do not create a separate Playwright-only display
 5. do not keep the old OpenCode-only Xvfb branch after the unified path exists
+6. wait for Xvfb TCP readiness before starting any native X11 clipboard bridge
+7. export one consistent display/auth pair for both generic X11 use and
+   clipboard-bridge use
 
 Recommended startup shape:
 
@@ -532,6 +545,9 @@ Rules:
 5. sync should preserve enough path structure to avoid filename collisions
 6. sync should only consider font-like files
 7. after the mount is present inside the barrel, run `fc-cache -f`
+8. the mounted font directory stays read-only inside barrels
+9. fontconfig cache files should live under `/home/user/.cache/fontconfig`,
+   not in the mounted font directory
 
 Implementation direction:
 
@@ -563,6 +579,8 @@ Rules:
 4. the first browser install may require user approval through the proxy
 5. once installed, the cache survives container restarts because it lives under
    `~/.cooper`
+6. Cooper must create the host cache directory before any `docker run` so
+   Docker does not create it with the wrong ownership
 
 Important result:
 
@@ -729,6 +747,8 @@ The barrel entrypoint must:
 3. perform best-effort font sync before the system is declared ready
 4. not fail startup if font sync is partial or unavailable
 5. surface startup warnings if font sync fails in a meaningful way
+6. create the support directories before any barrel start so Docker does not
+   create them as root-owned directories
 
 ### `cooper configure` requirements
 
@@ -750,12 +770,15 @@ They should check:
 1. `Xvfb` is installed
 2. `DISPLAY` is set
 3. `XAUTHORITY` is set and file exists
-4. `/home/user/.local/share/fonts` exists
-5. `/home/user/.fonts` is a symlink to the mounted font dir
-6. `fc-cache` and `fc-list` are available
-7. `PLAYWRIGHT_BROWSERS_PATH` is set
-8. the browser cache directory exists
-9. `/dev/shm` size matches the configured value
+4. `COOPER_CLIPBOARD_DISPLAY` is set
+5. `COOPER_CLIPBOARD_XAUTHORITY` is set and file exists
+6. `/home/user/.local/share/fonts` exists
+7. `/home/user/.fonts` is a symlink to the mounted font dir
+8. `fc-cache` and `fc-list` are available
+9. `PLAYWRIGHT_BROWSERS_PATH` is set
+10. the browser cache directory exists
+11. `/dev/shm` size matches the configured value
+12. `fc-cache -f` succeeds even though the mounted font directory is read-only
 
 They should not fail just because:
 
@@ -766,6 +789,30 @@ Optional diagnostic behavior:
 
 - if a workspace Playwright package and a browser cache are both present, run a
   best-effort browser smoke test and report the result as extra information
+
+## Implementation Order
+
+The next implementation session should follow this order to reduce drift and
+avoid rework:
+
+1. add `barrel_shm_size` to config, defaults, validation, and configure UI
+2. add Cooper-managed support-dir creation and host-side font sync in `cooper up`
+3. add barrel mounts, env vars, and `--shm-size` wiring
+4. update `cooper-base` packages and unify entrypoint Xvfb startup
+5. update diagnostics so `doctor` and `proof` reflect the new runtime contract
+6. update e2e and template tests so the old OpenCode-only Xvfb expectations are
+   replaced with unified all-barrel expectations
+7. update docs last, after behavior and tests are stable
+
+Do not invert this sequence.
+
+In particular:
+
+1. do not start by editing docs only
+2. do not add new Playwright behavior without also updating diagnostics and e2e
+3. do not keep old OpenCode-only Xvfb branches around while adding the new
+   universal path
+4. do not let Docker auto-create the support directories as root-owned mounts
 
 ## File-Level Implementation Plan
 
@@ -920,6 +967,8 @@ Required changes:
 1. add a startup step for ensuring or syncing fonts
 2. ensure `~/.cooper/cache/ms-playwright` exists
 3. collect non-fatal startup warnings for font sync issues
+4. ensure the support directories exist before any barrel start so Docker does
+   not create them as root-owned directories
 
 Example startup sequence change:
 
@@ -966,8 +1015,10 @@ Required changes:
    `/home/user/.cache/ms-playwright:rw`
 3. set `PLAYWRIGHT_BROWSERS_PATH`
 4. set `DISPLAY` and `XAUTHORITY` for every barrel, not only current X11 tools
-5. add `--shm-size` from config
-6. ensure host directories are created before Docker mounts them
+5. preserve `COOPER_CLIPBOARD_DISPLAY` and `COOPER_CLIPBOARD_XAUTHORITY` on
+   the same values
+6. add `--shm-size` from config
+7. ensure host directories are created before Docker mounts them
 
 Example `docker run` changes:
 
@@ -997,6 +1048,8 @@ func appendPlaywrightSupport(args []string, cooperDir string) []string {
         "-e", "PLAYWRIGHT_BROWSERS_PATH=/home/user/.cache/ms-playwright",
         "-e", "DISPLAY=127.0.0.1:99",
         "-e", "XAUTHORITY=/home/user/.cooper-clipboard.xauth",
+        "-e", "COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99",
+        "-e", "COOPER_CLIPBOARD_XAUTHORITY=/home/user/.cooper-clipboard.xauth",
     )
     return args
 }
@@ -1026,8 +1079,9 @@ Required changes:
 3. remove the old OpenCode-only Xvfb special case
 4. add the unified all-barrels Xvfb startup
 5. create or fix `.fonts` symlink
-6. ensure `fc-cache -f` runs
-7. make the clipboard X11 bridge reuse the same X11 display
+6. ensure `/home/user/.cache/fontconfig` exists before running `fc-cache`
+7. ensure `fc-cache -f` runs
+8. make the clipboard X11 bridge reuse the same X11 display
 
 Example Dockerfile package direction:
 
@@ -1090,6 +1144,7 @@ Example entrypoint shape:
 ensure_playwright_runtime() {
   mkdir -p /home/user/.local/share/fonts
   mkdir -p /home/user/.cache/ms-playwright
+  mkdir -p /home/user/.cache/fontconfig
   ln -snf /home/user/.local/share/fonts /home/user/.fonts
   fc-cache -f >/tmp/fc-cache.log 2>&1 || true
 }
@@ -1111,6 +1166,8 @@ start_shared_xvfb() {
 
   export DISPLAY="$DISPLAY_ADDR"
   export XAUTHORITY="$XAUTH_FILE"
+  export COOPER_CLIPBOARD_DISPLAY="$DISPLAY_ADDR"
+  export COOPER_CLIPBOARD_XAUTHORITY="$XAUTH_FILE"
   sed -i "1i export DISPLAY=${DISPLAY_ADDR}\nexport XAUTHORITY=${XAUTH_FILE}" /home/user/.bashrc 2>/dev/null || true
   sed -i "1i export DISPLAY=${DISPLAY_ADDR}\nexport XAUTHORITY=${XAUTH_FILE}" /home/user/.profile 2>/dev/null || true
 }
@@ -1122,6 +1179,16 @@ Ordering rule:
 2. run `start_shared_xvfb`
 3. start clipboard X11 bridge only after Xvfb is ready
 4. do not keep the old OpenCode-only branch afterward
+
+Implementation note:
+
+- keep one helper that writes all four X11-related exports:
+  - `DISPLAY`
+  - `XAUTHORITY`
+  - `COOPER_CLIPBOARD_DISPLAY`
+  - `COOPER_CLIPBOARD_XAUTHORITY`
+- do not maintain two partially divergent code paths for generic X11 and
+  clipboard X11
 
 ### 6. Diagnostics
 
@@ -1168,6 +1235,269 @@ fi
 df -h /dev/shm | tail -n 1
 ```
 
+### Testing strategy
+
+The implementation should use three layers of automated testing:
+
+1. unit tests for pure logic and deterministic file operations
+2. render or integration tests for Docker args, templates, and app startup
+   behavior
+3. `test-e2e.sh` for full real-container behavior across all supported barrels
+
+Do not rely on e2e alone.
+
+The unit and render tests should catch regressions quickly without requiring
+Docker startup for every small change. The e2e test should then prove the full
+runtime contract with real containers.
+
+#### Unit tests
+
+These should be small, deterministic, and fast.
+
+1. `internal/config/config_test.go`
+   - default `barrel_shm_size` to `1g`
+   - accept valid sizes like `64m`, `256m`, `1g`, `2g`
+   - reject invalid sizes like `0`, `-1`, `1gb`, `abc`, empty after trimming
+
+2. `internal/fontsync/sync_test.go`
+   - copy supported font files from each Linux source root
+   - ignore non-font files
+   - preserve source-specific subdirectory structure in `~/.cooper/fonts`
+   - preserve user-added destination files
+   - skip unchanged files
+   - update changed files when size or modtime differs
+   - return warnings, not fatal errors, for unreadable optional roots
+   - handle missing roots without failing
+
+3. `internal/docker/barrel` tests
+   - `ensureBarrelHostDirs` creates:
+     - Cooper font dir
+     - Cooper Playwright cache dir
+   - barrel run args include:
+     - fonts mount
+     - Playwright cache mount
+     - `PLAYWRIGHT_BROWSERS_PATH`
+     - `DISPLAY`
+     - `XAUTHORITY`
+     - `COOPER_CLIPBOARD_DISPLAY`
+     - `COOPER_CLIPBOARD_XAUTHORITY`
+     - `--shm-size=<configured-value>`
+   - the same display/auth values are used for both generic X11 and
+     clipboard-bridge env vars
+
+4. `internal/proof` tests
+   - new environment checks behave correctly when vars are:
+     - present and valid
+     - missing
+     - pointing to missing paths
+
+#### Template and render tests
+
+These should prove generated image and entrypoint content without needing a
+full e2e run.
+
+1. `internal/templates/templates_test.go`
+   - `base.Dockerfile.tmpl` includes:
+     - `Xvfb`
+     - `xauth`
+     - `fontconfig`
+     - baseline fonts
+     - the Playwright-derived Linux dependency set
+   - `entrypoint.sh.tmpl`:
+     - creates `~/.local/share/fonts`
+     - creates `~/.cache/ms-playwright`
+     - creates `~/.cache/fontconfig`
+     - creates or refreshes `.fonts` symlink
+     - starts one shared `Xvfb`
+     - exports all four X11-related env vars
+     - no longer contains the old OpenCode-only Xvfb conditional
+     - waits for Xvfb readiness before native clipboard bridge startup
+
+2. `internal/app/cooper_test.go`
+   - generated runtime or app wiring includes the new mounts and env vars
+   - startup support directories are created before barrels are started
+   - startup warning collection can represent non-fatal font sync problems
+
+#### E2E strategy in `test-e2e.sh`
+
+The e2e test should use real containers and assert the runtime contract, not
+just generated files.
+
+Use the existing `barrel_exec()` pattern already present in `test-e2e.sh`.
+
+Update the test config in `test-e2e.sh` to include:
+
+```json
+{
+  "barrel_shm_size": "1g"
+}
+```
+
+Add e2e fixture setup before starting barrels:
+
+1. create a host font fixture directory under the test area, for example:
+   - `${CONFIG_DIR}/fonts-fixture`
+2. place at least one known font file there, for example a copied
+   `DejaVuSans.ttf`
+3. create a host Playwright cache dir under the test area, for example:
+   - `${CONFIG_DIR}/ms-playwright`
+4. ensure the started barrels mount those fixture directories the same way the
+   real implementation mounts `~/.cooper/fonts` and
+   `~/.cooper/cache/ms-playwright`
+
+Required e2e assertions for every built-in tool barrel:
+
+1. env contract:
+   - `test -n "$DISPLAY"`
+   - `test -n "$XAUTHORITY"`
+   - `test -n "$COOPER_CLIPBOARD_DISPLAY"`
+   - `test -n "$COOPER_CLIPBOARD_XAUTHORITY"`
+   - `test -n "$PLAYWRIGHT_BROWSERS_PATH"`
+   - `test "$DISPLAY" = "$COOPER_CLIPBOARD_DISPLAY"`
+   - `test "$XAUTHORITY" = "$COOPER_CLIPBOARD_XAUTHORITY"`
+
+2. filesystem and mounts:
+   - `test -d /home/user/.cache/ms-playwright`
+   - `test -d /home/user/.local/share/fonts`
+   - `test -L /home/user/.fonts`
+   - `test "$(readlink /home/user/.fonts)" = "/home/user/.local/share/fonts"`
+   - `test -f "$XAUTHORITY"`
+
+3. X11 runtime:
+   - `pgrep -x Xvfb >/dev/null`
+   - `bash -c "echo > /dev/tcp/127.0.0.1/6099"`
+
+4. font runtime:
+   - `fc-cache -f /home/user/.local/share/fonts`
+   - `fc-list | grep -F "DejaVuSans"`
+
+5. Playwright cache mount behavior:
+   - `test "$PLAYWRIGHT_BROWSERS_PATH" = "/home/user/.cache/ms-playwright"`
+   - `touch /home/user/.cache/ms-playwright/e2e-write-test`
+   - `test -f /home/user/.cache/ms-playwright/e2e-write-test`
+
+6. shared memory:
+   - `df -h /dev/shm`
+   - assert that `/dev/shm` reports the configured size rather than Docker's
+     default `64M`
+
+7. CLI regression:
+   - existing help/smoke commands still succeed for:
+     - `claude`
+     - `codex`
+     - `copilot`
+     - `opencode`
+
+8. clipboard-bridge compatibility:
+   - native X11 tools still see the shared X11 env
+   - shim tools still start successfully with the shared X11 env present
+
+Example e2e assertions to add with the current helper style:
+
+```bash
+display_val=$(barrel_exec 'echo "$DISPLAY"')
+clip_display_val=$(barrel_exec 'echo "$COOPER_CLIPBOARD_DISPLAY"')
+if [ "$display_val" = "$clip_display_val" ] && [ -n "$display_val" ]; then
+    pass "${tool}: DISPLAY matches clipboard display"
+else
+    fail "${tool}: DISPLAY mismatch: DISPLAY=${display_val} CLIP=${clip_display_val}"
+fi
+
+fonts_link=$(barrel_exec 'readlink /home/user/.fonts 2>/dev/null || true')
+if [ "$fonts_link" = "/home/user/.local/share/fonts" ]; then
+    pass "${tool}: ~/.fonts symlink correct"
+else
+    fail "${tool}: ~/.fonts symlink incorrect: ${fonts_link}"
+fi
+
+font_seen=$(barrel_exec 'fc-list | grep -F "DejaVuSans" | head -n 1')
+if [ -n "$font_seen" ]; then
+    pass "${tool}: mounted test font visible via fontconfig"
+else
+    fail "${tool}: mounted test font not visible via fontconfig"
+fi
+
+shm_line=$(barrel_exec 'df -h /dev/shm | tail -n 1')
+if echo "$shm_line" | grep -q "1.0G"; then
+    pass "${tool}: /dev/shm size reflects config"
+else
+    fail "${tool}: unexpected /dev/shm size: ${shm_line}"
+fi
+```
+
+#### Optional gated browser smoke tests
+
+These are valuable, but they should be gated because they require a prepared
+browser cache or manual network approval.
+
+Recommended gate:
+
+- run only when an explicit env var is set, for example
+  `COOPER_E2E_PLAYWRIGHT=1`
+
+When the gate is enabled and a browser cache is already present, run three real
+Playwright smokes inside at least one barrel:
+
+1. default headless
+2. headless with `channel: 'chromium'`
+3. headed with `headless: false`
+
+These tests should use a tiny inline Playwright script and assert:
+
+1. browser launches successfully
+2. a screenshot file is created
+3. console logging is observable
+4. the process exits zero
+
+The implementation should not make these heavy tests mandatory for normal CI if
+they require live downloads.
+
+#### E2E assumptions to verify or eliminate
+
+The e2e implementation should not silently depend on host-specific state.
+
+These are the main assumptions that must either be verified explicitly or
+eliminated from the test design:
+
+1. Test font fixture availability
+   - do not assume the host machine has a specific font like `DejaVuSans.ttf`
+   - preferred solution: check in a small redistributable test font under a
+     repo-owned fixture path and copy it into the e2e font fixture dir
+   - fallback only if necessary: probe a host font path and skip the font
+     visibility assertion when absent
+
+2. Fontconfig output stability
+   - do not rely only on a family-name grep if path-based matching is possible
+   - preferred assertion: confirm `fc-list` reports the mounted fixture font
+     path or basename, not just a family string that may vary slightly by
+     distro
+
+3. `/dev/shm` output formatting
+   - do not rely on `df -h` human-readable strings like `1.0G`
+   - preferred assertion: use `df -B1 /dev/shm | awk 'NR==2 {print $2}'` and
+     compare exact byte counts
+   - verified locally: `--shm-size=1g` yields `1073741824` bytes
+
+4. X11 display number and TCP port
+   - do not hardcode `6099` without deriving it from `DISPLAY`
+   - preferred assertion: parse the display number from `$DISPLAY` and compute
+     `6000 + display_num`
+   - verified locally: `DISPLAY=127.0.0.1:99` maps to TCP port `6099`
+
+5. Xvfb readiness timing
+   - do not assert X11 connectivity immediately after container start
+   - add a short wait loop for both `pgrep -x Xvfb` and TCP reachability before
+     failing the e2e check
+
+6. Browser cache prepopulation
+   - do not assume Playwright browsers already exist in the cache for normal CI
+   - keep real browser-launch tests behind an explicit gate like
+     `COOPER_E2E_PLAYWRIGHT=1`
+
+7. Host ownership of mounted directories
+   - ensure the e2e fixture dirs are created by the test script before barrel
+     startup so Docker does not create them with unexpected ownership
+
 ### 7. E2E and regression tests
 
 Files to update:
@@ -1187,6 +1517,8 @@ Required automated coverage:
 7. `/dev/shm` size reflects the configured value
 8. current CLI smoke commands still succeed for Claude, Codex, Copilot, and
    OpenCode
+9. `fc-cache -f` succeeds with the fonts directory mounted read-only
+10. `fc-list` can see at least one mounted font when test fixtures provide one
 
 Recommended optional E2E coverage:
 
@@ -1205,7 +1537,7 @@ barrel_exec 'test -n "$PLAYWRIGHT_BROWSERS_PATH"'
 barrel_exec 'test -d /home/user/.cache/ms-playwright'
 barrel_exec 'test -L /home/user/.fonts'
 barrel_exec 'fc-list | head -n 1'
-barrel_exec 'df -h /dev/shm'
+barrel_exec "df -B1 /dev/shm | awk 'NR==2 {print \$2}'"
 ```
 
 ### 8. Documentation
@@ -1222,6 +1554,42 @@ Required doc changes:
 3. explain the mounted font directory and browser cache
 4. explain the manual-approval model for browser downloads
 5. explain `barrel_shm_size`
+
+## Acceptance Criteria
+
+The implementation is done only when all of the following are true:
+
+1. `cooper build` produces images with the new browser-runtime packages and the
+   unified Xvfb startup path
+2. `cooper up` creates `~/.cooper/fonts` and
+   `~/.cooper/cache/ms-playwright` before any barrel starts
+3. `cooper up` performs best-effort Linux font sync and surfaces warnings
+   without blocking startup
+4. every built-in barrel mounts the Cooper-managed font dir read-only and the
+   Playwright cache dir read-write
+5. every built-in barrel exports:
+   - `DISPLAY`
+   - `XAUTHORITY`
+   - `COOPER_CLIPBOARD_DISPLAY`
+   - `COOPER_CLIPBOARD_XAUTHORITY`
+   - `PLAYWRIGHT_BROWSERS_PATH`
+6. every built-in barrel starts one authenticated shared X11 display and does
+   not retain the old OpenCode-only Xvfb branch
+7. `~/.fonts` exists as a symlink to `~/.local/share/fonts`
+8. `fc-cache -f` succeeds with the font mount read-only and `fc-list` can
+   discover mounted fonts
+9. `doctor.sh` and `cooper proof` reflect the new runtime contract without
+   requiring Playwright itself to be installed
+10. `/dev/shm` size inside barrels matches the configured
+    `barrel_shm_size`, default `1g`
+11. Claude, Codex, Copilot, and OpenCode still pass CLI smoke checks under the
+    unified display setup
+12. clipboard-bridge native X11 behavior still uses the same display and auth
+    material as the Playwright runtime
+13. e2e coverage exists for the new mounts, env vars, X11 runtime, and shm
+    behavior
+14. documentation clearly states that Cooper provides runtime support only, not
+    Playwright package management
 
 ## Integration With Clipboard-Bridge
 
@@ -1445,25 +1813,31 @@ Status:
 
 - verified from primary docs and local experiment
 
-### A8. A mounted user font directory plus `fc-cache -f` makes fonts discoverable
+### A8. A mounted read-only user font directory plus `fc-cache -f` makes fonts discoverable
 
 Assumption:
 
-- Cooper can mount host-managed fonts into the barrel and make them visible to
-  applications via fontconfig.
+- Cooper can mount host-managed fonts read-only into the barrel and make them
+  visible to applications via fontconfig without needing write access to the
+  mount itself.
 
 Verification:
 
 - local experiment in the official Playwright image as the non-root user:
   1. mount a host directory onto `/home/ubuntu/.local/share/fonts`
-  2. create `.fonts` symlink pointing at that directory
-  3. run `fc-cache -f /home/ubuntu/.local/share/fonts`
-  4. query `fc-list`
+  2. keep that mount read-only
+  3. create `.fonts` symlink pointing at that directory
+  4. run `fc-cache -f /home/ubuntu/.local/share/fonts`
+  5. query `fc-list`
+  6. inspect `~/.cache/fontconfig`
 
 Observed result:
 
 - `fc-list` reported a font from the mounted path:
   `/home/ubuntu/.local/share/fonts/DejaVuSans.ttf`
+- `fc-cache` succeeded even with the mounted font directory read-only
+- fontconfig wrote cache files under `/home/ubuntu/.cache/fontconfig`
+  instead of into the mounted font directory
 
 Status:
 

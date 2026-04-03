@@ -30,7 +30,6 @@ Then please read through /pgflock and notice the difference:
 - Request/response body inspection in the proxy monitor via ICAP server integration. v1 has SSL bump which gives URL, method,
   headers, and status code. Full body inspection (seeing what the AI is sending/receiving) requires an ICAP server that Squid
   forwards decrypted traffic to for deep inspection. This is significantly more complex but enables the richest visibility.
-- Fix paste image problem, something like, cc-clip or the VS Code extension "Image Paste for Remote SSH" bridge the clipboard gap to Docker.
 - Playwright support, the CLI container can run headed browser in the host machine safely.
 
 ## Detailed requirements
@@ -194,12 +193,15 @@ Then please read through /pgflock and notice the difference:
   - The TUI must always be active, and just like `pgflock` when user exits the TUI, it also stops all cooper containers.
   - (UI) Exiting always pops up an exit confirmation dialog (like pgflock). This is intentional — keeping barrels running
     without proxy/bridge is unsafe, and an explicit visible TUI is preferred over a background daemon.
+  - When starting, checks clipboard prerequisites (xclip or wl-paste on host) and warns if missing.
   - When starting, it checks programming tool and AI CLI tool versions in the docker image against the expected version per mode:
     - **Mirror mode**: compares container version against host machine version. Warns if different.
     - **Latest mode**: compares container version against latest remote version (queried from registry APIs). Warns if outdated.
     - **Pinned mode**: no warning. The version is what the user explicitly chose.
     - If any mismatch is found, it prompts user to run `cooper update` to update the CLI image.
     - This is important because the CLI docker shares important folders with the host machine, module cache, AI CLI config folders, etc.
+  - **Clipboard header bar** — always visible at the top of TUI, shows clipboard state with TTL countdown.
+    User presses `c` to capture host clipboard, `x` to clear. See "Clipboard Bridge" section for full details.
   - Control panel TUI tabs (Tab/Shift+Tab navigation, each tab is its own BubbleTea sub-model):
     - **Containers** tab:
       - List all live cooper containers (proxy and CLI containers), their CPU and memory usage, status.
@@ -248,6 +250,8 @@ Then please read through /pgflock and notice the difference:
       - Can set how many lines of blocked history requests in the log. Default 500.
       - Can set how many lines of allowed history requests in the log. Default 500.
       - Can set how many lines of execution bridge requests in the log. Default to 500.
+      - Can set clipboard TTL (10–3600 seconds, default 300). How long staged clipboard images remain available.
+      - Can set clipboard max size (1–100 MB, default 20 MiB). Maximum clipboard image payload size.
       - Configuration, when changed, takes effect immediately.
       - (UI) Tells the user that full logs are available at `~/.cooper/logs/` directory.
     - **About** tab:
@@ -295,6 +299,9 @@ Then please read through /pgflock and notice the difference:
       - `~/.codex` — OpenAI Codex CLI config
       - `~/.config/opencode` and `~/.local/share/opencode` — OpenCode CLI config and data
     - `~/.gitconfig` — git identity (read-only)
+    - Clipboard bridge (read-only):
+      - `~/.cooper/tokens/{containerName}` → `/etc/cooper/clipboard-token` — per-barrel auth token
+      - `~/.cooper/base/shims/` → `/etc/cooper/shims/` — pre-generated clipboard shim scripts
     - Language-specific caches (auto-configured based on enabled programming tools):
       - Go: `$GOPATH/pkg/mod` (read-only), `~/.cache/go-build` (read-write), `GOFLAGS=-mod=readonly`
       - Node: `~/.npm` (read-only)
@@ -364,15 +371,180 @@ Then please read through /pgflock and notice the difference:
   - Optionally removes `~/.cooper` directory (config, logs, Dockerfiles). Prompts for confirmation before deleting config.
   - Does NOT remove auth directories (`~/.claude`, `~/.copilot`, etc.) — these belong to the AI tools, not cooper.
 
+## Clipboard Bridge
+
+The clipboard bridge solves the Docker/host clipboard gap for image paste support across all AI CLIs.
+Docker containers have no access to the host clipboard — AI tools running inside barrels cannot paste images.
+The clipboard bridge provides a controlled, user-initiated mechanism to stage host clipboard images and
+make them available to AI tools inside containers.
+
+### Design Principles
+- **Explicit user consent**: User must press `c` in the TUI to stage a clipboard image. The host clipboard
+  is never passively or automatically exposed to containers.
+- **Time-limited access**: Staged images expire after a configurable TTL (default 5 minutes). Expired images
+  are inaccessible — the system is fail-closed.
+- **Per-barrel authentication**: Each running barrel receives a unique cryptographic token (32-byte random,
+  hex-encoded to 64 chars). Tokens are mounted as read-only files, never passed as environment variables or CLI args.
+- **Two delivery strategies**: Shim scripts (for tools that call xclip/xsel/wl-paste helper binaries) and
+  X11 selection ownership (for tools with native clipboard integration like Rust's `arboard` crate).
+
+### Architecture
+
+```
+Host clipboard (xclip/wl-paste)
+         ↓
+   [User presses 'c' in TUI]
+         ↓
+   LinuxReader.Read()          — reads image bytes from host clipboard
+         ↓
+   Normalize()                 — detects format, converts to PNG, enforces size limit
+         ↓
+   Manager.Stage()             — stores snapshot in memory with TTL and unique ID
+         ↓
+   Bridge HTTP server          — serves /clipboard/* endpoints with bearer token auth
+         ↓
+   [socat relay: barrel → cooper-proxy → host bridge]
+         ↓
+   Shim intercept              — xclip/xsel/wl-paste wrapper fetches from bridge
+     OR
+   X11 Bridge                  — owns CLIPBOARD selection on Xvfb, serves PNG via X11 protocol
+         ↓
+   AI CLI inside barrel        — sees standard clipboard image, pastes normally
+```
+
+### Delivery Strategies Per Tool
+
+Each AI tool uses a different mechanism to access the clipboard. Cooper auto-selects the strategy:
+
+| Tool | Mode | Mechanism | Why |
+|------|------|-----------|-----|
+| claude | `shim` | xclip/xsel/wl-paste wrapper scripts | Claude Code shells out to clipboard helper binaries |
+| opencode | `shim` | xclip/xsel/wl-paste wrapper scripts | OpenCode uses multiple clipboard helper binaries at runtime |
+| codex | `x11` | Xvfb + cooper-x11-bridge | Codex uses Rust `arboard` crate (native X11 clipboard via in-process code) |
+| copilot | `x11` | Xvfb + cooper-x11-bridge | Copilot uses native clipboard module |
+| custom | `auto` | Both shim + X11 | Custom tools get both strategies enabled |
+
+#### Shim Strategy (`shim` mode)
+Wrapper bash scripts replace `xclip`, `xsel`, and `wl-paste` in the container's `PATH`:
+- **xclip shim**: Intercepts `xclip -selection clipboard -t TARGETS -o` (advertises `image/png` if image staged)
+  and `xclip -selection clipboard -t image/* -o` (fetches PNG from bridge). All other invocations pass through
+  to the real `xclip` binary.
+- **xsel shim**: Intercepts `--clipboard --output` pattern. Falls back to real `xsel` otherwise.
+- **wl-paste shim** (Wayland): Intercepts `wl-paste --list-types` and `wl-paste --type image/*`.
+- All shims use a shared `_cooper_clip_fetch()` bash function that reads the bearer token from
+  `$COOPER_CLIPBOARD_TOKEN_FILE` and calls `curl` to fetch from the bridge. Binary data is handled
+  safely via tmpfile to preserve NUL bytes.
+
+#### X11 Strategy (`x11` mode)
+For tools with native clipboard integration (no shell-out to helper binaries):
+- **Xvfb** (X virtual framebuffer) runs on display `:99` with `-listen tcp -nolisten unix` (TCP-only for Docker).
+- **cooper-x11-bridge** binary runs as a background daemon inside the container. It:
+  - Connects to Xvfb via TCP `127.0.0.1:6099` with `MIT-MAGIC-COOKIE-1` authentication.
+  - Owns the X11 `CLIPBOARD` selection.
+  - When a tool requests clipboard contents, the bridge fetches the staged image from the HTTP bridge
+    endpoint and serves it as `image/png` via the X11 selection protocol.
+  - Supports INCR (incremental transfer) for large payloads (>256KB, in 64KB chunks).
+- X authority cookie is generated per-session via `mcookie`, written with mode 0600.
+
+### HTTP Endpoints (on Execution Bridge)
+
+Clipboard endpoints are served on the same bridge HTTP server (`localhost:{bridge_port}`), under the
+reserved `/clipboard/*` namespace. User bridge routes cannot use this namespace.
+
+- `GET /clipboard/type` — Returns JSON metadata: state (empty/staged/expired), MIME type, size, TTL remaining, variants.
+- `GET /clipboard/image` — Returns raw PNG bytes with `X-Cooper-Clipboard-Id` header.
+- Both endpoints require `Authorization: Bearer <token>` header. Invalid/missing tokens get 403 Forbidden.
+
+### Token Management
+- `clipboard.GenerateToken()` creates 32-byte random tokens (64-char hex strings).
+- Tokens are written to `~/.cooper/tokens/{containerName}` with mode 0600 on barrel start.
+- Token files are mounted into barrels at `/etc/cooper/clipboard-token` (read-only).
+- Tokens are removed when barrels stop (`clipboard.RemoveTokenFile()`).
+- In-memory token validation in the Manager, with disk-scan fallback for `cooper cli` barrels
+  (started as separate processes).
+
+### Container Integration
+
+**Environment variables set in barrel containers:**
+- `COOPER_CLIPBOARD_ENABLED=1`
+- `COOPER_CLIPBOARD_BRIDGE_URL=http://127.0.0.1:{bridge_port}`
+- `COOPER_CLIPBOARD_TOKEN_FILE=/etc/cooper/clipboard-token`
+- `COOPER_CLIPBOARD_MODE={shim|x11|auto}` — auto-selected per tool
+- `COOPER_CLIPBOARD_SHIMS=xclip,xsel` — which shim scripts to install
+- `COOPER_CLIPBOARD_XAUTHORITY=/home/user/.cooper-clipboard.xauth` — X11 auth file path (x11/auto modes)
+- `COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99` — X11 display address (x11/auto modes)
+
+**Volume mounts:**
+- `~/.cooper/tokens/{containerName}` → `/etc/cooper/clipboard-token` (read-only) — per-barrel auth token
+- `~/.cooper/base/shims/` → `/etc/cooper/shims/` (read-only) — pre-generated shim scripts
+
+**Base image additions:**
+- Packages: `xclip`, `xsel`, `xauth`, `xvfb` (installed unconditionally in base image)
+- Multi-stage build compiles `cooper-x11-bridge` from embedded Go source, copies to `/usr/local/bin/`
+
+**Entrypoint setup** (conditional on `ClipboardEnabled`):
+- Shim mode: copies shim scripts from `/etc/cooper/shims/` to `/home/user/.local/bin/` (prepended to PATH).
+- X11 mode: generates X authority cookie → starts Xvfb on TCP `:99` → starts `cooper-x11-bridge` daemon
+  with auto-restart supervisor loop → exports `DISPLAY` and `XAUTHORITY`.
+
+### TUI Integration
+
+**Header bar** shows clipboard status at all times:
+- **Empty**: `Clipboard Empty [c Copy]`
+- **Staged**: `Clipboard Staged [████░░░░░░] 45s [c Replace] [x Delete]` — TTL countdown bar (color: green→yellow→red)
+- **Failed**: `Clipboard Failed: <error> [c Retry]`
+- **Expired**: `Clipboard Expired [c Copy]`
+
+**Global hotkeys:**
+- `c` — Capture clipboard from host (reads, normalizes, stages). Disabled during text input.
+- `x` — Clear staged clipboard. Only available when staged. Disabled during text input.
+
+**Runtime Settings tab** exposes two clipboard settings (editable, immediate effect):
+- **Clipboard TTL** (10–3600 seconds, default 300) — how long staged images remain available.
+- **Clipboard max size** (1–100 MB, default 20 MiB) — maximum clipboard image payload size.
+
+### Configuration
+
+Config fields in `~/.cooper/config.json`:
+```json
+{
+  "clipboard_ttl_secs": 300,
+  "clipboard_max_bytes": 20971520
+}
+```
+
+Clipboard settings are NOT part of `cooper configure` — they use sensible defaults and are editable at
+runtime via the TUI Runtime Settings tab.
+
+### Image Processing Pipeline
+
+1. **Read**: `LinuxReader` detects display server (Wayland vs X11 via `WAYLAND_DISPLAY` env var),
+   then calls `wl-paste` or `xclip` to read raw image bytes from host clipboard.
+2. **Detect format**: Magic-byte detection for PNG, JPEG, GIF, BMP, TIFF, WebP, SVG. Falls back to
+   `http.DetectContentType` for edge cases.
+3. **Convert**: In-process conversion to PNG for common formats (JPEG, GIF, BMP, TIFF, WebP via
+   `golang.org/x/image`). External conversion via ImageMagick `magick` CLI for uncommon formats
+   (SVG, AVIF, HEIC, ICO) — 30-second timeout.
+4. **Size enforcement**: Input and output size limits enforced (configurable, default 20 MiB).
+5. **Stage**: PNG bytes stored in memory as `StagedSnapshot` with unique ID, creation time, expiry,
+   and access tracking (LastAccessAt, AccessCount).
+
+### Host Prerequisites
+- `xclip` or `wl-paste` must be installed on the host (for reading clipboard).
+- Optional: ImageMagick `magick` for uncommon image formats.
+- `cooper up` checks prerequisites at startup and warns if missing.
+
 ## Scope Model
 
 - **Global** (`~/.cooper/`): config.json, generated Dockerfiles, images (`cooper-proxy`, `cooper-base`, `cooper-cli-*`),
-  proxy container (`cooper-proxy`), secrets cache (`~/.cooper/secrets/`), logs (`~/.cooper/logs/`).
+  proxy container (`cooper-proxy`), secrets cache (`~/.cooper/secrets/`), logs (`~/.cooper/logs/`),
+  clipboard tokens (`~/.cooper/tokens/`), generated shim scripts (`~/.cooper/base/shims/`).
 - **Per-workspace**: CLI containers (`barrel-{dirname}-{tool}`), volume mounts (workspace dir rw, caches ro), socat port forwarding,
   token resolution (per-workspace secret cache keyed by path hash).
 - **Per-workspace persisted** (`~/.cooper/config.json`): execution bridge route mappings (API path → script path), configured
   via the Bridges tab in the Execution Bridge screen.
-- **Runtime-only** (not persisted): proxy monitor pending queue, approval decisions, TUI state, bridge API server process.
+- **Runtime-only** (not persisted): proxy monitor pending queue, approval decisions, TUI state, bridge API server process,
+  staged clipboard snapshots (in-memory with TTL), per-barrel clipboard tokens.
 
 ## Config Change → Required Action Matrix
 
@@ -380,7 +552,7 @@ Different config types are editable in different places and require different ac
 
 - **`cooper configure` only (v1)**: domain whitelist, AI tool selection, programming tool versions,
   proxy/bridge ports, CA regeneration. These require container restarts or rebuilds to apply.
-- **TUI runtime (Runtime tab)**: monitor timeout, log line limits. These take effect immediately.
+- **TUI runtime (Runtime tab)**: monitor timeout, log line limits, clipboard TTL/max size. These take effect immediately.
 - **TUI runtime (Routes tab)**: execution bridge route mappings. These take effect immediately.
 - **TUI runtime (Ports tab)**: port forwarding rules. Applied via SIGHUP live reload.
 
@@ -394,6 +566,7 @@ Different config types are editable in different places and require different ac
 | Bridge/proxy port change | `cooper up` restart | Port is bound at process/container start |
 | CA certificate regeneration | `cooper build` (full rebuild) | CA baked into CLI image at build time |
 | Monitor timeout / log limits | Immediate (runtime) | TUI-side config, no container changes |
+| Clipboard TTL / max size | Immediate (runtime) | Manager holds config in memory, no container changes |
 
 `cooper configure` and the TUI Configure tab should tell the user which action is needed after each change.
 
@@ -539,6 +712,7 @@ Internet:
 | AI tool API calls | CLI → `cooper-proxy:3128` (internal) → Squid (SSL bump, whitelist) → internet (external) |
 | Proxy monitor (approve/deny) | Squid → external ACL helper (stdin/stdout) → Unix socket → `cooper up` on host → TUI → user decision |
 | Execution bridge | CLI socat → `cooper-proxy:4343` (internal) → proxy socat → `host.docker.internal:4343` (external) → host |
+| Clipboard bridge | CLI shim/x11-bridge → socat → `cooper-proxy:{bridge_port}` → proxy socat → host bridge `/clipboard/*` |
 | Host service access (DB, etc.) | CLI socat → `cooper-proxy:{port}` (internal) → proxy socat → `host.docker.internal:{port}` (external) → host |
 | Package registry blocking | CLI → `cooper-proxy:3128` → Squid → denied (not in whitelist) |
 | Direct internet bypass | IMPOSSIBLE — `cooper-internal` has no gateway, no route to any external network |
@@ -648,8 +822,11 @@ cooper/
 │   └── version.go                   # Version string
 │
 ├── cmd/
-│   └── acl-helper/
-│       └── main.go                  # ACL helper binary (built into proxy image, bridges Squid stdin/stdout ↔ Unix socket)
+│   ├── acl-helper/
+│   │   └── main.go                  # ACL helper binary (built into proxy image, bridges Squid stdin/stdout ↔ Unix socket)
+│   └── cooper-x11-bridge/
+│       ├── main.go                  # X11 CLIPBOARD selection owner (built into base image for x11 clipboard mode)
+│       └── main_test.go             # Integration tests (atom interning, selection requests, INCR transfers)
 │
 ├── internal/
 │   ├── app/                         # Core application orchestration
@@ -687,15 +864,15 @@ cooper/
 │   │   └── configure_test.go
 │   │
 │   ├── templates/                   # Embedded templates (//go:embed *.tmpl)
-│   │   ├── templates.go             # Template rendering from config
+│   │   ├── templates.go             # Template rendering from config + shim generation
 │   │   ├── templates_test.go        # Golden file tests for generated output
-│   │   ├── base.Dockerfile.tmpl     # Base image: OS + programming languages
+│   │   ├── base.Dockerfile.tmpl     # Base image: OS + languages + x11-bridge multi-stage build + xclip/xvfb
 │   │   ├── cli-tool.Dockerfile.tmpl # Per-AI-tool image layer (FROM cooper-base)
 │   │   ├── proxy.Dockerfile.tmpl    # Proxy container Dockerfile template
 │   │   ├── proxy-entrypoint.sh.tmpl # Proxy container entrypoint (socat relays, logrotate, Squid)
 │   │   ├── squid.conf.tmpl          # Squid proxy config template
-│   │   ├── entrypoint.sh.tmpl       # CLI container entrypoint (socat, aliases, welcome)
-│   │   ├── doctor.sh                # Diagnostic script (embedded, used by proof)
+│   │   ├── entrypoint.sh.tmpl       # CLI container entrypoint (socat, aliases, clipboard shims/X11, welcome)
+│   │   ├── doctor.sh                # Diagnostic script (embedded, used by proof — includes clipboard checks)
 │   │   └── ERR_ACCESS_DENIED        # Custom Squid error page (embedded)
 │   │
 │   ├── docker/                      # Docker image + container management
@@ -735,6 +912,23 @@ cooper/
 │   │   ├── resolve.go               # Token resolution logic per AI tool
 │   │   └── resolve_test.go
 │   │
+│   ├── clipboard/                   # Clipboard bridge for image paste support
+│   │   ├── types.go                 # ClipboardObject, StagedSnapshot, BarrelSession, ClipboardState
+│   │   ├── manager.go               # Staged clipboard manager with TTL, per-barrel token auth
+│   │   ├── manager_test.go
+│   │   ├── reader_linux.go          # Host clipboard reader (Wayland wl-paste / X11 xclip detection)
+│   │   ├── reader_linux_test.go
+│   │   ├── http.go                  # HTTP endpoints: GET /clipboard/type, GET /clipboard/image
+│   │   ├── http_test.go
+│   │   ├── normalize.go             # Image format detection and PNG normalization pipeline
+│   │   ├── normalize_test.go
+│   │   ├── convert.go               # In-process image conversion (JPEG, GIF, BMP, TIFF, WebP → PNG)
+│   │   ├── convert_external.go      # External conversion via ImageMagick (SVG, AVIF, HEIC, ICO)
+│   │   ├── shims.go                 # Bash shim generators for xclip, xsel, wl-paste
+│   │   ├── shims_test.go
+│   │   ├── token.go                 # Token generation (32-byte random), file-based persistence
+│   │   └── errors.go                # Sentinel errors (ErrNoImage, ErrOversized, ErrInvalidToken, etc.)
+│   │
 │   ├── logging/                     # Logging infrastructure
 │   │   ├── logger.go
 │   │   └── logger_test.go
@@ -746,6 +940,11 @@ cooper/
 │   ├── aclsrc/                      # ACL helper source embedding
 │   │   ├── embed.go                 # Embeds acl-helper Go source for proxy image build
 │   │   └── embed_test.go
+│   │
+│   ├── x11src/                      # X11 bridge source embedding
+│   │   ├── embed.go                 # Embeds cooper-x11-bridge Go source for base image build
+│   │   ├── main.go.src              # Exact copy of cmd/cooper-x11-bridge/main.go
+│   │   └── embed_test.go            # Verifies embedded copy matches source
 │   │
 │   ├── tableutil/                   # Table formatting utilities
 │   │   ├── table.go
@@ -779,7 +978,7 @@ cooper/
 │       ├── portfwd/                 # Port Forwarding tab (runtime rule management)
 │       │   └── model.go             # Rules list with add/edit/delete, live reload via socat SIGHUP
 │       │
-│       ├── settings/                # Runtime Settings tab (monitor timeout, log limits)
+│       ├── settings/                # Runtime Settings tab (monitor timeout, log limits, clipboard settings)
 │       │   └── model.go             # Number input with inline validation, immediate effect
 │       │
 │       ├── about/                   # About tab (versions, tool status, startup warnings)
@@ -800,8 +999,11 @@ cooper/
 
 Key design patterns (matching pgflock):
 - **Embedded templates** (`//go:embed`) — Dockerfile, squid.conf, entrypoint.sh, doctor.sh, error pages baked into binary. No external file dependencies at runtime.
-- **Pub/sub event system** — `internal/pubsub/` broker decouples proxy monitor, bridge, and TUI. Components publish events; TUI subscribes and refreshes.
+- **Source embedding for Docker builds** — `internal/aclsrc/` and `internal/x11src/` embed Go source code that gets compiled inside Docker images during multi-stage builds, ensuring binary/source consistency.
+- **Pub/sub event system** — `internal/pubsub/` broker decouples proxy monitor, bridge, clipboard, and TUI. Components publish events; TUI subscribes and refreshes.
 - **Callback architecture** — TUI sets `onRestart`, `onShutdown`, `onQuit` callbacks. `main.go` calls them to control loading screen.
 - **Sub-model composition** — each TUI tab is its own BubbleTea model implementing `SubModel` interface (Init/Update/View). Root model routes messages to active tab.
 - **Multi-image architecture** — one Docker image per AI tool (`cooper-cli-{tool}`), all sharing `cooper-base`. Enables independent tool updates and per-tool containers.
-- **ACL helper as separate binary** — `cmd/acl-helper/` is compiled into the proxy image, bridges Squid stdin/stdout to the Unix socket where `cooper up` listens.
+- **ACL helper as separate binary** — `cmd/acl-helper/` compiled into proxy image; bridges Squid stdin/stdout to Unix socket.
+- **X11 bridge as separate binary** — `cmd/cooper-x11-bridge/` compiled into base image; owns X11 CLIPBOARD selection for native clipboard consumers.
+- **Dual clipboard strategy** — shim scripts (for tools that shell out to xclip/wl-paste) and X11 selection ownership (for tools with native clipboard integration). Strategy auto-selected per AI tool.
