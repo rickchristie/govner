@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/tableutil"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
@@ -49,6 +50,13 @@ type RoutesModel struct {
 	editIdx     int    // Index of route being edited (-1 for new).
 	editAPI     string // Buffer for API path input.
 	editScript  string // Buffer for script path input.
+	editErr     string // Validation error shown in edit modal.
+}
+
+// IsEditing returns true when the routes model is in an add/edit/delete modal
+// that consumes character key input.
+func (m *RoutesModel) IsEditing() bool {
+	return m.editMode != routeNone
 }
 
 // NewRoutesModel creates a new bridge routes sub-model.
@@ -124,6 +132,7 @@ func (m *RoutesModel) handleNormalKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) 
 		m.editField = fieldAPIPath
 		m.editAPI = "/"
 		m.editScript = ""
+		m.editErr = ""
 	case "enter", "e":
 		// Edit selected route.
 		if sel := m.list.Selected(); sel != nil {
@@ -133,6 +142,7 @@ func (m *RoutesModel) handleNormalKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) 
 				m.editField = fieldAPIPath
 				m.editAPI = r.APIPath
 				m.editScript = r.ScriptPath
+				m.editErr = ""
 			}
 		}
 	case "x":
@@ -162,6 +172,7 @@ func (m *RoutesModel) handleEditInput(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) 
 		// Save the route.
 		return m.saveRoute()
 	case "backspace":
+		m.editErr = ""
 		if m.editField == fieldAPIPath && len(m.editAPI) > 0 {
 			m.editAPI = m.editAPI[:len(m.editAPI)-1]
 		} else if m.editField == fieldScriptPath && len(m.editScript) > 0 {
@@ -172,6 +183,7 @@ func (m *RoutesModel) handleEditInput(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) 
 		// Append character to active field.
 		r := msg.String()
 		if len(r) == 1 {
+			m.editErr = ""
 			if m.editField == fieldAPIPath {
 				m.editAPI += r
 			} else {
@@ -191,6 +203,11 @@ func (m *RoutesModel) saveRoute() (theme.SubModel, tea.Cmd) {
 	}
 	if m.editScript == "" {
 		// Do not save empty script.
+		return m, nil
+	}
+	// Reject paths under the reserved clipboard namespace.
+	if clipboard.IsReservedPath(api) {
+		m.editErr = "reserved path: /clipboard/* is used by clipboard-bridge"
 		return m, nil
 	}
 
@@ -391,6 +408,10 @@ func (m *RoutesModel) renderEditModal(width, height int) string {
 
 	inner += labelStyle.Render("Script Path:") + "\n"
 	inner += makeInput(m.editScript, m.editField == fieldScriptPath) + "\n\n"
+
+	if m.editErr != "" {
+		inner += theme.ErrorStyle.Render(m.editErr) + "\n\n"
+	}
 
 	inner += hintStyle.Render("Tab/Up/Down: switch fields") + "\n\n"
 	inner += lipgloss.NewStyle().Foreground(theme.ColorProof).Bold(true).Render("[Enter "+theme.IconCheck+" Save]") +

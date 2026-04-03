@@ -104,7 +104,7 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 	}
 
 	// Volume mounts.
-	args = appendVolumeMounts(args, absWorkspace, homeDir, cfg, cooperDir, toolName)
+	args = appendVolumeMounts(args, absWorkspace, homeDir, cfg, cooperDir, toolName, name)
 
 	// Proxy environment variables -- all traffic goes through cooper-proxy.
 	args = append(args,
@@ -112,6 +112,28 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 		"-e", fmt.Sprintf("HTTPS_PROXY=http://cooper-proxy:%d", cfg.ProxyPort),
 		"-e", "NO_PROXY=localhost,127.0.0.1",
 	)
+
+	// Clipboard bridge env vars.
+	clipMode := clipboardModeForTool(toolName)
+	args = append(args,
+		"-e", "COOPER_CLIPBOARD_ENABLED=1",
+		"-e", fmt.Sprintf("COOPER_CLIPBOARD_BRIDGE_URL=http://127.0.0.1:%d", cfg.BridgePort),
+		"-e", "COOPER_CLIPBOARD_TOKEN_FILE=/etc/cooper/clipboard-token",
+		"-e", "COOPER_CLIPBOARD_XAUTHORITY=/home/user/.cooper-clipboard.xauth",
+		"-e", "COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99",
+		"-e", "COOPER_CLIPBOARD_SHIMS=xclip,xsel",
+		"-e", fmt.Sprintf("COOPER_CLIPBOARD_MODE=%s", clipMode),
+	)
+
+	// For X11/auto clipboard modes, set DISPLAY and XAUTHORITY as Docker env
+	// vars so they're visible to docker exec sessions (entrypoint exports
+	// only affect child processes, not new exec sessions).
+	if clipMode == "x11" || clipMode == "auto" {
+		args = append(args,
+			"-e", "DISPLAY=127.0.0.1:99",
+			"-e", "XAUTHORITY=/home/user/.cooper-clipboard.xauth",
+		)
+	}
 
 	// If Go is enabled, set GOFLAGS=-mod=readonly to prevent the AI from
 	// modifying go.mod/go.sum inside the container. Dependencies must be
@@ -144,7 +166,8 @@ const containerHome = "/home/user"
 // appendVolumeMounts adds all volume mount flags to the docker run args.
 // cooperDir is used to locate the socat-rules.json config file.
 // toolName scopes which AI tool auth directories are mounted.
-func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config.Config, cooperDir, toolName string) []string {
+// containerName is the barrel container name, used for clipboard token mounts.
+func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config.Config, cooperDir, toolName, containerName string) []string {
 	// Workspace directory (read-write) -- symmetrical mount so IDE
 	// integration (e.g. VS Code) can resolve paths correctly.
 	args = append(args, "-v", fmt.Sprintf("%s:%s:rw", absWorkspace, absWorkspace))
@@ -196,6 +219,18 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 	socatRules := filepath.Join(cooperDir, socatRulesFile)
 	if fileExists(socatRules) {
 		args = append(args, "-v", fmt.Sprintf("%s:/etc/cooper/socat-rules.json:ro", socatRules))
+	}
+
+	// Mount clipboard token file if it exists.
+	tokenFile := filepath.Join(cooperDir, "tokens", containerName)
+	if fileExists(tokenFile) {
+		args = append(args, "-v", tokenFile+":/etc/cooper/clipboard-token:ro")
+	}
+
+	// Mount clipboard shim scripts.
+	shimsDir := filepath.Join(cooperDir, "base", "shims")
+	if dirExists(shimsDir) {
+		args = append(args, "-v", shimsDir+":/etc/cooper/shims:ro")
 	}
 
 	return args
@@ -412,6 +447,19 @@ func IsBarrelRunning(name string) (bool, error) {
 		return false, nil
 	}
 	return strings.TrimSpace(string(output)) == "true", nil
+}
+
+// clipboardModeForTool returns the clipboard mode for a given tool.
+// Built-in tools have known modes; custom tools default to "auto".
+func clipboardModeForTool(toolName string) string {
+	switch toolName {
+	case "claude", "opencode":
+		return "shim"
+	case "codex", "copilot":
+		return "x11"
+	default:
+		return "auto"
+	}
 }
 
 // isGoEnabled checks if Go is enabled in the programming tools config.

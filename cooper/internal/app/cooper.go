@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/bridge"
+	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/logging"
@@ -25,8 +26,10 @@ type CooperApp struct {
 	cfg        *config.Config
 	cooperDir  string
 
-	aclListener  *proxy.ACLListener
-	bridgeServer *bridge.BridgeServer
+	aclListener      *proxy.ACLListener
+	bridgeServer     *bridge.BridgeServer
+	clipboardManager *clipboard.Manager
+	clipboardReader  *clipboard.LinuxReader
 
 	aclLogger    *logging.Logger
 	bridgeLogger *logging.Logger
@@ -44,14 +47,19 @@ type CooperApp struct {
 // The app is not started; call Start to begin the startup sequence.
 func NewCooperApp(cfg *config.Config, cooperDir string) *CooperApp {
 	logDir := filepath.Join(cooperDir, "logs")
+	ttl := time.Duration(cfg.ClipboardTTLSecs) * time.Second
+	mgr := clipboard.NewManager(ttl, cfg.ClipboardMaxBytes)
+	mgr.SetCooperDir(cooperDir)
 	return &CooperApp{
-		cfg:          cfg,
-		cooperDir:    cooperDir,
-		aclLogger:    logging.NewLogger(logDir, "acl", 10*1024*1024, 10),
-		bridgeLogger: logging.NewLogger(logDir, "bridge", 10*1024*1024, 10),
-		aclFwd:       make(chan proxy.ACLRequest, 256),
-		decisionFwd:  make(chan proxy.DecisionEvent, 1024),
-		bridgeFwd:    make(chan bridge.ExecutionLog, 256),
+		cfg:              cfg,
+		cooperDir:        cooperDir,
+		clipboardManager: mgr,
+		clipboardReader:  clipboard.NewLinuxReader(os.Getenv),
+		aclLogger:        logging.NewLogger(logDir, "acl", 10*1024*1024, 10),
+		bridgeLogger:     logging.NewLogger(logDir, "bridge", 10*1024*1024, 10),
+		aclFwd:           make(chan proxy.ACLRequest, 256),
+		decisionFwd:      make(chan proxy.DecisionEvent, 1024),
+		bridgeFwd:        make(chan bridge.ExecutionLog, 256),
 	}
 }
 
@@ -66,6 +74,15 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 	report := func(step int, name string, err error) {
 		if onProgress != nil {
 			onProgress(step, totalSteps, name, err)
+		}
+	}
+
+	// Pre-check: verify clipboard prerequisites before anything else.
+	// Refuse to start if clipboard host tools are missing.
+	if a.clipboardReader != nil {
+		if err := a.clipboardReader.CheckPrerequisites(ctx); err != nil {
+			report(0, "Check clipboard prerequisites", err)
+			return err
 		}
 	}
 
@@ -118,6 +135,11 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 		return err
 	}
 	a.bridgeServer = bridge.NewBridgeServer(a.cfg.BridgeRoutes, a.cfg.BridgePort, gatewayIPs)
+	// Install clipboard handler on the bridge before starting.
+	if a.clipboardManager != nil {
+		clipHandler := clipboard.NewHandler(a.clipboardManager)
+		a.bridgeServer.SetClipboardHandler(clipHandler)
+	}
 	if err := a.bridgeServer.Start(); err != nil {
 		report(3, "Start bridge", err)
 		return err
@@ -454,6 +476,13 @@ func (a *CooperApp) Adopt(aclListener *proxy.ACLListener, bridgeServer *bridge.B
 	a.aclListener = aclListener
 	a.bridgeServer = bridgeServer
 	a.startupWarnings = warnings
+
+	// Install clipboard handler on the adopted bridge server.
+	if a.clipboardManager != nil && a.bridgeServer != nil {
+		clipHandler := clipboard.NewHandler(a.clipboardManager)
+		a.bridgeServer.SetClipboardHandler(clipHandler)
+	}
+
 	a.wireChannels()
 	a.loadPersistedBridgeRoutes()
 }
@@ -471,6 +500,73 @@ func (a *CooperApp) ACLListener() *proxy.ACLListener {
 // transitional accessor.
 func (a *CooperApp) BridgeServer() *bridge.BridgeServer {
 	return a.bridgeServer
+}
+
+// ----- Clipboard bridge -----
+
+// CaptureClipboard reads the host clipboard, normalizes the image to PNG,
+// and stages it for authenticated barrel access.
+func (a *CooperApp) CaptureClipboard() (*clipboard.ClipboardEvent, error) {
+	if a.clipboardReader == nil || a.clipboardManager == nil {
+		return &clipboard.ClipboardEvent{
+			State: clipboard.ClipboardFailed,
+			Error: "clipboard bridge not initialized",
+		}, fmt.Errorf("clipboard bridge not initialized")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	result, err := a.clipboardReader.Read(ctx)
+	if err != nil {
+		return &clipboard.ClipboardEvent{
+			State: clipboard.ClipboardFailed,
+			Error: err.Error(),
+		}, err
+	}
+
+	obj, err := clipboard.Normalize(result, a.cfg.ClipboardMaxBytes)
+	if err != nil {
+		return &clipboard.ClipboardEvent{
+			State: clipboard.ClipboardFailed,
+			Error: err.Error(),
+		}, err
+	}
+
+	ttl := time.Duration(a.cfg.ClipboardTTLSecs) * time.Second
+	snap, err := a.clipboardManager.Stage(*obj, ttl)
+	if err != nil {
+		return &clipboard.ClipboardEvent{
+			State: clipboard.ClipboardFailed,
+			Error: err.Error(),
+		}, err
+	}
+
+	return &clipboard.ClipboardEvent{
+		State:    clipboard.ClipboardStaged,
+		Snapshot: snap,
+	}, nil
+}
+
+// ClearClipboard removes the currently staged clipboard image.
+func (a *CooperApp) ClearClipboard() {
+	if a.clipboardManager != nil {
+		a.clipboardManager.Clear()
+	}
+}
+
+// ClipboardSnapshot returns the current staged clipboard snapshot, or nil.
+func (a *CooperApp) ClipboardSnapshot() *clipboard.StagedSnapshot {
+	if a.clipboardManager == nil {
+		return nil
+	}
+	return a.clipboardManager.Current()
+}
+
+// ClipboardManager returns the underlying clipboard manager for direct
+// access by components that need token registration (barrel startup).
+func (a *CooperApp) ClipboardManager() *clipboard.Manager {
+	return a.clipboardManager
 }
 
 // ----- Internal helpers -----

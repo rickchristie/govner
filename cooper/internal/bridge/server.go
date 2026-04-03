@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 )
 
@@ -28,10 +29,11 @@ type ExecutionLog struct {
 // specific addresses (localhost + Docker gateway IP) and dispatches
 // incoming requests to configured script routes.
 type BridgeServer struct {
-	routes    []config.BridgeRoute
-	bindAddrs []string
-	logCh     chan ExecutionLog
-	servers   []*http.Server
+	routes           []config.BridgeRoute
+	bindAddrs        []string
+	logCh            chan ExecutionLog
+	servers          []*http.Server
+	clipboardHandler *clipboard.Handler
 
 	mu sync.RWMutex
 }
@@ -124,6 +126,15 @@ func (s *BridgeServer) Stop() error {
 // The TUI consumes this to display bridge activity.
 func (s *BridgeServer) LogChan() <-chan ExecutionLog {
 	return s.logCh
+}
+
+// SetClipboardHandler installs the clipboard-bridge HTTP handler. It must
+// be called before Start. Clipboard endpoints are dispatched before generic
+// user-defined routes and occupy the reserved /clipboard/* namespace.
+func (s *BridgeServer) SetClipboardHandler(h *clipboard.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clipboardHandler = h
 }
 
 // UpdateRoutes hot-swaps the configured routes while the server is

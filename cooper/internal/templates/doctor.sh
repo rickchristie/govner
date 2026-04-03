@@ -346,6 +346,125 @@ else
 fi
 
 # ============================================================================
+section "Clipboard Bridge"
+# ============================================================================
+
+# Check clipboard env vars
+if [ "${COOPER_CLIPBOARD_ENABLED:-0}" = "1" ]; then
+    pass "COOPER_CLIPBOARD_ENABLED=1"
+else
+    warn "COOPER_CLIPBOARD_ENABLED not set or disabled"
+fi
+
+if [ -n "${COOPER_CLIPBOARD_TOKEN_FILE:-}" ]; then
+    if [ -f "${COOPER_CLIPBOARD_TOKEN_FILE}" ]; then
+        if [ -r "${COOPER_CLIPBOARD_TOKEN_FILE}" ]; then
+            pass "Clipboard token file exists and readable: ${COOPER_CLIPBOARD_TOKEN_FILE}"
+        else
+            fail "Clipboard token file exists but not readable: ${COOPER_CLIPBOARD_TOKEN_FILE}"
+        fi
+    else
+        warn "Clipboard token file not found: ${COOPER_CLIPBOARD_TOKEN_FILE}"
+        info "  Token is written by 'cooper cli' before barrel start."
+        info "  If running manually, create a token at ${COOPER_CLIPBOARD_TOKEN_FILE}"
+    fi
+else
+    warn "COOPER_CLIPBOARD_TOKEN_FILE not set"
+fi
+
+if [ -n "${COOPER_CLIPBOARD_BRIDGE_URL:-}" ]; then
+    pass "COOPER_CLIPBOARD_BRIDGE_URL set: ${COOPER_CLIPBOARD_BRIDGE_URL}"
+else
+    warn "COOPER_CLIPBOARD_BRIDGE_URL not set"
+fi
+
+clip_mode="${COOPER_CLIPBOARD_MODE:-not set}"
+info "COOPER_CLIPBOARD_MODE: ${clip_mode}"
+
+# Check clipboard shims
+if [ "$clip_mode" = "shim" ] || [ "$clip_mode" = "auto" ]; then
+    for shim in xclip xsel wl-paste; do
+        if [ -x "/home/user/.local/bin/${shim}" ]; then
+            pass "Clipboard shim installed: /home/user/.local/bin/${shim}"
+        elif [ -f "/etc/cooper/shims/${shim}" ]; then
+            warn "Shim source exists at /etc/cooper/shims/${shim} but not installed in PATH"
+            info "  The entrypoint should copy shims to /home/user/.local/bin/"
+        else
+            warn "Clipboard shim not found: ${shim}"
+        fi
+    done
+fi
+
+# Check clipboard tools
+for tool in xsel xauth mcookie; do
+    if command -v "$tool" &>/dev/null; then
+        pass "${tool} available: $(which "$tool")"
+    else
+        fail "${tool} not found — needed for clipboard bridge"
+        info "  Install with: apt install xsel xauth"
+    fi
+done
+
+# Check cooper-x11-bridge binary
+if command -v cooper-x11-bridge &>/dev/null; then
+    pass "cooper-x11-bridge binary available: $(which cooper-x11-bridge)"
+else
+    warn "cooper-x11-bridge not found — X11 clipboard mode will not work"
+fi
+
+# Check Xvfb (needed for x11/auto mode)
+if [ "$clip_mode" = "x11" ] || [ "$clip_mode" = "auto" ]; then
+    if command -v Xvfb &>/dev/null; then
+        pass "Xvfb available: $(which Xvfb)"
+    else
+        fail "Xvfb not found — required for X11 clipboard mode"
+        info "  Install with: apt install xvfb"
+    fi
+
+    # Check if Xvfb is running (started by entrypoint for x11/auto mode)
+    if pgrep -x Xvfb &>/dev/null; then
+        pass "Xvfb process running"
+    else
+        warn "Xvfb not running — may not have been started by entrypoint"
+    fi
+
+    # Check DISPLAY and XAUTHORITY
+    if [ -n "${DISPLAY:-}" ]; then
+        pass "DISPLAY set: ${DISPLAY}"
+    else
+        warn "DISPLAY not set — X11 clipboard consumers won't find the display"
+    fi
+
+    if [ -n "${XAUTHORITY:-}" ]; then
+        if [ -f "${XAUTHORITY}" ]; then
+            pass "XAUTHORITY set and file exists: ${XAUTHORITY}"
+        else
+            warn "XAUTHORITY set but file missing: ${XAUTHORITY}"
+        fi
+    else
+        warn "XAUTHORITY not set"
+    fi
+fi
+
+# Test bridge clipboard endpoint (if token and bridge URL are available)
+if [ -n "${COOPER_CLIPBOARD_TOKEN_FILE:-}" ] && [ -f "${COOPER_CLIPBOARD_TOKEN_FILE}" ] && [ -n "${COOPER_CLIPBOARD_BRIDGE_URL:-}" ]; then
+    token=$(cat "${COOPER_CLIPBOARD_TOKEN_FILE}" 2>/dev/null)
+    if [ -n "$token" ]; then
+        clip_status=$(curl -sf -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${token}" \
+            --connect-timeout 3 --max-time 5 \
+            "${COOPER_CLIPBOARD_BRIDGE_URL}/clipboard/type" 2>/dev/null || echo "000")
+        if [ "$clip_status" = "200" ]; then
+            pass "Clipboard bridge endpoint reachable (HTTP 200)"
+        elif [ "$clip_status" = "000" ]; then
+            warn "Clipboard bridge endpoint not reachable (cooper up may not be running)"
+        else
+            warn "Clipboard bridge returned HTTP ${clip_status}"
+        fi
+    fi
+fi
+
+# ============================================================================
 section "File Permissions"
 # ============================================================================
 

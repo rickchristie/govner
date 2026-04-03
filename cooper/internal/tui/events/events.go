@@ -48,3 +48,18 @@ type ACLDecisionMsg struct {
 type BridgeLogMsg struct {
 	Log app.ExecutionLog
 }
+
+// ClipboardCaptureMsg carries the result of a clipboard capture attempt.
+type ClipboardCaptureMsg struct {
+	Event *app.ClipboardEvent
+	Err   error
+}
+
+// ClipboardClearMsg signals that the clipboard has been cleared by the user.
+type ClipboardClearMsg struct{}
+
+// ClipboardExpiredMsg signals that the staged clipboard content has expired.
+type ClipboardExpiredMsg struct{}
+
+// ClipboardTickMsg is sent on each UI tick to check clipboard TTL expiry.
+type ClipboardTickMsg struct{}

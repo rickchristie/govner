@@ -7,6 +7,7 @@ package app
 import (
 	"context"
 
+	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 )
 
@@ -53,6 +54,11 @@ type App interface {
 
 	// Settings (live update)
 	UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit int) error
+
+	// Clipboard bridge
+	CaptureClipboard() (*clipboard.ClipboardEvent, error)
+	ClearClipboard()
+	ClipboardSnapshot() *clipboard.StagedSnapshot
 
 	// State
 	Config() *config.Config

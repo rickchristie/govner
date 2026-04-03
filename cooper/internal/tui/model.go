@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"time"
+
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
 	"github.com/rickchristie/govner/cooper/internal/tui/loading"
@@ -47,6 +49,13 @@ type Model struct {
 
 	// Loading screen (nil after startup completes).
 	loadingModel SubModel
+
+	// Clipboard bridge state.
+	clipboardState     app.ClipboardState
+	clipboardSnapshot  *app.StagedSnapshot
+	clipboardError     string
+	clipboardFailedAt  time.Time
+	clipboardExpiredAt time.Time
 
 	// Shutdown state.
 	shuttingDown  bool

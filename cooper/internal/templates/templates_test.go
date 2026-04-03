@@ -189,7 +189,9 @@ func TestRenderBaseDockerfile_NoGo(t *testing.T) {
 	}
 
 	assertContains(t, result, "FROM debian:bookworm-slim")
-	assertNotContains(t, result, "golang:")
+	// The x11-bridge build stage always uses golang, but the runtime
+	// stage should use debian when Go is disabled.
+	assertContains(t, result, "FROM golang:1.25-bookworm AS x11-bridge-builder")
 }
 
 func TestRenderBaseDockerfile_NodeVersion(t *testing.T) {
@@ -423,9 +425,14 @@ func TestRenderBaseDockerfile_RuntimeDepsExcluded(t *testing.T) {
 	assertNotContains(t, result, "meson")
 	assertNotContains(t, result, "bubblewrap")
 
-	// No opencode -> no xvfb/xclip
-	assertNotContains(t, result, "xvfb")
-	assertNotContains(t, result, "xclip")
+	// No opencode -> no inotify-tools (opencode-specific dep)
+	assertNotContains(t, result, "inotify-tools")
+
+	// xvfb, xclip, xsel, xauth are now unconditional for clipboard-bridge
+	assertContains(t, result, "xvfb")
+	assertContains(t, result, "xclip")
+	assertContains(t, result, "xsel")
+	assertContains(t, result, "xauth")
 }
 
 // ---------------------------------------------------------------------------
@@ -690,12 +697,12 @@ func TestRenderEntrypoint_XvfbConditionalOnTool(t *testing.T) {
 }
 
 func TestRenderEntrypoint_NoToolBooleans(t *testing.T) {
-	// Verify that entrypointData only has HasGo and BridgePort fields.
-	// This is a compile-time check: if someone adds HasClaudeCode back
-	// to the struct, this test will fail to compile.
+	// Verify that entrypointData has the expected fields and no per-tool
+	// booleans like HasClaudeCode. This is a compile-time check.
 	d := entrypointData{
-		HasGo:      true,
-		BridgePort: 4343,
+		HasGo:            true,
+		BridgePort:       4343,
+		ClipboardEnabled: true,
 	}
 
 	// Verify the struct fields are what we expect
@@ -704,6 +711,9 @@ func TestRenderEntrypoint_NoToolBooleans(t *testing.T) {
 	}
 	if d.BridgePort != 4343 {
 		t.Errorf("expected BridgePort=4343, got %d", d.BridgePort)
+	}
+	if !d.ClipboardEnabled {
+		t.Error("expected ClipboardEnabled=true")
 	}
 }
 

@@ -194,6 +194,96 @@ trap 'reload_socat' HUP
 echo "Starting port forwarding..."
 start_socat_from_config
 
+{{if .ClipboardEnabled}}
+# ============================================================================
+# CLIPBOARD BRIDGE: Shim Setup
+# ============================================================================
+# When clipboard mode is "shim" or "auto", install clipboard shim scripts from
+# /etc/cooper/shims/ into the user's PATH. Shims intercept xclip/xsel/wl-paste
+# calls and serve staged images from the Cooper clipboard bridge.
+CLIP_MODE="${COOPER_CLIPBOARD_MODE:-auto}"
+if [ "$CLIP_MODE" = "shim" ] || [ "$CLIP_MODE" = "auto" ]; then
+  SHIM_DIR="/home/user/.local/bin"
+  mkdir -p "$SHIM_DIR"
+  if [ -f /etc/cooper/shims/xclip ]; then
+    cp /etc/cooper/shims/xclip "$SHIM_DIR/xclip"
+    chmod +x "$SHIM_DIR/xclip"
+  fi
+  if [ -f /etc/cooper/shims/xsel ]; then
+    cp /etc/cooper/shims/xsel "$SHIM_DIR/xsel"
+    chmod +x "$SHIM_DIR/xsel"
+  fi
+  if [ -f /etc/cooper/shims/wl-paste ]; then
+    cp /etc/cooper/shims/wl-paste "$SHIM_DIR/wl-paste"
+    chmod +x "$SHIM_DIR/wl-paste"
+  fi
+fi
+
+# ============================================================================
+# CLIPBOARD BRIDGE: X11/Native Setup
+# ============================================================================
+# When clipboard mode is "x11" or "auto", start an Xvfb display with xauth
+# and launch the X11 clipboard bridge daemon (if available).
+if [ "$CLIP_MODE" = "x11" ] || [ "$CLIP_MODE" = "auto" ]; then
+  # Use a user-writable location for xauth. /etc/cooper/ is root-owned and
+  # read-only from Docker volume mounts, so we write to the user's home dir.
+  XAUTH_FILE="/home/user/.cooper-clipboard.xauth"
+  DISPLAY_NUM=99
+  DISPLAY_ADDR="127.0.0.1:${DISPLAY_NUM}"
+
+  # Generate X authority cookie. We add entries for both the local display form
+  # (:99) and the hostname form so Xvfb and native X11 clients can authenticate.
+  COOKIE="$(mcookie)"
+  xauth -f "$XAUTH_FILE" add ":${DISPLAY_NUM}" . "$COOKIE" 2>/dev/null || true
+  chmod 0600 "$XAUTH_FILE" 2>/dev/null || true
+
+  # Save the raw cookie hex for cooper-x11-bridge (it connects via TCP and
+  # uses xgb's NewConnNetWithCookieHex to bypass xauth file parsing issues
+  # with TCP display name matching).
+  COOKIE_HEX_FILE="/home/user/.cooper-clipboard-cookie"
+  echo -n "$COOKIE" > "$COOKIE_HEX_FILE"
+  chmod 0600 "$COOKIE_HEX_FILE" 2>/dev/null || true
+
+  # Start Xvfb on TCP loopback only
+  Xvfb ":${DISPLAY_NUM}" -screen 0 1024x768x24 -auth "$XAUTH_FILE" -listen tcp -nolisten unix >/tmp/xvfb-clipboard.log 2>&1 &
+
+  export DISPLAY="$DISPLAY_ADDR"
+  export XAUTHORITY="$XAUTH_FILE"
+
+  # Persist DISPLAY and XAUTHORITY for docker exec sessions (export only
+  # affects children of the entrypoint, not new docker exec processes).
+  # Write before the interactive guard in .bashrc so non-interactive exec
+  # sessions also get them.
+  sed -i "1i export DISPLAY=${DISPLAY_ADDR}\nexport XAUTHORITY=${XAUTH_FILE}" /home/user/.bashrc 2>/dev/null || true
+  # Also write to .profile for login shells.
+  sed -i "1i export DISPLAY=${DISPLAY_ADDR}\nexport XAUTHORITY=${XAUTH_FILE}" /home/user/.profile 2>/dev/null || true
+
+  # Wait for Xvfb to be ready (TCP port 6000+display_num).
+  XVFB_PORT=$((6000 + DISPLAY_NUM))
+  for _i in $(seq 1 30); do
+    if timeout 1 bash -c "echo > /dev/tcp/127.0.0.1/${XVFB_PORT}" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+
+  # Start X11 clipboard bridge with auto-restart supervisor.
+  # The bridge must stay running as the CLIPBOARD selection owner.
+  if command -v cooper-x11-bridge >/dev/null 2>&1; then
+    (
+      while true; do
+        cooper-x11-bridge \
+          --display "$DISPLAY_ADDR" \
+          --cookie-file "$COOKIE_HEX_FILE" \
+          --bridge-url "${COOPER_CLIPBOARD_BRIDGE_URL}" \
+          --token-file "${COOPER_CLIPBOARD_TOKEN_FILE}" >>/tmp/x11-bridge.log 2>&1
+        # If bridge exits, wait briefly and restart (crash recovery).
+        sleep 1
+      done
+    ) &
+  fi
+fi
+{{end}}
 # ============================================================================
 # WELCOME BANNER (interactive bash sessions only)
 # ============================================================================

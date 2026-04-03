@@ -17,6 +17,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/auth"
 	"github.com/rickchristie/govner/cooper/internal/bridge"
+	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/configure"
 	"github.com/rickchristie/govner/cooper/internal/docker"
@@ -575,6 +576,8 @@ func runUp(cmd *cobra.Command, args []string) error {
 		cfg.BlockedHistoryLimit,
 		cfg.AllowedHistoryLimit,
 		cfg.BridgeLogLimit,
+		cfg.ClipboardTTLSecs,
+		cfg.ClipboardMaxBytes/(1024*1024), // Convert bytes to MB for display.
 	)
 	mainModel.SetRuntimeModel(runtimeModel)
 
@@ -726,8 +729,21 @@ func runCLI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("check barrel: %w", err)
 	}
 	if !barrelRunning {
+		// Generate and write clipboard token before starting the barrel.
+		// The token file is mounted read-only into the container. The running
+		// cooper up process validates tokens by scanning the tokens directory.
+		clipToken, err := clipboard.GenerateToken()
+		if err != nil {
+			return fmt.Errorf("generate clipboard token: %w", err)
+		}
+		if _, err := clipboard.WriteTokenFile(cooperDir, containerName, clipToken); err != nil {
+			return fmt.Errorf("write clipboard token: %w", err)
+		}
+
 		fmt.Fprintf(os.Stderr, "Starting barrel container %s...\n", containerName)
 		if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, toolName); err != nil {
+			// Clean up token file on failed start.
+			clipboard.RemoveTokenFile(cooperDir, containerName)
 			return fmt.Errorf("start barrel: %w", err)
 		}
 		// Wait for entrypoint to finish writing .bashrc (welcome banner).
@@ -792,6 +808,9 @@ func runProof(cmd *cobra.Command, args []string) error {
 // ---------- cooper cleanup ----------
 
 func runCleanup(cmd *cobra.Command, args []string) error {
+	// Load cooperDir for token cleanup. Non-fatal if it fails.
+	_, cooperDir, _ := loadConfig()
+
 	// 1. List and stop all barrels.
 	fmt.Fprintln(os.Stderr, "Stopping barrel containers...")
 	barrels, err := docker.ListBarrels()
@@ -802,6 +821,10 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "  Stopping %s...\n", b.Name)
 		if err := docker.StopBarrel(b.Name); err != nil {
 			fmt.Fprintf(os.Stderr, "  Warning: %v\n", err)
+		}
+		// Clean up clipboard token file.
+		if cooperDir != "" {
+			clipboard.RemoveTokenFile(cooperDir, b.Name)
 		}
 	}
 
@@ -842,7 +865,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	}
 
 	// 5. Optionally remove ~/.cooper.
-	cooperDir, err := resolveCooperDir()
+	cooperDir, err = resolveCooperDir()
 	if err == nil {
 		fmt.Fprintf(os.Stderr, "\nRemove configuration directory %s? [y/N] ", cooperDir)
 		reader := bufio.NewReader(os.Stdin)
@@ -1125,6 +1148,8 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 		cfg.BlockedHistoryLimit,
 		cfg.AllowedHistoryLimit,
 		cfg.BridgeLogLimit,
+		cfg.ClipboardTTLSecs,
+		cfg.ClipboardMaxBytes/(1024*1024),
 	)
 	mainModel.SetRuntimeModel(tuiRuntimeModel)
 

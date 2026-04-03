@@ -3,6 +3,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/auth"
+	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/names"
@@ -2530,6 +2532,358 @@ func TestCooperApp_CustomToolImage(t *testing.T) {
 	}
 
 	_ = cfg // cfg used by setupCooperDir
+}
+
+// =====================================================================
+// Clipboard integration tests
+// =====================================================================
+
+// startClipboardApp creates a CooperApp with the clipboard reader disabled
+// (since integration tests don't have host clipboard tools), starts it,
+// and returns the running app. The clipboard manager and HTTP handler are
+// fully functional; only the host-reader prerequisite check is bypassed.
+func startClipboardApp(t *testing.T, cfg *config.Config, cooperDir string) *CooperApp {
+	t.Helper()
+	app := NewCooperApp(cfg, cooperDir)
+	// Disable the clipboard reader so Start() does not check for host
+	// clipboard tools (wl-paste/xclip). The clipboard HTTP endpoints
+	// are driven by the Manager, not the Reader.
+	app.clipboardReader = nil
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	return app
+}
+
+// writeTestToken writes a token file to {cooperDir}/tokens/{name} and
+// returns the token string.
+func writeTestToken(t *testing.T, cooperDir, name string) string {
+	t.Helper()
+	token, err := clipboard.GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken() failed: %v", err)
+	}
+	if _, err := clipboard.WriteTokenFile(cooperDir, name, token); err != nil {
+		t.Fatalf("WriteTokenFile() failed: %v", err)
+	}
+	return token
+}
+
+// clipboardGet performs a GET request to the clipboard endpoint with optional
+// bearer token and returns the response.
+func clipboardGet(t *testing.T, port int, path, token string) *http.Response {
+	t.Helper()
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("NewRequest(%s) failed: %v", url, err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s failed: %v", url, err)
+	}
+	return resp
+}
+
+// TestCooperApp_ClipboardEndpointAuth verifies that clipboard endpoints
+// require valid bearer token authentication. Valid tokens get 200, invalid
+// tokens and missing auth both get 401.
+func TestCooperApp_ClipboardEndpointAuth(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := startClipboardApp(t, cfg, cooperDir)
+	defer app.Stop()
+
+	// Write a valid token file to the tokens directory.
+	validToken := writeTestToken(t, cooperDir, "barrel-auth-test")
+
+	// GET /clipboard/type with valid token -> 200.
+	resp := clipboardGet(t, cfg.BridgePort, "/clipboard/type", validToken)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("valid token: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// GET /clipboard/type with invalid token -> 401.
+	resp = clipboardGet(t, cfg.BridgePort, "/clipboard/type", "bogus-invalid-token")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("invalid token: status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+
+	// GET /clipboard/type with no auth -> 401.
+	resp = clipboardGet(t, cfg.BridgePort, "/clipboard/type", "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("no auth: status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+// TestCooperApp_ClipboardStageAndFetch verifies the full clipboard lifecycle:
+// stage an image via the Manager, fetch metadata via /clipboard/type, fetch
+// image bytes via /clipboard/image, clear, and verify 204 after clear.
+func TestCooperApp_ClipboardStageAndFetch(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := startClipboardApp(t, cfg, cooperDir)
+	defer app.Stop()
+
+	// Write a token file for authentication.
+	token := writeTestToken(t, cooperDir, "barrel-stage-test")
+
+	// Stage a clipboard object via the Manager directly.
+	// Use a minimal valid PNG (1x1 pixel) to simulate a real clipboard capture.
+	pngBytes := minimalPNG()
+	obj := clipboard.ClipboardObject{
+		Kind:    clipboard.ClipboardKindImage,
+		MIME:    "image/png",
+		Raw:     pngBytes,
+		RawSize: int64(len(pngBytes)),
+		Variants: map[string]clipboard.ClipboardVariant{
+			"image/png": {
+				MIME:  "image/png",
+				Bytes: pngBytes,
+				Size:  int64(len(pngBytes)),
+			},
+		},
+	}
+	ttl := time.Duration(cfg.ClipboardTTLSecs) * time.Second
+	if _, err := app.ClipboardManager().Stage(obj, ttl); err != nil {
+		t.Fatalf("Stage() failed: %v", err)
+	}
+
+	// GET /clipboard/type -> 200, state=staged, kind=image.
+	resp := clipboardGet(t, cfg.BridgePort, "/clipboard/type", token)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/clipboard/type status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	var typeResp map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&typeResp); err != nil {
+		t.Fatalf("decode /clipboard/type response: %v", err)
+	}
+	if typeResp["state"] != "staged" {
+		t.Errorf("state = %v, want %q", typeResp["state"], "staged")
+	}
+	if typeResp["kind"] != "image" {
+		t.Errorf("kind = %v, want %q", typeResp["kind"], "image")
+	}
+
+	// GET /clipboard/image -> 200 with PNG bytes matching what was staged.
+	imgResp := clipboardGet(t, cfg.BridgePort, "/clipboard/image", token)
+	defer imgResp.Body.Close()
+	if imgResp.StatusCode != http.StatusOK {
+		t.Fatalf("/clipboard/image status = %d, want %d", imgResp.StatusCode, http.StatusOK)
+	}
+	if imgResp.Header.Get("Content-Type") != "image/png" {
+		t.Errorf("Content-Type = %q, want %q", imgResp.Header.Get("Content-Type"), "image/png")
+	}
+
+	var imgBuf bytes.Buffer
+	if _, err := imgBuf.ReadFrom(imgResp.Body); err != nil {
+		t.Fatalf("read /clipboard/image body: %v", err)
+	}
+	if !bytes.Equal(imgBuf.Bytes(), pngBytes) {
+		t.Errorf("image bytes mismatch: got %d bytes, want %d bytes", imgBuf.Len(), len(pngBytes))
+	}
+
+	// Clear clipboard.
+	app.ClearClipboard()
+
+	// GET /clipboard/image -> 204 after clear.
+	clearedResp := clipboardGet(t, cfg.BridgePort, "/clipboard/image", token)
+	clearedResp.Body.Close()
+	if clearedResp.StatusCode != http.StatusNoContent {
+		t.Errorf("after clear: /clipboard/image status = %d, want %d", clearedResp.StatusCode, http.StatusNoContent)
+	}
+}
+
+// TestCooperApp_ClipboardIneligibleBarrel verifies that a barrel registered
+// with Eligible=false receives 403 Forbidden when accessing clipboard endpoints.
+func TestCooperApp_ClipboardIneligibleBarrel(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := startClipboardApp(t, cfg, cooperDir)
+	defer app.Stop()
+
+	// Register a barrel with Eligible=false via the Manager.
+	mgr := app.ClipboardManager()
+	if err := mgr.RegisterBarrel(clipboard.BarrelSession{
+		ContainerName: "barrel-ineligible",
+		ToolName:      "test-tool",
+		ClipboardMode: "off",
+		Eligible:      false,
+	}); err != nil {
+		t.Fatalf("RegisterBarrel() failed: %v", err)
+	}
+
+	// Retrieve the token assigned to this barrel session.
+	sessions := mgr.ActiveSessions()
+	var token string
+	for _, s := range sessions {
+		if s.ContainerName == "barrel-ineligible" {
+			token = s.Token
+			break
+		}
+	}
+	if token == "" {
+		t.Fatal("could not find token for barrel-ineligible session")
+	}
+
+	// GET /clipboard/type -> 403.
+	resp := clipboardGet(t, cfg.BridgePort, "/clipboard/type", token)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("ineligible barrel: status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+// TestCooperApp_ClipboardTokenFromDisk verifies that tokens written to the
+// {cooperDir}/tokens/ directory are validated by the clipboard handler.
+// This simulates what `cooper cli` does: it writes a token file when
+// starting a barrel, and the barrel uses that token to authenticate.
+func TestCooperApp_ClipboardTokenFromDisk(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := startClipboardApp(t, cfg, cooperDir)
+	defer app.Stop()
+
+	// Write a token file directly to {cooperDir}/tokens/barrel-test.
+	// This is what `cooper cli` does when starting a barrel in a separate
+	// process from `cooper up`.
+	token := writeTestToken(t, cooperDir, "barrel-test")
+
+	// GET /clipboard/type with the disk-based token -> 200.
+	resp := clipboardGet(t, cfg.BridgePort, "/clipboard/type", token)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("disk-based token: status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// Verify the session was cached in memory after the first disk lookup.
+	sessions := app.ClipboardManager().ActiveSessions()
+	found := false
+	for _, s := range sessions {
+		if s.ContainerName == "barrel-test" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("disk-based token was not cached as an in-memory session after validation")
+	}
+}
+
+// TestCooperApp_ClipboardTTLExpiry stages an image with a very short TTL,
+// waits for it to expire, and verifies the clipboard becomes inaccessible.
+func TestCooperApp_ClipboardTTLExpiry(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := startClipboardApp(t, cfg, cooperDir)
+	defer app.Stop()
+
+	token := writeTestToken(t, cooperDir, "barrel-ttl-test")
+
+	// Stage with a very short TTL (1 second).
+	pngBytes := minimalPNG()
+	obj := clipboard.ClipboardObject{
+		Kind:    clipboard.ClipboardKindImage,
+		MIME:    "image/png",
+		Raw:     pngBytes,
+		RawSize: int64(len(pngBytes)),
+		Variants: map[string]clipboard.ClipboardVariant{
+			"image/png": {
+				MIME:  "image/png",
+				Bytes: pngBytes,
+				Size:  int64(len(pngBytes)),
+			},
+		},
+	}
+	if _, err := app.ClipboardManager().Stage(obj, 1*time.Second); err != nil {
+		t.Fatalf("Stage() failed: %v", err)
+	}
+
+	// Immediately: should be staged.
+	resp := clipboardGet(t, cfg.BridgePort, "/clipboard/image", token)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("before expiry: /clipboard/image status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	// Wait for TTL to expire.
+	time.Sleep(1500 * time.Millisecond)
+
+	// After expiry: /clipboard/image should return 204.
+	expiredImgResp := clipboardGet(t, cfg.BridgePort, "/clipboard/image", token)
+	expiredImgResp.Body.Close()
+	if expiredImgResp.StatusCode != http.StatusNoContent {
+		t.Errorf("after expiry: /clipboard/image status = %d, want %d", expiredImgResp.StatusCode, http.StatusNoContent)
+	}
+
+	// After expiry: /clipboard/type should return state=empty.
+	expiredTypeResp := clipboardGet(t, cfg.BridgePort, "/clipboard/type", token)
+	defer expiredTypeResp.Body.Close()
+	if expiredTypeResp.StatusCode != http.StatusOK {
+		t.Fatalf("after expiry: /clipboard/type status = %d, want %d", expiredTypeResp.StatusCode, http.StatusOK)
+	}
+	var typeResp map[string]interface{}
+	if err := json.NewDecoder(expiredTypeResp.Body).Decode(&typeResp); err != nil {
+		t.Fatalf("decode /clipboard/type response: %v", err)
+	}
+	if typeResp["state"] != "empty" {
+		t.Errorf("after expiry: state = %v, want %q", typeResp["state"], "empty")
+	}
+}
+
+// minimalPNG returns a valid 1x1 pixel white PNG image. This is the smallest
+// valid PNG and avoids importing image/png just for test data.
+func minimalPNG() []byte {
+	// 1x1 white pixel PNG, manually constructed.
+	return []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG signature
+		0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1
+		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, // 8-bit RGB
+		0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, // IDAT chunk
+		0x54, 0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00,
+		0x00, 0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc,
+		0x33, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, // IEND chunk
+		0x44, 0xae, 0x42, 0x60, 0x82,
+	}
 }
 
 // Ensure imported packages are used. These variables exist solely to prevent

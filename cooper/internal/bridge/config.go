@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 )
 
@@ -14,6 +15,8 @@ const bridgeRoutesFile = "bridge-routes.json"
 
 // LoadBridgeRoutes loads persisted bridge routes from {cooperDir}/bridge-routes.json.
 // If the file does not exist, it returns an empty slice (not an error).
+// Routes that collide with the reserved /clipboard/* namespace are silently
+// removed to prevent user routes from shadowing clipboard endpoints.
 func LoadBridgeRoutes(cooperDir string) ([]config.BridgeRoute, error) {
 	path := filepath.Join(cooperDir, bridgeRoutesFile)
 	data, err := os.ReadFile(path)
@@ -29,7 +32,12 @@ func LoadBridgeRoutes(cooperDir string) ([]config.BridgeRoute, error) {
 		return nil, fmt.Errorf("parse bridge routes: %w", err)
 	}
 
-	return routes, nil
+	// Sanitize: remove routes under reserved clipboard namespace.
+	clean, _ := clipboard.SanitizeBridgeRoutes(routes, func(r config.BridgeRoute) string {
+		return r.APIPath
+	})
+
+	return clean, nil
 }
 
 // SaveBridgeRoutes persists the given bridge routes to {cooperDir}/bridge-routes.json.

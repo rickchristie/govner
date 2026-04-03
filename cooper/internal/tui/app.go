@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"time"
 
@@ -79,6 +80,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ---- Tick timers ----
 	case events.TickMsg:
+		// Check clipboard TTL expiry on each tick.
+		m.checkClipboardExpiry()
 		// Forward to the active sub-model so it can refresh timestamps etc.
 		cmd := m.forwardToActive(msg)
 		return m, tea.Batch(cmd, m.tickCmd())
@@ -183,6 +186,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			); err != nil {
 				log.Printf("cooper: failed to update settings: %v", err)
 			}
+			// Apply clipboard settings directly to config (UpdateSettings
+			// doesn't include them to avoid changing the interface signature).
+			cfg := m.app.Config()
+			if cfg != nil {
+				cfg.ClipboardTTLSecs = msg.ClipboardTTLSecs
+				cfg.ClipboardMaxBytes = msg.ClipboardMaxMB * 1024 * 1024
+			}
 		}
 		// Propagate new values to live TUI components.
 		newTimeout := time.Duration(msg.MonitorTimeoutSecs) * time.Second
@@ -266,6 +276,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case events.ClipboardCaptureMsg:
+		if msg.Err != nil {
+			m.clipboardState = app.ClipboardFailed
+			m.clipboardError = msg.Err.Error()
+			m.clipboardSnapshot = nil
+			m.clipboardFailedAt = time.Now()
+		} else if msg.Event != nil {
+			m.clipboardState = msg.Event.State
+			m.clipboardError = msg.Event.Error
+			m.clipboardSnapshot = msg.Event.Snapshot
+		}
+		return m, nil
+
+	case events.ClipboardClearMsg:
+		if m.app != nil {
+			m.app.ClearClipboard()
+		}
+		m.clipboardState = app.ClipboardEmpty
+		m.clipboardSnapshot = nil
+		m.clipboardError = ""
+		return m, nil
+
+	case events.ClipboardExpiredMsg:
+		m.clipboardState = app.ClipboardExpired
+		m.clipboardSnapshot = nil
+		return m, nil
+
 	case about.RunUpdateMsg:
 		modal := components.NewModal(
 			theme.ModalUpdateInfo,
@@ -329,6 +366,18 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// --- Clipboard shortcuts (only when not editing a text field) ---
+	if !m.isTextInputActive() {
+		switch msg.String() {
+		case "c":
+			return m, m.captureClipboardCmd()
+		case "x":
+			if m.clipboardState == app.ClipboardStaged {
+				return m, func() tea.Msg { return events.ClipboardClearMsg{} }
+			}
+		}
+	}
+
 	// --- Delegate to active sub-model ---
 	cmd := m.forwardToActive(msg)
 	return m, cmd
@@ -345,6 +394,68 @@ func (m *Model) showExitModal() {
 		"Cancel",
 	)
 	m.modal = &modal
+}
+
+// isTextInputActive returns true when the active sub-model is in a text
+// editing mode. Clipboard shortcuts (c/x) are suppressed in this state
+// so keystrokes reach the sub-model's input buffer instead.
+func (m *Model) isTextInputActive() bool {
+	switch m.activeTab {
+	case theme.TabBridgeRoutes:
+		if rm, ok := m.bridgeRoutesModel.(*bridgeui.RoutesModel); ok {
+			return rm.IsEditing()
+		}
+	case theme.TabRuntime:
+		if sm, ok := m.runtimeModel.(*settings.Model); ok {
+			return sm.IsEditing()
+		}
+	case theme.TabPortForward:
+		if pm, ok := m.portForwardModel.(*portfwd.Model); ok {
+			return pm.IsEditing()
+		}
+	}
+	return false
+}
+
+// captureClipboardCmd returns a tea.Cmd that captures the host clipboard
+// and emits a ClipboardCaptureMsg with the result.
+func (m *Model) captureClipboardCmd() tea.Cmd {
+	a := m.app
+	return func() tea.Msg {
+		if a == nil {
+			return events.ClipboardCaptureMsg{Err: fmt.Errorf("app not available")}
+		}
+		event, err := a.CaptureClipboard()
+		return events.ClipboardCaptureMsg{Event: event, Err: err}
+	}
+}
+
+// checkClipboardExpiry checks clipboard state transitions on each tick:
+//   - Staged → Expired when TTL elapses (also clears the manager)
+//   - Failed → Empty after 3 seconds (auto-clear error display)
+//   - Expired → Empty after 3 seconds (auto-clear expired display)
+func (m *Model) checkClipboardExpiry() {
+	switch m.clipboardState {
+	case app.ClipboardStaged:
+		if m.clipboardSnapshot != nil && m.clipboardSnapshot.IsExpired() {
+			m.clipboardState = app.ClipboardExpired
+			m.clipboardSnapshot = nil
+			m.clipboardExpiredAt = time.Now()
+			// Actively clear the manager so the bridge stops serving the image.
+			if m.app != nil {
+				m.app.ClearClipboard()
+			}
+		}
+	case app.ClipboardFailed:
+		if !m.clipboardFailedAt.IsZero() && time.Since(m.clipboardFailedAt) > 3*time.Second {
+			m.clipboardState = app.ClipboardEmpty
+			m.clipboardError = ""
+		}
+	case app.ClipboardExpired:
+		if !m.clipboardExpiredAt.IsZero() && time.Since(m.clipboardExpiredAt) > 3*time.Second {
+			m.clipboardState = app.ClipboardEmpty
+		}
+	}
 }
 
 // executeModalConfirm runs the action for the confirmed modal.
@@ -510,7 +621,7 @@ func (m *Model) contentHeight() int {
 	return h
 }
 
-// headerBar renders: 🥃 Cooper  barrel-proof  🛡️ Proxy ✓  📦 N containers  ⏱ N pending
+// headerBar renders: 🥃 Cooper  barrel-proof  🛡️ Proxy ✓  <clipboard status>
 func (m *Model) headerBar(width int) string {
 	brand := theme.BrandStyle.Render(theme.BarrelEmoji + " Cooper")
 	tagline := theme.TaglineStyle.Render("barrel-proof")
@@ -523,13 +634,85 @@ func (m *Model) headerBar(width int) string {
 		proxyStatus = theme.StatusStoppedStyle.Render(theme.IconShield + "  Proxy " + theme.IconCross)
 	}
 
-	parts := []string{brand, tagline, proxyStatus}
+	leftParts := []string{brand, tagline, proxyStatus}
+	left := strings.Join(leftParts, "  ")
 
-	row := strings.Join(parts, "  ")
+	// Clipboard status segment on the right side.
+	right := m.clipboardHeaderSegment()
+
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = 1
+	}
+
+	row := left + strings.Repeat(" ", gap) + right
 
 	// Pad or truncate to terminal width.
 	rendered := theme.HeaderBarStyle.Width(width).Render(row)
 	return rendered
+}
+
+// clipboardHeaderSegment renders the clipboard status for the header bar.
+func (m *Model) clipboardHeaderSegment() string {
+	label := theme.DimStyle.Render("Clipboard")
+	switch m.clipboardState {
+	case app.ClipboardStaged:
+		if m.clipboardSnapshot == nil {
+			return label + " " + theme.StatusRunningStyle.Render("Staged") +
+				"  [" + theme.HelpKeyStyle.Render("c") + " Replace]" +
+				"  [" + theme.HelpKeyStyle.Render("x") + " Delete]"
+		}
+		snap := m.clipboardSnapshot
+		remaining := time.Until(snap.ExpiresAt)
+		if remaining < 0 {
+			remaining = 0
+		}
+		total := snap.ExpiresAt.Sub(snap.CreatedAt)
+		if total <= 0 {
+			total = 1
+		}
+		progress := float64(remaining) / float64(total)
+		if progress > 1.0 {
+			progress = 1.0
+		}
+
+		// Timer bar (compact, 10 chars wide).
+		barWidth := 10
+		filled := int(float64(barWidth) * progress)
+		if filled > barWidth {
+			filled = barWidth
+		}
+		empty := barWidth - filled
+
+		color := theme.TimerColor(progress)
+		filledStyle := lipgloss.NewStyle().Foreground(color)
+		bar := filledStyle.Render(strings.Repeat(theme.IconBlock, filled)) +
+			theme.TimerBarEmptyStyle.Render(strings.Repeat(theme.IconShade, empty))
+
+		secs := int(math.Ceil(remaining.Seconds()))
+		timeLabel := filledStyle.Render(fmt.Sprintf("%ds", secs))
+
+		return label + " " + theme.StatusRunningStyle.Render("Staged") +
+			" [" + bar + "] " + timeLabel +
+			"  [" + theme.HelpKeyStyle.Render("c") + " Replace]" +
+			"  [" + theme.HelpKeyStyle.Render("x") + " Delete]"
+
+	case app.ClipboardFailed:
+		errText := m.clipboardError
+		if len(errText) > 30 {
+			errText = errText[:27] + "..."
+		}
+		return label + " " + theme.ErrorStyle.Render("Failed: "+errText) +
+			"  [" + theme.HelpKeyStyle.Render("c") + " Retry]"
+
+	case app.ClipboardExpired:
+		return label + " " + theme.DimStyle.Render("Expired") +
+			"  [" + theme.HelpKeyStyle.Render("c") + " Copy]"
+
+	default: // ClipboardEmpty
+		return label + " " + theme.DimStyle.Render("Empty") +
+			"  [" + theme.HelpKeyStyle.Render("c") + " Copy]"
+	}
 }
 
 // helpBar renders context-sensitive keybindings at the bottom of the screen.

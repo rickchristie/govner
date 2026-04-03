@@ -20,6 +20,8 @@ type Config struct {
 	AllowedHistoryLimit int             `json:"allowed_history_limit"`
 	BridgeLogLimit    int               `json:"bridge_log_limit"`
 	BridgeRoutes      []BridgeRoute     `json:"bridge_routes"`
+	ClipboardTTLSecs  int               `json:"clipboard_ttl_secs"`
+	ClipboardMaxBytes int               `json:"clipboard_max_bytes"`
 }
 
 // LoadConfig loads configuration from a JSON file.
@@ -37,7 +39,23 @@ func LoadConfig(path string) (*Config, error) {
 	// Merge any new default domains added in code updates.
 	cfg.MergeDefaultDomains()
 
+	// Apply defaults for fields added in later versions that may be missing
+	// from existing config files (zero-value means unset in JSON).
+	cfg.applyMissingDefaults()
+
 	return &cfg, nil
+}
+
+// applyMissingDefaults fills in zero-value fields with sensible defaults.
+// This ensures existing config files written before new fields were added
+// continue to validate and work correctly.
+func (c *Config) applyMissingDefaults() {
+	if c.ClipboardTTLSecs <= 0 {
+		c.ClipboardTTLSecs = 300
+	}
+	if c.ClipboardMaxBytes <= 0 {
+		c.ClipboardMaxBytes = 20971520 // 20 MiB
+	}
 }
 
 // SaveConfig saves configuration to a JSON file with indentation.
@@ -70,6 +88,8 @@ func DefaultConfig() *Config {
 		AllowedHistoryLimit: 500,
 		BridgeLogLimit:     500,
 		BridgeRoutes:       []BridgeRoute{},
+		ClipboardTTLSecs:   300,
+		ClipboardMaxBytes:  20971520, // 20 MiB
 	}
 }
 
@@ -187,6 +207,14 @@ func (c *Config) Validate() error {
 	}
 	if c.BridgeLogLimit <= 0 {
 		return fmt.Errorf("bridge log limit must be positive, got %d", c.BridgeLogLimit)
+	}
+
+	// Validate clipboard settings
+	if c.ClipboardTTLSecs <= 0 {
+		return fmt.Errorf("clipboard TTL must be positive, got %d", c.ClipboardTTLSecs)
+	}
+	if c.ClipboardMaxBytes <= 0 {
+		return fmt.Errorf("clipboard max bytes must be positive, got %d", c.ClipboardMaxBytes)
 	}
 
 	return nil

@@ -36,11 +36,20 @@ type routeInfo struct {
 }
 
 // ServeHTTP dispatches incoming HTTP requests:
-//   - GET  /health  -> health check
-//   - GET  /routes  -> list configured routes
-//   - POST /{path}  -> execute the matching bridge script
-//   - anything else -> 404 with available routes
+//   - GET  /health         -> health check
+//   - GET  /routes         -> list configured routes
+//   - /clipboard/*         -> clipboard-bridge endpoints (bearer auth required)
+//   - POST /{path}         -> execute the matching bridge script
+//   - anything else        -> 404 with available routes
 func (s *BridgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Clipboard endpoints are dispatched first, before any other routing.
+	// They are a protected built-in namespace that user routes cannot occupy.
+	if s.clipboardHandler != nil {
+		if s.clipboardHandler.Handle(w, r) {
+			return
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 
 	path := r.URL.Path

@@ -196,6 +196,64 @@ func TestValidateHistoryLimits(t *testing.T) {
 	}
 }
 
+func TestValidateClipboardSettings(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{
+			name:    "zero clipboard TTL",
+			mutate:  func(c *Config) { c.ClipboardTTLSecs = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "negative clipboard TTL",
+			mutate:  func(c *Config) { c.ClipboardTTLSecs = -1 },
+			wantErr: true,
+		},
+		{
+			name:    "zero clipboard max bytes",
+			mutate:  func(c *Config) { c.ClipboardMaxBytes = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "negative clipboard max bytes",
+			mutate:  func(c *Config) { c.ClipboardMaxBytes = -1 },
+			wantErr: true,
+		},
+		{
+			name:    "valid clipboard settings",
+			mutate:  func(c *Config) { c.ClipboardTTLSecs = 600; c.ClipboardMaxBytes = 10485760 },
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tt.mutate(cfg)
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Error("expected validation error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}
+
+func TestDefaultConfigClipboardDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.ClipboardTTLSecs != 300 {
+		t.Errorf("expected default clipboard TTL 300, got %d", cfg.ClipboardTTLSecs)
+	}
+	if cfg.ClipboardMaxBytes != 20971520 {
+		t.Errorf("expected default clipboard max bytes 20971520, got %d", cfg.ClipboardMaxBytes)
+	}
+}
+
 func TestHasEnabledAITool(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.HasEnabledAITool() {

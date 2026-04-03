@@ -49,7 +49,7 @@ The correct model is:
 - "All barrels" includes eligible AI barrels started after capture, not only
   barrels already running at capture time.
 - Eligible AI barrels include the four officially supported tools plus custom
-  Cooper AI CLI barrels that explicitly opt into Cooper's clipboard contract.
+  Cooper AI CLI barrels by default, unless they explicitly opt out.
 
 This is not really "mirror the live clipboard into Docker". It is "make Cooper
 bridge the clipboard protocol each AI CLI expects, but only after an explicit
@@ -68,6 +68,26 @@ Reason:
 
 This document uses `clipboard-bridge` as the umbrella feature name from this
 point forward.
+
+## Required Reference Reading
+
+For any implementation session touching shim behavior or native/X11 clipboard
+behavior, the plan document is not sufficient by itself.
+
+Required reading before coding Phase 2 or Phase 3:
+
+- `.scratch/cc-clip/README.md`
+- `.scratch/cc-clip/internal/shim/template.go`
+- `.scratch/cc-clip/internal/x11bridge/bridge.go`
+- `.scratch/cc-clip/internal/x11bridge/*`
+- `.scratch/cc-clip/internal/daemon/server.go`
+
+Reason:
+
+- the plan captures architecture and constraints
+- `cc-clip` contains the low-level behavior that is easy to get subtly wrong,
+  especially around helper interception, X11 selection ownership, `TARGETS`,
+  and `INCR`
 
 ## What We Learned
 
@@ -320,8 +340,8 @@ Current recommendation:
 - mount tokens as read-only files, not env vars
 - rotate tokens on barrel restart/recreate
 - never print tokens in logs, diagnostics, or shell output
-- eligibility should include custom `cooper-cli-*` AI barrels only when they
-  explicitly opt into Cooper's clipboard contract
+- custom `cooper-cli-*` AI barrels should be clipboard-eligible by default,
+  unless they explicitly set clipboard mode to `off`
 
 #### Configurable TTL + explicit deletion
 
@@ -636,9 +656,11 @@ Recommended contract for custom AI CLI barrels:
 - custom images inherit from `cooper-base`
 - custom images keep using Cooper's standard entrypoint/runtime plumbing
 - each custom AI tool declares a clipboard mode:
+  - `auto`
   - `off`
   - `shim`
   - `x11`
+- default for Cooper barrels should be `auto`, not `off`
 - `shim` mode may request any combination of:
   - `xclip`
   - `xsel`
@@ -652,6 +674,16 @@ Recommended contract for custom AI CLI barrels:
   - a per-barrel clipboard token file
   - bridge port/runtime env
   - access to the staged clipboard endpoints
+
+Meaning of `auto`:
+
+- install helper shims
+- start native X11 clipboard plumbing
+- let the CLI consume whichever path it actually uses
+
+This is intentionally broader than the built-in tool-specific minimum. It keeps
+custom Cooper barrels working by default without forcing a manual classification
+step up front.
 
 This makes clipboard support reusable for unsupported AI CLIs without giving
 arbitrary user containers clipboard access by default.
@@ -947,7 +979,7 @@ Recommended env vars:
 
 ```bash
 COOPER_CLIPBOARD_ENABLED=1
-COOPER_CLIPBOARD_MODE=shim   # or x11 / off
+COOPER_CLIPBOARD_MODE=auto   # auto / shim / x11 / off
 COOPER_CLIPBOARD_BRIDGE_URL=http://127.0.0.1:${COOPER_BRIDGE_PORT}
 COOPER_CLIPBOARD_TOKEN_FILE=/etc/cooper/clipboard-token
 COOPER_CLIPBOARD_XAUTHORITY=/etc/cooper/clipboard.xauth
@@ -958,7 +990,9 @@ COOPER_CLIPBOARD_SHIMS=xclip,xsel
 Rules:
 
 - built-in tool images should receive these automatically
-- custom images should opt in by setting `COOPER_CLIPBOARD_MODE`
+- custom images should default to `COOPER_CLIPBOARD_MODE=auto`
+- custom images may set `COOPER_CLIPBOARD_MODE=off` to opt out
+- custom images may set explicit `shim` or `x11` to reduce runtime overhead
 - host-side token/session registration still decides actual eligibility
 
 ### Shim Implementation Example
@@ -1018,6 +1052,21 @@ Recommended concrete pieces:
 - a launcher script generated from a template
 - `xauth` cookie generation during barrel startup
 
+Implementation choice:
+
+- `cooper-x11-bridge` should be a real Go binary
+- shelling out to X11 helper tools is acceptable for startup concerns such as
+  `Xvfb`, `xauth`, and `mcookie`
+- shelling out is not acceptable for the X11 bridge itself
+
+Reason:
+
+- the bridge must stay resident as selection owner
+- it must implement `TARGETS`, `image/png`, and `INCR` correctly
+- it must integrate cleanly with bearer auth, retries, and tests
+- hiding that behavior behind `xclip`/`xsel` subprocesses would make the
+  native clipboard path brittle and harder to verify
+
 Illustrative launcher sketch:
 
 ```bash
@@ -1048,19 +1097,28 @@ Implementation rules:
 
 ### Custom Barrel Examples
 
-Recommended custom shim-mode Dockerfile example:
+Recommended custom default-mode Dockerfile example:
 
 ```Dockerfile
 FROM cooper-base
 
 ENV COOPER_CLI_TOOL=my-custom
-ENV COOPER_CLIPBOARD_MODE=shim
-ENV COOPER_CLIPBOARD_SHIMS=xclip,xsel
 
 RUN npm install -g my-custom-cli
 ```
 
-Recommended custom X11-mode Dockerfile example:
+Recommended custom opt-out Dockerfile example:
+
+```Dockerfile
+FROM cooper-base
+
+ENV COOPER_CLI_TOOL=my-isolated-cli
+ENV COOPER_CLIPBOARD_MODE=off
+
+RUN npm install -g my-isolated-cli
+```
+
+Recommended custom forced X11-mode Dockerfile example:
 
 ```Dockerfile
 FROM cooper-base
@@ -1075,8 +1133,8 @@ Implementation rule:
 
 - a custom barrel must not get clipboard access merely because its image name
   starts with `cooper-cli-`
-- it must opt in through the documented runtime contract, and the host session
-  registration must mark it eligible
+- it gets clipboard-bridge by default as a Cooper barrel unless it opts out
+- host session registration must still mark it eligible
 
 ### TUI Example States
 
@@ -1134,9 +1192,11 @@ These are non-negotiable unless this document is updated deliberately.
   object generic
 - do not implement current barrel adapters as raw blob passthrough; they must
   satisfy the exact helper/X11 protocol the CLI expects
+- do not implement `cooper-x11-bridge` as shell glue around `xclip`/`xsel`; it
+  should be a real Go X11 client/selection owner
 - do not make `c` / `x` unconditional globals while a text input is active
-- do not mark custom `cooper-cli-*` barrels eligible unless they explicitly
-  opt into the clipboard runtime contract
+- do not require manual clipboard opt-in for Cooper barrels; default to
+  clipboard enabled and let barrels opt out with `COOPER_CLIPBOARD_MODE=off`
 
 ## Tool Support Plan
 
@@ -1199,7 +1259,8 @@ Planned implementation:
 
 - expose a stable clipboard runtime contract to any custom
   `cooper-cli-<tool>` image
-- let custom tools opt into `shim` or `x11` mode
+- default custom tools to `auto` clipboard mode
+- allow custom tools to force `shim` or `x11`, or opt out with `off`
 - keep token/auth behavior identical to built-in tools
 - document the expected env vars, mounted files, and helper binaries
 
@@ -1325,8 +1386,8 @@ Likely additions:
 These should be treated as implementation inputs, not open questions:
 
 1. all four supported AI CLIs are in scope
-2. custom Cooper AI CLI barrels must be able to opt into the same clipboard
-   plumbing
+2. custom Cooper AI CLI barrels must get clipboard-bridge by default and be
+   able to opt out
 3. Linux host only for now
 4. staged clipboard grants, not live clipboard bridge
 5. explicit user action in `cooper up`
@@ -1334,6 +1395,8 @@ These should be treated as implementation inputs, not open questions:
    - `wl-paste` on Wayland
    - `xclip` on X11
 7. uncommon image-format conversion fallback uses host `magick` in v1
+8. `cooper-x11-bridge` is a real Go binary in v1; shelling out is acceptable
+   only for X11 startup helpers
 
 ### Phase 1: host clipboard capture + secure staging
 
@@ -1652,9 +1715,9 @@ monitor tab.
 ### 6. Shared scope across barrels
 
 The user-selected model is intentionally simple: once staged, the clipboard is
-available to all eligible AI barrels, including custom opt-in AI barrels. That
-is still safer than live clipboard bridging, but it is weaker than per-barrel
-scoping.
+available to all eligible AI barrels, including custom Cooper AI barrels by
+default unless they opt out. That is still safer than live clipboard bridging,
+but it is weaker than per-barrel scoping.
 
 ### 7. X11 server exposure for `codex` and `copilot`
 
@@ -1770,7 +1833,7 @@ Implementation strategy:
 
 This gives the right security model and matches the actual clipboard behavior
 of the four supported AI CLIs, while exposing the same clipboard contract to
-custom opt-in Cooper AI barrels.
+custom Cooper AI barrels by default unless they opt out.
 
 ## Decision Log
 
@@ -1778,8 +1841,8 @@ custom opt-in Cooper AI barrels.
 
 - Scope expanded to all supported AI CLIs: `claude`, `opencode`, `codex`,
   `copilot`.
-- Custom `cooper-cli-*` AI barrels should be able to opt into the same
-  clipboard plumbing through a documented Cooper runtime contract.
+- Custom `cooper-cli-*` AI barrels should get the same clipboard plumbing by
+  default through a documented Cooper runtime contract, with explicit opt-out.
 - Feature naming should be `clipboard-bridge`, with image paste as the v1 use
   case rather than the whole long-term abstraction.
 - Host scope limited to Linux for v1.
@@ -1797,6 +1860,8 @@ custom opt-in Cooper AI barrels.
   - `wl-paste` on Wayland
   - `xclip` on X11
 - Uncommon image-format conversion fallback in v1 should use host `magick`.
+- `cooper-x11-bridge` should be implemented as a real Go binary, not shell
+  orchestration around X11 helpers.
 - Preferred TUI UX:
   - `c` captures from any panel
   - header shows clipboard state on the right
@@ -1804,7 +1869,8 @@ custom opt-in Cooper AI barrels.
 - Staged clipboard should be available to all eligible AI barrels, not scoped
   to a specific barrel.
 - Eligible access includes barrels started after capture, as long as they are
-  supported or custom-opt-in Cooper AI barrels with valid tokens.
+  supported or custom Cooper AI barrels with valid tokens, unless explicitly
+  opted out.
 - Default staged-image TTL should be 5 minutes and configurable.
 - Successful image fetch should not clear the staged clipboard automatically.
 - Capturing a new image should replace the previous staged clipboard

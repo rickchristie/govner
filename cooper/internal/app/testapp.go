@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 
+	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 )
 
@@ -52,6 +53,10 @@ func (t *TestApp) IsProxyRunning() bool                        { return t.proxyU
 func (t *TestApp) UpdatePortForwards(_ []config.PortForwardRule) error { return nil }
 func (t *TestApp) UpdateBridgeRoutes(_ []config.BridgeRoute) error     { return nil }
 func (t *TestApp) UpdateSettings(_, _, _, _ int) error                 { return nil }
+
+func (t *TestApp) CaptureClipboard() (*clipboard.ClipboardEvent, error) { return nil, nil }
+func (t *TestApp) ClearClipboard()                                       {}
+func (t *TestApp) ClipboardSnapshot() *clipboard.StagedSnapshot          { return nil }
 
 func (t *TestApp) Config() *config.Config    { return t.cfg }
 func (t *TestApp) CooperDir() string          { return "/tmp/cooper-test" }

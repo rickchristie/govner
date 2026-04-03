@@ -85,6 +85,12 @@ type Model struct {
 	height int
 }
 
+// IsEditing returns true when the port forward model is in an add/edit/delete
+// modal that consumes character key input.
+func (m *Model) IsEditing() bool {
+	return m.pfEditMode != pfNone
+}
+
 // New creates a new port forwarding model.
 func New() *Model {
 	return &Model{

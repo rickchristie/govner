@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 )
 
@@ -34,6 +35,11 @@ type MockApp struct {
 	RestartContainerErr error
 	ProxyRunning        bool
 
+	// Clipboard controllable return values.
+	CaptureClipboardResult *clipboard.ClipboardEvent
+	CaptureClipboardErr    error
+	ClipboardSnapshotVal   *clipboard.StagedSnapshot
+
 	// Recorded calls for assertions.
 	ApprovedIDs          []string
 	DeniedIDs            []string
@@ -44,6 +50,8 @@ type MockApp struct {
 	UpdatedSettings      []SettingsUpdate
 	StartCalled          bool
 	StopCalled           bool
+	CapturedClipboard    bool
+	ClearedClipboard     bool
 
 	startupWarnings []string
 	pendingRequests []*PendingRequest
@@ -207,6 +215,27 @@ func (m *MockApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridge
 	m.cfg.AllowedHistoryLimit = allowedLimit
 	m.cfg.BridgeLogLimit = bridgeLogLimit
 	return nil
+}
+
+// ----- Clipboard -----
+
+func (m *MockApp) CaptureClipboard() (*clipboard.ClipboardEvent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.CapturedClipboard = true
+	return m.CaptureClipboardResult, m.CaptureClipboardErr
+}
+
+func (m *MockApp) ClearClipboard() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ClearedClipboard = true
+}
+
+func (m *MockApp) ClipboardSnapshot() *clipboard.StagedSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ClipboardSnapshotVal
 }
 
 // ----- State -----

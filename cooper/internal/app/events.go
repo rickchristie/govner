@@ -2,6 +2,7 @@ package app
 
 import (
 	"github.com/rickchristie/govner/cooper/internal/bridge"
+	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/proxy"
 )
@@ -37,4 +38,19 @@ const (
 	DecisionAllow   = proxy.DecisionAllow
 	DecisionDeny    = proxy.DecisionDeny
 	DecisionTimeout = proxy.DecisionTimeout
+)
+
+// Clipboard types re-exported for TUI consumption.
+type ClipboardEvent = clipboard.ClipboardEvent
+type ClipboardState = clipboard.ClipboardState
+type StagedSnapshot = clipboard.StagedSnapshot
+type ClipboardObject = clipboard.ClipboardObject
+type ClipboardVariant = clipboard.ClipboardVariant
+
+// Clipboard state constants.
+const (
+	ClipboardEmpty   = clipboard.ClipboardEmpty
+	ClipboardStaged  = clipboard.ClipboardStaged
+	ClipboardExpired = clipboard.ClipboardExpired
+	ClipboardFailed  = clipboard.ClipboardFailed
 )

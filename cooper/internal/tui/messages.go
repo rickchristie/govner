@@ -19,6 +19,11 @@ type ShutdownCompleteMsg = events.ShutdownCompleteMsg
 
 type BridgeLogMsg = events.BridgeLogMsg
 
+type ClipboardCaptureMsg = events.ClipboardCaptureMsg
+type ClipboardClearMsg = events.ClipboardClearMsg
+type ClipboardExpiredMsg = events.ClipboardExpiredMsg
+type ClipboardTickMsg = events.ClipboardTickMsg
+
 // ----- Channel listener commands -----
 
 // listenACL returns a tea.Cmd that blocks until a value is received on ch,

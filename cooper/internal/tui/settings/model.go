@@ -24,6 +24,8 @@ type SettingsChangedMsg struct {
 	BlockedHistoryLimit int
 	AllowedHistoryLimit int
 	BridgeLogLimit      int
+	ClipboardTTLSecs    int
+	ClipboardMaxMB      int
 }
 
 // settingDef describes one editable setting.
@@ -64,12 +66,26 @@ var settingDefs = []settingDef{
 		Min:         50,
 		Max:         10000,
 	},
+	{
+		Label:       "Clipboard TTL",
+		Unit:        "seconds",
+		Description: "How long a staged clipboard image remains available to barrels before it expires. User can always delete early or replace with a new capture.",
+		Min:         10,
+		Max:         3600,
+	},
+	{
+		Label:       "Clipboard max size",
+		Unit:        "MB",
+		Description: "Maximum size of a clipboard image payload in megabytes. Oversized clipboard images are rejected at capture time.",
+		Min:         1,
+		Max:         100,
+	},
 }
 
 // Model is the sub-model for the Runtime tab.
 type Model struct {
 	// Settings values.
-	values   [4]int // One value per settingDef.
+	values   [6]int // One value per settingDef.
 	selected int    // Currently highlighted setting.
 	editing  bool   // True when the settings edit modal is open.
 	editBuf  string // Buffer for digit input in modal.
@@ -84,10 +100,16 @@ type Model struct {
 	height int // Cached height for modal rendering.
 }
 
+// IsEditing returns true when the settings model has an edit modal open
+// that consumes character key input.
+func (m *Model) IsEditing() bool {
+	return m.editing
+}
+
 // New creates a new settings model with the given initial values.
-func New(monitorTimeout, blockedLimit, allowedLimit, bridgeLogLimit int) *Model {
+func New(monitorTimeout, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTL, clipboardMaxMB int) *Model {
 	return &Model{
-		values: [4]int{monitorTimeout, blockedLimit, allowedLimit, bridgeLogLimit},
+		values: [6]int{monitorTimeout, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTL, clipboardMaxMB},
 	}
 }
 
@@ -211,6 +233,8 @@ func (m *Model) emitChange() tea.Cmd {
 		BlockedHistoryLimit: m.values[1],
 		AllowedHistoryLimit: m.values[2],
 		BridgeLogLimit:      m.values[3],
+		ClipboardTTLSecs:    m.values[4],
+		ClipboardMaxMB:      m.values[5],
 	}
 	return func() tea.Msg { return msg }
 }
