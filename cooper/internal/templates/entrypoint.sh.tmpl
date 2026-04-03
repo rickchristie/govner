@@ -43,6 +43,10 @@ fi
 # ============================================================================
 # Auto-approve alias (set per tool image via ENV)
 # ============================================================================
+# The alias is appended inside .bashrc's interactive section, so it only works
+# in interactive shells (cooper cli <tool> → bash -l). Non-interactive one-shot
+# commands (cooper cli <tool> -c "go test") don't load aliases, but that's fine
+# because one-shot commands run user code, not the AI tool itself.
 if [ -n "$COOPER_CLI_TOOL" ] && [ -n "$COOPER_CLI_AUTO_APPROVE" ]; then
     if ! grep -q "Cooper: Auto-approve alias" /home/user/.bashrc 2>/dev/null; then
         cat >> /home/user/.bashrc << ALIAS

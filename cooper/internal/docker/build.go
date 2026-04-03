@@ -36,9 +36,14 @@ func ImagePrefix() string {
 func GetImageProxy() string { return imagePrefix + defaultImageProxy }
 
 // GetImageBase returns the base image name (with prefix).
+// The base image contains OS, programming tools, entrypoint, and CA cert — no AI tools.
+// All per-tool images use FROM cooper-base, sharing layers via Docker's
+// content-addressable storage (no disk duplication of base layers).
 func GetImageBase() string { return imagePrefix + defaultImageBase }
 
 // GetImageCLI returns the CLI tool image name for a given tool (with prefix).
+// Each tool gets its own image (cooper-cli-claude, cooper-cli-codex, etc.).
+// Changing one tool's Dockerfile only rebuilds that image; siblings are untouched.
 func GetImageCLI(toolName string) string {
 	return imagePrefix + "cooper-cli-" + toolName
 }

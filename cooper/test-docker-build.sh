@@ -487,7 +487,7 @@ run_build_test() {
     fi
 
     # Custom error page.
-    if proxy_run test -f /etc/squid/errors/ERR_ACCESS_DENIED; then
+    if docker exec "$proxy_container" test -f /etc/squid/errors/ERR_ACCESS_DENIED 2>/dev/null; then
         pass "${mode}: Custom Cooper error page in proxy"
     else
         fail "${mode}: Custom Cooper error page not found in proxy"

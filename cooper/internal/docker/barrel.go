@@ -61,6 +61,10 @@ func containerWorkspacePath(name string) string {
 // all capabilities, preventing privilege escalation, custom seccomp profile,
 // and PID 1 init process.
 //
+// Multiple barrels for different tools can share the same workspace directory
+// simultaneously. File ownership is consistent because all tool images inherit
+// the same UID/GID from the base image.
+//
 // cooperDir is the path to ~/.cooper.
 func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) error {
 	name := BarrelContainerName(workspaceDir, toolName)
