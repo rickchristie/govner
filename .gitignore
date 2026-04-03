@@ -13,6 +13,7 @@ pgflock/pgflock
 cooper/cooper
 cooper/cooper-acl-helper
 cooper/acl-helper
+cooper/cooper-x11-bridge
 cooper/.test-mirror/
 cooper/.test-latest/
 cooper/.test-pinned/
