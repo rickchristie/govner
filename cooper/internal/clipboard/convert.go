@@ -15,6 +15,46 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
+// DetectImageFormat inspects raw bytes to determine the image format.
+// It returns a short format name ("png", "jpeg", "gif", "bmp", "tiff",
+// "webp", "svg") or a raw MIME string for uncommon image types. Returns
+// "" for non-image or empty data. This is the public entry point; the
+// internal alias detectImageFormat exists for backward compatibility
+// within the package.
+func DetectImageFormat(data []byte) string {
+	return detectImageFormat(data)
+}
+
+// IsImageData returns true if the raw bytes look like a supported image
+// format (PNG, JPEG, GIF, BMP, TIFF, WebP).
+func IsImageData(data []byte) bool {
+	f := detectImageFormat(data)
+	return f != "" && isCommonRasterFormat(f)
+}
+
+// FormatToMIME maps a short format name (as returned by DetectImageFormat)
+// to its MIME type string. Unknown formats return "application/octet-stream".
+func FormatToMIME(format string) string {
+	switch format {
+	case "png":
+		return "image/png"
+	case "jpeg":
+		return "image/jpeg"
+	case "gif":
+		return "image/gif"
+	case "bmp":
+		return "image/bmp"
+	case "tiff":
+		return "image/tiff"
+	case "webp":
+		return "image/webp"
+	case "svg":
+		return "image/svg+xml"
+	default:
+		return "application/octet-stream"
+	}
+}
+
 // detectImageFormat inspects raw bytes to determine the image format.
 // It uses magic-byte signatures first, then falls back to
 // http.DetectContentType. Returns a short format name like "png",

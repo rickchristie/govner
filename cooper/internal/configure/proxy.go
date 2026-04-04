@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
@@ -22,9 +23,11 @@ const (
 type proxyModel struct {
 	proxyPort    int
 	bridgePort   int
+	shmSize      string
 	proxyInput   textInput
 	bridgeInput  textInput
-	focusField   int // 0 = proxy, 1 = bridge
+	shmInput     textInput
+	focusField   int // 0 = proxy, 1 = bridge, 2 = shm size
 	err          string
 
 	// Scroll state for layout.
@@ -33,7 +36,7 @@ type proxyModel struct {
 	lastMaxScroll int // cached max scroll offset from last render
 }
 
-func newProxyModel(proxyPort, bridgePort int) proxyModel {
+func newProxyModel(proxyPort, bridgePort int, shmSize string) proxyModel {
 	pi := newTextInput("3128", 20)
 	pi.SetValue(fmt.Sprintf("%d", proxyPort))
 	pi.Focus()
@@ -41,11 +44,16 @@ func newProxyModel(proxyPort, bridgePort int) proxyModel {
 	bi := newTextInput("4343", 20)
 	bi.SetValue(fmt.Sprintf("%d", bridgePort))
 
+	si := newTextInput("1g", 20)
+	si.SetValue(shmSize)
+
 	return proxyModel{
 		proxyPort:   proxyPort,
 		bridgePort:  bridgePort,
+		shmSize:     shmSize,
 		proxyInput:  pi,
 		bridgeInput: bi,
+		shmInput:    si,
 	}
 }
 
@@ -59,10 +67,17 @@ func (m *proxyModel) update(msg tea.Msg) proxyResult {
 		case "esc":
 			return proxyBack
 		case "down":
-			if m.focusField < 1 {
+			if m.focusField < 2 {
 				m.focusField++
 				m.proxyInput.Blur()
-				m.bridgeInput.Focus()
+				m.bridgeInput.Blur()
+				m.shmInput.Blur()
+				switch m.focusField {
+				case 1:
+					m.bridgeInput.Focus()
+				case 2:
+					m.shmInput.Focus()
+				}
 			} else {
 				// At last field — scroll content down.
 				m.scrollOffset++
@@ -72,8 +87,15 @@ func (m *proxyModel) update(msg tea.Msg) proxyResult {
 		case "up":
 			if m.focusField > 0 {
 				m.focusField--
-				m.proxyInput.Focus()
+				m.proxyInput.Blur()
 				m.bridgeInput.Blur()
+				m.shmInput.Blur()
+				switch m.focusField {
+				case 0:
+					m.proxyInput.Focus()
+				case 1:
+					m.bridgeInput.Focus()
+				}
 			} else if m.scrollOffset > 0 {
 				m.scrollOffset--
 			}
@@ -94,8 +116,14 @@ func (m *proxyModel) update(msg tea.Msg) proxyResult {
 				m.err = fmt.Sprintf("Proxy port (%d) and bridge port (%d) must be different", pp, bp)
 				return proxyNone
 			}
+			shmVal := m.shmInput.Value()
+			if !config.SHMSizeValid(shmVal) {
+				m.err = "SHM size must be a number with optional k/m/g suffix (e.g. 64m, 1g)"
+				return proxyNone
+			}
 			m.proxyPort = pp
 			m.bridgePort = bp
+			m.shmSize = shmVal
 			m.err = ""
 			return proxyBack
 		case "pgup", "ctrl+u":
@@ -110,10 +138,13 @@ func (m *proxyModel) update(msg tea.Msg) proxyResult {
 			}
 		default:
 			// Route to focused input.
-			if m.focusField == 0 {
+			switch m.focusField {
+			case 0:
 				m.proxyInput.handleKey(msg.String())
-			} else {
+			case 1:
 				m.bridgeInput.handleKey(msg.String())
+			case 2:
+				m.shmInput.handleKey(msg.String())
 			}
 		}
 	}
@@ -157,7 +188,16 @@ func (m *proxyModel) view(width, height int) string {
 	}
 	inner += bridgeLabel + "\n"
 	inner += m.bridgeInput.viewWithMargin(4) + "\n"
-	inner += "    " + hint.Render("HTTP API for AI-to-host script execution.") + "\n"
+	inner += "    " + hint.Render("HTTP API for AI-to-host script execution.") + "\n\n"
+
+	// SHM size field.
+	shmLabel := "    " + labelBold.Render("Barrel Shared Memory Size:")
+	if m.focusField == 2 {
+		shmLabel = "  " + lipgloss.NewStyle().Foreground(theme.ColorAmber).Bold(true).Render(theme.IconArrowRight) + " " + labelBold.Render("Barrel Shared Memory Size:")
+	}
+	inner += shmLabel + "\n"
+	inner += m.shmInput.viewWithMargin(4) + "\n"
+	inner += "    " + hint.Render("Size of /dev/shm for browser/Playwright workloads (e.g. 64m, 256m, 1g, 2g).") + "\n"
 
 	if m.err != "" {
 		inner += "\n  " + lipgloss.NewStyle().Foreground(theme.ColorFlame).Render(m.err)

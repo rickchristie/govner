@@ -126,6 +126,7 @@ func (m *saveModel) doSave() error {
 		m.configureApp.SetPortForwardRules(m.cfg.PortForwardRules)
 		m.configureApp.SetProxyPort(m.cfg.ProxyPort)
 		m.configureApp.SetBridgePort(m.cfg.BridgePort)
+		m.configureApp.SetBarrelSHMSize(m.cfg.BarrelSHMSize)
 
 		if err := m.configureApp.Save(); err != nil {
 			return err
@@ -187,6 +188,8 @@ func (m *saveModel) view(width, height int) string {
 		lipgloss.NewStyle().Foreground(theme.ColorAmber).Render(fmt.Sprintf("%d", m.cfg.ProxyPort)) + "\n"
 	content += " " + labelStyle.Render("Bridge Port:        ") +
 		lipgloss.NewStyle().Foreground(theme.ColorAmber).Render(fmt.Sprintf("%d", m.cfg.BridgePort)) + "\n"
+	content += " " + labelStyle.Render("Barrel SHM Size:    ") +
+		lipgloss.NewStyle().Foreground(theme.ColorAmber).Render(m.cfg.BarrelSHMSize) + "\n"
 
 	content += "\n"
 

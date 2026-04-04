@@ -157,7 +157,7 @@ func newModel(cfg *config.Config, cooperDir string, ca *app.ConfigureApp, existi
 	m.aicli = newAICLIModel(cfg.AITools)
 	m.whitelist = newWhitelistModel(cfg.WhitelistedDomains)
 	m.portForward = newPortFwdModel(cfg.PortForwardRules)
-	m.proxySetup = newProxyModel(cfg.ProxyPort, cfg.BridgePort)
+	m.proxySetup = newProxyModel(cfg.ProxyPort, cfg.BridgePort, cfg.BarrelSHMSize)
 	m.save = newSaveModel(cfg, cooperDir, configPath, ca)
 
 	// Detect version changes for mirror mode tools.
@@ -385,6 +385,7 @@ func (m *model) syncConfigFromSubModels() {
 	m.cfg.PortForwardRules = m.portForward.toPortForwardRules()
 	m.cfg.ProxyPort = m.proxySetup.proxyPort
 	m.cfg.BridgePort = m.proxySetup.bridgePort
+	m.cfg.BarrelSHMSize = m.proxySetup.shmSize
 }
 
 // navigateTo switches to a new screen and syncs config.

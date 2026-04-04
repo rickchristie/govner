@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 )
 
 // Config holds all Cooper configuration. This is the central data type
@@ -22,6 +24,7 @@ type Config struct {
 	BridgeRoutes      []BridgeRoute     `json:"bridge_routes"`
 	ClipboardTTLSecs  int               `json:"clipboard_ttl_secs"`
 	ClipboardMaxBytes int               `json:"clipboard_max_bytes"`
+	BarrelSHMSize     string            `json:"barrel_shm_size"`
 }
 
 // LoadConfig loads configuration from a JSON file.
@@ -56,6 +59,17 @@ func (c *Config) applyMissingDefaults() {
 	if c.ClipboardMaxBytes <= 0 {
 		c.ClipboardMaxBytes = 20971520 // 20 MiB
 	}
+	if strings.TrimSpace(c.BarrelSHMSize) == "" {
+		c.BarrelSHMSize = "1g"
+	}
+}
+
+// shmSizeRE validates barrel SHM size: positive integer optionally followed by k, m, or g.
+var shmSizeRE = regexp.MustCompile(`(?i)^[1-9][0-9]*[kmg]?$`)
+
+// SHMSizeValid returns true if the given string is a valid barrel SHM size.
+func SHMSizeValid(s string) bool {
+	return shmSizeRE.MatchString(s)
 }
 
 // SaveConfig saves configuration to a JSON file with indentation.
@@ -90,6 +104,7 @@ func DefaultConfig() *Config {
 		BridgeRoutes:       []BridgeRoute{},
 		ClipboardTTLSecs:   300,
 		ClipboardMaxBytes:  20971520, // 20 MiB
+		BarrelSHMSize:      "1g",
 	}
 }
 
@@ -215,6 +230,11 @@ func (c *Config) Validate() error {
 	}
 	if c.ClipboardMaxBytes <= 0 {
 		return fmt.Errorf("clipboard max bytes must be positive, got %d", c.ClipboardMaxBytes)
+	}
+
+	// Validate barrel SHM size
+	if !shmSizeRE.MatchString(c.BarrelSHMSize) {
+		return fmt.Errorf("barrel shm size %q is invalid (examples: 64m, 256m, 1g, 2g)", c.BarrelSHMSize)
 	}
 
 	return nil

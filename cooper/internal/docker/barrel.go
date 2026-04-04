@@ -74,7 +74,7 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 	}
 
 	// Create host directories that may not exist yet.
-	if err := ensureBarrelHostDirs(absWorkspace, toolName); err != nil {
+	if err := ensureBarrelHostDirs(absWorkspace, toolName, cooperDir); err != nil {
 		return fmt.Errorf("create host directories: %w", err)
 	}
 
@@ -99,6 +99,9 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 		"--security-opt", fmt.Sprintf("seccomp=%s", seccompPath),
 		"--init",
 
+		// Shared memory size for browser/Playwright workloads.
+		"--shm-size", cfg.BarrelSHMSize,
+
 		// Label for workspace path tracking (used by collision detection).
 		"--label", fmt.Sprintf("cooper.workspace=%s", absWorkspace),
 	}
@@ -113,27 +116,30 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 		"-e", "NO_PROXY=localhost,127.0.0.1",
 	)
 
+	// X11 display env vars — set for ALL barrels so Playwright and clipboard
+	// bridge both have a consistent display. The entrypoint starts a shared
+	// Xvfb instance that these point to.
+	args = append(args,
+		"-e", "DISPLAY=127.0.0.1:99",
+		"-e", "XAUTHORITY=/home/user/.cooper-clipboard.xauth",
+		"-e", "COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99",
+		"-e", "COOPER_CLIPBOARD_XAUTHORITY=/home/user/.cooper-clipboard.xauth",
+	)
+
+	// Playwright browser cache path.
+	args = append(args,
+		"-e", "PLAYWRIGHT_BROWSERS_PATH=/home/user/.cache/ms-playwright",
+	)
+
 	// Clipboard bridge env vars.
 	clipMode := clipboardModeForTool(toolName)
 	args = append(args,
 		"-e", "COOPER_CLIPBOARD_ENABLED=1",
 		"-e", fmt.Sprintf("COOPER_CLIPBOARD_BRIDGE_URL=http://127.0.0.1:%d", cfg.BridgePort),
 		"-e", "COOPER_CLIPBOARD_TOKEN_FILE=/etc/cooper/clipboard-token",
-		"-e", "COOPER_CLIPBOARD_XAUTHORITY=/home/user/.cooper-clipboard.xauth",
-		"-e", "COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99",
 		"-e", "COOPER_CLIPBOARD_SHIMS=xclip,xsel",
 		"-e", fmt.Sprintf("COOPER_CLIPBOARD_MODE=%s", clipMode),
 	)
-
-	// For X11/auto clipboard modes, set DISPLAY and XAUTHORITY as Docker env
-	// vars so they're visible to docker exec sessions (entrypoint exports
-	// only affect child processes, not new exec sessions).
-	if clipMode == "x11" || clipMode == "auto" {
-		args = append(args,
-			"-e", "DISPLAY=127.0.0.1:99",
-			"-e", "XAUTHORITY=/home/user/.cooper-clipboard.xauth",
-		)
-	}
 
 	// If Go is enabled, set GOFLAGS=-mod=readonly to prevent the AI from
 	// modifying go.mod/go.sum inside the container. Dependencies must be
@@ -233,6 +239,14 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 		args = append(args, "-v", shimsDir+":/etc/cooper/shims:ro")
 	}
 
+	// Playwright support mounts: Cooper-managed fonts (read-only) and
+	// Playwright browser cache (read-write).
+	fontsDir := filepath.Join(cooperDir, "fonts")
+	args = append(args, "-v", fontsDir+":/home/user/.local/share/fonts:ro")
+
+	pwCacheDir := filepath.Join(cooperDir, "cache", "ms-playwright")
+	args = append(args, "-v", pwCacheDir+":/home/user/.cache/ms-playwright:rw")
+
 	return args
 }
 
@@ -280,7 +294,7 @@ func appendLanguageCacheMounts(args []string, homeDir string, cfg *config.Config
 
 // ensureBarrelHostDirs creates directories on the host that must exist
 // before Docker can mount them as volumes.
-func ensureBarrelHostDirs(absWorkspace, toolName string) error {
+func ensureBarrelHostDirs(absWorkspace, toolName, cooperDir string) error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("get home dir: %w", err)
@@ -313,6 +327,13 @@ func ensureBarrelHostDirs(absWorkspace, toolName string) error {
 		filepath.Join(homeDir, ".cache", "pip"),
 		filepath.Join(homeDir, ".cache", "go-build"),
 		filepath.Join(gopath, "pkg", "mod"),
+	)
+
+	// Playwright support dirs — must exist before Docker mounts them
+	// so Docker does not create them as root-owned directories.
+	dirs = append(dirs,
+		filepath.Join(cooperDir, "fonts"),
+		filepath.Join(cooperDir, "cache", "ms-playwright"),
 	)
 
 	for _, dir := range dirs {
@@ -451,6 +472,26 @@ func IsBarrelRunning(name string) (bool, error) {
 
 // clipboardModeForTool returns the clipboard mode for a given tool.
 // Built-in tools have known modes; custom tools default to "auto".
+//
+// Image paste support requires two different strategies depending on how
+// the AI CLI reads the clipboard:
+//
+//   - "shim": The CLI shells out to helper binaries (xclip, xsel, wl-paste)
+//     to read clipboard data. Cooper installs wrapper scripts earlier in PATH
+//     that intercept image-read calls and serve the staged image from the
+//     bridge. Claude and OpenCode both work this way — their binaries contain
+//     explicit references to these helper tools.
+//
+//   - "x11": The CLI reads the clipboard in-process via native X11 APIs.
+//     A helper-binary shim cannot intercept this. Instead, Cooper starts
+//     Xvfb and runs cooper-x11-bridge as the X11 CLIPBOARD selection owner.
+//     Codex uses arboard (Rust, in-process X11); Copilot uses
+//     @teddyzhu/clipboard (native Node module) — both verified by runtime
+//     inspection and live Xvfb experiments.
+//
+// Custom cooper-cli-* barrels default to "auto" (both shim and X11 plumbing
+// installed) so they work without the user having to manually classify the
+// CLI's clipboard strategy. Barrels can opt out with COOPER_CLIPBOARD_MODE=off.
 func clipboardModeForTool(toolName string) string {
 	switch toolName {
 	case "claude", "opencode":

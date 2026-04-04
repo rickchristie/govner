@@ -54,7 +54,8 @@ func (t *TestApp) UpdatePortForwards(_ []config.PortForwardRule) error { return 
 func (t *TestApp) UpdateBridgeRoutes(_ []config.BridgeRoute) error     { return nil }
 func (t *TestApp) UpdateSettings(_, _, _, _ int) error                 { return nil }
 
-func (t *TestApp) CaptureClipboard() (*clipboard.ClipboardEvent, error) { return nil, nil }
+func (t *TestApp) CaptureClipboard() (*clipboard.ClipboardEvent, error)  { return nil, nil }
+func (t *TestApp) StageFile(_ string) (*clipboard.ClipboardEvent, error) { return nil, nil }
 func (t *TestApp) ClearClipboard()                                       {}
 func (t *TestApp) ClipboardSnapshot() *clipboard.StagedSnapshot          { return nil }
 

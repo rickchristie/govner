@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
 	"strings"
 	"time"
 
@@ -327,6 +328,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handleKey routes keyboard input. Modal keys take priority, then global
 // keys (quit, tab switching), then delegation to the active sub-model.
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// --- Bracketed paste: detect file drag-and-drop ---
+	// Terminal emulators send dragged file paths as bracketed paste text.
+	// BubbleTea sets Paste=true on the resulting KeyMsg.
+	if msg.Paste {
+		if path := extractDroppedFilePath(msg); path != "" {
+			return m, m.stageFileCmd(path)
+		}
+		return m, nil
+	}
+
 	// --- Modal is active: arrow keys navigate, Enter/Esc confirm/cancel ---
 	if m.modal != nil && m.modal.Active {
 		switch msg.String() {
@@ -428,6 +439,43 @@ func (m *Model) captureClipboardCmd() tea.Cmd {
 		event, err := a.CaptureClipboard()
 		return events.ClipboardCaptureMsg{Event: event, Err: err}
 	}
+}
+
+// stageFileCmd returns a tea.Cmd that stages a file from disk onto the
+// clipboard bridge. It reuses ClipboardCaptureMsg so the TUI handles the
+// result identically to a clipboard capture.
+func (m *Model) stageFileCmd(path string) tea.Cmd {
+	a := m.app
+	return func() tea.Msg {
+		if a == nil {
+			return events.ClipboardCaptureMsg{Err: fmt.Errorf("app not available")}
+		}
+		event, err := a.StageFile(path)
+		return events.ClipboardCaptureMsg{Event: event, Err: err}
+	}
+}
+
+// extractDroppedFilePath checks whether a paste KeyMsg contains a single
+// absolute file path that exists on disk. Returns the path if valid, or
+// "" if the paste is not a file drop.
+func extractDroppedFilePath(msg tea.KeyMsg) string {
+	text := strings.TrimSpace(string(msg.Runes))
+	if text == "" {
+		return ""
+	}
+	// Reject multi-line pastes (multiple files or prose).
+	if strings.ContainsAny(text, "\n\r") {
+		return ""
+	}
+	// Must be an absolute path.
+	if !strings.HasPrefix(text, "/") {
+		return ""
+	}
+	// Must exist on disk.
+	if _, err := os.Stat(text); err != nil {
+		return ""
+	}
+	return text
 }
 
 // checkClipboardExpiry checks clipboard state transitions on each tick:

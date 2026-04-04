@@ -272,6 +272,43 @@ func TestRenderBaseDockerfile_XvfbForOpenCode(t *testing.T) {
 	assertContains(t, result, "inotify-tools")
 }
 
+func TestRenderBaseDockerfile_PlaywrightRuntimePackages(t *testing.T) {
+	// Playwright runtime packages should be installed in ALL configurations,
+	// even with no AI tools enabled.
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{},
+		AITools:          []config.ToolConfig{},
+		ProxyPort:        3128,
+		BridgePort:       4343,
+	}
+
+	result, err := RenderBaseDockerfile(cfg)
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+
+	// Font packages
+	assertContains(t, result, "fontconfig")
+	assertContains(t, result, "fonts-dejavu-core")
+	assertContains(t, result, "fonts-roboto")
+	assertContains(t, result, "fonts-noto-core")
+	assertContains(t, result, "fonts-noto-cjk")
+	assertContains(t, result, "fonts-freefont-ttf")
+	assertContains(t, result, "fonts-liberation")
+	assertContains(t, result, "fonts-noto-color-emoji")
+
+	// Chromium OS dependencies
+	assertContains(t, result, "libnss3")
+	assertContains(t, result, "libgbm1")
+	assertContains(t, result, "libx11-6")
+	assertContains(t, result, "libxkbcommon0")
+	assertContains(t, result, "libfontconfig1")
+
+	// X11 tools (always present)
+	assertContains(t, result, "xvfb")
+	assertContains(t, result, "xauth")
+}
+
 func TestRenderBaseDockerfile_ProxyEnvVars(t *testing.T) {
 	cfg := &config.Config{
 		ProgrammingTools: []config.ToolConfig{},
@@ -632,9 +669,15 @@ func TestRenderEntrypoint(t *testing.T) {
 	assertContains(t, result, "$COOPER_CLI_TOOL")
 	assertContains(t, result, "$COOPER_CLI_AUTO_APPROVE")
 
-	// Should have OpenCode DISPLAY setup conditional on tool type
-	assertContains(t, result, "DISPLAY=:99.0")
-	assertContains(t, result, "Xvfb :99")
+	// Should have unified Xvfb setup for all barrels (Playwright + clipboard)
+	assertContains(t, result, "start_shared_xvfb")
+	assertContains(t, result, "ensure_playwright_runtime")
+	assertContains(t, result, "DISPLAY=")
+	assertContains(t, result, "XAUTHORITY=")
+	assertContains(t, result, "Xvfb")
+	assertContains(t, result, "1920x1080x24")
+
+	// Should still have OpenCode config setup
 	assertContains(t, result, "opencode.json")
 
 	// Should read rules from socat-rules.json config file
@@ -685,15 +728,23 @@ func TestRenderEntrypoint_DynamicAutoApprove(t *testing.T) {
 	assertNotContains(t, result, "alias opencode=")
 }
 
-func TestRenderEntrypoint_XvfbConditionalOnTool(t *testing.T) {
+func TestRenderEntrypoint_UnifiedXvfb(t *testing.T) {
 	cfg := testConfig()
 	result, err := RenderEntrypoint(cfg)
 	if err != nil {
 		t.Fatalf("RenderEntrypoint failed: %v", err)
 	}
 
-	// OpenCode Xvfb setup should be conditional on COOPER_CLI_TOOL env var
-	assertContains(t, result, `if [ "$COOPER_CLI_TOOL" = "opencode" ]`)
+	// Xvfb is now started for ALL barrels via unified start_shared_xvfb,
+	// not inside the OpenCode conditional block.
+	assertContains(t, result, "start_shared_xvfb")
+	assertContains(t, result, "ensure_playwright_runtime")
+	assertContains(t, result, "fc-cache")
+	assertContains(t, result, ".fonts")
+	assertContains(t, result, ".cache/ms-playwright")
+	assertContains(t, result, ".cache/fontconfig")
+	assertContains(t, result, "COOPER_CLIPBOARD_DISPLAY")
+	assertContains(t, result, "COOPER_CLIPBOARD_XAUTHORITY")
 }
 
 func TestRenderEntrypoint_NoToolBooleans(t *testing.T) {

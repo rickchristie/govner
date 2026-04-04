@@ -185,7 +185,8 @@ cat > "${CONFIG_DIR}/config.json" << 'CONFIGEOF'
   "blocked_history_limit": 500,
   "allowed_history_limit": 500,
   "bridge_log_limit": 500,
-  "bridge_routes": []
+  "bridge_routes": [],
+  "barrel_shm_size": "1g"
 }
 CONFIGEOF
 pass "Test config created"
@@ -397,6 +398,26 @@ mkdir -p "${HOME_DIR}/.npm" 2>/dev/null || true
 mkdir -p "${HOME_DIR}/.cache/pip" 2>/dev/null || true
 mkdir -p "${HOME_DIR}/.cache/go-build" 2>/dev/null || true
 
+# Playwright support dirs — must exist before Docker mounts them.
+mkdir -p "${CONFIG_DIR}/fonts" 2>/dev/null || true
+mkdir -p "${CONFIG_DIR}/cache/ms-playwright" 2>/dev/null || true
+
+# Copy a test font fixture for font mount verification.
+TEST_FONT=""
+for candidate in /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf /usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf; do
+    if [ -f "$candidate" ]; then
+        TEST_FONT="$candidate"
+        break
+    fi
+done
+if [ -n "$TEST_FONT" ]; then
+    mkdir -p "${CONFIG_DIR}/fonts/test-fixture"
+    cp "$TEST_FONT" "${CONFIG_DIR}/fonts/test-fixture/DejaVuSans.ttf"
+    info "Test font fixture: ${TEST_FONT}"
+else
+    info "No test font fixture found (font assertions will be skipped)"
+fi
+
 # ---- Start, test, and stop each tool barrel ----
 for tool in "${ALL_TOOLS[@]}"; do
     section "Phase 3: Barrel Testing — ${tool}"
@@ -451,6 +472,22 @@ for tool in "${ALL_TOOLS[@]}"; do
 
         # GOFLAGS (since Go is enabled).
         "-e" "GOFLAGS=-mod=readonly"
+
+        # X11 display env vars — set for ALL barrels.
+        "-e" "DISPLAY=127.0.0.1:99"
+        "-e" "XAUTHORITY=/home/user/.cooper-clipboard.xauth"
+        "-e" "COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99"
+        "-e" "COOPER_CLIPBOARD_XAUTHORITY=/home/user/.cooper-clipboard.xauth"
+
+        # Playwright browser cache path.
+        "-e" "PLAYWRIGHT_BROWSERS_PATH=/home/user/.cache/ms-playwright"
+
+        # Shared memory size for browser workloads.
+        "--shm-size" "1g"
+
+        # Playwright support mounts: fonts (ro) and browser cache (rw).
+        "-v" "${CONFIG_DIR}/fonts:/home/user/.local/share/fonts:ro"
+        "-v" "${CONFIG_DIR}/cache/ms-playwright:/home/user/.cache/ms-playwright:rw"
 
         # Working directory.
         "-w" "${E2E_WORKSPACE}"
@@ -615,6 +652,108 @@ for tool in "${ALL_TOOLS[@]}"; do
         pass "${tool}: CA cert volume-mounted at /etc/cooper/cooper-ca.pem"
     else
         fail "${tool}: CA cert not volume-mounted at /etc/cooper/cooper-ca.pem"
+    fi
+
+    # ---- Playwright runtime environment ----
+
+    # Wait for entrypoint Xvfb startup (may need a moment).
+    sleep 2
+
+    # Env contract.
+    display_val=$(barrel_exec 'echo "$DISPLAY"' | tr -d '[:space:]')
+    clip_display_val=$(barrel_exec 'echo "$COOPER_CLIPBOARD_DISPLAY"' | tr -d '[:space:]')
+    if [ "$display_val" = "$clip_display_val" ] && [ -n "$display_val" ]; then
+        pass "${tool}: DISPLAY matches COOPER_CLIPBOARD_DISPLAY (${display_val})"
+    else
+        fail "${tool}: DISPLAY mismatch: DISPLAY=${display_val} CLIP=${clip_display_val}"
+    fi
+
+    xauth_val=$(barrel_exec 'echo "$XAUTHORITY"' | tr -d '[:space:]')
+    clip_xauth_val=$(barrel_exec 'echo "$COOPER_CLIPBOARD_XAUTHORITY"' | tr -d '[:space:]')
+    if [ "$xauth_val" = "$clip_xauth_val" ] && [ -n "$xauth_val" ]; then
+        pass "${tool}: XAUTHORITY matches COOPER_CLIPBOARD_XAUTHORITY"
+    else
+        fail "${tool}: XAUTHORITY mismatch: XAUTHORITY=${xauth_val} CLIP=${clip_xauth_val}"
+    fi
+
+    pw_path=$(barrel_exec 'echo "$PLAYWRIGHT_BROWSERS_PATH"' | tr -d '[:space:]')
+    if [ "$pw_path" = "/home/user/.cache/ms-playwright" ]; then
+        pass "${tool}: PLAYWRIGHT_BROWSERS_PATH set correctly"
+    else
+        fail "${tool}: PLAYWRIGHT_BROWSERS_PATH expected /home/user/.cache/ms-playwright, got: ${pw_path}"
+    fi
+
+    # Filesystem and mounts.
+    fonts_check=$(barrel_exec 'test -d /home/user/.local/share/fonts && echo ok || echo missing')
+    if echo "$fonts_check" | grep -q "ok"; then
+        pass "${tool}: /home/user/.local/share/fonts mounted"
+    else
+        fail "${tool}: /home/user/.local/share/fonts not found"
+    fi
+
+    fonts_link=$(barrel_exec 'readlink /home/user/.fonts 2>/dev/null || echo missing')
+    if echo "$fonts_link" | grep -q "/home/user/.local/share/fonts"; then
+        pass "${tool}: ~/.fonts symlink correct"
+    else
+        fail "${tool}: ~/.fonts symlink incorrect: ${fonts_link}"
+    fi
+
+    pw_cache_check=$(barrel_exec 'test -d /home/user/.cache/ms-playwright && echo ok || echo missing')
+    if echo "$pw_cache_check" | grep -q "ok"; then
+        pass "${tool}: Playwright cache dir mounted"
+    else
+        fail "${tool}: Playwright cache dir not found"
+    fi
+
+    # Playwright cache should be writable.
+    pw_write_check=$(barrel_exec 'touch /home/user/.cache/ms-playwright/e2e-write-test && echo ok || echo fail')
+    if echo "$pw_write_check" | grep -q "ok"; then
+        pass "${tool}: Playwright cache dir is writable"
+    else
+        fail "${tool}: Playwright cache dir is NOT writable"
+    fi
+
+    # X11 runtime.
+    xvfb_check=$(barrel_exec 'pgrep -x Xvfb >/dev/null 2>&1 && echo running || echo stopped')
+    if echo "$xvfb_check" | grep -q "running"; then
+        pass "${tool}: Xvfb is running"
+    else
+        fail "${tool}: Xvfb is NOT running"
+    fi
+
+    # Parse display number and check TCP port.
+    xvfb_port_check=$(barrel_exec 'DNUM=$(echo "$DISPLAY" | sed "s/.*://;s/\\..*//"); PORT=$((6000 + DNUM)); timeout 1 bash -c "echo > /dev/tcp/127.0.0.1/${PORT}" 2>/dev/null && echo ok || echo fail')
+    if echo "$xvfb_port_check" | grep -q "ok"; then
+        pass "${tool}: Xvfb TCP port reachable"
+    else
+        fail "${tool}: Xvfb TCP port NOT reachable"
+    fi
+
+    # Font runtime.
+    fc_cache_check=$(barrel_exec 'fc-cache -f /home/user/.local/share/fonts 2>&1 && echo ok || echo fail')
+    if echo "$fc_cache_check" | grep -q "ok"; then
+        pass "${tool}: fc-cache succeeds with read-only font mount"
+    else
+        fail "${tool}: fc-cache failed"
+    fi
+
+    # Check if test fixture font is visible.
+    if [ -n "$TEST_FONT" ]; then
+        font_seen=$(barrel_exec 'fc-list 2>/dev/null | grep -F "DejaVu Sans" | head -n 1')
+        if [ -n "$font_seen" ]; then
+            pass "${tool}: mounted test font visible via fontconfig"
+        else
+            fail "${tool}: mounted test font not visible via fontconfig"
+        fi
+    fi
+
+    # Shared memory.
+    shm_bytes=$(barrel_exec "df -B1 /dev/shm | awk 'NR==2 {print \$2}'" | tr -d '[:space:]')
+    if [ -n "$shm_bytes" ] && [ "$shm_bytes" -gt 67108864 ] 2>/dev/null; then
+        shm_mb=$((shm_bytes / 1048576))
+        pass "${tool}: /dev/shm size = ${shm_mb}MB (> 64MB default)"
+    else
+        fail "${tool}: /dev/shm size too small or unreadable: ${shm_bytes}"
     fi
 
     # Stop this barrel before moving on.
@@ -863,6 +1002,21 @@ port_open() {
     barrel_exec "bash -c 'echo > /dev/tcp/localhost/$1' 2>/dev/null" >/dev/null 2>&1
 }
 
+# Helper: wait for a port to become ready inside the barrel (up to 10 s).
+# The entrypoint starts Xvfb + socat which can take several seconds after a
+# docker restart, so fixed sleeps are unreliable.
+wait_for_port() {
+    local port=$1
+    local max_attempts=${2:-20}
+    for _i in $(seq 1 "$max_attempts"); do
+        if port_open "$port"; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
 # Verify socat is listening on forwarded ports inside the barrel.
 for port in 5432 6379; do
     if port_open "$port"; then
@@ -898,7 +1052,7 @@ SOCAT_REMOVE_EOF
 # Restart barrel to pick up the new socat config.
 # SIGHUP-based reload is unreliable under tini --init, so we restart the container.
 docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
-sleep 3  # Wait for entrypoint to start socat with new config.
+wait_for_port 4343  # Wait for socat to bind after entrypoint restart.
 
 # After removing Redis rule, port 5432 should still listen, port 6379 should stop.
 if port_open 5432; then
@@ -925,7 +1079,7 @@ cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_READD_EOF'
 SOCAT_READD_EOF
 
 docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
-sleep 3
+wait_for_port 6379
 
 if port_open 6379; then
     pass "Port 6379 forwarding restored after re-adding rule"
@@ -946,7 +1100,7 @@ cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_RANGE_EOF'
 SOCAT_RANGE_EOF
 
 docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
-sleep 3
+wait_for_port 9102  # Wait for the last range port — implies all earlier ones are ready.
 
 # Check that ports 9100, 9101, 9102 are all listening.
 range_ok=true
@@ -971,7 +1125,7 @@ cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_RESTORE_EOF'
 }
 SOCAT_RESTORE_EOF
 docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
-sleep 3
+wait_for_port 4343
 
 # ============================================================================
 # Phase 8: Socat Live Reload
@@ -1407,8 +1561,15 @@ barrel_exec() {
     docker exec "$ACTIVE_BARREL" bash -c "$1" 2>&1
 }
 
-# Wait for entrypoint to finish setup (socat, shims, etc.).
-sleep 3
+# Wait for entrypoint to finish setup (socat, Xvfb, shims).
+# Shim installation is the LAST step in the entrypoint, so we poll for the
+# xclip shim file to confirm the entire entrypoint has completed.
+for _i in $(seq 1 20); do
+    if barrel_exec 'test -x /home/user/.local/bin/xclip' >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.5
+done
 
 # ---- Test 1: Clipboard env vars present in barrel ----
 info "Checking clipboard env vars..."

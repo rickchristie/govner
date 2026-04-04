@@ -30,7 +30,35 @@ Then please read through /pgflock and notice the difference:
 - Request/response body inspection in the proxy monitor via ICAP server integration. v1 has SSL bump which gives URL, method,
   headers, and status code. Full body inspection (seeing what the AI is sending/receiving) requires an ICAP server that Squid
   forwards decrypted traffic to for deep inspection. This is significantly more complex but enables the richest visibility.
-- Playwright support, the CLI container can run headed browser in the host machine safely.
+
+## Playwright Support (Built-in Runtime Capability)
+
+Playwright support is a built-in barrel capability, not a configurable programming tool. Cooper provides the Linux runtime
+environment that Playwright needs; the repo provides the Playwright package; Playwright itself provides browser binaries.
+
+What Cooper provides (always, in every barrel):
+- Chromium/Chrome OS shared-library dependencies in `cooper-base`
+- `Xvfb` virtual display (1920x1080x24) started for every barrel, with authenticated X11
+- `fontconfig` plus a baseline font set (DejaVu, Roboto, Noto, Noto CJK, FreeFont, Liberation, Noto Color Emoji)
+- Cooper-managed host font directory (`~/.cooper/fonts`) mounted read-only into `/home/user/.local/share/fonts`
+- Cooper-managed Playwright browser cache (`~/.cooper/cache/ms-playwright`) mounted read-write into `/home/user/.cache/ms-playwright`
+- `PLAYWRIGHT_BROWSERS_PATH` environment variable set in every barrel
+- `DISPLAY` and `XAUTHORITY` set for every barrel (shared with clipboard-bridge X11)
+- Configurable barrel shared memory (`barrel_shm_size`, default `1g`) via `--shm-size`
+- Best-effort host font sync on `cooper up` (copies .ttf/.otf/.ttc/.otc from standard Linux font dirs)
+
+What Cooper does NOT do:
+- Cooper does not install the Playwright npm package
+- Cooper does not install a system Chromium binary
+- Cooper does not manage Playwright versioning
+- Cooper does not auto-whitelist Playwright browser download domains
+
+The user or project is responsible for:
+- Installing Playwright in the repo (`npm install playwright`)
+- Running `playwright install` and manually approving browser downloads through the proxy monitor
+- Choosing headed, default headless, or headless with `channel: 'chromium'`
+
+This design keeps Cooper images stable across Playwright version bumps and avoids silently broadening egress.
 
 ## Detailed requirements
 
@@ -158,7 +186,10 @@ Then please read through /pgflock and notice the difference:
       - Users can set-up:
         - Which port is used by the Squid proxy. Default: 3128 (Squid standard).
         - Which port is used for the execution bridge API. Default: 4343.
-        These are two separate ports and must not collide.
+        - Barrel shared memory size (`barrel_shm_size`). Default: `1g`. Controls `--shm-size` for Docker containers.
+          Needed for Chromium/Playwright browser workloads (Docker's default 64m is too small for reliable browser use).
+          Accepts positive integers with optional k/m/g suffix (e.g. `64m`, `256m`, `1g`, `2g`).
+        These ports must not collide, and are separate from the barrel shared memory setting.
       - The execution bridge HTTP API binds to `127.0.0.1` AND the Docker bridge gateway IP (discovered at runtime
         via `docker network inspect cooper-external`). This makes it reachable from localhost and Docker containers,
         but NOT from the LAN. No authentication is required — Cooper's threat model is a single-user local dev machine.
@@ -302,6 +333,12 @@ Then please read through /pgflock and notice the difference:
     - Clipboard bridge (read-only):
       - `~/.cooper/tokens/{containerName}` → `/etc/cooper/clipboard-token` — per-barrel auth token
       - `~/.cooper/base/shims/` → `/etc/cooper/shims/` — pre-generated clipboard shim scripts
+    - Playwright support (always mounted for every barrel):
+      - `~/.cooper/fonts` → `/home/user/.local/share/fonts` (read-only) — Cooper-managed host font mirror
+      - `~/.cooper/cache/ms-playwright` → `/home/user/.cache/ms-playwright` (read-write) — Playwright browser cache
+      - `PLAYWRIGHT_BROWSERS_PATH=/home/user/.cache/ms-playwright` environment variable
+      - `DISPLAY=127.0.0.1:99` and `XAUTHORITY=/home/user/.cooper-clipboard.xauth` for Xvfb display
+      - `--shm-size` from `barrel_shm_size` config (default `1g`)
     - Language-specific caches (auto-configured based on enabled programming tools):
       - Go: `$GOPATH/pkg/mod` (read-only), `~/.cache/go-build` (read-write), `GOFLAGS=-mod=readonly`
       - Node: `~/.npm` (read-only)

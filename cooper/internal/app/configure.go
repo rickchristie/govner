@@ -150,6 +150,11 @@ func (a *ConfigureApp) SetBridgePort(port int) {
 	a.cfg.BridgePort = port
 }
 
+// SetBarrelSHMSize sets the barrel shared memory size.
+func (a *ConfigureApp) SetBarrelSHMSize(size string) {
+	a.cfg.BarrelSHMSize = size
+}
+
 // Validate validates the full configuration and returns any error.
 func (a *ConfigureApp) Validate() error {
 	return a.cfg.Validate()

@@ -57,6 +57,7 @@ type App interface {
 
 	// Clipboard bridge
 	CaptureClipboard() (*clipboard.ClipboardEvent, error)
+	StageFile(path string) (*clipboard.ClipboardEvent, error)
 	ClearClipboard()
 	ClipboardSnapshot() *clipboard.StagedSnapshot
 

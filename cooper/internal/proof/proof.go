@@ -452,6 +452,123 @@ func (ctx *ProofContext) phaseTools() {
 			ctx.fail(t.Name, fmt.Sprintf("not found in container (%s)", truncate(out, 80)))
 		}
 	}
+
+	// Playwright runtime environment — validate in each barrel that the
+	// display, clipboard, font, browser-cache, Xvfb, and /dev/shm setup
+	// that Cooper provisions for Playwright is correctly in place. These
+	// checks do NOT require Playwright itself to be installed.
+	for _, t := range ctx.Cfg.AITools {
+		if !t.Enabled {
+			continue
+		}
+		toolBarrel, ok := ctx.barrels[t.Name]
+		if !ok {
+			continue
+		}
+		suffix := fmt.Sprintf("(%s)", t.Name)
+
+		// 1. DISPLAY is set.
+		out, err := dockerExec(toolBarrel, `test -n "$DISPLAY" && echo "$DISPLAY"`)
+		if err == nil && out != "" {
+			ctx.pass(fmt.Sprintf("DISPLAY %s", suffix), out)
+		} else {
+			ctx.fail(fmt.Sprintf("DISPLAY %s", suffix), "not set")
+		}
+
+		// 2. XAUTHORITY is set.
+		out, err = dockerExec(toolBarrel, `test -n "$XAUTHORITY" && echo "$XAUTHORITY"`)
+		if err == nil && out != "" {
+			ctx.pass(fmt.Sprintf("XAUTHORITY %s", suffix), out)
+		} else {
+			ctx.fail(fmt.Sprintf("XAUTHORITY %s", suffix), "not set")
+		}
+
+		// 3. PLAYWRIGHT_BROWSERS_PATH is set.
+		out, err = dockerExec(toolBarrel, `test -n "$PLAYWRIGHT_BROWSERS_PATH" && echo "$PLAYWRIGHT_BROWSERS_PATH"`)
+		if err == nil && out != "" {
+			ctx.pass(fmt.Sprintf("PLAYWRIGHT_BROWSERS_PATH %s", suffix), out)
+		} else {
+			ctx.fail(fmt.Sprintf("PLAYWRIGHT_BROWSERS_PATH %s", suffix), "not set")
+		}
+
+		// 4. COOPER_CLIPBOARD_DISPLAY is set.
+		out, err = dockerExec(toolBarrel, `test -n "$COOPER_CLIPBOARD_DISPLAY" && echo "$COOPER_CLIPBOARD_DISPLAY"`)
+		if err == nil && out != "" {
+			ctx.pass(fmt.Sprintf("COOPER_CLIPBOARD_DISPLAY %s", suffix), out)
+		} else {
+			ctx.fail(fmt.Sprintf("COOPER_CLIPBOARD_DISPLAY %s", suffix), "not set")
+		}
+
+		// 5. COOPER_CLIPBOARD_XAUTHORITY is set.
+		out, err = dockerExec(toolBarrel, `test -n "$COOPER_CLIPBOARD_XAUTHORITY" && echo "$COOPER_CLIPBOARD_XAUTHORITY"`)
+		if err == nil && out != "" {
+			ctx.pass(fmt.Sprintf("COOPER_CLIPBOARD_XAUTHORITY %s", suffix), out)
+		} else {
+			ctx.fail(fmt.Sprintf("COOPER_CLIPBOARD_XAUTHORITY %s", suffix), "not set")
+		}
+
+		// 6. DISPLAY equals COOPER_CLIPBOARD_DISPLAY.
+		out, err = dockerExec(toolBarrel, `test "$DISPLAY" = "$COOPER_CLIPBOARD_DISPLAY" && echo "match"`)
+		if err == nil && strings.TrimSpace(out) == "match" {
+			ctx.pass(fmt.Sprintf("DISPLAY=COOPER_CLIPBOARD_DISPLAY %s", suffix), "values match")
+		} else {
+			ctx.fail(fmt.Sprintf("DISPLAY=COOPER_CLIPBOARD_DISPLAY %s", suffix), "DISPLAY and COOPER_CLIPBOARD_DISPLAY differ")
+		}
+
+		// 7. XAUTHORITY equals COOPER_CLIPBOARD_XAUTHORITY.
+		out, err = dockerExec(toolBarrel, `test "$XAUTHORITY" = "$COOPER_CLIPBOARD_XAUTHORITY" && echo "match"`)
+		if err == nil && strings.TrimSpace(out) == "match" {
+			ctx.pass(fmt.Sprintf("XAUTHORITY=COOPER_CLIPBOARD_XAUTHORITY %s", suffix), "values match")
+		} else {
+			ctx.fail(fmt.Sprintf("XAUTHORITY=COOPER_CLIPBOARD_XAUTHORITY %s", suffix), "XAUTHORITY and COOPER_CLIPBOARD_XAUTHORITY differ")
+		}
+
+		// 8. /home/user/.local/share/fonts directory exists.
+		_, err = dockerExec(toolBarrel, `test -d /home/user/.local/share/fonts`)
+		if err == nil {
+			ctx.pass(fmt.Sprintf("Fonts dir %s", suffix), "/home/user/.local/share/fonts exists")
+		} else {
+			ctx.fail(fmt.Sprintf("Fonts dir %s", suffix), "/home/user/.local/share/fonts not found")
+		}
+
+		// 9. /home/user/.fonts is a symlink.
+		_, err = dockerExec(toolBarrel, `test -L /home/user/.fonts`)
+		if err == nil {
+			ctx.pass(fmt.Sprintf("Fonts symlink %s", suffix), "/home/user/.fonts is a symlink")
+		} else {
+			ctx.warn(fmt.Sprintf("Fonts symlink %s", suffix), "/home/user/.fonts is not a symlink")
+		}
+
+		// 10. /home/user/.cache/ms-playwright directory exists.
+		_, err = dockerExec(toolBarrel, `test -d /home/user/.cache/ms-playwright`)
+		if err == nil {
+			ctx.pass(fmt.Sprintf("Playwright cache dir %s", suffix), "/home/user/.cache/ms-playwright exists")
+		} else {
+			ctx.fail(fmt.Sprintf("Playwright cache dir %s", suffix), "/home/user/.cache/ms-playwright not found")
+		}
+
+		// 11. Xvfb process is running.
+		out, err = dockerExec(toolBarrel, `pgrep -x Xvfb`)
+		if err == nil && out != "" {
+			ctx.pass(fmt.Sprintf("Xvfb running %s", suffix), fmt.Sprintf("PID %s", strings.Fields(out)[0]))
+		} else {
+			ctx.fail(fmt.Sprintf("Xvfb running %s", suffix), "Xvfb process not found")
+		}
+
+		// 12. /dev/shm size is greater than 64MB default.
+		out, err = dockerExec(toolBarrel, `df -B1 /dev/shm | awk 'NR==2 {print $2}'`)
+		if err == nil && out != "" {
+			shmSize := int64(0)
+			fmt.Sscanf(strings.TrimSpace(out), "%d", &shmSize)
+			if shmSize > 67108864 {
+				ctx.pass(fmt.Sprintf("/dev/shm size %s", suffix), fmt.Sprintf("%dMB (> 64MB)", shmSize/(1024*1024)))
+			} else {
+				ctx.fail(fmt.Sprintf("/dev/shm size %s", suffix), fmt.Sprintf("%dMB — too small, expected > 64MB", shmSize/(1024*1024)))
+			}
+		} else {
+			ctx.fail(fmt.Sprintf("/dev/shm size %s", suffix), "could not read /dev/shm size")
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

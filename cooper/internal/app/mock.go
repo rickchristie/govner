@@ -38,6 +38,8 @@ type MockApp struct {
 	// Clipboard controllable return values.
 	CaptureClipboardResult *clipboard.ClipboardEvent
 	CaptureClipboardErr    error
+	StageFileResult        *clipboard.ClipboardEvent
+	StageFileErr           error
 	ClipboardSnapshotVal   *clipboard.StagedSnapshot
 
 	// Recorded calls for assertions.
@@ -51,6 +53,7 @@ type MockApp struct {
 	StartCalled          bool
 	StopCalled           bool
 	CapturedClipboard    bool
+	StagedFiles          []string
 	ClearedClipboard     bool
 
 	startupWarnings []string
@@ -224,6 +227,13 @@ func (m *MockApp) CaptureClipboard() (*clipboard.ClipboardEvent, error) {
 	defer m.mu.Unlock()
 	m.CapturedClipboard = true
 	return m.CaptureClipboardResult, m.CaptureClipboardErr
+}
+
+func (m *MockApp) StageFile(path string) (*clipboard.ClipboardEvent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.StagedFiles = append(m.StagedFiles, path)
+	return m.StageFileResult, m.StageFileErr
 }
 
 func (m *MockApp) ClearClipboard() {

@@ -465,6 +465,126 @@ if [ -n "${COOPER_CLIPBOARD_TOKEN_FILE:-}" ] && [ -f "${COOPER_CLIPBOARD_TOKEN_F
 fi
 
 # ============================================================================
+section "Playwright Runtime"
+# ============================================================================
+
+# Font utilities (needed for Playwright browser rendering)
+if command -v fc-cache &>/dev/null; then
+    pass "fc-cache available: $(which fc-cache)"
+else
+    warn "fc-cache not found — Playwright browsers may have font issues"
+fi
+
+if command -v fc-list &>/dev/null; then
+    pass "fc-list available: $(which fc-list)"
+else
+    warn "fc-list not found — Playwright browsers may have font issues"
+fi
+
+# Playwright browser path
+if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+    pass "PLAYWRIGHT_BROWSERS_PATH set: ${PLAYWRIGHT_BROWSERS_PATH}"
+else
+    warn "PLAYWRIGHT_BROWSERS_PATH not set"
+fi
+
+# Font directories
+if [ -d /home/user/.local/share/fonts ]; then
+    pass "/home/user/.local/share/fonts directory exists"
+else
+    warn "/home/user/.local/share/fonts directory does not exist"
+fi
+
+if [ -L /home/user/.fonts ]; then
+    link_target=$(readlink /home/user/.fonts)
+    if [ "$link_target" = "/home/user/.local/share/fonts" ]; then
+        pass "/home/user/.fonts is a symlink to /home/user/.local/share/fonts"
+    else
+        warn "/home/user/.fonts is a symlink but points to ${link_target} (expected /home/user/.local/share/fonts)"
+    fi
+else
+    warn "/home/user/.fonts is not a symlink to /home/user/.local/share/fonts"
+fi
+
+# X11 / display environment for Playwright
+if [ -n "${DISPLAY:-}" ]; then
+    pass "DISPLAY set: ${DISPLAY}"
+else
+    warn "DISPLAY not set — Playwright browsers need a display"
+fi
+
+if [ -n "${XAUTHORITY:-}" ]; then
+    if [ -f "${XAUTHORITY}" ]; then
+        pass "XAUTHORITY set and file exists: ${XAUTHORITY}"
+    else
+        warn "XAUTHORITY set but file missing: ${XAUTHORITY}"
+    fi
+else
+    warn "XAUTHORITY not set"
+fi
+
+if [ -n "${COOPER_CLIPBOARD_DISPLAY:-}" ]; then
+    pass "COOPER_CLIPBOARD_DISPLAY set: ${COOPER_CLIPBOARD_DISPLAY}"
+else
+    warn "COOPER_CLIPBOARD_DISPLAY not set"
+fi
+
+if [ -n "${COOPER_CLIPBOARD_XAUTHORITY:-}" ]; then
+    if [ -f "${COOPER_CLIPBOARD_XAUTHORITY}" ]; then
+        pass "COOPER_CLIPBOARD_XAUTHORITY set and file exists: ${COOPER_CLIPBOARD_XAUTHORITY}"
+    else
+        warn "COOPER_CLIPBOARD_XAUTHORITY set but file missing: ${COOPER_CLIPBOARD_XAUTHORITY}"
+    fi
+else
+    warn "COOPER_CLIPBOARD_XAUTHORITY not set"
+fi
+
+# Check DISPLAY/XAUTHORITY consistency with clipboard equivalents
+if [ -n "${DISPLAY:-}" ] && [ -n "${COOPER_CLIPBOARD_DISPLAY:-}" ]; then
+    if [ "${DISPLAY}" = "${COOPER_CLIPBOARD_DISPLAY}" ]; then
+        pass "DISPLAY matches COOPER_CLIPBOARD_DISPLAY (${DISPLAY})"
+    else
+        warn "DISPLAY (${DISPLAY}) does not match COOPER_CLIPBOARD_DISPLAY (${COOPER_CLIPBOARD_DISPLAY})"
+    fi
+fi
+
+if [ -n "${XAUTHORITY:-}" ] && [ -n "${COOPER_CLIPBOARD_XAUTHORITY:-}" ]; then
+    if [ "${XAUTHORITY}" = "${COOPER_CLIPBOARD_XAUTHORITY}" ]; then
+        pass "XAUTHORITY matches COOPER_CLIPBOARD_XAUTHORITY (${XAUTHORITY})"
+    else
+        warn "XAUTHORITY (${XAUTHORITY}) does not match COOPER_CLIPBOARD_XAUTHORITY (${COOPER_CLIPBOARD_XAUTHORITY})"
+    fi
+fi
+
+# Browser cache directory
+if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+    if [ -d "${PLAYWRIGHT_BROWSERS_PATH}" ]; then
+        pass "Browser cache directory exists: ${PLAYWRIGHT_BROWSERS_PATH}"
+    else
+        warn "Browser cache directory does not exist: ${PLAYWRIGHT_BROWSERS_PATH}"
+        info "  Browsers have not been downloaded yet — this is OK until playwright install is run"
+    fi
+fi
+
+# Font cache rebuild test
+if command -v fc-cache &>/dev/null && [ -d /home/user/.local/share/fonts ]; then
+    if fc-cache -f /home/user/.local/share/fonts 2>/dev/null; then
+        pass "fc-cache -f /home/user/.local/share/fonts succeeds"
+    else
+        warn "fc-cache -f /home/user/.local/share/fonts failed (font dir may be read-only)"
+    fi
+fi
+
+# Shared memory for Chromium
+if df /dev/shm &>/dev/null 2>&1; then
+    shm_size=$(df -B1 /dev/shm | awk 'NR==2 {print $2}')
+    shm_human=$(df -h /dev/shm | awk 'NR==2 {print $2}')
+    info "/dev/shm size: ${shm_human} (${shm_size} bytes)"
+else
+    warn "/dev/shm not available — Chromium needs shared memory"
+fi
+
+# ============================================================================
 section "File Permissions"
 # ============================================================================
 

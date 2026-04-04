@@ -61,21 +61,65 @@ fi
 # OpenCode setup (conditional on tool type)
 # ============================================================================
 if [ "$COOPER_CLI_TOOL" = "opencode" ]; then
-    if ! grep -q "Cooper: DISPLAY" /home/user/.bashrc 2>/dev/null; then
-        echo '# Cooper: DISPLAY for headless clipboard support' >> /home/user/.bashrc
-        echo 'export DISPLAY=:99.0' >> /home/user/.bashrc
-    fi
-
     # OpenCode config: create defaults only if not already present (dir is host-mounted)
     mkdir -p /home/user/.config/opencode/plugins /home/user/.config/opencode/commands
     if [ ! -f /home/user/.config/opencode/opencode.json ]; then
         echo '{"$schema": "https://opencode.ai/config.json", "autoupdate": false}' > /home/user/.config/opencode/opencode.json
     fi
-
-    # Start Xvfb virtual display for headless clipboard/display support
-    Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
-    export DISPLAY=:99.0
 fi
+
+# ============================================================================
+# Playwright Runtime Setup
+# ============================================================================
+ensure_playwright_runtime() {
+  mkdir -p /home/user/.local/share/fonts
+  mkdir -p /home/user/.cache/ms-playwright
+  mkdir -p /home/user/.cache/fontconfig
+  ln -snf /home/user/.local/share/fonts /home/user/.fonts
+  fc-cache -f >/tmp/fc-cache.log 2>&1 || true
+}
+
+# ============================================================================
+# Shared X11 Display (Xvfb) — used by Playwright and clipboard bridge
+# ============================================================================
+start_shared_xvfb() {
+  XAUTH_FILE="/home/user/.cooper-clipboard.xauth"
+  DISPLAY_NUM=99
+  DISPLAY_ADDR="127.0.0.1:${DISPLAY_NUM}"
+
+  COOKIE="$(mcookie)"
+  xauth -f "$XAUTH_FILE" add ":${DISPLAY_NUM}" . "$COOKIE" 2>/dev/null || true
+  chmod 0600 "$XAUTH_FILE" 2>/dev/null || true
+
+  # Save the raw cookie hex for cooper-x11-bridge.
+  COOKIE_HEX_FILE="/home/user/.cooper-clipboard-cookie"
+  echo -n "$COOKIE" > "$COOKIE_HEX_FILE"
+  chmod 0600 "$COOKIE_HEX_FILE" 2>/dev/null || true
+
+  Xvfb ":${DISPLAY_NUM}" \
+    -screen 0 1920x1080x24 \
+    -auth "$XAUTH_FILE" \
+    -listen tcp \
+    -nolisten unix >/tmp/xvfb.log 2>&1 &
+
+  export DISPLAY="$DISPLAY_ADDR"
+  export XAUTHORITY="$XAUTH_FILE"
+  export COOPER_CLIPBOARD_DISPLAY="$DISPLAY_ADDR"
+  export COOPER_CLIPBOARD_XAUTHORITY="$XAUTH_FILE"
+
+  # Persist for docker exec sessions.
+  sed -i "1i export DISPLAY=${DISPLAY_ADDR}\nexport XAUTHORITY=${XAUTH_FILE}" /home/user/.bashrc 2>/dev/null || true
+  sed -i "1i export DISPLAY=${DISPLAY_ADDR}\nexport XAUTHORITY=${XAUTH_FILE}" /home/user/.profile 2>/dev/null || true
+
+  # Wait for Xvfb to be ready (TCP port 6000+display_num).
+  XVFB_PORT=$((6000 + DISPLAY_NUM))
+  for _i in $(seq 1 30); do
+    if timeout 1 bash -c "echo > /dev/tcp/127.0.0.1/${XVFB_PORT}" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+}
 
 # ============================================================================
 # SOCAT PORT FORWARDING (live-reloadable via SIGHUP)
@@ -165,7 +209,15 @@ start_socat_from_config() {
         fi
     done
 
-    sleep 0.3
+    # Wait for the bridge port to be listening (up to 3 s). This confirms
+    # at least one socat has bound its TCP socket; the others bind in
+    # parallel and are typically ready at the same time.
+    for _i in $(seq 1 30); do
+        if timeout 1 bash -c "echo > /dev/tcp/127.0.0.1/${bridge_port}" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
     echo "Port forwarding active (from $SOCAT_RULES)"
 }
 
@@ -191,8 +243,17 @@ reload_socat() {
 # Handle SIGHUP for live reload
 trap 'reload_socat' HUP
 
+# Start socat BEFORE Xvfb — port forwarding has no dependency on the X11
+# display, and the Xvfb readiness wait (up to 3 s) would delay socat binding.
 echo "Starting port forwarding..."
 start_socat_from_config
+
+# Playwright runtime and shared Xvfb run AFTER socat so port forwarding is
+# available as early as possible. Xvfb is needed by Playwright and the
+# clipboard X11 bridge but neither requires immediate readiness at container
+# start — only at first interactive use.
+ensure_playwright_runtime
+start_shared_xvfb
 
 {{if .ClipboardEnabled}}
 # ============================================================================
@@ -222,59 +283,18 @@ fi
 # ============================================================================
 # CLIPBOARD BRIDGE: X11/Native Setup
 # ============================================================================
-# When clipboard mode is "x11" or "auto", start an Xvfb display with xauth
-# and launch the X11 clipboard bridge daemon (if available).
+# When clipboard mode is "x11" or "auto", start the X11 clipboard bridge.
+# Xvfb and xauth are already set up by start_shared_xvfb above.
 if [ "$CLIP_MODE" = "x11" ] || [ "$CLIP_MODE" = "auto" ]; then
-  # Use a user-writable location for xauth. /etc/cooper/ is root-owned and
-  # read-only from Docker volume mounts, so we write to the user's home dir.
-  XAUTH_FILE="/home/user/.cooper-clipboard.xauth"
-  DISPLAY_NUM=99
-  DISPLAY_ADDR="127.0.0.1:${DISPLAY_NUM}"
-
-  # Generate X authority cookie. We add entries for both the local display form
-  # (:99) and the hostname form so Xvfb and native X11 clients can authenticate.
-  COOKIE="$(mcookie)"
-  xauth -f "$XAUTH_FILE" add ":${DISPLAY_NUM}" . "$COOKIE" 2>/dev/null || true
-  chmod 0600 "$XAUTH_FILE" 2>/dev/null || true
-
-  # Save the raw cookie hex for cooper-x11-bridge (it connects via TCP and
-  # uses xgb's NewConnNetWithCookieHex to bypass xauth file parsing issues
-  # with TCP display name matching).
-  COOKIE_HEX_FILE="/home/user/.cooper-clipboard-cookie"
-  echo -n "$COOKIE" > "$COOKIE_HEX_FILE"
-  chmod 0600 "$COOKIE_HEX_FILE" 2>/dev/null || true
-
-  # Start Xvfb on TCP loopback only
-  Xvfb ":${DISPLAY_NUM}" -screen 0 1024x768x24 -auth "$XAUTH_FILE" -listen tcp -nolisten unix >/tmp/xvfb-clipboard.log 2>&1 &
-
-  export DISPLAY="$DISPLAY_ADDR"
-  export XAUTHORITY="$XAUTH_FILE"
-
-  # Persist DISPLAY and XAUTHORITY for docker exec sessions (export only
-  # affects children of the entrypoint, not new docker exec processes).
-  # Write before the interactive guard in .bashrc so non-interactive exec
-  # sessions also get them.
-  sed -i "1i export DISPLAY=${DISPLAY_ADDR}\nexport XAUTHORITY=${XAUTH_FILE}" /home/user/.bashrc 2>/dev/null || true
-  # Also write to .profile for login shells.
-  sed -i "1i export DISPLAY=${DISPLAY_ADDR}\nexport XAUTHORITY=${XAUTH_FILE}" /home/user/.profile 2>/dev/null || true
-
-  # Wait for Xvfb to be ready (TCP port 6000+display_num).
-  XVFB_PORT=$((6000 + DISPLAY_NUM))
-  for _i in $(seq 1 30); do
-    if timeout 1 bash -c "echo > /dev/tcp/127.0.0.1/${XVFB_PORT}" 2>/dev/null; then
-      break
-    fi
-    sleep 0.1
-  done
-
   # Start X11 clipboard bridge with auto-restart supervisor.
   # The bridge must stay running as the CLIPBOARD selection owner.
+  # Xvfb and xauth are already set up by start_shared_xvfb above.
   if command -v cooper-x11-bridge >/dev/null 2>&1; then
     (
       while true; do
         cooper-x11-bridge \
           --display "$DISPLAY_ADDR" \
-          --cookie-file "$COOKIE_HEX_FILE" \
+          --cookie-file "/home/user/.cooper-clipboard-cookie" \
           --bridge-url "${COOPER_CLIPBOARD_BRIDGE_URL}" \
           --token-file "${COOPER_CLIPBOARD_TOKEN_FILE}" >>/tmp/x11-bridge.log 2>&1
         # If bridge exits, wait briefly and restart (crash recovery).

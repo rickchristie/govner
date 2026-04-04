@@ -33,7 +33,7 @@ type LoadingStep struct {
 
 // progressTarget maps step index to the target progress percentage
 // when that step completes. The slice is parallel to Model.Steps.
-var startupProgress = []float64{0.15, 0.35, 0.50, 0.65, 0.80, 0.95, 1.0}
+var startupProgress = []float64{0.12, 0.30, 0.42, 0.55, 0.65, 0.78, 0.92, 1.0}
 var shutdownProgress = []float64{0.10, 0.30, 0.60, 0.85, 1.0}
 
 // StartupSteps returns the default step list for startup.
@@ -43,6 +43,7 @@ func StartupSteps() []LoadingStep {
 		{Name: "Proxy container starting..."},
 		{Name: "SSL certificates loaded"},
 		{Name: "Execution bridge starting..."},
+		{Name: "Playwright support ready"},
 		{Name: "CLI image version check..."},
 		{Name: "ACL listener ready"},
 		{Name: "barrel-proof and ready"},

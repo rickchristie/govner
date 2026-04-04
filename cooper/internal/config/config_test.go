@@ -254,6 +254,70 @@ func TestDefaultConfigClipboardDefaults(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigBarrelSHMSize(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.BarrelSHMSize != "1g" {
+		t.Errorf("expected default barrel SHM size \"1g\", got %q", cfg.BarrelSHMSize)
+	}
+}
+
+func TestValidateBarrelSHMSize(t *testing.T) {
+	tests := []struct {
+		name    string
+		size    string
+		wantErr bool
+	}{
+		{"default 1g", "1g", false},
+		{"64m", "64m", false},
+		{"256m", "256m", false},
+		{"512m", "512m", false},
+		{"2g", "2g", false},
+		{"uppercase 1G", "1G", false},
+		{"just number", "512", false},
+		{"1k", "1k", false},
+		{"empty", "", true},
+		{"zero", "0", true},
+		{"negative", "-1", true},
+		{"1gb", "1gb", true},
+		{"abc", "abc", true},
+		{"spaces", " ", true},
+		{"0m", "0m", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.BarrelSHMSize = tt.size
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Errorf("expected validation error for SHM size %q", tt.size)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected validation error for SHM size %q: %v", tt.size, err)
+			}
+		})
+	}
+}
+
+func TestApplyMissingDefaultsBarrelSHMSize(t *testing.T) {
+	// Simulate loading a config file that was written before barrel_shm_size existed.
+	cfg := &Config{
+		ProxyPort:          3128,
+		BridgePort:         4343,
+		MonitorTimeoutSecs: 5,
+		BlockedHistoryLimit: 500,
+		AllowedHistoryLimit: 500,
+		BridgeLogLimit:     500,
+		ClipboardTTLSecs:   300,
+		ClipboardMaxBytes:  20971520,
+		BarrelSHMSize:      "", // missing from old config
+	}
+	cfg.applyMissingDefaults()
+	if cfg.BarrelSHMSize != "1g" {
+		t.Errorf("expected default barrel SHM size \"1g\", got %q", cfg.BarrelSHMSize)
+	}
+}
+
 func TestHasEnabledAITool(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.HasEnabledAITool() {

@@ -11,6 +11,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/fontsync"
 	"github.com/rickchristie/govner/cooper/internal/logging"
 
 	"github.com/rickchristie/govner/cooper/internal/proxy"
@@ -64,7 +65,7 @@ func NewCooperApp(cfg *config.Config, cooperDir string) *CooperApp {
 }
 
 // totalSteps is the number of startup steps reported via onProgress.
-const totalSteps = 7
+const totalSteps = 8
 
 // Start executes the startup sequence. It blocks until all steps complete
 // or the context is cancelled. The onProgress callback is invoked after
@@ -76,6 +77,8 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 			onProgress(step, totalSteps, name, err)
 		}
 	}
+
+	homeDir, _ := os.UserHomeDir()
 
 	// Pre-check: verify clipboard prerequisites before anything else.
 	// Refuse to start if clipboard host tools are missing.
@@ -149,35 +152,54 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 	}
 	report(3, "Start bridge", nil)
 
-	// Step 4: CLI image version check (informational, non-blocking).
-	a.startupWarnings = checkToolVersions(a.cfg)
+	// Step 4: Ensure Playwright support dirs and sync fonts (best-effort).
+	if err := ensurePlaywrightSupportDirs(a.cooperDir); err != nil {
+		report(4, "Playwright support ready", err)
+		return err
+	}
+	fontResult, fontErr := fontsync.SyncLinuxFonts(homeDir, a.cooperDir)
+	if fontErr != nil {
+		// Font sync failure is non-fatal — add to warnings.
+		a.startupWarnings = append(a.startupWarnings, fmt.Sprintf("Font sync failed: %v", fontErr))
+	} else {
+		for _, w := range fontResult.Warnings {
+			a.startupWarnings = append(a.startupWarnings, fmt.Sprintf("Font sync: %s", w))
+		}
+	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	report(4, "Check tool versions", nil)
+	report(4, "Playwright support ready", nil)
 
-	// Step 5: Start ACL listener.
+	// Step 5: CLI image version check (informational, non-blocking).
+	a.startupWarnings = append(a.startupWarnings, checkToolVersions(a.cfg)...)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	report(5, "Check tool versions", nil)
+
+	// Step 6: Start ACL listener.
 	socketPath := filepath.Join(a.cooperDir, "run", "acl.sock")
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
 		err = fmt.Errorf("create run dir: %w", err)
-		report(5, "Start ACL listener", err)
+		report(6, "Start ACL listener", err)
 		return err
 	}
 	timeout := time.Duration(a.cfg.MonitorTimeoutSecs) * time.Second
 	a.aclListener = proxy.NewACLListener(socketPath, timeout)
 	if err := a.aclListener.Start(); err != nil {
-		report(5, "Start ACL listener", err)
+		report(6, "Start ACL listener", err)
 		return err
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	report(5, "Start ACL listener", nil)
+	report(6, "Start ACL listener", nil)
 
-	// Step 6: Wire forwarding channels and load persisted bridge routes.
+	// Step 7: Wire forwarding channels and load persisted bridge routes.
 	a.wireChannels()
 	a.loadPersistedBridgeRoutes()
-	report(6, "Ready", nil)
+	report(7, "Ready", nil)
 
 	return nil
 }
@@ -548,6 +570,66 @@ func (a *CooperApp) CaptureClipboard() (*clipboard.ClipboardEvent, error) {
 	}, nil
 }
 
+// StageFile reads an image file from disk and stages it on the clipboard
+// bridge. It reuses the same normalization pipeline as CaptureClipboard
+// (format detection via magic bytes, PNG conversion, size enforcement).
+// Non-image files are rejected with a clear error.
+func (a *CooperApp) StageFile(path string) (*clipboard.ClipboardEvent, error) {
+	if a.clipboardManager == nil {
+		return &clipboard.ClipboardEvent{
+			State: clipboard.ClipboardFailed,
+			Error: "clipboard bridge not initialized",
+		}, fmt.Errorf("clipboard bridge not initialized")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		msg := fmt.Sprintf("read file: %v", err)
+		return &clipboard.ClipboardEvent{
+			State: clipboard.ClipboardFailed,
+			Error: msg,
+		}, fmt.Errorf("%s", msg)
+	}
+
+	if !clipboard.IsImageData(data) {
+		msg := "only image files can be staged (png, jpeg, gif, bmp, tiff, webp)"
+		return &clipboard.ClipboardEvent{
+			State: clipboard.ClipboardFailed,
+			Error: msg,
+		}, fmt.Errorf("%s", msg)
+	}
+
+	ext := filepath.Ext(path)
+	result := &clipboard.CaptureResult{
+		MIME:      clipboard.FormatToMIME(clipboard.DetectImageFormat(data)),
+		Filename:  filepath.Base(path),
+		Extension: ext,
+		Bytes:     data,
+	}
+
+	obj, err := clipboard.Normalize(result, a.cfg.ClipboardMaxBytes)
+	if err != nil {
+		return &clipboard.ClipboardEvent{
+			State: clipboard.ClipboardFailed,
+			Error: err.Error(),
+		}, err
+	}
+
+	ttl := time.Duration(a.cfg.ClipboardTTLSecs) * time.Second
+	snap, err := a.clipboardManager.Stage(*obj, ttl)
+	if err != nil {
+		return &clipboard.ClipboardEvent{
+			State: clipboard.ClipboardFailed,
+			Error: err.Error(),
+		}, err
+	}
+
+	return &clipboard.ClipboardEvent{
+		State:    clipboard.ClipboardStaged,
+		Snapshot: snap,
+	}, nil
+}
+
 // ClearClipboard removes the currently staged clipboard image.
 func (a *CooperApp) ClearClipboard() {
 	if a.clipboardManager != nil {
@@ -570,6 +652,21 @@ func (a *CooperApp) ClipboardManager() *clipboard.Manager {
 }
 
 // ----- Internal helpers -----
+
+// ensurePlaywrightSupportDirs creates the host directories for Playwright
+// support before any barrel start, so Docker does not create them as root-owned.
+func ensurePlaywrightSupportDirs(cooperDir string) error {
+	dirs := []string{
+		filepath.Join(cooperDir, "fonts"),
+		filepath.Join(cooperDir, "cache", "ms-playwright"),
+	}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("create Playwright support dir %s: %w", dir, err)
+		}
+	}
+	return nil
+}
 
 // checkToolVersions compares container tool versions against expected
 // versions and returns warnings for any mismatches.
