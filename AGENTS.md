@@ -8,6 +8,8 @@ Govner is a collection of Go development tools.
   You are given tasks, fully complete them, don't waste our time.
 - **ALWAYS verify your work and assumptions**, don't just read the code, actually test what you're doing.
   Write tests, write scripts to test behaviors, run playwright to check console, take screenshots, run the commands.
+- **NEVER blame without evidence**, don't say something like "X fail due to Y", find evidence! 
+  **Always investigate to find root cause**, if unable to, state why.
 
 # TUI Code Architecture Standard
 
