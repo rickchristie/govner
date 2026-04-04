@@ -412,7 +412,6 @@ func resolveLatestVersions(cfg *config.Config) {
 	}
 }
 
-
 // ---------- cooper up ----------
 
 func runUp(cmd *cobra.Command, args []string) error {
@@ -668,6 +667,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// Run the main TUI.
 	if _, err := mainProgram.Run(); err != nil {
 		return fmt.Errorf("TUI: %w", err)
+	}
+	if !mainModel.ExitExpected() {
+		return fmt.Errorf("TUI exited unexpectedly without a user quit request; terminal input may have been closed or reset")
 	}
 
 	return nil

@@ -37,15 +37,15 @@ type Model struct {
 
 	// Sub-models, one per tab. These are nil until the corresponding tab
 	// package supplies a concrete implementation (Work Packages 4C-4I).
-	containersModel    SubModel
-	proxyMonModel      SubModel
-	blockedModel       SubModel
-	allowedModel       SubModel
-	bridgeLogsModel    SubModel
-	bridgeRoutesModel  SubModel
-	runtimeModel       SubModel
-	portForwardModel   SubModel
-	aboutModel         SubModel
+	containersModel   SubModel
+	proxyMonModel     SubModel
+	blockedModel      SubModel
+	allowedModel      SubModel
+	bridgeLogsModel   SubModel
+	bridgeRoutesModel SubModel
+	runtimeModel      SubModel
+	portForwardModel  SubModel
+	aboutModel        SubModel
 
 	// Loading screen (nil after startup completes).
 	loadingModel SubModel
@@ -60,6 +60,7 @@ type Model struct {
 	// Shutdown state.
 	shuttingDown  bool
 	shutdownModel *loading.Model
+	exitExpected  bool
 
 	// Callbacks.
 	onShutdown func()
@@ -131,6 +132,11 @@ func (m *Model) SetOnShutdown(fn func()) { m.onShutdown = fn }
 
 // SetOnQuit sets the callback invoked for an immediate quit.
 func (m *Model) SetOnQuit(fn func()) { m.onQuit = fn }
+
+// ExitExpected reports whether the model has entered an explicit user-initiated
+// quit or shutdown path. Callers can use this to distinguish a normal TUI exit
+// from an unexpected program termination.
+func (m *Model) ExitExpected() bool { return m.exitExpected }
 
 // activeSubModel returns the SubModel for the currently active tab,
 // or nil if the tab has not been wired yet.

@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -317,6 +319,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case events.ShutdownCompleteMsg:
 		// Legacy fallback — new shutdown flow uses the loading screen.
+		m.exitExpected = true
 		return m, tea.Quit
 	}
 
@@ -335,7 +338,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if path := extractDroppedFilePath(msg); path != "" {
 			return m, m.stageFileCmd(path)
 		}
-		return m, nil
 	}
 
 	// --- Modal is active: arrow keys navigate, Enter/Esc confirm/cancel ---
@@ -380,7 +382,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// --- Clipboard shortcuts (only when not editing a text field) ---
 	if !m.isTextInputActive() {
 		switch msg.String() {
-		case "c":
+		case "c", "ctrl+v":
 			return m, m.captureClipboardCmd()
 		case "x":
 			if m.clipboardState == app.ClipboardStaged {
@@ -393,7 +395,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	cmd := m.forwardToActive(msg)
 	return m, cmd
 }
-
 
 // showExitModal displays the exit confirmation modal.
 func (m *Model) showExitModal() {
@@ -463,19 +464,134 @@ func extractDroppedFilePath(msg tea.KeyMsg) string {
 	if text == "" {
 		return ""
 	}
-	// Reject multi-line pastes (multiple files or prose).
-	if strings.ContainsAny(text, "\n\r") {
+
+	candidate := singlePastedPathCandidate(text)
+	if candidate == "" {
 		return ""
 	}
-	// Must be an absolute path.
-	if !strings.HasPrefix(text, "/") {
+
+	for _, path := range pastedPathVariants(candidate) {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path
+		}
+	}
+
+	return ""
+}
+
+func singlePastedPathCandidate(text string) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	candidates := make([]string, 0, len(lines))
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if i == 0 && (line == "copy" || line == "cut") {
+			continue
+		}
+		candidates = append(candidates, line)
+	}
+	if len(candidates) != 1 {
 		return ""
 	}
-	// Must exist on disk.
-	if _, err := os.Stat(text); err != nil {
-		return ""
+	return candidates[0]
+}
+
+func pastedPathVariants(text string) []string {
+	variants := make([]string, 0, 6)
+	seen := make(map[string]struct{}, 6)
+	add := func(value string) {
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		variants = append(variants, value)
+	}
+
+	add(text)
+	if stripped := trimPastedQuotes(text); stripped != text {
+		add(stripped)
+	}
+
+	snapshot := append([]string(nil), variants...)
+	for _, variant := range snapshot {
+		if unescaped := unescapePastedPath(variant); unescaped != variant {
+			add(unescaped)
+		}
+	}
+
+	snapshot = append([]string(nil), variants...)
+	for _, variant := range snapshot {
+		add(parseFileURIPath(variant))
+	}
+
+	filtered := variants[:0]
+	for _, variant := range variants {
+		if filepath.IsAbs(variant) {
+			filtered = append(filtered, variant)
+		}
+	}
+	return filtered
+}
+
+func trimPastedQuotes(text string) string {
+	if len(text) < 2 {
+		return text
+	}
+	if text[0] == '\'' && text[len(text)-1] == '\'' {
+		return text[1 : len(text)-1]
+	}
+	if text[0] == '"' && text[len(text)-1] == '"' {
+		return text[1 : len(text)-1]
 	}
 	return text
+}
+
+func unescapePastedPath(text string) string {
+	if !strings.ContainsRune(text, '\\') {
+		return text
+	}
+	var b strings.Builder
+	b.Grow(len(text))
+	escaped := false
+	for _, r := range text {
+		if escaped {
+			b.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		b.WriteRune(r)
+	}
+	if escaped {
+		b.WriteRune('\\')
+	}
+	return b.String()
+}
+
+func parseFileURIPath(text string) string {
+	if !strings.HasPrefix(text, "file://") {
+		return ""
+	}
+	u, err := url.Parse(text)
+	if err != nil || u.Scheme != "file" {
+		return ""
+	}
+	if u.Host != "" && u.Host != "localhost" {
+		return ""
+	}
+	path, err := url.PathUnescape(u.Path)
+	if err != nil {
+		return ""
+	}
+	return path
 }
 
 // checkClipboardExpiry checks clipboard state transitions on each tick:
@@ -510,6 +626,7 @@ func (m *Model) checkClipboardExpiry() {
 func (m *Model) executeModalConfirm(modal *components.Modal) (tea.Model, tea.Cmd) {
 	switch modal.ModalType {
 	case theme.ModalExit:
+		m.exitExpected = true
 		if m.onShutdown != nil {
 			m.shuttingDown = true
 			m.modal = nil
@@ -540,6 +657,7 @@ func (m *Model) updateShutdown(msg tea.Msg) (tea.Model, tea.Cmd) {
 		updated, cmd := m.shutdownModel.Update(loading.StepCompleteMsg{Index: msg.Index})
 		m.shutdownModel = &updated
 		if updated.Done {
+			m.exitExpected = true
 			return m, tea.Quit
 		}
 		return m, cmd
@@ -554,6 +672,7 @@ func (m *Model) updateShutdown(msg tea.Msg) (tea.Model, tea.Cmd) {
 	updated, cmd := m.shutdownModel.Update(msg)
 	m.shutdownModel = &updated
 	if updated.Done {
+		m.exitExpected = true
 		return m, tea.Quit
 	}
 	return m, cmd
