@@ -65,7 +65,9 @@ func SyncFonts(sources []Source, cooperDir string) (Result, error) {
 	for _, src := range sources {
 		info, err := os.Stat(src.Path)
 		if err != nil || !info.IsDir() {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("font source %s: not accessible", src.Path))
+			// Missing source roots are expected (e.g. ~/.fonts is commonly
+			// absent). Skip silently — only warn on actual walk/copy errors.
+			result.Skipped++
 			continue
 		}
 

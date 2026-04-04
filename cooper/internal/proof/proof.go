@@ -6,6 +6,7 @@
 package proof
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/auth"
 	"github.com/rickchristie/govner/cooper/internal/bridge"
+	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/proxy"
@@ -223,11 +225,25 @@ func (ctx *ProofContext) phaseStartup() {
 		return
 	}
 	ctx.bridgeServer = bridge.NewBridgeServer(ctx.Cfg.BridgeRoutes, ctx.Cfg.BridgePort, gatewayIPs)
+	// Install clipboard handler so /clipboard/* endpoints work during proof.
+	ttl := time.Duration(ctx.Cfg.ClipboardTTLSecs) * time.Second
+	clipMgr := clipboard.NewManager(ttl, ctx.Cfg.ClipboardMaxBytes)
+	clipMgr.SetCooperDir(ctx.CooperDir)
+	clipHandler := clipboard.NewHandler(clipMgr)
+	ctx.bridgeServer.SetClipboardHandler(clipHandler)
 	if err := ctx.bridgeServer.Start(); err != nil {
 		ctx.fail("Start bridge", err.Error())
 		return
 	}
 	ctx.pass("Start bridge", fmt.Sprintf("listening on %s", strings.Join(gatewayIPs, ", ")))
+
+	// Check clipboard prerequisites (informational, non-blocking in proof).
+	clipReader := clipboard.NewLinuxReader(os.Getenv)
+	if err := clipReader.CheckPrerequisites(context.Background()); err != nil {
+		ctx.warn("Clipboard prerequisites", err.Error())
+	} else {
+		ctx.pass("Clipboard prerequisites", "host clipboard tools available")
+	}
 
 	// Start ACL listener.
 	socketPath := filepath.Join(ctx.CooperDir, "run", "acl.sock")

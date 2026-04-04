@@ -12,11 +12,18 @@ import (
 // conversion process. Exported via a variable so tests can override.
 var externalConvertTimeout = 30 * time.Second
 
+// imageMagickBinary returns the ImageMagick CLI binary name.
+// ImageMagick 7 provides "magick", ImageMagick 6 provides "convert".
+func imageMagickBinary() string {
+	if _, err := exec.LookPath("magick"); err == nil {
+		return "magick"
+	}
+	return "convert"
+}
+
 // convertExternalToPNG pipes the input data through ImageMagick's
-// `magick` CLI to produce PNG output. It uses stdin/stdout to avoid
-// temporary files:
-//
-//	magick - png:-
+// CLI to produce PNG output. It uses stdin/stdout to avoid temporary files.
+// Supports both ImageMagick 7 ("magick") and ImageMagick 6 ("convert").
 //
 // This is the fallback path for formats we cannot decode in-process
 // (SVG, AVIF, HEIC, ICO, etc.).
@@ -24,7 +31,7 @@ func convertExternalToPNG(data []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), externalConvertTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "magick", "-", "png:-")
+	cmd := exec.CommandContext(ctx, imageMagickBinary(), "-", "png:-")
 	cmd.Stdin = bytes.NewReader(data)
 
 	var stdout, stderr bytes.Buffer
@@ -45,21 +52,22 @@ func convertExternalToPNG(data []byte) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
-// CheckConversionPrerequisites verifies that the `magick` binary
-// (ImageMagick 7+) is available on PATH. Returns nil when ready, or
-// a descriptive error with an install hint.
+// CheckConversionPrerequisites verifies that ImageMagick (either "magick"
+// from v7+ or "convert" from v6) is available on PATH. Returns nil when
+// ready, or a descriptive error with an install hint.
 func CheckConversionPrerequisites() error {
-	path, err := exec.LookPath("magick")
-	if err != nil {
-		return fmt.Errorf(
-			"ImageMagick 7 not found on PATH (needed for SVG, AVIF, HEIC, and other uncommon image formats). " +
-				"Install it with:\n" +
-				"  Ubuntu/Debian:  sudo apt install imagemagick\n" +
-				"  macOS (brew):   brew install imagemagick\n" +
-				"  Arch:           sudo pacman -S imagemagick\n" +
-				"  Fedora:         sudo dnf install ImageMagick",
-		)
+	if _, err := exec.LookPath("magick"); err == nil {
+		return nil
 	}
-	_ = path
-	return nil
+	if _, err := exec.LookPath("convert"); err == nil {
+		return nil
+	}
+	return fmt.Errorf(
+		"ImageMagick not found on PATH (needed for SVG, AVIF, HEIC, and other uncommon image formats). " +
+			"Install it with:\n" +
+			"  Ubuntu/Debian:  sudo apt install imagemagick\n" +
+			"  macOS (brew):   brew install imagemagick\n" +
+			"  Arch:           sudo pacman -S imagemagick\n" +
+			"  Fedora:         sudo dnf install ImageMagick",
+	)
 }

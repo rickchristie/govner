@@ -169,7 +169,7 @@ func TestSyncUpdatesChangedFiles(t *testing.T) {
 	}
 }
 
-func TestSyncWarnsOnMissingRoots(t *testing.T) {
+func TestSyncSkipsMissingRootsSilently(t *testing.T) {
 	cooperDir := t.TempDir()
 
 	sources := []Source{{Path: "/nonexistent/font/dir", Prefix: "missing"}}
@@ -178,8 +178,13 @@ func TestSyncWarnsOnMissingRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(result.Warnings) == 0 {
-		t.Error("expected warnings for missing font source roots")
+	// Missing roots are expected (e.g. ~/.fonts). They should be silently
+	// skipped, not produce warnings.
+	if len(result.Warnings) != 0 {
+		t.Errorf("expected no warnings for missing roots, got %v", result.Warnings)
+	}
+	if result.Skipped != 1 {
+		t.Errorf("expected 1 skipped for missing root, got %d", result.Skipped)
 	}
 }
 

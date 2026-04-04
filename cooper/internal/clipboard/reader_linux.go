@@ -88,8 +88,12 @@ func (r *LinuxReader) CheckPrerequisites(ctx context.Context) error {
 		}
 	}
 
+	// ImageMagick 7 provides "magick", ImageMagick 6 provides "convert".
+	// Accept either — both can do the format conversion Cooper needs.
 	if err := checkTool(ctx, "magick"); err != nil {
-		return fmt.Errorf("magick (ImageMagick) is required for image format conversion.\nInstall with: sudo apt install imagemagick")
+		if err := checkTool(ctx, "convert"); err != nil {
+			return fmt.Errorf("ImageMagick is required for image format conversion.\nInstall with: sudo apt install imagemagick")
+		}
 	}
 
 	return nil

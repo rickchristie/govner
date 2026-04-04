@@ -499,7 +499,9 @@ func (a *CooperApp) Adopt(aclListener *proxy.ACLListener, bridgeServer *bridge.B
 	a.bridgeServer = bridgeServer
 	a.startupWarnings = warnings
 
-	// Install clipboard handler on the adopted bridge server.
+	// Re-install clipboard handler on the adopted bridge server so it uses
+	// this app's clipboard manager (which may have been replaced by
+	// AdoptClipboard before this call).
 	if a.clipboardManager != nil && a.bridgeServer != nil {
 		clipHandler := clipboard.NewHandler(a.clipboardManager)
 		a.bridgeServer.SetClipboardHandler(clipHandler)
@@ -507,6 +509,14 @@ func (a *CooperApp) Adopt(aclListener *proxy.ACLListener, bridgeServer *bridge.B
 
 	a.wireChannels()
 	a.loadPersistedBridgeRoutes()
+}
+
+// AdoptClipboard replaces the internal clipboard manager and reader with
+// pre-created instances. This is used by main.go's startup path which
+// creates these early so the bridge can be wired before the app exists.
+func (a *CooperApp) AdoptClipboard(mgr *clipboard.Manager, reader *clipboard.LinuxReader) {
+	a.clipboardManager = mgr
+	a.clipboardReader = reader
 }
 
 // ACLListener returns the underlying ACL listener for direct access by

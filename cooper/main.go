@@ -21,6 +21,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/configure"
 	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/fontsync"
 	"github.com/rickchristie/govner/cooper/internal/names"
 	"github.com/rickchristie/govner/cooper/internal/proof"
 	"github.com/rickchristie/govner/cooper/internal/proxy"
@@ -433,6 +434,19 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// Startup warnings collected by the version check step.
 	var startupWarnings []string
 
+	// Create clipboard manager and reader early so the bridge can be wired
+	// with the clipboard handler before it starts.
+	ttl := time.Duration(cfg.ClipboardTTLSecs) * time.Second
+	clipMgr := clipboard.NewManager(ttl, cfg.ClipboardMaxBytes)
+	clipMgr.SetCooperDir(cooperDir)
+	clipReader := clipboard.NewLinuxReader(os.Getenv)
+
+	// Pre-check: verify clipboard prerequisites (xclip/wl-paste on host).
+	// Refuse to start if missing — matches CooperApp.Start() contract.
+	if err := clipReader.CheckPrerequisites(context.Background()); err != nil {
+		return fmt.Errorf("clipboard prerequisites not met: %w\nInstall xclip or wl-paste and try again", err)
+	}
+
 	// Context for the startup goroutine so it can be cancelled if the user
 	// quits during loading.
 	startupCtx, startupCancel := context.WithCancel(context.Background())
@@ -486,6 +500,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 			return
 		}
 		bridgeServer = bridge.NewBridgeServer(cfg.BridgeRoutes, cfg.BridgePort, gatewayIPs)
+		// Install clipboard handler so /clipboard/* endpoints work.
+		clipHandler := clipboard.NewHandler(clipMgr)
+		bridgeServer.SetClipboardHandler(clipHandler)
 		if err := bridgeServer.Start(); err != nil {
 			p.Send(loading.StepErrorMsg{Index: 3, Err: err})
 			return
@@ -495,32 +512,59 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 		p.Send(loading.StepCompleteMsg{Index: 3})
 
-		// Step 4: CLI image version check (informational, non-blocking).
-		startupWarnings = checkToolVersions(cfg)
+		// Step 4: Ensure Playwright support dirs and sync fonts (best-effort).
+		playwrightDirs := []string{
+			filepath.Join(cooperDir, "fonts"),
+			filepath.Join(cooperDir, "cache", "ms-playwright"),
+		}
+		for _, d := range playwrightDirs {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				p.Send(loading.StepErrorMsg{Index: 4, Err: fmt.Errorf("create Playwright support dir %s: %w", d, err)})
+				return
+			}
+		}
+		homeDir, _ := os.UserHomeDir()
+		fontResult, fontErr := fontsync.SyncLinuxFonts(homeDir, cooperDir)
+		if fontErr != nil {
+			startupWarnings = append(startupWarnings, fmt.Sprintf("Font sync failed: %v", fontErr))
+		} else {
+			for _, w := range fontResult.Warnings {
+				if !strings.Contains(w, "not accessible") {
+					startupWarnings = append(startupWarnings, fmt.Sprintf("Font sync: %s", w))
+				}
+			}
+		}
 		if startupCtx.Err() != nil {
 			return
 		}
 		p.Send(loading.StepCompleteMsg{Index: 4})
 
-		// Step 5: Start ACL listener.
-		socketPath := filepath.Join(cooperDir, "run", "acl.sock")
-		if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
-			p.Send(loading.StepErrorMsg{Index: 5, Err: fmt.Errorf("create run dir: %w", err)})
-			return
-		}
-		timeout := time.Duration(cfg.MonitorTimeoutSecs) * time.Second
-		aclListener = proxy.NewACLListener(socketPath, timeout)
-		if err := aclListener.Start(); err != nil {
-			p.Send(loading.StepErrorMsg{Index: 5, Err: err})
-			return
-		}
+		// Step 5: CLI image version check (informational, non-blocking).
+		startupWarnings = append(startupWarnings, checkToolVersions(cfg)...)
 		if startupCtx.Err() != nil {
 			return
 		}
 		p.Send(loading.StepCompleteMsg{Index: 5})
 
-		// Step 6: Ready.
+		// Step 6: Start ACL listener.
+		socketPath := filepath.Join(cooperDir, "run", "acl.sock")
+		if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
+			p.Send(loading.StepErrorMsg{Index: 6, Err: fmt.Errorf("create run dir: %w", err)})
+			return
+		}
+		timeout := time.Duration(cfg.MonitorTimeoutSecs) * time.Second
+		aclListener = proxy.NewACLListener(socketPath, timeout)
+		if err := aclListener.Start(); err != nil {
+			p.Send(loading.StepErrorMsg{Index: 6, Err: err})
+			return
+		}
+		if startupCtx.Err() != nil {
+			return
+		}
 		p.Send(loading.StepCompleteMsg{Index: 6})
+
+		// Step 7: Ready.
+		p.Send(loading.StepCompleteMsg{Index: 7})
 	}()
 
 	// Run the loading screen. This blocks until it finishes.
@@ -545,6 +589,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	// Build the App, adopting the pre-started infrastructure.
 	cooperApp := app.NewCooperApp(cfg, cooperDir)
+	cooperApp.AdoptClipboard(clipMgr, clipReader)
 	cooperApp.Adopt(aclListener, bridgeServer, startupWarnings)
 
 	// Transition to the main TUI.

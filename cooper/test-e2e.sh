@@ -96,6 +96,13 @@ image_name_for() {
 cleanup() {
     section "Cleanup"
 
+    # Stop e2e bridge server if running.
+    if [ -n "${E2E_BRIDGE_PID:-}" ]; then
+        info "Stopping e2e bridge server..."
+        kill "$E2E_BRIDGE_PID" 2>/dev/null || true
+        wait "$E2E_BRIDGE_PID" 2>/dev/null || true
+    fi
+
     info "Stopping barrel containers..."
     for tool in "${ALL_TOOLS[@]}"; do
         docker rm -f "$(barrel_name_for "$tool")" 2>/dev/null || true
@@ -1052,7 +1059,8 @@ SOCAT_REMOVE_EOF
 # Restart barrel to pick up the new socat config.
 # SIGHUP-based reload is unreliable under tini --init, so we restart the container.
 docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
-wait_for_port 4343  # Wait for socat to bind after entrypoint restart.
+wait_for_port 4343  # Wait for bridge socat after entrypoint restart.
+wait_for_port 5432  # Wait for PostgreSQL socat after entrypoint restart.
 
 # After removing Redis rule, port 5432 should still listen, port 6379 should stop.
 if port_open 5432; then
@@ -1100,7 +1108,9 @@ cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_RANGE_EOF'
 SOCAT_RANGE_EOF
 
 docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
-wait_for_port 9102  # Wait for the last range port — implies all earlier ones are ready.
+wait_for_port 9100
+wait_for_port 9101
+wait_for_port 9102
 
 # Check that ports 9100, 9101, 9102 are all listening.
 range_ok=true
@@ -1497,6 +1507,82 @@ docker rm -f "$ACTIVE_BARREL" 2>/dev/null || true
 # ============================================================================
 section "Phase 14: Clipboard Bridge"
 
+# Start an isolated bridge server for clipboard tests.
+# Build a tiny Go program that starts the bridge with clipboard handler.
+E2E_BRIDGE_DIR="${CONFIG_DIR}/e2e-bridge"
+mkdir -p "$E2E_BRIDGE_DIR"
+cat > "${E2E_BRIDGE_DIR}/main.go" << 'BRIDGEGO'
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/rickchristie/govner/cooper/internal/bridge"
+	"github.com/rickchristie/govner/cooper/internal/clipboard"
+	"github.com/rickchristie/govner/cooper/internal/docker"
+)
+
+func main() {
+	cooperDir := os.Getenv("COOPER_DIR")
+	mgr := clipboard.NewManager(5*time.Minute, 20*1024*1024)
+	mgr.SetCooperDir(cooperDir)
+	handler := clipboard.NewHandler(mgr)
+	var gatewayIPs []string
+	if ip, err := docker.GetGatewayIP("cooper-external"); err == nil {
+		gatewayIPs = append(gatewayIPs, ip)
+	}
+	if ip, err := docker.GetGatewayIP("bridge"); err == nil {
+		gatewayIPs = append(gatewayIPs, ip)
+	}
+	srv := bridge.NewBridgeServer(nil, 4343, gatewayIPs)
+	srv.SetClipboardHandler(handler)
+	if err := srv.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "bridge start: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("bridge ready")
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
+	<-ch
+}
+BRIDGEGO
+
+info "Building e2e bridge helper..."
+E2E_BRIDGE_BIN="${CONFIG_DIR}/e2e-bridge-server"
+go build -o "$E2E_BRIDGE_BIN" "${E2E_BRIDGE_DIR}/main.go" 2>&1 || { fail "e2e bridge build failed"; }
+
+# Kill any existing listener on port 4343 (leftover from a prior cooper up).
+existing_pid=$(lsof -ti tcp:4343 2>/dev/null || true)
+if [ -n "$existing_pid" ]; then
+    info "Killing existing process on port 4343 (PID ${existing_pid})..."
+    kill "$existing_pid" 2>/dev/null || true
+    sleep 1
+fi
+
+info "Starting e2e bridge server on port 4343..."
+COOPER_DIR="${CONFIG_DIR}" "$E2E_BRIDGE_BIN" &
+E2E_BRIDGE_PID=$!
+
+# Wait for bridge to be ready.
+bridge_started=false
+for _i in $(seq 1 30); do
+    if curl -sf -o /dev/null -m 1 "http://127.0.0.1:4343/health" 2>/dev/null; then
+        bridge_started=true
+        break
+    fi
+    sleep 0.3
+done
+if [ "$bridge_started" = "true" ] && kill -0 "$E2E_BRIDGE_PID" 2>/dev/null; then
+    pass "E2E bridge server started (PID ${E2E_BRIDGE_PID})"
+else
+    fail "E2E bridge server did not start (check port 4343 availability)"
+    kill "$E2E_BRIDGE_PID" 2>/dev/null || true
+fi
+
 # Generate a clipboard token for the claude barrel.
 mkdir -p "${CONFIG_DIR}/tokens"
 TOKEN=$(head -c 32 /dev/urandom | xxd -p | tr -d '\n')
@@ -1734,13 +1820,18 @@ if echo "$bridge_reachable" | grep -q "200"; then
         fail "GET /clipboard/type with no auth returned HTTP ${http_code_noauth} (expected 401)"
     fi
 else
-    info "Bridge server not reachable on port 4343 (not started by e2e test — requires 'cooper up')"
-    info "Skipping bridge HTTP endpoint tests (socat tunnel active but no bridge server on host)"
+    fail "Bridge server not reachable on port 4343 (e2e bridge should be running)"
 fi
 
-# Stop the active barrel.
+# Stop the active barrel and bridge server.
 info "Stopping active barrel..."
 docker rm -f "$ACTIVE_BARREL" 2>/dev/null || true
+info "Stopping e2e bridge server..."
+if [ -n "${E2E_BRIDGE_PID:-}" ]; then
+    kill "$E2E_BRIDGE_PID" 2>/dev/null || true
+    wait "$E2E_BRIDGE_PID" 2>/dev/null || true
+    E2E_BRIDGE_PID=""
+fi
 
 # ============================================================================
 # Summary

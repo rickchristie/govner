@@ -292,8 +292,9 @@ func TestCheckPrerequisitesX11Missing(t *testing.T) {
 }
 
 func TestCheckPrerequisitesMagickMissing(t *testing.T) {
+	// Both "magick" (v7) and "convert" (v6) must be missing to trigger the error.
 	withMockExec(t, func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		if name == "which" && len(args) > 0 && args[0] == "magick" {
+		if name == "which" && len(args) > 0 && (args[0] == "magick" || args[0] == "convert") {
 			return fakeExecFailure(ctx, "")
 		}
 		return fakeExecSuccess(ctx, "/usr/bin/"+args[0])
@@ -303,10 +304,10 @@ func TestCheckPrerequisitesMagickMissing(t *testing.T) {
 	r := NewLinuxReader(env)
 	err := r.CheckPrerequisites(context.Background())
 	if err == nil {
-		t.Fatal("expected error for missing magick")
+		t.Fatal("expected error for missing ImageMagick")
 	}
-	if !strings.Contains(err.Error(), "imagemagick") {
-		t.Fatalf("expected install hint for imagemagick, got: %v", err)
+	if !strings.Contains(err.Error(), "ImageMagick") {
+		t.Fatalf("expected install hint for ImageMagick, got: %v", err)
 	}
 }
 
