@@ -22,6 +22,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/configure"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/fontsync"
+	"github.com/rickchristie/govner/cooper/internal/logging"
 	"github.com/rickchristie/govner/cooper/internal/names"
 	"github.com/rickchristie/govner/cooper/internal/proof"
 	"github.com/rickchristie/govner/cooper/internal/proxy"
@@ -224,30 +225,48 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	logDir := filepath.Join(cooperDir, "logs")
+	cl := logging.NewCmdLogger(logDir, "configure")
+	defer cl.Close()
+	cl.LogStart()
+
 	if regenerateCA {
 		fmt.Fprintln(os.Stderr, "Regenerating CA certificate...")
 		if _, _, err := config.RegenerateCA(cooperDir); err != nil {
-			return fmt.Errorf("regenerate CA: %w", err)
+			err = fmt.Errorf("regenerate CA: %w", err)
+			cl.LogStep(0, "Regenerate CA", err)
+			cl.LogDone(err)
+			return err
 		}
+		cl.LogStep(0, "Regenerate CA", nil)
 		fmt.Fprintln(os.Stderr, "CA certificate regenerated. Run 'cooper build' to rebuild images with the new CA.")
 	}
 
 	ca, err := app.NewConfigureApp(cooperDir)
 	if err != nil {
-		return fmt.Errorf("initialize configure: %w", err)
+		err = fmt.Errorf("initialize configure: %w", err)
+		cl.LogStep(1, "Initialize configure app", err)
+		cl.LogDone(err)
+		return err
 	}
+	cl.LogStep(1, "Initialize configure app", nil)
 
 	result, err := configure.Run(ca)
 	if err != nil {
+		cl.LogStep(2, "Run configure wizard", err)
+		cl.LogDone(err)
 		return err
 	}
+	cl.LogStep(2, "Run configure wizard", nil)
 
 	if result.BuildRequested {
 		if result.CleanBuild {
 			buildClean = true
 		}
+		cl.LogDone(nil)
 		return runBuild(cmd, args)
 	}
+	cl.LogDone(nil)
 	return nil
 }
 
@@ -420,6 +439,11 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	logDir := filepath.Join(cooperDir, "logs")
+	ul := logging.NewCmdLogger(logDir, "up")
+	defer ul.Close()
+	ul.LogStart()
+
 	// Create the loading screen model.
 	loadModel := loading.New(false)
 
@@ -444,7 +468,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// Pre-check: verify clipboard prerequisites (xclip/wl-paste on host).
 	// Refuse to start if missing — matches CooperApp.Start() contract.
 	if err := clipReader.CheckPrerequisites(context.Background()); err != nil {
-		return fmt.Errorf("clipboard prerequisites not met: %w\nInstall xclip or wl-paste and try again", err)
+		err = fmt.Errorf("clipboard prerequisites not met: %w\nInstall xclip or wl-paste and try again", err)
+		ul.LogStep(0, "Check clipboard prerequisites", err)
+		ul.LogDone(err)
+		return err
 	}
 
 	// Context for the startup goroutine so it can be cancelled if the user
@@ -456,33 +483,40 @@ func runUp(cmd *cobra.Command, args []string) error {
 	go func() {
 		// Step 0: Create networks.
 		if err := docker.EnsureNetworks(); err != nil {
+			ul.LogStep(0, "Create networks", err)
 			p.Send(loading.StepErrorMsg{Index: 0, Err: err})
 			return
 		}
 		if startupCtx.Err() != nil {
 			return
 		}
+		ul.LogStep(0, "Create networks", nil)
 		p.Send(loading.StepCompleteMsg{Index: 0})
 
 		// Step 1: Start proxy.
 		if err := docker.StartProxy(cfg, cooperDir); err != nil {
+			ul.LogStep(1, "Start proxy", err)
 			p.Send(loading.StepErrorMsg{Index: 1, Err: err})
 			return
 		}
 		if startupCtx.Err() != nil {
 			return
 		}
+		ul.LogStep(1, "Start proxy", nil)
 		p.Send(loading.StepCompleteMsg{Index: 1})
 
 		// Step 2: SSL certificates (already ensured during configure/build,
 		// but verify they exist).
 		if !config.CAExists(cooperDir) {
-			p.Send(loading.StepErrorMsg{Index: 2, Err: fmt.Errorf("CA certificate not found, run 'cooper build' first")})
+			err := fmt.Errorf("CA certificate not found, run 'cooper build' first")
+			ul.LogStep(2, "Verify CA certificate", err)
+			p.Send(loading.StepErrorMsg{Index: 2, Err: err})
 			return
 		}
 		if startupCtx.Err() != nil {
 			return
 		}
+		ul.LogStep(2, "Verify CA certificate", nil)
 		p.Send(loading.StepCompleteMsg{Index: 2})
 
 		// Step 3: Start execution bridge.
@@ -494,9 +528,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 			gatewayIPs = append(gatewayIPs, ip)
 		}
 		if len(gatewayIPs) == 0 {
-			p.Send(loading.StepErrorMsg{Index: 3,
-				Err: fmt.Errorf("could not discover any Docker gateway IP\n" +
-					"Bridge won't be reachable from containers. Check that Docker networks exist")})
+			err := fmt.Errorf("could not discover any Docker gateway IP\n" +
+				"Bridge won't be reachable from containers. Check that Docker networks exist")
+			ul.LogStep(3, "Start bridge", err)
+			p.Send(loading.StepErrorMsg{Index: 3, Err: err})
 			return
 		}
 		bridgeServer = bridge.NewBridgeServer(cfg.BridgeRoutes, cfg.BridgePort, gatewayIPs)
@@ -504,6 +539,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		clipHandler := clipboard.NewHandler(clipMgr)
 		bridgeServer.SetClipboardHandler(clipHandler)
 		if err := bridgeServer.Start(); err != nil {
+			ul.LogStep(3, "Start bridge", err)
 			p.Send(loading.StepErrorMsg{Index: 3, Err: err})
 			return
 		}
@@ -519,6 +555,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		hostRelay = docker.NewHostRelay(gatewayIPs, nil)
 		hostRelay.Start(cfg.PortForwardRules)
 
+		ul.LogStep(3, "Start bridge", nil)
 		p.Send(loading.StepCompleteMsg{Index: 3})
 
 		// Step 4: Ensure Playwright support dirs and sync fonts (best-effort).
@@ -528,7 +565,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 		for _, d := range playwrightDirs {
 			if err := os.MkdirAll(d, 0o755); err != nil {
-				p.Send(loading.StepErrorMsg{Index: 4, Err: fmt.Errorf("create Playwright support dir %s: %w", d, err)})
+				err = fmt.Errorf("create Playwright support dir %s: %w", d, err)
+				ul.LogStep(4, "Playwright support ready", err)
+				p.Send(loading.StepErrorMsg{Index: 4, Err: err})
 				return
 			}
 		}
@@ -546,6 +585,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		if startupCtx.Err() != nil {
 			return
 		}
+		ul.LogStep(4, "Playwright support ready", nil)
 		p.Send(loading.StepCompleteMsg{Index: 4})
 
 		// Step 5: CLI image version check (informational, non-blocking).
@@ -553,32 +593,40 @@ func runUp(cmd *cobra.Command, args []string) error {
 		if startupCtx.Err() != nil {
 			return
 		}
+		ul.LogStep(5, "Check tool versions", nil)
 		p.Send(loading.StepCompleteMsg{Index: 5})
 
 		// Step 6: Start ACL listener.
 		socketPath := filepath.Join(cooperDir, "run", "acl.sock")
 		if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
-			p.Send(loading.StepErrorMsg{Index: 6, Err: fmt.Errorf("create run dir: %w", err)})
+			err = fmt.Errorf("create run dir: %w", err)
+			ul.LogStep(6, "Start ACL listener", err)
+			p.Send(loading.StepErrorMsg{Index: 6, Err: err})
 			return
 		}
 		timeout := time.Duration(cfg.MonitorTimeoutSecs) * time.Second
 		aclListener = proxy.NewACLListener(socketPath, timeout)
 		if err := aclListener.Start(); err != nil {
+			ul.LogStep(6, "Start ACL listener", err)
 			p.Send(loading.StepErrorMsg{Index: 6, Err: err})
 			return
 		}
 		if startupCtx.Err() != nil {
 			return
 		}
+		ul.LogStep(6, "Start ACL listener", nil)
 		p.Send(loading.StepCompleteMsg{Index: 6})
 
 		// Step 7: Ready.
+		ul.LogStep(7, "Ready", nil)
+		ul.LogDone(nil)
 		p.Send(loading.StepCompleteMsg{Index: 7})
 	}()
 
 	// Run the loading screen. This blocks until it finishes.
 	loadingResult, err := p.Run()
 	if err != nil {
+		ul.LogDone(fmt.Errorf("loading screen: %w", err))
 		return fmt.Errorf("loading screen: %w", err)
 	}
 
@@ -591,8 +639,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 		// User cancelled or error occurred. Clean up what was started.
 		cleanupServices(aclListener, bridgeServer, hostRelay)
 		if adapter != nil && adapter.model.HasError {
+			ul.LogDone(fmt.Errorf("startup failed"))
 			return fmt.Errorf("startup failed")
 		}
+		ul.LogDone(nil)
 		return nil
 	}
 
