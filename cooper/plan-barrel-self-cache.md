@@ -1,676 +1,585 @@
 # Plan: Barrel Self-Managed Cache
 
-## Summary
+## Decision
 
-Replace host-mounted language caches with cooper-owned cache directories under `~/.cooper/cache/`.
-During `cooper build`, seed these directories by copying from host caches (detected per-OS).
-During `cooper up`, mount them read-write into the container. The AI CLI can then run
-`go get`, `npm install`, `pip install` freely — provided the user approves the network
-requests through the proxy monitor. Remove `GOFLAGS=-mod=readonly` since the module cache
-is no longer a read-only host mount. Change default monitor timeout from 5s to 30s to give
-users time to review install requests.
+Replace direct host language-cache mounts with Cooper-managed cache directories under
+`~/.cooper/cache/`.
 
-## Current State
+Important: **do not seed or import host caches during `cooper build`, `cooper update`,
+or barrel startup**.
 
-### Host cache mounts (barrel.go:263-293)
+The new model is:
 
+- `cooper build` stays self-contained and image-focused
+- `cooper update` stays self-contained and rebuild-focused
+- barrel startup creates and mounts Cooper-owned cache directories
+- the caches begin empty and fill naturally during normal package-manager usage
+
+This is a deliberate simplification. It avoids host-tool detection, avoids copy and
+permission-repair logic, avoids macOS-specific cache import behavior, and keeps the
+implementation easy to reason about.
+
+## Why This Direction
+
+The earlier seeding idea caused several architectural problems:
+
+- it pushed runtime cache concerns into `cooper build`
+- it would require host-side `go`, `npm`, `pip`, `cp`, and `chmod`
+- it would create `build` vs `update` divergence unless duplicated
+- it would require partial-copy recovery or atomic staging
+- it would make future macOS support harder, not easier
+- it would make tests shell-heavy and brittle
+
+Runtime-only Cooper caches avoid all of that.
+
+## Goals
+
+- Use Cooper-owned cache directories instead of host cache directories
+- Keep `cooper build` and `cooper update` free of cache import logic
+- Remove `GOFLAGS=-mod=readonly`
+- Change fresh-config default monitor timeout from 5 to 30 seconds
+- Keep existing saved configs backward compatible
+- Make the implementation easy to unit test without Docker or shelling out
+
+## Non-Goals
+
+- No cache seeding
+- No cache import
+- No cache cleanup or GC
+- No cache migration from host paths
+- No config migration that rewrites existing `monitor_timeout_secs`
+
+If cache import is ever added later, it should be an explicit separate command such as
+`cooper cache import`, not hidden inside `build`, `update`, or startup.
+
+## Verified Assumptions
+
+These are the assumptions that still matter for the runtime-only design.
+
+### 1. Barrel startup already owns mount-directory preparation
+
+Verified in `cooper/internal/docker/barrel.go`:
+
+- `StartBarrel(...)` calls `ensureBarrelHostDirs(...)` before `docker run`
+- that function already exists specifically to create bind-mount directories
+
+This means the new Cooper cache directories fit naturally into existing startup
+responsibility. No build-time lifecycle hook is required.
+
+### 2. Docker bind mounts should still have their host directories pre-created
+
+Verified in current Cooper behavior:
+
+- Playwright support directories are already pre-created before mount
+- the code comment explicitly notes this avoids Docker creating root-owned directories
+
+The new language cache directories should follow the same pattern.
+
+### 3. Container-side cache paths must stay under `/home/user`
+
+Verified in `cooper/internal/docker/barrel.go`:
+
+- `containerHome` is `/home/user`
+- auth mounts, cache mounts, and Playwright mounts are all built around that constant
+
+The new cache helper should continue using `containerHome` and should not introduce
+host-home-dependent container paths.
+
+### 4. `main.go` does not need cache changes for this design
+
+Verified from current lifecycle split:
+
+- `main.go` handles config loading, build/update orchestration, and CLI entrypoints
+- barrel runtime behavior is implemented under `cooper/internal/docker/barrel.go`
+
+Because this design is runtime-only and has no seeding/import step, `main.go` should
+stay unchanged.
+
+### 5. Changing `DefaultConfig()` to 30 seconds does not rewrite existing saved configs
+
+Verified in `cooper/internal/config/config.go`:
+
+- `DefaultConfig()` is used for fresh config creation
+- `LoadConfig()` unmarshals existing persisted values
+- `applyMissingDefaults()` only fills truly missing or zero-value fields
+
+Therefore:
+
+- fresh configs will pick up `30`
+- existing configs that already have `monitor_timeout_secs: 5` will keep `5`
+
+This is the intended compatibility behavior.
+
+### 6. The old-config timeout tests must remain old-config tests
+
+Verified in current test layout:
+
+- some tests use `DefaultConfig()` and therefore should move to 30
+- some tests model existing persisted config values and may still legitimately use 5
+
+Do not blindly replace every `5` in tests with `30`.
+
+## Current Code Surfaces
+
+These are the relevant current code points the implementation must update:
+
+### `cooper/internal/docker/barrel.go`
+
+Current responsibilities:
+
+- `StartBarrel(...)` calls `ensureBarrelHostDirs(...)`
+- `appendVolumeMounts(...)` calls `appendLanguageCacheMounts(args, homeDir, cfg)`
+- `appendLanguageCacheMounts(...)` mounts host cache paths
+- `ensureBarrelHostDirs(...)` pre-creates host cache directories
+- `StartBarrel(...)` injects `GOFLAGS=-mod=readonly` when Go is enabled
+
+Current language cache behavior:
+
+```text
+$GOPATH/pkg/mod      -> /home/user/go/pkg/mod          (ro)
+~/.cache/go-build    -> /home/user/.cache/go-build     (rw)
+~/.npm               -> /home/user/.npm                (ro)
+~/.cache/pip         -> /home/user/.cache/pip          (ro)
 ```
-Go:     $GOPATH/pkg/mod          → /home/user/go/pkg/mod          (ro)
-Go:     ~/.cache/go-build        → /home/user/.cache/go-build     (rw)
-Node:   ~/.npm                   → /home/user/.npm                (ro)
-Python: ~/.cache/pip             → /home/user/.cache/pip          (ro)
-```
 
-These are mounted directly from the host at container start time in `appendLanguageCacheMounts`.
+### `cooper/internal/config/config.go`
 
-### Host dir pre-creation (barrel.go:324-330)
-
-`ensureBarrelHostDirs` creates these host directories before Docker mounts them:
-
-```go
-filepath.Join(homeDir, ".npm"),
-filepath.Join(homeDir, ".cache", "pip"),
-filepath.Join(homeDir, ".cache", "go-build"),
-filepath.Join(gopath, "pkg", "mod"),
-```
-
-### GOFLAGS (barrel.go:144-149)
-
-```go
-if isGoEnabled(cfg) {
-    args = append(args, "-e", "GOFLAGS=-mod=readonly")
-}
-```
-
-This prevents `go get` / `go mod tidy` from modifying `go.mod`/`go.sum` inside the
-container. With self-managed caches, we remove this restriction — the AI can install
-dependencies, subject to proxy approval.
-
-### Default monitor timeout (config.go:100)
+Current default:
 
 ```go
 MonitorTimeoutSecs: 5,
 ```
 
-## Target State
+### `cooper/internal/templates/doctor.sh`
 
-### Cooper-managed cache directories
+Current diagnostic assumes `GOFLAGS=-mod=readonly` is expected.
 
-```
-~/.cooper/cache/go-mod/     → /home/user/go/pkg/mod          (rw)
-~/.cooper/cache/go-build/   → /home/user/.cache/go-build     (rw)
-~/.cooper/cache/npm/        → /home/user/.npm                (rw)
-~/.cooper/cache/pip/        → /home/user/.cache/pip          (rw)
-```
+### `cooper/test-e2e.sh`
 
-All four are mounted **read-write**. The container owns these caches.
+Current e2e startup logic:
 
-### Cache seeding during `cooper build`
+- creates host cache directories in `${HOME_DIR}`
+- mounts host cache directories
+- injects `GOFLAGS=-mod=readonly`
+- asserts readonly cache behavior for Go/NPM/Pip
 
-During build, detect host cache locations using tool commands, then copy contents into
-`~/.cooper/cache/` directories. This is a one-time operation — subsequent builds skip
-seeding if the target directories already contain data.
+## Target Behavior
 
-### No GOFLAGS=-mod=readonly
+### New language cache mounts
 
-Removed. The AI can freely run `go get`, `go mod tidy`, etc. The proxy still controls
-what network requests are allowed.
+The only language caches mounted into the barrel should be:
 
-### Default monitor timeout: 30 seconds
-
-Changed from 5s to 30s. This gives users enough time to review and approve `go get` /
-`npm install` / `pip install` requests that the AI triggers.
-
----
-
-## Verified Assumptions
-
-### 1. Go module cache directories have 0555 permissions (CONFIRMED)
-
-Versioned module directories (e.g., `mongo-driver@v1.14.0`) are `555`. Files inside are
-`444`. Top-level grouping directories (e.g., `go.mongodb.org`) are `775`. This means
-`cp -a` preserves these restrictive permissions and a `chmod -R u+w` is required after
-copying.
-
-### 2. `cp -a` followed by `chmod -R u+w` correctly fixes Go module cache permissions (CONFIRMED)
-
-Tested: copied a sample module directory with `cp -a`, confirmed directories were `555`.
-After `chmod -R u+w`, directories changed to `755`. Files changed from `444` to `644`.
-The cache is fully writable after this operation.
-
-### 3. npm and pip caches have normal permissions (CONFIRMED)
-
-- npm (`~/.npm`): all directories `775`, no special treatment needed
-- pip (`~/.cache/pip`): all directories `775`, no special treatment needed
-
-No `chmod` needed for these two.
-
-### 4. `go env GOMODCACHE` and `go env GOCACHE` return correct platform-specific paths (CONFIRMED)
-
-On Linux: `GOMODCACHE=/home/ricky/go/pkg/mod`, `GOCACHE=/home/ricky/.cache/go-build`.
-These commands respect `$GOPATH` and platform defaults. On macOS, `GOCACHE` would return
-`~/Library/Caches/go-build` instead of `~/.cache/go-build`. Using `go env` is the
-cross-platform-correct way to find these.
-
-### 5. `npm config get cache` returns correct path (CONFIRMED)
-
-Returns `/home/ricky/.npm` on Linux. On macOS, also returns `~/.npm` by default.
-Cross-platform safe.
-
-### 6. `pip cache dir` returns correct path (CONFIRMED)
-
-Returns `/home/ricky/.cache/pip` on Linux. On macOS, would return
-`~/Library/Caches/pip`. Cross-platform safe.
-
-### 7. Disk usage of host caches (MEASURED)
-
-```
-GOMODCACHE:       9.1 GB
-GOCACHE:          3.6 GB
-~/.npm:           2.3 GB
-~/.cache/pip:     113 MB
-Total:           ~15.1 GB (potential duplication)
+```text
+~/.cooper/cache/go-mod     -> /home/user/go/pkg/mod          (rw)
+~/.cooper/cache/go-build   -> /home/user/.cache/go-build     (rw)
+~/.cooper/cache/npm        -> /home/user/.npm                (rw)
+~/.cooper/cache/pip        -> /home/user/.cache/pip          (rw)
 ```
 
-Seeding copies all of this. Users should be informed of the disk space cost on first build.
+These directories:
 
-### 8. Container user UID/GID matches host user (CONFIRMED)
+- live entirely under `cooperDir`
+- persist across barrel runs
+- start empty if they do not exist
+- are created before Docker bind-mounts them
 
-The base Dockerfile template (`base.Dockerfile.tmpl:122-134`) creates the container user
-with `USER_UID` and `USER_GID` build args, which are set to `os.Getuid()` and
-`os.Getgid()` at build time (`main.go:316-318`). Files copied on the host (owned by host
-user) will have matching ownership inside the container. No `chown` needed.
+### Build/update lifecycle
 
-### 9. `~/.cooper/cache/` directory already exists (CONFIRMED)
+No cache logic belongs in:
 
-It already exists and contains `ms-playwright/`. New subdirectories (`go-mod`, `go-build`,
-`npm`, `pip`) will be created alongside it.
+- `runBuild`
+- `runUpdate`
+- template generation
+- image builds
 
-### 10. rsync is available and supports incremental copy (CONFIRMED)
+### Go behavior
 
-`rsync 3.2.7` is installed. `rsync -a` preserves permissions and only copies changed
-files, making subsequent seeding runs fast. However, rsync may not be available on all
-systems (notably fresh macOS installs without Homebrew). We should use `cp -a` as the
-primary mechanism since it's universally available, and the seeding only runs when the
-target is empty anyway.
+After the change:
 
----
+- there is no `GOFLAGS=-mod=readonly`
+- `go get`, `go mod tidy`, and module downloads work normally inside the barrel
+- Go module cache writes go to `~/.cooper/cache/go-mod`
+- Go build cache writes go to `~/.cooper/cache/go-build`
 
-## Implementation
+### Timeout behavior
 
-### Step 1: Add cache seeding function to `cooper/internal/docker/cache.go` (NEW FILE)
+After the change:
 
-Create a new file `cooper/internal/docker/cache.go` with the cache seeding logic.
+- new configs default to `MonitorTimeoutSecs: 30`
+- old configs that already contain `5` keep `5`
+
+There is no migration step that rewrites saved configs.
+
+## Architecture
+
+### Source Of Truth
+
+Do not hardcode cache mount paths in multiple places.
+
+Introduce one small pure helper that computes enabled language cache specs from
+`cooperDir` and `cfg`.
+
+That helper must be used by:
+
+- `appendLanguageCacheMounts(...)`
+- directory-precreation logic
+- unit tests
+
+### Thin IO, Fat Pure Helpers
+
+Prefer this shape:
+
+- pure functions decide paths and lists
+- thin wrappers call `os.UserHomeDir()` and `os.MkdirAll(...)`
+
+This gives better testability than embedding path logic directly inside filesystem code.
+
+## File-By-File Implementation
+
+### 1. Add `cooper/internal/docker/cachepaths.go`
+
+Create a new file for pure path-selection logic.
+
+Recommended contents:
 
 ```go
 package docker
 
 import (
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
+    "path/filepath"
 
-	"github.com/rickchristie/govner/cooper/internal/config"
+    "github.com/rickchristie/govner/cooper/internal/config"
 )
 
-// CacheSeedResult holds the result of seeding a single cache.
-type CacheSeedResult struct {
-	Name    string // e.g., "go-mod", "npm"
-	Seeded  bool   // true if data was copied
-	Skipped bool   // true if target already had data
-	Err     error  // non-nil if seeding failed (non-fatal)
+type cacheMountSpec struct {
+    Name          string
+    HostPath      string
+    ContainerPath string
 }
 
-// SeedLanguageCaches copies host language caches into ~/.cooper/cache/ directories.
-// This is called during `cooper build`. Each cache is only seeded if the target
-// directory is empty (first run). Errors are non-fatal — a failed seed just means
-// the AI will need to download dependencies from scratch.
-//
-// cooperDir is the path to ~/.cooper/.
-// cfg is used to determine which programming tools are enabled.
-func SeedLanguageCaches(cooperDir string, cfg *config.Config) []CacheSeedResult {
-	var results []CacheSeedResult
+func languageCacheSpecs(cooperDir string, cfg *config.Config) []cacheMountSpec {
+    var specs []cacheMountSpec
 
-	for _, tool := range cfg.ProgrammingTools {
-		if !tool.Enabled {
-			continue
-		}
-		switch tool.Name {
-		case "go":
-			results = append(results, seedGoModCache(cooperDir))
-			results = append(results, seedGoBuildCache(cooperDir))
-		case "node":
-			results = append(results, seedNpmCache(cooperDir))
-		case "python":
-			results = append(results, seedPipCache(cooperDir))
-		}
-	}
+    for _, tool := range cfg.ProgrammingTools {
+        if !tool.Enabled {
+            continue
+        }
+        switch tool.Name {
+        case "go":
+            specs = append(specs,
+                cacheMountSpec{
+                    Name:          "go-mod",
+                    HostPath:      filepath.Join(cooperDir, "cache", "go-mod"),
+                    ContainerPath: filepath.Join(containerHome, "go", "pkg", "mod"),
+                },
+                cacheMountSpec{
+                    Name:          "go-build",
+                    HostPath:      filepath.Join(cooperDir, "cache", "go-build"),
+                    ContainerPath: filepath.Join(containerHome, ".cache", "go-build"),
+                },
+            )
+        case "node":
+            specs = append(specs, cacheMountSpec{
+                Name:          "npm",
+                HostPath:      filepath.Join(cooperDir, "cache", "npm"),
+                ContainerPath: filepath.Join(containerHome, ".npm"),
+            })
+        case "python":
+            specs = append(specs, cacheMountSpec{
+                Name:          "pip",
+                HostPath:      filepath.Join(cooperDir, "cache", "pip"),
+                ContainerPath: filepath.Join(containerHome, ".cache", "pip"),
+            })
+        }
+    }
 
-	return results
-}
-
-// seedGoModCache copies the host Go module cache into ~/.cooper/cache/go-mod/.
-// After copying, chmod -R u+w is applied because Go sets module directories to 0555.
-func seedGoModCache(cooperDir string) CacheSeedResult {
-	name := "go-mod"
-	target := filepath.Join(cooperDir, "cache", name)
-
-	if dirHasContents(target) {
-		return CacheSeedResult{Name: name, Skipped: true}
-	}
-
-	// Use `go env GOMODCACHE` to find the host cache location (cross-platform).
-	hostPath, err := goEnv("GOMODCACHE")
-	if err != nil {
-		return CacheSeedResult{Name: name, Err: fmt.Errorf("resolve GOMODCACHE: %w", err)}
-	}
-	if !dirHasContents(hostPath) {
-		return CacheSeedResult{Name: name, Skipped: true}
-	}
-
-	if err := os.MkdirAll(target, 0755); err != nil {
-		return CacheSeedResult{Name: name, Err: fmt.Errorf("mkdir %s: %w", target, err)}
-	}
-
-	// cp -a preserves symlinks, timestamps, and ownership.
-	// Trailing /. copies contents of hostPath into target (not hostPath itself).
-	if err := cpDir(hostPath, target); err != nil {
-		return CacheSeedResult{Name: name, Err: fmt.Errorf("copy: %w", err)}
-	}
-
-	// Go module cache has 0555 dirs and 0444 files. Make writable.
-	if err := chmodWritable(target); err != nil {
-		return CacheSeedResult{Name: name, Err: fmt.Errorf("chmod: %w", err)}
-	}
-
-	return CacheSeedResult{Name: name, Seeded: true}
-}
-
-// seedGoBuildCache copies the host Go build cache into ~/.cooper/cache/go-build/.
-func seedGoBuildCache(cooperDir string) CacheSeedResult {
-	name := "go-build"
-	target := filepath.Join(cooperDir, "cache", name)
-
-	if dirHasContents(target) {
-		return CacheSeedResult{Name: name, Skipped: true}
-	}
-
-	hostPath, err := goEnv("GOCACHE")
-	if err != nil {
-		return CacheSeedResult{Name: name, Err: fmt.Errorf("resolve GOCACHE: %w", err)}
-	}
-	if !dirHasContents(hostPath) {
-		return CacheSeedResult{Name: name, Skipped: true}
-	}
-
-	if err := os.MkdirAll(target, 0755); err != nil {
-		return CacheSeedResult{Name: name, Err: fmt.Errorf("mkdir %s: %w", target, err)}
-	}
-
-	if err := cpDir(hostPath, target); err != nil {
-		return CacheSeedResult{Name: name, Err: fmt.Errorf("copy: %w", err)}
-	}
-
-	return CacheSeedResult{Name: name, Seeded: true}
-}
-
-// seedNpmCache copies the host npm cache into ~/.cooper/cache/npm/.
-func seedNpmCache(cooperDir string) CacheSeedResult {
-	name := "npm"
-	target := filepath.Join(cooperDir, "cache", name)
-
-	if dirHasContents(target) {
-		return CacheSeedResult{Name: name, Skipped: true}
-	}
-
-	// Use `npm config get cache` to find the host cache location (cross-platform).
-	out, err := exec.Command("npm", "config", "get", "cache").Output()
-	if err != nil {
-		return CacheSeedResult{Name: name, Err: fmt.Errorf("resolve npm cache: %w", err)}
-	}
-	hostPath := strings.TrimSpace(string(out))
-	if !dirHasContents(hostPath) {
-		return CacheSeedResult{Name: name, Skipped: true}
-	}
-
-	if err := os.MkdirAll(target, 0755); err != nil {
-		return CacheSeedResult{Name: name, Err: fmt.Errorf("mkdir %s: %w", target, err)}
-	}
-
-	if err := cpDir(hostPath, target); err != nil {
-		return CacheSeedResult{Name: name, Err: fmt.Errorf("copy: %w", err)}
-	}
-
-	return CacheSeedResult{Name: name, Seeded: true}
-}
-
-// seedPipCache copies the host pip cache into ~/.cooper/cache/pip/.
-func seedPipCache(cooperDir string) CacheSeedResult {
-	name := "pip"
-	target := filepath.Join(cooperDir, "cache", name)
-
-	if dirHasContents(target) {
-		return CacheSeedResult{Name: name, Skipped: true}
-	}
-
-	// Use `pip cache dir` to find the host cache location (cross-platform).
-	// Try pip3 first (common on systems where python3 is default), fall back to pip.
-	hostPath, err := pipCacheDir()
-	if err != nil {
-		return CacheSeedResult{Name: name, Err: fmt.Errorf("resolve pip cache: %w", err)}
-	}
-	if !dirHasContents(hostPath) {
-		return CacheSeedResult{Name: name, Skipped: true}
-	}
-
-	if err := os.MkdirAll(target, 0755); err != nil {
-		return CacheSeedResult{Name: name, Err: fmt.Errorf("mkdir %s: %w", target, err)}
-	}
-
-	if err := cpDir(hostPath, target); err != nil {
-		return CacheSeedResult{Name: name, Err: fmt.Errorf("copy: %w", err)}
-	}
-
-	return CacheSeedResult{Name: name, Seeded: true}
-}
-
-// goEnv runs `go env <key>` and returns the trimmed output.
-func goEnv(key string) (string, error) {
-	out, err := exec.Command("go", "env", key).Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-// pipCacheDir runs `pip3 cache dir` (or `pip cache dir` as fallback) and returns
-// the trimmed output.
-func pipCacheDir() (string, error) {
-	out, err := exec.Command("pip3", "cache", "dir").Output()
-	if err != nil {
-		out, err = exec.Command("pip", "cache", "dir").Output()
-		if err != nil {
-			return "", fmt.Errorf("neither pip3 nor pip available: %w", err)
-		}
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-// dirHasContents returns true if dir exists and contains at least one entry.
-func dirHasContents(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	return len(entries) > 0
-}
-
-// cpDir copies the contents of src into dst using `cp -a src/. dst/`.
-// The trailing /. ensures contents are copied, not the directory itself.
-func cpDir(src, dst string) error {
-	cmd := exec.Command("cp", "-a", src+"/.", dst+"/")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%w: %s", err, string(output))
-	}
-	return nil
-}
-
-// chmodWritable runs `chmod -R u+w` on the given directory.
-// This is needed for Go module cache directories which are set to 0555.
-func chmodWritable(dir string) error {
-	cmd := exec.Command("chmod", "-R", "u+w", dir)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%w: %s", err, string(output))
-	}
-	return nil
+    return specs
 }
 ```
 
-### Step 2: Modify `appendLanguageCacheMounts` in `barrel.go`
-
-**File:** `cooper/internal/docker/barrel.go`
-**Function:** `appendLanguageCacheMounts` (lines 260-293)
-
-Replace the entire function body. Instead of mounting from host paths, mount from
-`~/.cooper/cache/` directories.
-
-**Before (current code):**
+Recommended additional pure helper in the same file:
 
 ```go
-func appendLanguageCacheMounts(args []string, homeDir string, cfg *config.Config) []string {
-	for _, tool := range cfg.ProgrammingTools {
-		if !tool.Enabled {
-			continue
-		}
-		switch tool.Name {
-		case "go":
-			gopath := os.Getenv("GOPATH")
-			if gopath == "" {
-				gopath = filepath.Join(homeDir, "go")
-			}
-			hostModCache := filepath.Join(gopath, "pkg", "mod")
-			hostBuildCache := filepath.Join(homeDir, ".cache", "go-build")
-			containerModCache := filepath.Join(containerHome, "go", "pkg", "mod")
-			containerBuildCache := filepath.Join(containerHome, ".cache", "go-build")
-			args = append(args,
-				"-v", fmt.Sprintf("%s:%s:ro", hostModCache, containerModCache),
-				"-v", fmt.Sprintf("%s:%s:rw", hostBuildCache, containerBuildCache),
-			)
-		case "node":
-			hostNpm := filepath.Join(homeDir, ".npm")
-			containerNpm := filepath.Join(containerHome, ".npm")
-			args = append(args, "-v", fmt.Sprintf("%s:%s:ro", hostNpm, containerNpm))
-		case "python":
-			hostPip := filepath.Join(homeDir, ".cache", "pip")
-			containerPip := filepath.Join(containerHome, ".cache", "pip")
-			args = append(args, "-v", fmt.Sprintf("%s:%s:ro", hostPip, containerPip))
-		}
-	}
-	return args
+func barrelMountDirs(homeDir, toolName, cooperDir string, cfg *config.Config) []string {
+    var dirs []string
+
+    switch toolName {
+    case "claude":
+        dirs = append(dirs, filepath.Join(homeDir, ".claude"))
+    case "copilot":
+        dirs = append(dirs, filepath.Join(homeDir, ".copilot"))
+    case "codex":
+        dirs = append(dirs, filepath.Join(homeDir, ".codex"))
+    case "opencode":
+        dirs = append(dirs,
+            filepath.Join(homeDir, ".config", "opencode"),
+            filepath.Join(homeDir, ".local", "share", "opencode"),
+        )
+    }
+
+    for _, spec := range languageCacheSpecs(cooperDir, cfg) {
+        dirs = append(dirs, spec.HostPath)
+    }
+
+    dirs = append(dirs,
+        filepath.Join(cooperDir, "fonts"),
+        filepath.Join(cooperDir, "cache", "ms-playwright"),
+    )
+
+    return dirs
 }
 ```
 
-**After (new code):**
+Why this helper is recommended:
+
+- `ensureBarrelMountDirs(...)` becomes a thin wrapper
+- the dir list becomes directly unit-testable
+- auth dirs, cache dirs, and Playwright dirs are computed in one place
+
+### 2. Modify `cooper/internal/docker/barrel.go`
+
+#### 2a. Update `StartBarrel(...)`
+
+Current:
 
 ```go
-// appendLanguageCacheMounts adds cache volume mounts from cooper-managed
-// directories (~/.cooper/cache/) based on which programming tools are enabled.
-// All mounts are read-write so the container can install new dependencies.
-func appendLanguageCacheMounts(args []string, cooperDir string, cfg *config.Config) []string {
-	for _, tool := range cfg.ProgrammingTools {
-		if !tool.Enabled {
-			continue
-		}
-		switch tool.Name {
-		case "go":
-			goModCache := filepath.Join(cooperDir, "cache", "go-mod")
-			goBuildCache := filepath.Join(cooperDir, "cache", "go-build")
-			containerModCache := filepath.Join(containerHome, "go", "pkg", "mod")
-			containerBuildCache := filepath.Join(containerHome, ".cache", "go-build")
-			args = append(args,
-				"-v", fmt.Sprintf("%s:%s:rw", goModCache, containerModCache),
-				"-v", fmt.Sprintf("%s:%s:rw", goBuildCache, containerBuildCache),
-			)
-		case "node":
-			npmCache := filepath.Join(cooperDir, "cache", "npm")
-			containerNpm := filepath.Join(containerHome, ".npm")
-			args = append(args, "-v", fmt.Sprintf("%s:%s:rw", npmCache, containerNpm))
-		case "python":
-			pipCache := filepath.Join(cooperDir, "cache", "pip")
-			containerPip := filepath.Join(containerHome, ".cache", "pip")
-			args = append(args, "-v", fmt.Sprintf("%s:%s:rw", pipCache, containerPip))
-		}
-	}
-	return args
+if err := ensureBarrelHostDirs(absWorkspace, toolName, cooperDir); err != nil {
+    return fmt.Errorf("create host directories: %w", err)
 }
 ```
 
-**Critical:** The function signature changes from `homeDir string` to `cooperDir string`.
-Update the call site in `appendVolumeMounts` (line 214):
-
-**Before:**
+Change to:
 
 ```go
-args = appendLanguageCacheMounts(args, homeDir, cfg)
-```
-
-**After:**
-
-```go
-args = appendLanguageCacheMounts(args, cooperDir, cfg)
-```
-
-### Step 3: Update `ensureBarrelHostDirs` in `barrel.go`
-
-**File:** `cooper/internal/docker/barrel.go`
-**Function:** `ensureBarrelHostDirs` (lines 295-344)
-
-Remove host language cache directory creation. Add cooper cache directory creation instead.
-
-**Remove these lines (324-330):**
-
-```go
-// Language cache dirs (always needed).
-dirs = append(dirs,
-    filepath.Join(homeDir, ".npm"),
-    filepath.Join(homeDir, ".cache", "pip"),
-    filepath.Join(homeDir, ".cache", "go-build"),
-    filepath.Join(gopath, "pkg", "mod"),
-)
-```
-
-**Replace with:**
-
-```go
-// Cooper-managed language cache dirs (must exist before Docker mounts them).
-dirs = append(dirs,
-    filepath.Join(cooperDir, "cache", "go-mod"),
-    filepath.Join(cooperDir, "cache", "go-build"),
-    filepath.Join(cooperDir, "cache", "npm"),
-    filepath.Join(cooperDir, "cache", "pip"),
-)
-```
-
-**Also:** The `gopath` variable and its resolution (lines 303-306) are no longer needed
-in this function. Remove:
-
-```go
-gopath := os.Getenv("GOPATH")
-if gopath == "" {
-    gopath = filepath.Join(homeDir, "go")
+if err := ensureBarrelMountDirs(toolName, cooperDir, cfg); err != nil {
+    return fmt.Errorf("create mount directories: %w", err)
 }
 ```
 
-**Also:** The function signature needs `cooperDir` added as a parameter. Currently it has:
+Notes:
+
+- `absWorkspace` is not needed by the mount-dir helper
+- rename the error message too, not just the function
+
+#### 2b. Remove the `GOFLAGS` block
+
+Delete this block entirely:
 
 ```go
-func ensureBarrelHostDirs(absWorkspace, toolName, cooperDir string) error {
-```
-
-It already receives `cooperDir` — good. But it currently uses `homeDir` for the cache
-dirs. After this change, it uses `cooperDir` instead. The `homeDir` variable is still
-needed for the auth dirs (lines 310-322) and Playwright dirs (lines 332-337), so keep it.
-
-### Step 4: Remove `GOFLAGS=-mod=readonly` from `barrel.go`
-
-**File:** `cooper/internal/docker/barrel.go`
-**Lines:** 144-149
-
-**Delete these lines:**
-
-```go
-// If Go is enabled, set GOFLAGS=-mod=readonly to prevent the AI from
-// modifying go.mod/go.sum inside the container. Dependencies must be
-// installed on the host.
 if isGoEnabled(cfg) {
     args = append(args, "-e", "GOFLAGS=-mod=readonly")
 }
 ```
 
-### Step 5: Add cache seeding step to `runBuild` in `main.go`
+Do not replace it with any new Go-specific env var.
 
-**File:** `cooper/main.go`
-**Function:** `runBuild` (lines 258-372)
+#### 2c. Update `appendVolumeMounts(...)`
 
-Add a new step between step 1 (template generation) and the existing version resolution.
-Insert after line 272 (after directory creation, before version resolution):
+Current call:
 
 ```go
-// 2. Seed language caches from host (first build only).
-fmt.Fprintln(os.Stderr, "Seeding language caches...")
-seedResults := docker.SeedLanguageCaches(cooperDir, cfg)
-for _, r := range seedResults {
-    if r.Err != nil {
-        fmt.Fprintf(os.Stderr, "  Warning: %s cache seed failed: %v\n", r.Name, r.Err)
-    } else if r.Seeded {
-        fmt.Fprintf(os.Stderr, "  Seeded %s cache from host.\n", r.Name)
-    } else if r.Skipped {
-        fmt.Fprintf(os.Stderr, "  %s cache already populated, skipping.\n", r.Name)
+args = appendLanguageCacheMounts(args, homeDir, cfg)
+```
+
+Change to:
+
+```go
+args = appendLanguageCacheMounts(args, cooperDir, cfg)
+```
+
+Do not remove `homeDir` from `appendVolumeMounts(...)`, because it is still needed for
+auth mounts and `.gitconfig`.
+
+#### 2d. Rewrite `appendLanguageCacheMounts(...)`
+
+Current function uses `homeDir`, `GOPATH`, and host cache directories.
+
+Replace with:
+
+```go
+func appendLanguageCacheMounts(args []string, cooperDir string, cfg *config.Config) []string {
+    for _, spec := range languageCacheSpecs(cooperDir, cfg) {
+        args = append(args, "-v", fmt.Sprintf("%s:%s:rw", spec.HostPath, spec.ContainerPath))
     }
+    return args
 }
 ```
 
-The step numbers of subsequent steps in the comments shift by 1. Update them:
+Important:
 
+- all language cache mounts become `:rw`
+- there is no special readonly case anymore
+- there is no `GOPATH` lookup anymore
+- there is no `homeDir` lookup inside this function anymore
+
+#### 2e. Rename and simplify `ensureBarrelHostDirs(...)`
+
+Rename to:
+
+```go
+func ensureBarrelMountDirs(toolName, cooperDir string, cfg *config.Config) error
 ```
-// 2. Seed language caches from host (first build only).   <-- NEW
-// 3. Resolve latest versions...                           <-- was 2 (implicit)
-// 4. Ensure CA certificate exists.                        <-- was 2
-// 5. Write ACL helper source...                           <-- was 3
-// 6. Stage CA files into build contexts.                  <-- was 4
-// 7. Build proxy image.                                   <-- was 5
-// 8. Build base image.                                    <-- was 6
-// 9. Build each enabled AI tool image.                    <-- was 7
-// 10. Build user-custom images.                           <-- was 8
-// 11. Update ContainerVersion in config.                  <-- was 9
+
+Implementation pattern:
+
+```go
+func ensureBarrelMountDirs(toolName, cooperDir string, cfg *config.Config) error {
+    homeDir, err := os.UserHomeDir()
+    if err != nil {
+        return fmt.Errorf("get home dir: %w", err)
+    }
+
+    for _, dir := range barrelMountDirs(homeDir, toolName, cooperDir, cfg) {
+        if err := os.MkdirAll(dir, 0755); err != nil {
+            return fmt.Errorf("mkdir %s: %w", dir, err)
+        }
+    }
+    return nil
+}
 ```
 
-### Step 6: Change default `MonitorTimeoutSecs` from 5 to 30
+Important removals:
 
-**File:** `cooper/internal/config/config.go`
-**Line:** 100
+- remove all `GOPATH` logic
+- remove all creation of `${HOME}/.npm`
+- remove all creation of `${HOME}/.cache/pip`
+- remove all creation of `${HOME}/.cache/go-build`
+- remove all creation of `${GOPATH}/pkg/mod`
 
-**Before:**
+Important retentions:
+
+- keep auth dir creation
+- keep `fonts`
+- keep `cache/ms-playwright`
+
+### 3. Do not modify `cooper/main.go`
+
+There should be **no cache-related changes** in `main.go`.
+
+Specifically, do not add:
+
+- cache seeding in `runBuild`
+- cache seeding in `runUpdate`
+- host tool detection
+- copy logic
+- chmod logic
+
+If the implementation session finds itself adding cache logic to build/update, that is
+a sign it has drifted from the plan.
+
+### 4. Modify `cooper/internal/config/config.go`
+
+Change the default:
 
 ```go
 MonitorTimeoutSecs: 5,
 ```
 
-**After:**
+to:
 
 ```go
 MonitorTimeoutSecs: 30,
 ```
 
-**IMPORTANT:** Existing config files will already have `"monitor_timeout_secs": 5` saved.
-The change only affects new `cooper configure` runs. This is intentional — existing users
-keep their current timeout. If they want 30s, they change it in the TUI settings screen.
+Also update the nearby comment so it no longer says "monitor timeout 5s".
 
-### Step 7: Update `doctor.sh` diagnostic script
+Recommended updated comment:
 
-**File:** `cooper/internal/templates/doctor.sh`
-**Lines:** 337-346
+```go
+// DefaultConfig returns a configuration with sensible defaults.
+// Proxy port 3128 (Squid standard), bridge port 4343, monitor timeout 30s,
+// history limits 500 entries.
+```
 
-**Before:**
+### 5. Modify `cooper/internal/templates/doctor.sh`
+
+Replace the GOFLAGS section with this exact behavior:
 
 ```bash
 # Check GOFLAGS
 if [ -n "${GOFLAGS:-}" ]; then
     if echo "$GOFLAGS" | grep -q "mod=readonly"; then
-        pass "GOFLAGS includes -mod=readonly"
+        warn "GOFLAGS includes -mod=readonly (unexpected for Cooper-managed caches)"
     else
-        info "GOFLAGS set but no -mod=readonly: ${GOFLAGS}"
+        info "GOFLAGS set without mod=readonly: ${GOFLAGS}"
     fi
 else
-    warn "GOFLAGS not set (Go modules not in readonly mode)"
+    pass "GOFLAGS not set (Go modules are writable)"
 fi
 ```
 
-**After:**
+Rationale:
+
+- absence of GOFLAGS is now the expected success case
+- `mod=readonly` is now a warning, not a pass
+
+### 6. Modify `cooper/test-e2e.sh`
+
+This file needs a careful update because it has multiple startup fixtures and explicit
+mount assertions.
+
+#### 6a. Replace host cache directory setup
+
+Current setup creates:
 
 ```bash
-# Check GOFLAGS (should NOT have -mod=readonly — cooper uses self-managed caches)
-if [ -n "${GOFLAGS:-}" ]; then
-    if echo "$GOFLAGS" | grep -q "mod=readonly"; then
-        warn "GOFLAGS includes -mod=readonly (unexpected — cooper uses self-managed caches)"
-    else
-        info "GOFLAGS set: ${GOFLAGS}"
-    fi
-else
-    pass "GOFLAGS not set (cooper manages module cache independently)"
-fi
+mkdir -p "${HOME_DIR}/.npm"
+mkdir -p "${HOME_DIR}/.cache/pip"
+mkdir -p "${HOME_DIR}/.cache/go-build"
 ```
 
-### Step 8: Update e2e test expectations in `test-e2e.sh`
-
-**File:** `cooper/test-e2e.sh`
-
-#### 8a: Remove GOFLAGS from barrel startup commands
-
-Search for all occurrences of `-e" "GOFLAGS=-mod=readonly"` and remove them. There are
-4 occurrences (lines 490-491, 813, 919, 1820). Remove each one.
-
-For example, at line 490-491:
-
-**Before:**
+Replace with Cooper cache directory setup:
 
 ```bash
-        # GOFLAGS (since Go is enabled).
-        "-e" "GOFLAGS=-mod=readonly"
+mkdir -p "${CONFIG_DIR}/cache/go-mod" 2>/dev/null || true
+mkdir -p "${CONFIG_DIR}/cache/go-build" 2>/dev/null || true
+mkdir -p "${CONFIG_DIR}/cache/npm" 2>/dev/null || true
+mkdir -p "${CONFIG_DIR}/cache/pip" 2>/dev/null || true
 ```
 
-**Delete both lines.** Repeat for the other 3 occurrences.
+Do not add host cache setup back anywhere else in the file.
 
-#### 8b: Update GOFLAGS e2e test assertion
+#### 6b. Replace startup mount arguments
 
-At lines 1515-1521:
-
-**Before:**
+Wherever the test manually builds `docker run` args for a barrel, replace:
 
 ```bash
-# GOFLAGS set correctly.
+"-v" "${GOPATH}/pkg/mod:/home/user/go/pkg/mod:ro"
+"-v" "${HOME_DIR}/.cache/go-build:/home/user/.cache/go-build:rw"
+"-v" "${HOME_DIR}/.npm:/home/user/.npm:ro"
+"-v" "${HOME_DIR}/.cache/pip:/home/user/.cache/pip:ro"
+```
+
+with:
+
+```bash
+"-v" "${CONFIG_DIR}/cache/go-mod:/home/user/go/pkg/mod:rw"
+"-v" "${CONFIG_DIR}/cache/go-build:/home/user/.cache/go-build:rw"
+"-v" "${CONFIG_DIR}/cache/npm:/home/user/.npm:rw"
+"-v" "${CONFIG_DIR}/cache/pip:/home/user/.cache/pip:rw"
+```
+
+There are multiple occurrences in the file. Use grep and update all of them:
+
+```bash
+rg -n 'pkg/mod|\\.cache/go-build|\\.npm|\\.cache/pip|GOFLAGS=-mod=readonly' cooper/test-e2e.sh
+```
+
+Do not update only the first block and forget the later manual barrel runs.
+
+#### 6c. Remove GOFLAGS injection
+
+Delete all occurrences of:
+
+```bash
+-e "GOFLAGS=-mod=readonly"
+```
+
+#### 6d. Invert GOFLAGS assertion
+
+Replace logic like:
+
+```bash
 goflags=$(barrel_exec 'echo $GOFLAGS')
 if echo "$goflags" | grep -q "mod=readonly"; then
     pass "GOFLAGS includes -mod=readonly"
@@ -679,254 +588,202 @@ else
 fi
 ```
 
-**After:**
+with:
 
 ```bash
-# GOFLAGS should NOT include -mod=readonly (cooper uses self-managed caches).
 goflags=$(barrel_exec 'echo $GOFLAGS')
 if echo "$goflags" | grep -q "mod=readonly"; then
     fail "GOFLAGS unexpectedly includes -mod=readonly"
 else
-    pass "GOFLAGS does not include -mod=readonly (self-managed cache)"
+    pass "GOFLAGS does not include -mod=readonly"
 fi
 ```
 
-#### 8c: Update cache mount assertions in e2e tests
+#### 6e. Update mount assertions
 
-Find existing cache mount assertions in the e2e tests. These currently check for host
-paths. Update them to check for `~/.cooper/cache/` paths instead.
+Any assertion that expects host paths must be changed to Cooper cache paths.
 
-Search for mount validation assertions related to `go/pkg/mod`, `.npm`, `.cache/pip`,
-`.cache/go-build` in `test-e2e.sh` and update them to verify the new mount sources.
+Expected mount strings:
 
-The mounts should now look like:
-
-```
-~/.cooper/cache/go-mod:/home/user/go/pkg/mod:rw
-~/.cooper/cache/go-build:/home/user/.cache/go-build:rw
-~/.cooper/cache/npm:/home/user/.npm:rw
-~/.cooper/cache/pip:/home/user/.cache/pip:rw
+```text
+${CONFIG_DIR}/cache/go-mod:/home/user/go/pkg/mod:rw
+${CONFIG_DIR}/cache/go-build:/home/user/.cache/go-build:rw
+${CONFIG_DIR}/cache/npm:/home/user/.npm:rw
+${CONFIG_DIR}/cache/pip:/home/user/.cache/pip:rw
 ```
 
-Note all four are now `:rw` (previously go-mod, npm, and pip were `:ro`).
+### 7. Modify `cooper/REQUIREMENTS.md`
 
-### Step 9: Update REQUIREMENTS.md
+Update documentation so it describes the new runtime-only cache model.
 
-**File:** `cooper/REQUIREMENTS.md`
+Replace the old host-preload narrative with these facts:
 
-Update the following sections to reflect the new cache architecture:
+- Cooper mounts only `~/.cooper/cache/...` into barrels
+- these caches are read-write
+- they are not seeded during build/update
+- dependency installation occurs inside the barrel through the proxy
+- fresh configs use 30-second monitor timeout
 
-#### 9a: Line 163-164 (user-facing description)
+Also remove language implying:
 
-**Before:**
+- host caches are mounted directly
+- Go modules are always readonly
+- dependency caches must be preloaded on the host
 
-```
-User is told that the AI CLI mounts host machine's module cache (like go mod cache, npm cache, pip cache, etc.) into the CLI container as
-read-only volume, so they can read dependencies that are already in host machine, but cannot change them.
-```
+## Test Plan
 
-**After:**
+### A. Add `cooper/internal/docker/cachepaths_test.go`
 
-```
-Cooper seeds its own cache directories (~/.cooper/cache/) from the host's module caches during `cooper build`.
-The AI CLI can install dependencies freely — network requests go through the proxy and require user approval.
-```
+Create a new unit test file for pure cache-path logic.
 
-#### 9b: Lines 343-354 (barrel volume mounts and dependency workflow)
-
-**Before:**
-
-```
-- Language-specific caches (auto-configured based on enabled programming tools):
-  - Go: `$GOPATH/pkg/mod` (read-only), `~/.cache/go-build` (read-write), `GOFLAGS=-mod=readonly`
-  - Node: `~/.npm` (read-only)
-  - Python: `~/.cache/pip` (read-only)
-- Directories are created on host if they don't exist (`mkdir -p` before mount).
-- Dependency workflow per ecosystem (host-preload model — same pattern for all, different commands):
-  - Go: `go mod download` on host populates `$GOPATH/pkg/mod`, mounted read-only. `GOFLAGS=-mod=readonly` enforced.
-  - Node: `npm install` on host populates `node_modules/` in workspace (rw) and `~/.npm` cache (ro). AI can use existing deps but not install new ones from registry.
-  - Python: `pip install`, `pipenv install`, or `poetry install` on host. The workspace is mounted rw, so virtualenvs
-    created inside the workspace (e.g., `.venv/`) are accessible inside the container. `~/.cache/pip` is mounted ro
-    for cached wheels.
-```
-
-**After:**
-
-```
-- Cooper-managed language caches (seeded from host during `cooper build`, all read-write):
-  - Go: `~/.cooper/cache/go-mod` → `/home/user/go/pkg/mod` (rw), `~/.cooper/cache/go-build` → `/home/user/.cache/go-build` (rw)
-  - Node: `~/.cooper/cache/npm` → `/home/user/.npm` (rw)
-  - Python: `~/.cooper/cache/pip` → `/home/user/.cache/pip` (rw)
-- Cache seeding: During `cooper build`, host caches are detected via `go env`, `npm config get cache`, `pip cache dir` and
-  copied into `~/.cooper/cache/`. Only runs when the target is empty (first build). Go module cache requires `chmod -R u+w`
-  after copy because Go sets directories to 0555.
-- Dependency workflow: The AI can run `go get`, `npm install`, `pip install` etc. freely. Network requests go through
-  the proxy and require user approval. The default monitor timeout is 30 seconds.
-```
-
-### Step 10: Write unit tests for cache seeding in `cache_test.go`
-
-**File:** `cooper/internal/docker/cache_test.go` (NEW FILE)
+Recommended test cases:
 
 ```go
-package docker
+func TestLanguageCacheSpecs_EmptyWhenNoToolsEnabled(t *testing.T) {
+    cfg := &config.Config{
+        ProgrammingTools: []config.ToolConfig{
+            {Name: "go", Enabled: false},
+            {Name: "node", Enabled: false},
+            {Name: "python", Enabled: false},
+        },
+    }
 
-import (
-	"os"
-	"path/filepath"
-	"testing"
-
-	"github.com/rickchristie/govner/cooper/internal/config"
-)
-
-func TestDirHasContents(t *testing.T) {
-	// Empty dir.
-	empty := t.TempDir()
-	if dirHasContents(empty) {
-		t.Error("empty dir should return false")
-	}
-
-	// Non-existent dir.
-	if dirHasContents("/tmp/does-not-exist-cooper-test") {
-		t.Error("non-existent dir should return false")
-	}
-
-	// Dir with one file.
-	withFile := t.TempDir()
-	os.WriteFile(filepath.Join(withFile, "test.txt"), []byte("hi"), 0644)
-	if !dirHasContents(withFile) {
-		t.Error("dir with file should return true")
-	}
+    got := languageCacheSpecs("/tmp/cooper", cfg)
+    if len(got) != 0 {
+        t.Fatalf("len(specs) = %d, want 0", len(got))
+    }
 }
 
-func TestSeedLanguageCaches_SkipsWhenTargetHasData(t *testing.T) {
-	cooperDir := t.TempDir()
+func TestLanguageCacheSpecs_GoNodePython(t *testing.T) {
+    cooperDir := "/tmp/cooper"
+    cfg := &config.Config{
+        ProgrammingTools: []config.ToolConfig{
+            {Name: "go", Enabled: true},
+            {Name: "node", Enabled: true},
+            {Name: "python", Enabled: true},
+        },
+    }
 
-	// Pre-populate go-mod cache target with a file.
-	goModTarget := filepath.Join(cooperDir, "cache", "go-mod")
-	os.MkdirAll(goModTarget, 0755)
-	os.WriteFile(filepath.Join(goModTarget, "marker"), []byte("exists"), 0644)
+    got := languageCacheSpecs(cooperDir, cfg)
 
-	cfg := &config.Config{
-		ProgrammingTools: []config.ToolConfig{
-			{Name: "go", Enabled: true},
-		},
-	}
+    want := []cacheMountSpec{
+        {
+            Name:          "go-mod",
+            HostPath:      filepath.Join(cooperDir, "cache", "go-mod"),
+            ContainerPath: "/home/user/go/pkg/mod",
+        },
+        {
+            Name:          "go-build",
+            HostPath:      filepath.Join(cooperDir, "cache", "go-build"),
+            ContainerPath: "/home/user/.cache/go-build",
+        },
+        {
+            Name:          "npm",
+            HostPath:      filepath.Join(cooperDir, "cache", "npm"),
+            ContainerPath: "/home/user/.npm",
+        },
+        {
+            Name:          "pip",
+            HostPath:      filepath.Join(cooperDir, "cache", "pip"),
+            ContainerPath: "/home/user/.cache/pip",
+        },
+    }
 
-	results := SeedLanguageCaches(cooperDir, cfg)
-
-	// go-mod should be skipped (already has data).
-	for _, r := range results {
-		if r.Name == "go-mod" {
-			if !r.Skipped {
-				t.Errorf("go-mod: expected Skipped=true, got Seeded=%v Err=%v", r.Seeded, r.Err)
-			}
-		}
-	}
-}
-
-func TestSeedLanguageCaches_SkipsDisabledTools(t *testing.T) {
-	cooperDir := t.TempDir()
-
-	cfg := &config.Config{
-		ProgrammingTools: []config.ToolConfig{
-			{Name: "go", Enabled: false},
-			{Name: "node", Enabled: false},
-			{Name: "python", Enabled: false},
-		},
-	}
-
-	results := SeedLanguageCaches(cooperDir, cfg)
-	if len(results) != 0 {
-		t.Errorf("expected 0 results for disabled tools, got %d", len(results))
-	}
-}
-
-func TestCpDir(t *testing.T) {
-	src := t.TempDir()
-	dst := t.TempDir()
-
-	// Create a file in src.
-	os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0644)
-	os.MkdirAll(filepath.Join(src, "subdir"), 0755)
-	os.WriteFile(filepath.Join(src, "subdir", "nested.txt"), []byte("deep"), 0644)
-
-	if err := cpDir(src, dst); err != nil {
-		t.Fatalf("cpDir: %v", err)
-	}
-
-	// Verify contents were copied.
-	data, err := os.ReadFile(filepath.Join(dst, "hello.txt"))
-	if err != nil || string(data) != "world" {
-		t.Errorf("hello.txt: got %q, err %v", string(data), err)
-	}
-	data, err = os.ReadFile(filepath.Join(dst, "subdir", "nested.txt"))
-	if err != nil || string(data) != "deep" {
-		t.Errorf("subdir/nested.txt: got %q, err %v", string(data), err)
-	}
-}
-
-func TestChmodWritable(t *testing.T) {
-	dir := t.TempDir()
-
-	// Create a 0555 directory with a 0444 file (simulating Go module cache).
-	subdir := filepath.Join(dir, "mod@v1.0.0")
-	os.MkdirAll(subdir, 0555)
-	file := filepath.Join(subdir, "go.mod")
-	os.WriteFile(file, []byte("module test"), 0444)
-
-	if err := chmodWritable(dir); err != nil {
-		t.Fatalf("chmodWritable: %v", err)
-	}
-
-	// Verify directory is writable.
-	info, _ := os.Stat(subdir)
-	if info.Mode().Perm()&0200 == 0 {
-		t.Errorf("subdir should be writable, got %o", info.Mode().Perm())
-	}
-
-	// Verify file is writable.
-	info, _ = os.Stat(file)
-	if info.Mode().Perm()&0200 == 0 {
-		t.Errorf("file should be writable, got %o", info.Mode().Perm())
-	}
+    if !reflect.DeepEqual(got, want) {
+        t.Fatalf("specs mismatch\ngot:  %#v\nwant: %#v", got, want)
+    }
 }
 ```
 
-### Step 11: Update `cooper_test.go` assertions
+Also add a targeted test for `barrelMountDirs(...)` if you implement that helper:
 
-**File:** `cooper/internal/app/cooper_test.go`
+```go
+func TestBarrelMountDirs_ClaudeIncludesAuthCachesAndPlaywright(t *testing.T) {
+    homeDir := "/tmp/home"
+    cooperDir := "/tmp/cooper"
+    cfg := &config.Config{
+        ProgrammingTools: []config.ToolConfig{
+            {Name: "go", Enabled: true},
+            {Name: "node", Enabled: true},
+        },
+    }
 
-Search for any test assertions that check for:
-- `GOFLAGS` containing `mod=readonly`
-- Cache mount paths containing host paths (e.g., `$GOPATH/pkg/mod`, `~/.npm`)
-- Read-only (`:ro`) mount assertions for language caches
+    got := barrelMountDirs(homeDir, "claude", cooperDir, cfg)
 
-Update them to reflect:
-- No `GOFLAGS=-mod=readonly` env var
-- Cache mounts from `~/.cooper/cache/` directories
-- All language cache mounts are `:rw`
+    wantContains := []string{
+        filepath.Join(homeDir, ".claude"),
+        filepath.Join(cooperDir, "cache", "go-mod"),
+        filepath.Join(cooperDir, "cache", "go-build"),
+        filepath.Join(cooperDir, "cache", "npm"),
+        filepath.Join(cooperDir, "fonts"),
+        filepath.Join(cooperDir, "cache", "ms-playwright"),
+    }
 
-### Step 12: Update existing default timeout in test expectations
+    for _, want := range wantContains {
+        if !slices.Contains(got, want) {
+            t.Fatalf("mount dir list missing %q; got=%v", want, got)
+        }
+    }
+}
+```
 
-**File:** `cooper/internal/config/config_test.go`
-**Line:** 307
+If `slices.Contains` is unavailable in the file already, use a small local helper.
 
-**Before:**
+### B. Add/Update tests for `ensureBarrelMountDirs(...)`
+
+If you keep only the thin wrapper, it may be enough to test the pure helper and leave
+the wrapper untested.
+
+If you do test the wrapper directly:
+
+- use `t.TempDir()` for `cooperDir`
+- use `t.Setenv("HOME", homeDir)` only if you have verified `os.UserHomeDir()` behaves
+  predictably in this environment
+- keep the test local and filesystem-only
+- do not require Docker
+
+Because `os.UserHomeDir()` can be environment-sensitive, the preferred path is still:
+
+- test `barrelMountDirs(...)` thoroughly
+- keep `ensureBarrelMountDirs(...)` thin
+
+### C. Update `cooper/internal/config/config_test.go`
+
+Do **not** destroy backward-compat coverage by rewriting old-config fixtures from 5 to
+30.
+
+Make these changes instead:
+
+#### C1. Add a fresh-default test
+
+```go
+func TestDefaultConfigMonitorTimeoutIs30Seconds(t *testing.T) {
+    cfg := DefaultConfig()
+    if cfg.MonitorTimeoutSecs != 30 {
+        t.Fatalf("MonitorTimeoutSecs = %d, want 30", cfg.MonitorTimeoutSecs)
+    }
+}
+```
+
+#### C2. Keep old-config coverage
+
+A test fixture representing an older saved config may still contain:
 
 ```go
 MonitorTimeoutSecs: 5,
 ```
 
-**After:**
+That is correct when the purpose of the test is to simulate an older persisted config.
 
-```go
-MonitorTimeoutSecs: 30,
-```
+Do not "fix" that fixture to 30 if the test is about backward compatibility.
 
-Also update `cooper/internal/app/cooper_test.go` line 364-365:
+### D. Update `cooper/internal/app/cooper_test.go`
 
-**Before:**
+Update only tests that rely on fresh `DefaultConfig()` values.
+
+Concrete example:
+
+Current precondition in `TestCooperApp_UpdateSettings`:
 
 ```go
 if cfg.MonitorTimeoutSecs != 5 {
@@ -934,7 +791,7 @@ if cfg.MonitorTimeoutSecs != 5 {
 }
 ```
 
-**After:**
+Change to:
 
 ```go
 if cfg.MonitorTimeoutSecs != 30 {
@@ -942,32 +799,78 @@ if cfg.MonitorTimeoutSecs != 30 {
 }
 ```
 
----
+Do **not** change tests that explicitly set `cfg.MonitorTimeoutSecs = 5` to speed up a
+timeout scenario. Those are scenario-specific, not default-specific.
 
-## Files Changed (Summary)
+### E. Update e2e tests
 
-| File | Action | Description |
-|------|--------|-------------|
-| `cooper/internal/docker/cache.go` | **NEW** | Cache seeding logic: `SeedLanguageCaches`, per-cache seed functions, helpers |
-| `cooper/internal/docker/cache_test.go` | **NEW** | Unit tests for cache seeding |
-| `cooper/internal/docker/barrel.go` | **MODIFY** | Rewrite `appendLanguageCacheMounts` to use `cooperDir`; update `ensureBarrelHostDirs` to create cooper cache dirs; remove `GOFLAGS=-mod=readonly` |
-| `cooper/main.go` | **MODIFY** | Add cache seeding step in `runBuild` |
-| `cooper/internal/config/config.go` | **MODIFY** | Change `MonitorTimeoutSecs` default from `5` to `30` |
-| `cooper/internal/templates/doctor.sh` | **MODIFY** | Invert GOFLAGS diagnostic (warn if present, pass if absent) |
-| `cooper/test-e2e.sh` | **MODIFY** | Remove GOFLAGS from barrel commands; update cache mount and GOFLAGS assertions |
-| `cooper/REQUIREMENTS.md` | **MODIFY** | Document new cache architecture |
-| `cooper/internal/config/config_test.go` | **MODIFY** | Update default timeout expectation from `5` to `30` |
-| `cooper/internal/app/cooper_test.go` | **MODIFY** | Update timeout precondition and any cache/GOFLAGS assertions |
+After modifying `cooper/test-e2e.sh`, ensure the script now validates:
 
-## Out of Scope
+- Cooper cache mount sources under `${CONFIG_DIR}/cache/...`
+- no `GOFLAGS=-mod=readonly`
+- all language cache mounts are read-write
 
-- **macOS testing:** This plan is designed to be cross-platform via `go env`, `npm config
-  get cache`, and `pip cache dir`. Actual macOS verification is deferred to when macOS
-  support is added.
-- **Cache cleanup / garbage collection:** No mechanism to clear or resize
-  `~/.cooper/cache/`. Users can delete the directories manually; they will be recreated
-  (empty) on next `cooper up`.
-- **Re-seeding:** If the user wants to refresh from host caches, they delete
-  `~/.cooper/cache/{name}/` and run `cooper build` again.
-- **Config migration for existing users:** Existing users with `monitor_timeout_secs: 5`
-  keep that value. The new default (30) only applies to fresh `cooper configure`.
+## Verification Commands
+
+The implementation session should use commands like these while working:
+
+```bash
+rg -n 'appendLanguageCacheMounts|ensureBarrelHostDirs|GOFLAGS=-mod=readonly' cooper/internal/docker
+rg -n 'MonitorTimeoutSecs: 5|monitor timeout 5s' cooper/internal/config cooper/internal/app
+rg -n 'pkg/mod|\\.cache/go-build|\\.npm|\\.cache/pip|GOFLAGS=-mod=readonly' cooper/test-e2e.sh
+```
+
+After implementation, verify:
+
+```bash
+go test ./cooper/internal/docker/... ./cooper/internal/config/... ./cooper/internal/app/...  # as appropriate for package layout
+```
+
+And run targeted greps:
+
+```bash
+rg -n 'GOFLAGS=-mod=readonly' cooper
+rg -n '\\$GOPATH/pkg/mod|\\.npm:ro|\\.cache/pip:ro' cooper/internal cooper/test-e2e.sh cooper/REQUIREMENTS.md
+```
+
+Expected outcomes:
+
+- runtime code should no longer inject `GOFLAGS=-mod=readonly`
+- runtime code should no longer mount host language caches
+- docs and e2e tests should reflect Cooper-managed caches
+
+## Acceptance Criteria
+
+The change is complete when all of the following are true:
+
+1. Barrels mount only Cooper-managed language caches under `cooperDir/cache/...`.
+2. `appendLanguageCacheMounts(...)` no longer uses `homeDir` or `GOPATH`.
+3. `ensureBarrelMountDirs(...)` no longer creates host language cache directories.
+4. `StartBarrel(...)` no longer injects `GOFLAGS=-mod=readonly`.
+5. `main.go` contains no cache seeding/import logic.
+6. `DefaultConfig()` uses 30 seconds.
+7. Backward-compat tests still preserve old saved configs with timeout 5.
+8. `doctor.sh` treats missing `GOFLAGS` as success.
+9. `test-e2e.sh` expects Cooper cache mounts and no readonly module flag.
+10. The implementation remains easy to explain:
+    all language cache path decisions come from one pure helper.
+
+## Files Expected To Change
+
+| File | Change |
+|------|--------|
+| `cooper/internal/docker/cachepaths.go` | new pure helper file |
+| `cooper/internal/docker/cachepaths_test.go` | new unit tests |
+| `cooper/internal/docker/barrel.go` | mount path refactor, helper rename, GOFLAGS removal |
+| `cooper/internal/config/config.go` | fresh default timeout from 5 to 30 |
+| `cooper/internal/config/config_test.go` | new default-timeout test, preserve old-config coverage |
+| `cooper/internal/app/cooper_test.go` | update fresh-default expectation(s) |
+| `cooper/internal/templates/doctor.sh` | invert GOFLAGS diagnostic |
+| `cooper/test-e2e.sh` | update mount setup, mount assertions, GOFLAGS expectations |
+| `cooper/REQUIREMENTS.md` | update docs to runtime-only cache model |
+
+## Files That Should Not Change
+
+| File | Reason |
+|------|--------|
+| `cooper/main.go` | cache import/seeding is intentionally out of scope |
