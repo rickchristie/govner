@@ -29,6 +29,7 @@ type CooperApp struct {
 
 	aclListener      *proxy.ACLListener
 	bridgeServer     *bridge.BridgeServer
+	hostRelay        *docker.HostRelay
 	clipboardManager *clipboard.Manager
 	clipboardReader  *clipboard.LinuxReader
 
@@ -150,6 +151,12 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+
+	// Start host-side lazy TCP relays so services bound to 127.0.0.1 are
+	// reachable from containers via host.docker.internal (gateway IP).
+	a.hostRelay = docker.NewHostRelay(gatewayIPs, nil)
+	a.hostRelay.Start(a.cfg.PortForwardRules)
+
 	report(3, "Start bridge", nil)
 
 	// Step 4: Ensure Playwright support dirs and sync fonts (best-effort).
@@ -280,9 +287,12 @@ func (a *CooperApp) StopWithProgress(onStep func(int)) error {
 	}
 	onStep(0)
 
-	// Step 1: Stop bridge server.
+	// Step 1: Stop bridge server and host relays.
 	if a.bridgeServer != nil {
 		a.bridgeServer.Stop()
+	}
+	if a.hostRelay != nil {
+		a.hostRelay.Stop()
 	}
 	onStep(1)
 
@@ -429,6 +439,12 @@ func (a *CooperApp) UpdatePortForwards(rules []config.PortForwardRule) error {
 
 	// Update in-memory config on success.
 	a.cfg.PortForwardRules = rules
+
+	// Update host relay so new ports are picked up and removed ports are torn down.
+	if a.hostRelay != nil {
+		a.hostRelay.UpdatePorts(rules)
+	}
+
 	return nil
 }
 
@@ -494,9 +510,10 @@ func (a *CooperApp) StartupWarnings() []string {
 // the forwarding channels. This is used when main.go runs its own startup
 // sequence (e.g. with a loading screen) and then needs to hand off the
 // already-running services to the App.
-func (a *CooperApp) Adopt(aclListener *proxy.ACLListener, bridgeServer *bridge.BridgeServer, warnings []string) {
+func (a *CooperApp) Adopt(aclListener *proxy.ACLListener, bridgeServer *bridge.BridgeServer, hostRelay *docker.HostRelay, warnings []string) {
 	a.aclListener = aclListener
 	a.bridgeServer = bridgeServer
+	a.hostRelay = hostRelay
 	a.startupWarnings = warnings
 
 	// Re-install clipboard handler on the adopted bridge server so it uses

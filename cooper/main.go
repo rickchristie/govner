@@ -430,6 +430,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// Services that need cleanup on exit.
 	var aclListener *proxy.ACLListener
 	var bridgeServer *bridge.BridgeServer
+	var hostRelay *docker.HostRelay
 
 	// Startup warnings collected by the version check step.
 	var startupWarnings []string
@@ -510,6 +511,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 		if startupCtx.Err() != nil {
 			return
 		}
+
+		// Start host-side lazy TCP relays so services bound to 127.0.0.1 are
+		// reachable from containers via host.docker.internal (gateway IP).
+		// The relay periodically scans ports and only activates when a
+		// loopback-only service is detected. Relays are torn down when
+		// the service stops (via scan or failed connection).
+		hostRelay = docker.NewHostRelay(gatewayIPs, nil)
+		hostRelay.Start(cfg.PortForwardRules)
+
 		p.Send(loading.StepCompleteMsg{Index: 3})
 
 		// Step 4: Ensure Playwright support dirs and sync fonts (best-effort).
@@ -580,7 +590,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	adapter, ok := loadingResult.(*loadingAdapter)
 	if !ok || adapter.model.HasError || !adapter.model.Done {
 		// User cancelled or error occurred. Clean up what was started.
-		cleanupServices(aclListener, bridgeServer)
+		cleanupServices(aclListener, bridgeServer, hostRelay)
 		if adapter != nil && adapter.model.HasError {
 			return fmt.Errorf("startup failed")
 		}
@@ -590,7 +600,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// Build the App, adopting the pre-started infrastructure.
 	cooperApp := app.NewCooperApp(cfg, cooperDir)
 	cooperApp.AdoptClipboard(clipMgr, clipReader)
-	cooperApp.Adopt(aclListener, bridgeServer, startupWarnings)
+	cooperApp.Adopt(aclListener, bridgeServer, hostRelay, startupWarnings)
 
 	// Transition to the main TUI.
 	mainModel := tui.NewModel(cooperApp)
@@ -664,12 +674,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 }
 
 // cleanupServices stops the ACL listener and bridge server if they were started.
-func cleanupServices(acl *proxy.ACLListener, br *bridge.BridgeServer) {
+func cleanupServices(acl *proxy.ACLListener, br *bridge.BridgeServer, hr *docker.HostRelay) {
 	if acl != nil {
 		acl.Stop()
 	}
 	if br != nil {
 		br.Stop()
+	}
+	if hr != nil {
+		hr.Stop()
 	}
 	docker.StopProxy()
 }

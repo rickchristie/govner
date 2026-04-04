@@ -140,7 +140,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
           - (UI) Mirror button shows the version in the host machine.
         - Back to main screen, user can select "Save & Continue" button to save the configuration file.
     - Proxy Whitelist Setup Flow:
-      - Sets up proxy whitelist config, that is used to define the Proxy whitelist and port forwarding rules.
+      - Sets up proxy whitelist config, that is used to define which domains are allowed through the proxy.
       - By default, all traffic is blocked, except the ones whitelisted.
       - By default, these traffic is allowed:
         - Requests to AI provider API domains that are enabled in the CLI container, so that AI CLI tools work out of the box.
@@ -150,8 +150,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
         AI tool installation happens at image build time (`cooper build`/`cooper update`), not at runtime.
         This prevents supply-chain attacks where an AI could be tricked into downloading malicious packages or exfiltrating data.
       - Flow:
-        - Proxy Whitelist Setup screen shows two tabs, "Domain Whitelist" and "Port Forwarding".
-        - "Domain Whitelist" tab:
+        - Proxy Whitelist Setup screen shows domain whitelist configuration.
           - Shows list of default whitelisted domains above, and list of user-added whitelisted domains.
           - For each whitelisted domain, user can select it to edit or delete it.
           - When adding/editing a whitelisted domain, user can input the domain, and also specify if subdomains are included or not
@@ -165,23 +164,25 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
             read-only volume, so they can read dependencies that are already in host machine, but cannot change them. This requires action from user.
           - (UI) User is recommended to be as strict as possible, because control panel at `cooper up` allows the user to take a look at live network request
             and allow them on the fly. This is the recommended way, so any requests to the web are monitored.
-        - "Port Forwarding" tab:
-          - Port forwarding uses a two-hop socat relay (see Network Architecture): socat inside the CLI container
-            forwards `localhost:{port}` to `cooper-proxy:{port}` on the internal network, then socat inside the
-            proxy container forwards to `host.docker.internal:{port}` on the external network to reach host services.
-            Rules are configured centrally here and applied to both container entrypoints when `cooper cli` launches.
-          - Shows list of port forwarding rules, each rule is like "localhost:X in CLI container is forwarded to Port Y on host machine".
-          - User can add/edit/delete port forwarding rules.
-          - User can self-forward in range, for example, forward port 8000-8100 to host 8000-8100, useful when development needs many ports.
-          - (UI) User is warned that host services must bind to `0.0.0.0` or the Docker gateway IP to be reachable
-            from containers. Services bound strictly to `127.0.0.1` will NOT be accessible through port forwarding.
-            This is a Linux Docker networking limitation — `host.docker.internal` resolves to the Docker bridge
-            gateway IP, not the loopback interface.
-          - (UI) User is guided to only forward ports that are necessary, for example,
-            - The AI will need to access port of the local postgres database, so user adds a rule for that port.
-            - User is using a self-hosted AI provider, so they add a rule for the port of that provider.
-            - User is developing a web application, so they add a rule for the port of that application so AI can curl and test the application.
         - Back to main screen, user can select "Save & Continue" button to save the configuration file.
+    - Port Forwarding Setup Flow:
+      - Port forwarding is configured as its own dedicated screen (separate from Proxy Whitelist).
+      - Port forwarding uses a two-hop socat relay (see Network Architecture): socat inside the CLI container
+        forwards `localhost:{port}` to `cooper-proxy:{port}` on the internal network, then socat inside the
+        proxy container forwards to `host.docker.internal:{port}` on the external network to reach host services.
+        Rules are configured centrally here and applied to both container entrypoints when `cooper cli` launches.
+      - Shows list of port forwarding rules, each rule is like "localhost:X in CLI container is forwarded to Port Y on host machine".
+      - User can add/edit/delete port forwarding rules.
+      - User can self-forward in range, for example, forward port 8000-8100 to host 8000-8100, useful when development needs many ports.
+      - (UI) User is warned that host services must bind to `0.0.0.0` or the Docker gateway IP to be reachable
+        from containers. Services bound strictly to `127.0.0.1` will NOT be accessible through port forwarding.
+        This is a Linux Docker networking limitation — `host.docker.internal` resolves to the Docker bridge
+        gateway IP, not the loopback interface.
+      - (UI) User is guided to only forward ports that are necessary, for example,
+        - The AI will need to access port of the local postgres database, so user adds a rule for that port.
+        - User is using a self-hosted AI provider, so they add a rule for the port of that provider.
+        - User is developing a web application, so they add a rule for the port of that application so AI can curl and test the application.
+      - Back to main screen, user can select "Save & Continue" button to save the configuration file.
     - Proxy Setup:
       - Users can set-up:
         - Which port is used by the Squid proxy. Default: 3128 (Squid standard).
@@ -266,16 +267,16 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - Shows live logs of the execution bridge, each log entry shows columns: TIME, ROUTE, SCRIPT, STATUS, DURATION.
       - User can select each log entry to view more details (stdout, stderr).
       - Logs viewer is capped at max N lines (See: Runtime Settings).
-    - **Routes** tab (Bridge Routes):
-      - Shows list of all active execution bridges between CLI and host machine, each entry maps API path to script file path.
-      - User can add (n), edit (e/Enter), delete (x) bridge entries, for example, map `/deploy-staging` to `~/scripts/deploy-staging.sh`.
-      - Modal-based editing for add/edit/delete.
-      - (UI) User is reminded that the best practice is to have these scripts take no input. If scripts take input, scripts must validate them religiously.
     - **Ports** tab (Port Forwarding):
       - Shows current port forwarding rules.
       - User can add (n), edit (e/Enter), delete (x) rules at runtime.
       - Supports both single ports and port ranges.
       - Changes are applied live via socat SIGHUP reload (no container restart needed).
+    - **Routes** tab (Bridge Routes):
+      - Shows list of all active execution bridges between CLI and host machine, each entry maps API path to script file path.
+      - User can add (n), edit (e/Enter), delete (x) bridge entries, for example, map `/deploy-staging` to `~/scripts/deploy-staging.sh`.
+      - Modal-based editing for add/edit/delete.
+      - (UI) User is reminded that the best practice is to have these scripts take no input. If scripts take input, scripts must validate them religiously.
     - **Runtime** tab (Runtime Settings):
       - Can set how long to block the request in Monitor tab before it's automatically blocked. Defaults to 5 seconds.
       - Can set how many lines of blocked history requests in the log. Default 500.
@@ -545,13 +546,17 @@ reserved `/clipboard/*` namespace. User bridge routes cannot use this namespace.
 Config fields in `~/.cooper/config.json`:
 ```json
 {
+  "monitor_timeout_secs": 5,
+  "blocked_history_limit": 500,
+  "allowed_history_limit": 500,
+  "bridge_log_limit": 500,
   "clipboard_ttl_secs": 300,
   "clipboard_max_bytes": 20971520
 }
 ```
 
-Clipboard settings are NOT part of `cooper configure` — they use sensible defaults and are editable at
-runtime via the TUI Runtime Settings tab.
+Runtime settings (monitor timeout, history limits, clipboard TTL/max size) are NOT part of `cooper configure` —
+they use sensible defaults and are editable at runtime via the TUI Runtime Settings tab.
 
 ### Image Processing Pipeline
 
@@ -725,11 +730,15 @@ Internet:
 - CLI containers reach it via: CLI socat (`localhost:4343`) → `cooper-proxy:4343` → proxy socat → `host.docker.internal:4343` → host
 - The bridge port relay is auto-configured in the proxy container's entrypoint (not user-configured)
 
-**Host service accessibility (important limitation):**
+**Host service accessibility and HostRelay:**
 - `host.docker.internal` resolves to the Docker bridge gateway IP (e.g., `172.17.0.1`), NOT `127.0.0.1`
 - Host services must bind to `0.0.0.0` (or the Docker gateway IP) to be reachable from containers
-- Services bound strictly to `127.0.0.1` are NOT reachable. This is documented in `cooper configure` port
-  forwarding setup, which warns the user about this requirement.
+- Services bound strictly to `127.0.0.1` are NOT directly reachable through the socat relay chain.
+  This is documented in `cooper configure` port forwarding setup, which warns the user about this requirement.
+- **HostRelay** (`docker/hostrelay.go`) mitigates this for port-forwarded services: for each forwarding rule,
+  `cooper up` attempts to listen on `{gateway-ip}:{host-port}` and relays connections to `127.0.0.1:{host-port}`.
+  If the bind fails (service already on `0.0.0.0`), the relay is silently skipped. This means the two-hop socat
+  chain can reach loopback-bound host services via `host.docker.internal` → HostRelay → `127.0.0.1`.
 - The execution bridge binds to `127.0.0.1` + Docker gateway IP (not `0.0.0.0`) to be reachable from
   containers without exposing the API to the LAN.
 
@@ -750,7 +759,7 @@ Internet:
 | Proxy monitor (approve/deny) | Squid → external ACL helper (stdin/stdout) → Unix socket → `cooper up` on host → TUI → user decision |
 | Execution bridge | CLI socat → `cooper-proxy:4343` (internal) → proxy socat → `host.docker.internal:4343` (external) → host |
 | Clipboard bridge | CLI shim/x11-bridge → socat → `cooper-proxy:{bridge_port}` → proxy socat → host bridge `/clipboard/*` |
-| Host service access (DB, etc.) | CLI socat → `cooper-proxy:{port}` (internal) → proxy socat → `host.docker.internal:{port}` (external) → host |
+| Host service access (DB, etc.) | CLI socat → `cooper-proxy:{port}` (internal) → proxy socat → `host.docker.internal:{port}` (external) → host (HostRelay if loopback-only) |
 | Package registry blocking | CLI → `cooper-proxy:3128` → Squid → denied (not in whitelist) |
 | Direct internet bypass | IMPOSSIBLE — `cooper-internal` has no gateway, no route to any external network |
 | Raw socket bypass | IMPOSSIBLE — even without proxy env vars, no network route exists to the internet |
@@ -920,6 +929,7 @@ cooper/
 │   │   ├── network.go               # Docker network creation/management (dual-network)
 │   │   ├── network_test.go
 │   │   ├── portforward.go           # socat rules file management and SIGHUP live reload
+│   │   ├── hostrelay.go             # Host TCP relays: gateway IP → 127.0.0.1 for loopback-bound services
 │   │   ├── seccomp.go               # Custom seccomp profile loader
 │   │   └── seccomp-bwrap.json       # Seccomp profile allowing bubblewrap syscalls
 │   │
@@ -1010,6 +1020,7 @@ cooper/
 │       │
 │       ├── bridgeui/                # Execution Bridge (two separate tabs: logs + routes)
 │       │   ├── model.go             # Bridge Logs tab: execution logs with detail view
+│       │   ├── view.go              # Bridge Logs tab: rendering
 │       │   └── routes.go            # Bridge Routes tab: route CRUD with modal editing
 │       │
 │       ├── portfwd/                 # Port Forwarding tab (runtime rule management)
@@ -1025,6 +1036,7 @@ cooper/
 │       │   └── model.go             # Multi-step progress with animated barrel roll
 │       │
 │       ├── events/                  # Event message types for TUI
+│       │   └── events.go            # Shared event/message definitions across TUI packages
 │       │
 │       └── components/              # Shared UI components
 │           ├── modal.go             # Confirmation dialogs (exit, restart)

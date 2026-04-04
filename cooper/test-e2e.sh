@@ -103,6 +103,16 @@ cleanup() {
         wait "$E2E_BRIDGE_PID" 2>/dev/null || true
     fi
 
+    # Stop e2e relay test processes if running.
+    if [ -n "${E2E_RELAY_SERVER_PID:-}" ]; then
+        kill "$E2E_RELAY_SERVER_PID" 2>/dev/null || true
+        wait "$E2E_RELAY_SERVER_PID" 2>/dev/null || true
+    fi
+    if [ -n "${E2E_RELAY_HELPER_PID:-}" ]; then
+        kill "$E2E_RELAY_HELPER_PID" 2>/dev/null || true
+        wait "$E2E_RELAY_HELPER_PID" 2>/dev/null || true
+    fi
+
     info "Stopping barrel containers..."
     for tool in "${ALL_TOOLS[@]}"; do
         docker rm -f "$(barrel_name_for "$tool")" 2>/dev/null || true
@@ -1136,6 +1146,199 @@ cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_RESTORE_EOF'
 SOCAT_RESTORE_EOF
 docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
 wait_for_port 4343
+
+# ============================================================================
+# Phase 7c: Host Relay — localhost-bound services reachable from barrels
+# ============================================================================
+section "Phase 7c: Host Relay (localhost-bound service forwarding)"
+
+# Build a tiny HTTP server that binds ONLY to 127.0.0.1 — simulating a
+# typical dev server that doesn't bind to 0.0.0.0.
+E2E_RELAY_DIR="${CONFIG_DIR}/e2e-relay"
+mkdir -p "$E2E_RELAY_DIR"
+cat > "${E2E_RELAY_DIR}/server.go" << 'RELAYSERVER'
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+)
+
+func main() {
+	port := os.Args[1]
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintln(w, "cooper-relay-test-ok")
+	})
+	srv := &http.Server{Addr: "127.0.0.1:" + port, Handler: mux}
+	go func() {
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "listen: %v\n", err)
+			os.Exit(1)
+		}
+	}()
+	fmt.Printf("listening on 127.0.0.1:%s\n", port)
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
+	<-ch
+	srv.Close()
+}
+RELAYSERVER
+
+# Build a tiny host relay helper that uses docker.NewHostRelay.
+cat > "${E2E_RELAY_DIR}/relay.go" << 'RELAYHELPER'
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/docker"
+)
+
+func main() {
+	port := 17931
+	rules := []config.PortForwardRule{{ContainerPort: port, HostPort: port, Description: "relay-test"}}
+	gatewayIPs := os.Args[1:]
+	logger := log.New(os.Stderr, "", log.LstdFlags)
+	hr := docker.NewHostRelay(gatewayIPs, logger)
+	hr.Start(rules)
+	// Wait for the lazy scan to detect the loopback service.
+	for i := 0; i < 20; i++ {
+		if hr.ActiveCount() > 0 {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	fmt.Printf("host relay active: %d listeners\n", hr.ActiveCount())
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
+	<-ch
+	hr.Stop()
+}
+RELAYHELPER
+
+RELAY_TEST_PORT=17931
+
+info "Building loopback test server and host relay..."
+E2E_RELAY_SERVER="${CONFIG_DIR}/e2e-relay-server"
+E2E_RELAY_HELPER="${CONFIG_DIR}/e2e-relay-helper"
+go build -o "$E2E_RELAY_SERVER" "${E2E_RELAY_DIR}/server.go" 2>&1 || { fail "relay test server build failed"; }
+go build -o "$E2E_RELAY_HELPER" "${E2E_RELAY_DIR}/relay.go" 2>&1 || { fail "relay helper build failed"; }
+pass "Relay test binaries built"
+
+# Start the loopback-only HTTP server.
+"$E2E_RELAY_SERVER" "$RELAY_TEST_PORT" &
+E2E_RELAY_SERVER_PID=$!
+sleep 1
+
+# Verify it's only on 127.0.0.1 and responds.
+relay_bind=$(ss -tlnp 2>/dev/null | grep ":${RELAY_TEST_PORT} " | head -1)
+if echo "$relay_bind" | grep -q "127.0.0.1:${RELAY_TEST_PORT}"; then
+    pass "Test server bound to 127.0.0.1:${RELAY_TEST_PORT} only"
+else
+    fail "Test server not bound to 127.0.0.1:${RELAY_TEST_PORT}: ${relay_bind}"
+fi
+
+host_response=$(curl -sf "http://127.0.0.1:${RELAY_TEST_PORT}/" 2>/dev/null || echo "")
+if echo "$host_response" | grep -q "cooper-relay-test-ok"; then
+    pass "Test server responds on host"
+else
+    fail "Test server not responding on host: ${host_response}"
+fi
+
+# Discover Docker gateway IPs.
+GW_EXTERNAL=$(docker network inspect cooper-external --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || echo "")
+GW_BRIDGE=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || echo "")
+
+# Verify the gateway IP CANNOT reach the server before relay (it's loopback-only).
+if ! curl -sf --connect-timeout 2 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" >/dev/null 2>&1; then
+    pass "Gateway IP cannot reach loopback server (before relay)"
+else
+    info "Gateway IP already reaches server (service may bind wider) — relay test still valid"
+fi
+
+# Start the host relay.
+RELAY_GW_ARGS=()
+[ -n "$GW_EXTERNAL" ] && RELAY_GW_ARGS+=("$GW_EXTERNAL")
+[ -n "$GW_BRIDGE" ] && RELAY_GW_ARGS+=("$GW_BRIDGE")
+
+"$E2E_RELAY_HELPER" "${RELAY_GW_ARGS[@]}" &
+E2E_RELAY_HELPER_PID=$!
+# Wait for the lazy relay to detect the loopback service and bind.
+for _i in $(seq 1 20); do
+    if curl -sf -o /dev/null --connect-timeout 1 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" 2>/dev/null; then
+        break
+    fi
+    sleep 0.5
+done
+
+# Verify the gateway IP CAN now reach the server via relay.
+post_relay=$(curl -sf --connect-timeout 2 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" 2>/dev/null || echo "")
+if echo "$post_relay" | grep -q "cooper-relay-test-ok"; then
+    pass "Gateway IP reaches loopback server via host relay"
+else
+    fail "Gateway IP still cannot reach server via relay: ${post_relay}"
+fi
+
+# Add a port forwarding rule for the test port, restart barrel.
+cat > "${CONFIG_DIR}/socat-rules.json" << SOCAT_RELAY_EOF
+{
+  "bridge_port": 4343,
+  "rules": [
+    {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"},
+    {"container_port": 6379, "host_port": 6379, "description": "Redis"},
+    {"container_port": ${RELAY_TEST_PORT}, "host_port": ${RELAY_TEST_PORT}, "description": "relay-test"}
+  ]
+}
+SOCAT_RELAY_EOF
+
+# Restart barrel AND signal proxy to reload socat rules for the new port.
+docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
+docker exec "$PROXY_CONTAINER" kill -HUP 1 2>/dev/null || true
+sleep 2  # Give proxy socat time to reload.
+wait_for_port 4343
+wait_for_port "$RELAY_TEST_PORT"
+
+# THE KEY TEST: barrel curls localhost:{port} and gets the response from
+# a host server that only binds to 127.0.0.1, via the host relay.
+barrel_response=$(barrel_exec "curl -sf --connect-timeout 5 --max-time 10 http://localhost:${RELAY_TEST_PORT}/ 2>&1 || echo 'CURL_FAILED'")
+if echo "$barrel_response" | grep -q "cooper-relay-test-ok"; then
+    pass "Barrel reaches loopback-only host service via host relay"
+else
+    fail "Barrel cannot reach loopback host service: ${barrel_response}"
+fi
+
+# Clean up relay test resources.
+kill "$E2E_RELAY_HELPER_PID" 2>/dev/null || true
+wait "$E2E_RELAY_HELPER_PID" 2>/dev/null || true
+kill "$E2E_RELAY_SERVER_PID" 2>/dev/null || true
+wait "$E2E_RELAY_SERVER_PID" 2>/dev/null || true
+E2E_RELAY_HELPER_PID=""
+E2E_RELAY_SERVER_PID=""
+
+# Restore original rules.
+cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_RESTORE2_EOF'
+{
+  "bridge_port": 4343,
+  "rules": [
+    {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"},
+    {"container_port": 6379, "host_port": 6379, "description": "Redis"}
+  ]
+}
+SOCAT_RESTORE2_EOF
+docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
+wait_for_port 4343
+pass "Host relay test complete, rules restored"
 
 # ============================================================================
 # Phase 8: Socat Live Reload
