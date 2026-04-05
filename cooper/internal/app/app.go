@@ -33,6 +33,7 @@ type App interface {
 	ACLRequests() <-chan ACLRequest
 	ACLDecisions() <-chan DecisionEvent
 	BridgeLogs() <-chan ExecutionLog
+	SquidLogs() <-chan string
 
 	// ACL actions
 	ApproveRequest(id string)
@@ -53,7 +54,7 @@ type App interface {
 	UpdateBridgeRoutes(routes []config.BridgeRoute) error
 
 	// Settings (live update)
-	UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit int) error
+	UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTLSecs, clipboardMaxBytes int) error
 
 	// Clipboard bridge
 	CaptureClipboard() (*clipboard.ClipboardEvent, error)

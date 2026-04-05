@@ -14,11 +14,12 @@ var _ App = (*TestApp)(nil)
 // It provides mock channels and no-op infrastructure methods, allowing the
 // TUI to render without Docker or any real services.
 type TestApp struct {
-	cfg       *config.Config
-	aclCh     chan ACLRequest
+	cfg        *config.Config
+	aclCh      chan ACLRequest
 	decisionCh chan DecisionEvent
-	bridgeCh  chan ExecutionLog
-	proxyUp   bool
+	bridgeCh   chan ExecutionLog
+	squidLogCh chan string
+	proxyUp    bool
 }
 
 // NewTestApp creates a TestApp with the given config and mock channels.
@@ -29,6 +30,7 @@ func NewTestApp(cfg *config.Config, aclCh chan ACLRequest, bridgeCh chan Executi
 		aclCh:      aclCh,
 		decisionCh: make(chan DecisionEvent),
 		bridgeCh:   bridgeCh,
+		squidLogCh: make(chan string, 1024),
 		proxyUp:    true,
 	}
 }
@@ -39,6 +41,7 @@ func (t *TestApp) Stop() error                                                  
 func (t *TestApp) ACLRequests() <-chan ACLRequest    { return t.aclCh }
 func (t *TestApp) ACLDecisions() <-chan DecisionEvent { return t.decisionCh }
 func (t *TestApp) BridgeLogs() <-chan ExecutionLog   { return t.bridgeCh }
+func (t *TestApp) SquidLogs() <-chan string           { return t.squidLogCh }
 
 func (t *TestApp) ApproveRequest(_ string)         {}
 func (t *TestApp) DenyRequest(_ string)             {}
@@ -52,7 +55,7 @@ func (t *TestApp) IsProxyRunning() bool                        { return t.proxyU
 
 func (t *TestApp) UpdatePortForwards(_ []config.PortForwardRule) error { return nil }
 func (t *TestApp) UpdateBridgeRoutes(_ []config.BridgeRoute) error     { return nil }
-func (t *TestApp) UpdateSettings(_, _, _, _ int) error                 { return nil }
+func (t *TestApp) UpdateSettings(_, _, _, _, _, _ int) error           { return nil }
 
 func (t *TestApp) CaptureClipboard() (*clipboard.ClipboardEvent, error)  { return nil, nil }
 func (t *TestApp) StageFile(_ string) (*clipboard.ClipboardEvent, error) { return nil, nil }

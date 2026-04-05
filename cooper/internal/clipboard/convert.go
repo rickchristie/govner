@@ -28,14 +28,19 @@ func DetectImageFormat(data []byte) string {
 // IsImageData returns true if the raw bytes look like a supported image
 // format (PNG, JPEG, GIF, BMP, TIFF, WebP).
 func IsImageData(data []byte) bool {
-	f := detectImageFormat(data)
-	return f != "" && isCommonRasterFormat(f)
+	return isCommonRasterFormat(detectImageFormat(data))
+}
+
+// IsImageFormat reports whether a detected format or MIME string describes
+// an image Cooper knows how to accept.
+func IsImageFormat(format string) bool {
+	return isImageFormat(format)
 }
 
 // FormatToMIME maps a short format name (as returned by DetectImageFormat)
 // to its MIME type string. Unknown formats return "application/octet-stream".
 func FormatToMIME(format string) string {
-	switch format {
+	switch mimeToFormat(format) {
 	case "png":
 		return "image/png"
 	case "jpeg":
@@ -51,7 +56,41 @@ func FormatToMIME(format string) string {
 	case "svg":
 		return "image/svg+xml"
 	default:
+		if strings.HasPrefix(strings.TrimSpace(format), "image/") {
+			return strings.TrimSpace(format)
+		}
 		return "application/octet-stream"
+	}
+}
+
+// MIMEFromFileExtension maps a filename extension to an image MIME type.
+// Unknown extensions return the empty string.
+func MIMEFromFileExtension(ext string) string {
+	switch strings.ToLower(strings.TrimPrefix(strings.TrimSpace(ext), ".")) {
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "gif":
+		return "image/gif"
+	case "bmp":
+		return "image/bmp"
+	case "tif", "tiff":
+		return "image/tiff"
+	case "webp":
+		return "image/webp"
+	case "svg":
+		return "image/svg+xml"
+	case "avif":
+		return "image/avif"
+	case "heic":
+		return "image/heic"
+	case "heif":
+		return "image/heif"
+	case "ico":
+		return "image/x-icon"
+	default:
+		return ""
 	}
 }
 
@@ -122,6 +161,27 @@ func detectImageFormat(data []byte) string {
 	}
 }
 
+func mimeToFormat(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "image/png":
+		return "png"
+	case "image/jpeg":
+		return "jpeg"
+	case "image/gif":
+		return "gif"
+	case "image/bmp":
+		return "bmp"
+	case "image/tiff":
+		return "tiff"
+	case "image/webp":
+		return "webp"
+	case "image/svg+xml":
+		return "svg"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+}
+
 // looksLikeSVG does a quick heuristic check for SVG content.
 func looksLikeSVG(data []byte) bool {
 	// Check the first 512 bytes for an <svg tag.
@@ -136,11 +196,21 @@ func looksLikeSVG(data []byte) bool {
 // isCommonRasterFormat returns true for formats we can decode
 // in-process using stdlib + golang.org/x/image.
 func isCommonRasterFormat(format string) bool {
-	switch format {
+	switch mimeToFormat(format) {
 	case "png", "jpeg", "gif", "bmp", "tiff", "webp":
 		return true
 	default:
 		return false
+	}
+}
+
+func isImageFormat(format string) bool {
+	normalized := mimeToFormat(format)
+	switch normalized {
+	case "png", "jpeg", "gif", "bmp", "tiff", "webp", "svg":
+		return true
+	default:
+		return strings.HasPrefix(normalized, "image/")
 	}
 }
 

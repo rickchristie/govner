@@ -41,6 +41,7 @@ type Model struct {
 	proxyMonModel     SubModel
 	blockedModel      SubModel
 	allowedModel      SubModel
+	squidLogModel     SubModel
 	bridgeLogsModel   SubModel
 	bridgeRoutesModel SubModel
 	runtimeModel      SubModel
@@ -103,6 +104,9 @@ func (m *Model) SetBlockedModel(sm SubModel) { m.blockedModel = sm }
 // SetAllowedModel wires the allowed-history tab.
 func (m *Model) SetAllowedModel(sm SubModel) { m.allowedModel = sm }
 
+// SetSquidLogModel wires the squid logs tab.
+func (m *Model) SetSquidLogModel(sm SubModel) { m.squidLogModel = sm }
+
 // SetBridgeLogsModel wires the bridge logs tab.
 func (m *Model) SetBridgeLogsModel(sm SubModel) { m.bridgeLogsModel = sm }
 
@@ -150,6 +154,8 @@ func (m *Model) activeSubModel() SubModel {
 		return m.blockedModel
 	case theme.TabAllowed:
 		return m.allowedModel
+	case theme.TabSquidLogs:
+		return m.squidLogModel
 	case theme.TabBridgeLogs:
 		return m.bridgeLogsModel
 	case theme.TabBridgeRoutes:

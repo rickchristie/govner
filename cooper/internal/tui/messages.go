@@ -18,6 +18,7 @@ type TickMsg = events.TickMsg
 type ShutdownCompleteMsg = events.ShutdownCompleteMsg
 
 type BridgeLogMsg = events.BridgeLogMsg
+type SquidLogLineMsg = events.SquidLogLineMsg
 
 type ClipboardCaptureMsg = events.ClipboardCaptureMsg
 type ClipboardClearMsg = events.ClipboardClearMsg
@@ -60,6 +61,18 @@ func listenBridgeLogs(ch <-chan app.ExecutionLog) tea.Cmd {
 			return nil
 		}
 		return events.BridgeLogMsg{Log: log}
+	}
+}
+
+// listenSquidLogs returns a tea.Cmd that blocks until a log line arrives
+// on ch.
+func listenSquidLogs(ch <-chan string) tea.Cmd {
+	return func() tea.Msg {
+		line, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return events.SquidLogLineMsg{Line: line}
 	}
 }
 

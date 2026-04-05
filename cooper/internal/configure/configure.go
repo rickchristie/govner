@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -59,13 +60,49 @@ type model struct {
 	save        saveModel
 }
 
+// dockerInstallHint returns OS-specific instructions for installing Docker.
+func dockerInstallHint() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "Install Docker Desktop for Mac:\n" +
+			"  https://docs.docker.com/desktop/setup/install/mac-install/\n" +
+			"\n" +
+			"Or via Homebrew:\n" +
+			"  brew install --cask docker"
+	case "windows":
+		return "Install Docker Desktop for Windows:\n" +
+			"  https://docs.docker.com/desktop/setup/install/windows-install/\n" +
+			"\n" +
+			"Or via winget:\n" +
+			"  winget install Docker.DockerDesktop"
+	default: // linux
+		return "Install Docker Engine for Linux:\n" +
+			"  https://docs.docker.com/engine/install/\n" +
+			"\n" +
+			"Quick install (convenience script):\n" +
+			"  curl -fsSL https://get.docker.com | sh\n" +
+			"\n" +
+			"After installing, ensure your user is in the docker group:\n" +
+			"  sudo usermod -aG docker $USER\n" +
+			"  (log out and back in for this to take effect)"
+	}
+}
+
 // checkDocker verifies that Docker is installed and running, and warns if the
 // version is older than 20.10.
 func checkDocker() error {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return fmt.Errorf("Docker is not installed.\n\n%s", dockerInstallHint())
+	}
+
 	cmd := exec.Command("docker", "version", "--format", "{{.Server.Version}}")
 	output, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("Docker is not installed or not running. Please install Docker and ensure the daemon is started")
+		return fmt.Errorf("Docker is installed but the daemon is not running.\n"+
+			"Please start the Docker daemon and try again.\n\n"+
+			"On Linux:  sudo systemctl start docker\n"+
+			"On macOS:  open -a Docker\n"+
+			"On Windows: start Docker Desktop")
 	}
 
 	version := strings.TrimSpace(string(output))

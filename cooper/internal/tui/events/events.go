@@ -61,5 +61,10 @@ type ClipboardClearMsg struct{}
 // ClipboardExpiredMsg signals that the staged clipboard content has expired.
 type ClipboardExpiredMsg struct{}
 
+// SquidLogLineMsg wraps a new line from the Squid access log.
+type SquidLogLineMsg struct {
+	Line string
+}
+
 // ClipboardTickMsg is sent on each UI tick to check clipboard TTL expiry.
 type ClipboardTickMsg struct{}

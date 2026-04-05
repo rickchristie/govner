@@ -29,6 +29,7 @@ const (
 	TabMonitor
 	TabBlocked
 	TabAllowed
+	TabSquidLogs
 	TabBridgeLogs
 	TabBridgeRoutes
 	TabRuntime
@@ -62,11 +63,12 @@ var AllTabs = []TabInfo{
 	{ID: TabMonitor, Label: "Monitor", Icon: "🔍", ShortcutKey: "2"},
 	{ID: TabBlocked, Label: "Blocked", Icon: IconCross, ShortcutKey: "3"},
 	{ID: TabAllowed, Label: "Allowed", Icon: IconCheck, ShortcutKey: "4"},
-	{ID: TabBridgeLogs, Label: "Bridge Logs", Icon: IconPlug, ShortcutKey: "5"},
-	{ID: TabPortForward, Label: "Ports", Icon: IconPlug, ShortcutKey: "6"},
-	{ID: TabBridgeRoutes, Label: "Routes", Icon: IconGear, ShortcutKey: "7"},
-	{ID: TabRuntime, Label: "Runtime", Icon: IconGear, ShortcutKey: "8"},
-	{ID: TabAbout, Label: "About", Icon: "ℹ", ShortcutKey: "9"},
+	{ID: TabSquidLogs, Label: "Squid Logs", Icon: "🦑", ShortcutKey: "5"},
+	{ID: TabBridgeLogs, Label: "Bridge Logs", Icon: IconPlug, ShortcutKey: "6"},
+	{ID: TabPortForward, Label: "Ports", Icon: IconPlug, ShortcutKey: "7"},
+	{ID: TabBridgeRoutes, Label: "Routes", Icon: IconGear, ShortcutKey: "8"},
+	{ID: TabRuntime, Label: "Runtime", Icon: IconGear, ShortcutKey: "9"},
+	{ID: TabAbout, Label: "About", Icon: "ℹ", ShortcutKey: "0"},
 }
 
 // ----- Animation timing constants -----

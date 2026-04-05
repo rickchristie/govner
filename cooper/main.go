@@ -37,6 +37,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tui/portfwd"
 	"github.com/rickchristie/govner/cooper/internal/tui/proxymon"
 	"github.com/rickchristie/govner/cooper/internal/tui/settings"
+	squidlogui "github.com/rickchristie/govner/cooper/internal/tui/squidlog"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 	"github.com/rickchristie/govner/cooper/meta"
 )
@@ -668,6 +669,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 	allowedModel := history.NewWithCapacity(history.ModeAllowed, cfg.AllowedHistoryLimit)
 	mainModel.SetAllowedModel(allowedModel)
 
+	squidLogModel := squidlogui.New()
+	mainModel.SetSquidLogModel(squidLogModel)
+
 	bridgeLogsModel := bridgeui.NewLogsModel(cfg.BridgeLogLimit)
 	mainModel.SetBridgeLogsModel(bridgeLogsModel)
 
@@ -1245,6 +1249,7 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 	mainModel.SetProxyMonModel(proxymon.New(testApp, time.Duration(cfg.MonitorTimeoutSecs)*time.Second))
 	mainModel.SetBlockedModel(history.NewWithCapacity(history.ModeBlocked, cfg.BlockedHistoryLimit))
 	mainModel.SetAllowedModel(history.NewWithCapacity(history.ModeAllowed, cfg.AllowedHistoryLimit))
+	mainModel.SetSquidLogModel(squidlogui.New())
 
 	logsModel := bridgeui.NewLogsModel(cfg.BridgeLogLimit)
 	mainModel.SetBridgeLogsModel(logsModel)
@@ -1280,6 +1285,8 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 			mainModel.SetActiveTab(theme.TabBlocked)
 		case "allowed":
 			mainModel.SetActiveTab(theme.TabAllowed)
+		case "squid-logs", "squid":
+			mainModel.SetActiveTab(theme.TabSquidLogs)
 		case "bridge-logs":
 			mainModel.SetActiveTab(theme.TabBridgeLogs)
 		case "bridge-routes":
@@ -1304,7 +1311,7 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 			_, err := configure.Run(testCA)
 			return err
 		default:
-			return fmt.Errorf("unknown screen: %s\nAvailable: containers, monitor, blocked, allowed, bridge-logs, bridge-routes, settings, ports, about, loading, configure", tuiTestScreen)
+			return fmt.Errorf("unknown screen: %s\nAvailable: containers, monitor, blocked, allowed, squid-logs, bridge-logs, bridge-routes, settings, ports, about, loading, configure", tuiTestScreen)
 		}
 	}
 

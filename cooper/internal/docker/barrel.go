@@ -132,13 +132,11 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 	)
 
 	// Clipboard bridge env vars.
-	clipMode := clipboardModeForTool(toolName)
 	args = append(args,
 		"-e", "COOPER_CLIPBOARD_ENABLED=1",
 		"-e", fmt.Sprintf("COOPER_CLIPBOARD_BRIDGE_URL=http://127.0.0.1:%d", cfg.BridgePort),
 		"-e", "COOPER_CLIPBOARD_TOKEN_FILE=/etc/cooper/clipboard-token",
 		"-e", "COOPER_CLIPBOARD_SHIMS=xclip,xsel",
-		"-e", fmt.Sprintf("COOPER_CLIPBOARD_MODE=%s", clipMode),
 	)
 
 	// If Go is enabled, set GOFLAGS=-mod=readonly to prevent the AI from

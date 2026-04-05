@@ -23,6 +23,7 @@ type MockApp struct {
 	aclRequests  chan ACLRequest
 	aclDecisions chan DecisionEvent
 	bridgeLogs   chan ExecutionLog
+	squidLogs    chan string
 
 	// Controllable return values.
 	StartErr            error
@@ -62,10 +63,12 @@ type MockApp struct {
 
 // SettingsUpdate records a call to UpdateSettings.
 type SettingsUpdate struct {
-	TimeoutSecs    int
-	BlockedLimit   int
-	AllowedLimit   int
-	BridgeLogLimit int
+	TimeoutSecs       int
+	BlockedLimit      int
+	AllowedLimit      int
+	BridgeLogLimit    int
+	ClipboardTTLSecs  int
+	ClipboardMaxBytes int
 }
 
 // NewMockApp creates a MockApp with buffered channels and sensible defaults.
@@ -76,6 +79,7 @@ func NewMockApp(cfg *config.Config, cooperDir string) *MockApp {
 		aclRequests:  make(chan ACLRequest, 256),
 		aclDecisions: make(chan DecisionEvent, 256),
 		bridgeLogs:   make(chan ExecutionLog, 256),
+		squidLogs:    make(chan string, 1024),
 		ProxyRunning: true,
 	}
 }
@@ -111,6 +115,7 @@ func (m *MockApp) Stop() error {
 func (m *MockApp) ACLRequests() <-chan ACLRequest     { return m.aclRequests }
 func (m *MockApp) ACLDecisions() <-chan DecisionEvent { return m.aclDecisions }
 func (m *MockApp) BridgeLogs() <-chan ExecutionLog    { return m.bridgeLogs }
+func (m *MockApp) SquidLogs() <-chan string            { return m.squidLogs }
 
 // InjectACLRequest sends a request on the ACL requests channel.
 func (m *MockApp) InjectACLRequest(req ACLRequest) {
@@ -204,19 +209,23 @@ func (m *MockApp) UpdateBridgeRoutes(routes []config.BridgeRoute) error {
 
 // ----- Settings -----
 
-func (m *MockApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit int) error {
+func (m *MockApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTLSecs, clipboardMaxBytes int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.UpdatedSettings = append(m.UpdatedSettings, SettingsUpdate{
-		TimeoutSecs:    timeoutSecs,
-		BlockedLimit:   blockedLimit,
-		AllowedLimit:   allowedLimit,
-		BridgeLogLimit: bridgeLogLimit,
+		TimeoutSecs:       timeoutSecs,
+		BlockedLimit:      blockedLimit,
+		AllowedLimit:      allowedLimit,
+		BridgeLogLimit:    bridgeLogLimit,
+		ClipboardTTLSecs:  clipboardTTLSecs,
+		ClipboardMaxBytes: clipboardMaxBytes,
 	})
 	m.cfg.MonitorTimeoutSecs = timeoutSecs
 	m.cfg.BlockedHistoryLimit = blockedLimit
 	m.cfg.AllowedHistoryLimit = allowedLimit
 	m.cfg.BridgeLogLimit = bridgeLogLimit
+	m.cfg.ClipboardTTLSecs = clipboardTTLSecs
+	m.cfg.ClipboardMaxBytes = clipboardMaxBytes
 	return nil
 }
 

@@ -107,6 +107,32 @@ func TestStageFile_ValidJPEG(t *testing.T) {
 	}
 }
 
+func TestStageFile_SVGBypassesImageGate(t *testing.T) {
+	app := testStageApp(t, 10*1024*1024)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vector.svg")
+	svg := []byte(`<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect fill="red" width="8" height="8"/></svg>`)
+	if err := os.WriteFile(path, svg, 0644); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+
+	ev, err := app.StageFile(path)
+	if err == nil {
+		if ev.State != clipboard.ClipboardStaged {
+			t.Fatalf("expected staged state on success, got %s", ev.State)
+		}
+		return
+	}
+
+	if strings.Contains(ev.Error, "only image files") {
+		t.Fatalf("SVG should reach normalization/conversion, got gate error: %s", ev.Error)
+	}
+	if !strings.Contains(ev.Error, "external conversion") {
+		t.Fatalf("expected external conversion error or success, got: %s", ev.Error)
+	}
+}
+
 func TestStageFile_NonImage(t *testing.T) {
 	app := testStageApp(t, 10*1024*1024)
 

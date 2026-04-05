@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/bridge"
@@ -13,6 +14,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/fontsync"
 	"github.com/rickchristie/govner/cooper/internal/logging"
+	"github.com/rickchristie/govner/cooper/internal/squidlog"
 
 	"github.com/rickchristie/govner/cooper/internal/proxy"
 )
@@ -24,8 +26,8 @@ var _ App = (*CooperApp)(nil)
 // infrastructure (Docker, proxy, bridge) and exposes a clean interface for
 // the TUI or any other consumer.
 type CooperApp struct {
-	cfg        *config.Config
-	cooperDir  string
+	cfg       *config.Config
+	cooperDir string
 
 	aclListener      *proxy.ACLListener
 	bridgeServer     *bridge.BridgeServer
@@ -41,6 +43,9 @@ type CooperApp struct {
 	aclFwd      chan proxy.ACLRequest
 	decisionFwd chan proxy.DecisionEvent
 	bridgeFwd   chan bridge.ExecutionLog
+
+	// Squid access log tailer.
+	squidTailer *squidlog.Tailer
 
 	startupWarnings []string
 }
@@ -212,8 +217,14 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 }
 
 // wireChannels starts goroutines that forward events from infrastructure
-// channels to the TUI-facing channels, with logging taps.
+// channels to the TUI-facing channels, with logging taps. It also starts
+// the Squid access log tailer.
 func (a *CooperApp) wireChannels() {
+	// Start the Squid access log tailer.
+	logDir := filepath.Join(a.cooperDir, "logs")
+	a.squidTailer = squidlog.NewTailer(logDir)
+	a.squidTailer.Start()
+
 	if a.aclListener != nil {
 		// Forward ACL requests with logging tap.
 		aclSrc := a.aclListener.RequestChan()
@@ -299,7 +310,9 @@ func (a *CooperApp) StopWithProgress(onStep func(int)) error {
 	// Step 2: Stop all barrel containers.
 	barrels, _ := docker.ListBarrels()
 	for _, b := range barrels {
-		docker.StopBarrel(b.Name)
+		if err := docker.StopBarrel(b.Name); err == nil {
+			a.revokeClipboardToken(b.Name)
+		}
 	}
 	onStep(2)
 
@@ -307,7 +320,10 @@ func (a *CooperApp) StopWithProgress(onStep func(int)) error {
 	docker.StopProxy()
 	onStep(3)
 
-	// Step 4: Sealed — close loggers.
+	// Step 4: Sealed — close loggers and stop tailer.
+	if a.squidTailer != nil {
+		a.squidTailer.Stop()
+	}
 	a.bridgeLogger.Close()
 	a.aclLogger.Close()
 	onStep(4)
@@ -330,6 +346,14 @@ func (a *CooperApp) ACLDecisions() <-chan DecisionEvent {
 // BridgeLogs returns the channel that emits bridge execution logs.
 func (a *CooperApp) BridgeLogs() <-chan ExecutionLog {
 	return a.bridgeFwd
+}
+
+// SquidLogs returns the channel that emits Squid access log lines.
+func (a *CooperApp) SquidLogs() <-chan string {
+	if a.squidTailer != nil {
+		return a.squidTailer.Lines()
+	}
+	return nil
 }
 
 // ----- ACL actions -----
@@ -378,12 +402,19 @@ func (a *CooperApp) ContainerStats() ([]ContainerStat, error) {
 
 // StopContainer stops and removes a barrel container by name.
 func (a *CooperApp) StopContainer(name string) error {
-	return docker.StopBarrel(name)
+	if err := docker.StopBarrel(name); err != nil {
+		return err
+	}
+	a.revokeClipboardToken(name)
+	return nil
 }
 
 // RestartContainer restarts a barrel container by name.
 func (a *CooperApp) RestartContainer(name string) error {
-	return docker.RestartBarrel(name)
+	if err := docker.RestartBarrel(name); err != nil {
+		return err
+	}
+	return a.rotateClipboardToken(name)
 }
 
 // ListContainers returns information about all running barrel containers.
@@ -467,22 +498,35 @@ func (a *CooperApp) UpdateBridgeRoutes(routes []config.BridgeRoute) error {
 
 // UpdateSettings applies new timeout and limit settings to the running
 // system and persists the updated configuration.
-func (a *CooperApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit int) error {
-	a.cfg.MonitorTimeoutSecs = timeoutSecs
-	a.cfg.BlockedHistoryLimit = blockedLimit
-	a.cfg.AllowedHistoryLimit = allowedLimit
-	a.cfg.BridgeLogLimit = bridgeLogLimit
+func (a *CooperApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTLSecs, clipboardMaxBytes int) error {
+	candidate := *a.cfg
+	candidate.MonitorTimeoutSecs = timeoutSecs
+	candidate.BlockedHistoryLimit = blockedLimit
+	candidate.AllowedHistoryLimit = allowedLimit
+	candidate.BridgeLogLimit = bridgeLogLimit
+	candidate.ClipboardTTLSecs = clipboardTTLSecs
+	candidate.ClipboardMaxBytes = clipboardMaxBytes
+	if err := candidate.Validate(); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	cfgPath := filepath.Join(a.cooperDir, "config.json")
+	if err := config.SaveConfig(cfgPath, &candidate); err != nil {
+		return fmt.Errorf("config save failed: %w", err)
+	}
+
+	*a.cfg = candidate
 
 	// Update live ACL listener timeout.
 	if a.aclListener != nil {
 		newTimeout := time.Duration(timeoutSecs) * time.Second
 		a.aclListener.SetTimeout(newTimeout)
 	}
-
-	// Persist config.json.
-	cfgPath := filepath.Join(a.cooperDir, "config.json")
-	if err := config.SaveConfig(cfgPath, a.cfg); err != nil {
-		return fmt.Errorf("config save failed: %w", err)
+	if a.clipboardManager != nil {
+		a.clipboardManager.UpdatePolicy(
+			time.Duration(clipboardTTLSecs)*time.Second,
+			clipboardMaxBytes,
+		)
 	}
 
 	return nil
@@ -618,17 +662,22 @@ func (a *CooperApp) StageFile(path string) (*clipboard.ClipboardEvent, error) {
 		}, fmt.Errorf("%s", msg)
 	}
 
-	if !clipboard.IsImageData(data) {
-		msg := "only image files can be staged (png, jpeg, gif, bmp, tiff, webp)"
+	ext := filepath.Ext(path)
+	format := clipboard.DetectImageFormat(data)
+	mime := clipboard.FormatToMIME(format)
+	if !clipboard.IsImageFormat(format) {
+		mime = clipboard.MIMEFromFileExtension(ext)
+	}
+	if !strings.HasPrefix(mime, "image/") {
+		msg := "only image files can be staged"
 		return &clipboard.ClipboardEvent{
 			State: clipboard.ClipboardFailed,
 			Error: msg,
 		}, fmt.Errorf("%s", msg)
 	}
 
-	ext := filepath.Ext(path)
 	result := &clipboard.CaptureResult{
-		MIME:      clipboard.FormatToMIME(clipboard.DetectImageFormat(data)),
+		MIME:      mime,
 		Filename:  filepath.Base(path),
 		Extension: ext,
 		Bytes:     data,
@@ -678,6 +727,13 @@ func (a *CooperApp) ClipboardManager() *clipboard.Manager {
 	return a.clipboardManager
 }
 
+// DisableClipboardReader disables host clipboard prerequisite checks and
+// direct host clipboard capture. Runtime drivers use this when they need the
+// clipboard HTTP bridge without depending on host clipboard tooling.
+func (a *CooperApp) DisableClipboardReader() {
+	a.clipboardReader = nil
+}
+
 // ----- Internal helpers -----
 
 // ensurePlaywrightSupportDirs creates the host directories for Playwright
@@ -691,6 +747,37 @@ func ensurePlaywrightSupportDirs(cooperDir string) error {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create Playwright support dir %s: %w", dir, err)
 		}
+	}
+	return nil
+}
+
+func (a *CooperApp) revokeClipboardToken(containerName string) {
+	if a.clipboardManager != nil {
+		a.clipboardManager.UnregisterBarrel(containerName)
+	}
+	if strings.TrimSpace(a.cooperDir) == "" {
+		return
+	}
+	_ = clipboard.RemoveTokenFile(a.cooperDir, containerName)
+}
+
+func (a *CooperApp) rotateClipboardToken(containerName string) error {
+	if strings.TrimSpace(a.cooperDir) == "" {
+		if a.clipboardManager != nil {
+			a.clipboardManager.UnregisterBarrel(containerName)
+		}
+		return nil
+	}
+
+	token, err := clipboard.GenerateToken()
+	if err != nil {
+		return fmt.Errorf("generate clipboard token: %w", err)
+	}
+	if _, err := clipboard.WriteTokenFile(a.cooperDir, containerName, token); err != nil {
+		return fmt.Errorf("write clipboard token: %w", err)
+	}
+	if a.clipboardManager != nil {
+		a.clipboardManager.UnregisterBarrel(containerName)
 	}
 	return nil
 }

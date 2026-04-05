@@ -26,9 +26,12 @@ func Normalize(result *CaptureResult, maxBytes int) (*ClipboardObject, error) {
 		)
 	}
 
-	format := detectImageFormat(result.Bytes)
-	if format == "" {
-		return nil, fmt.Errorf("normalize: unable to detect image format")
+	format := mimeToFormat(detectImageFormat(result.Bytes))
+	if !isImageFormat(format) {
+		format = mimeToFormat(result.MIME)
+	}
+	if !isImageFormat(format) {
+		return nil, fmt.Errorf("normalize: clipboard payload is not a recognizable image")
 	}
 
 	var pngBytes []byte

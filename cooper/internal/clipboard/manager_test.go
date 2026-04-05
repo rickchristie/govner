@@ -9,6 +9,15 @@ import (
 	"time"
 )
 
+func withMockInspectContainerSession(t *testing.T, fn func(string) (*BarrelSession, error)) {
+	t.Helper()
+	original := inspectContainerSession
+	inspectContainerSession = fn
+	t.Cleanup(func() {
+		inspectContainerSession = original
+	})
+}
+
 func TestStageCreatesValidSnapshot(t *testing.T) {
 	mgr := NewManager(5*time.Second, 1024)
 
@@ -169,6 +178,26 @@ func TestStageCustomTTL(t *testing.T) {
 	expectedExpiry := snap.CreatedAt.Add(10 * time.Second)
 	if snap.ExpiresAt.Sub(expectedExpiry).Abs() > time.Millisecond {
 		t.Errorf("ExpiresAt = %v, want ~%v (custom TTL)", snap.ExpiresAt, expectedExpiry)
+	}
+}
+
+func TestUpdatePolicyAffectsSubsequentStages(t *testing.T) {
+	mgr := NewManager(5*time.Second, 1024)
+	mgr.UpdatePolicy(30*time.Second, 64)
+
+	snap, err := mgr.Stage(ClipboardObject{Kind: ClipboardKindText, Raw: make([]byte, 32)}, 0)
+	if err != nil {
+		t.Fatalf("Stage with updated policy: %v", err)
+	}
+
+	expectedExpiry := snap.CreatedAt.Add(30 * time.Second)
+	if snap.ExpiresAt.Sub(expectedExpiry).Abs() > time.Millisecond {
+		t.Errorf("ExpiresAt = %v, want ~%v", snap.ExpiresAt, expectedExpiry)
+	}
+
+	_, err = mgr.Stage(ClipboardObject{Kind: ClipboardKindText, Raw: make([]byte, 65)}, 0)
+	if err == nil {
+		t.Fatal("expected updated maxBytes policy to reject oversized object")
 	}
 }
 
@@ -394,6 +423,96 @@ func TestTokenFilePath(t *testing.T) {
 	expected := filepath.Join("/tmp/cooper", "tokens", "barrel-1")
 	if p != expected {
 		t.Errorf("TokenFilePath = %q, want %q", p, expected)
+	}
+}
+
+func TestValidateTokenFromDiskUsesContainerInspection(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewManager(5*time.Second, 1024)
+	mgr.SetCooperDir(dir)
+
+	token := "disk-token"
+	if _, err := WriteTokenFile(dir, "barrel-custom-off", token); err != nil {
+		t.Fatalf("WriteTokenFile: %v", err)
+	}
+
+	withMockInspectContainerSession(t, func(containerName string) (*BarrelSession, error) {
+		if containerName != "barrel-custom-off" {
+			t.Fatalf("unexpected container inspection: %s", containerName)
+		}
+		return &BarrelSession{
+			ToolName:      "custom-off",
+			ClipboardMode: "off",
+			Eligible:      false,
+		}, nil
+	})
+
+	sess, err := mgr.ValidateToken(token)
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	if sess.Eligible {
+		t.Fatal("expected disk-backed session to inherit ineligible clipboard mode")
+	}
+	if sess.ClipboardMode != "off" {
+		t.Fatalf("ClipboardMode = %q, want off", sess.ClipboardMode)
+	}
+	if got := len(mgr.ActiveSessions()); got != 0 {
+		t.Fatalf("disk-backed sessions should not be cached in ActiveSessions, got %d", got)
+	}
+}
+
+func TestValidateTokenFromDiskRejectsStoppedContainer(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewManager(5*time.Second, 1024)
+	mgr.SetCooperDir(dir)
+
+	token := "stopped-token"
+	if _, err := WriteTokenFile(dir, "barrel-stopped", token); err != nil {
+		t.Fatalf("WriteTokenFile: %v", err)
+	}
+
+	withMockInspectContainerSession(t, func(containerName string) (*BarrelSession, error) {
+		if containerName != "barrel-stopped" {
+			t.Fatalf("unexpected container inspection: %s", containerName)
+		}
+		return nil, nil
+	})
+
+	if _, err := mgr.ValidateToken(token); err == nil {
+		t.Fatal("expected stopped container token to be rejected")
+	}
+}
+
+func TestValidateTokenFromDiskRejectsRotatedToken(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewManager(5*time.Second, 1024)
+	mgr.SetCooperDir(dir)
+
+	withMockInspectContainerSession(t, func(containerName string) (*BarrelSession, error) {
+		return &BarrelSession{
+			ToolName:      containerName,
+			ClipboardMode: "auto",
+			Eligible:      true,
+		}, nil
+	})
+
+	if _, err := WriteTokenFile(dir, "barrel-rotate", "token-one"); err != nil {
+		t.Fatalf("WriteTokenFile token-one: %v", err)
+	}
+	if _, err := mgr.ValidateToken("token-one"); err != nil {
+		t.Fatalf("ValidateToken token-one: %v", err)
+	}
+
+	if _, err := WriteTokenFile(dir, "barrel-rotate", "token-two"); err != nil {
+		t.Fatalf("WriteTokenFile token-two: %v", err)
+	}
+
+	if _, err := mgr.ValidateToken("token-one"); err == nil {
+		t.Fatal("expected rotated-out token to be rejected")
+	}
+	if _, err := mgr.ValidateToken("token-two"); err != nil {
+		t.Fatalf("ValidateToken token-two: %v", err)
 	}
 }
 

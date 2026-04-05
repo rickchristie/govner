@@ -23,6 +23,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tui/portfwd"
 	"github.com/rickchristie/govner/cooper/internal/tui/proxymon"
 	"github.com/rickchristie/govner/cooper/internal/tui/settings"
+	squidlogui "github.com/rickchristie/govner/cooper/internal/tui/squidlog"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
@@ -50,6 +51,9 @@ func (m *Model) Init() tea.Cmd {
 		}
 		if ch := m.app.ACLDecisions(); ch != nil {
 			cmds = append(cmds, listenACLDecisions(ch))
+		}
+		if ch := m.app.SquidLogs(); ch != nil {
+			cmds = append(cmds, listenSquidLogs(ch))
 		}
 
 		// Kick off the initial docker stats poll.
@@ -155,6 +159,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmd, listenCmd)
 
+	case events.SquidLogLineMsg:
+		if m.squidLogModel != nil {
+			if sm, ok := m.squidLogModel.(*squidlogui.Model); ok {
+				sm.AddLine(msg.Line)
+			}
+		}
+		var listenCmd tea.Cmd
+		if m.app != nil {
+			if ch := m.app.SquidLogs(); ch != nil {
+				listenCmd = listenSquidLogs(ch)
+			}
+		}
+		return m, listenCmd
+
 	case events.ContainerStatsMsg:
 		var cmd tea.Cmd
 		if m.containersModel != nil {
@@ -186,15 +204,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				msg.BlockedHistoryLimit,
 				msg.AllowedHistoryLimit,
 				msg.BridgeLogLimit,
+				msg.ClipboardTTLSecs,
+				msg.ClipboardMaxMB*1024*1024,
 			); err != nil {
 				log.Printf("cooper: failed to update settings: %v", err)
-			}
-			// Apply clipboard settings directly to config (UpdateSettings
-			// doesn't include them to avoid changing the interface signature).
-			cfg := m.app.Config()
-			if cfg != nil {
-				cfg.ClipboardTTLSecs = msg.ClipboardTTLSecs
-				cfg.ClipboardMaxBytes = msg.ClipboardMaxMB * 1024 * 1024
 			}
 		}
 		// Propagate new values to live TUI components.
@@ -701,6 +714,8 @@ func (m *Model) setActiveSubModel(sm SubModel) {
 		m.blockedModel = sm
 	case theme.TabAllowed:
 		m.allowedModel = sm
+	case theme.TabSquidLogs:
+		m.squidLogModel = sm
 	case theme.TabBridgeLogs:
 		m.bridgeLogsModel = sm
 	case theme.TabBridgeRoutes:
@@ -916,6 +931,10 @@ func (m *Model) helpBar(width int) string {
 			HelpBinding{Key: "n", Desc: "New"},
 			HelpBinding{Key: "x", Desc: "Delete"},
 			HelpBinding{Key: "Enter", Desc: "Edit"},
+		)
+	case theme.TabSquidLogs:
+		bindings = append(bindings,
+			HelpBinding{Key: "G", Desc: "Bottom"},
 		)
 	}
 

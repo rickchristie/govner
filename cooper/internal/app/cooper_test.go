@@ -343,22 +343,9 @@ func TestCooperApp_BridgeHealth(t *testing.T) {
 // TestCooperApp_UpdateSettings starts the app, calls UpdateSettings with
 // new values, and verifies the config was updated and persisted.
 func TestCooperApp_UpdateSettings(t *testing.T) {
-	skipIfNoDocker(t)
-	skipIfNoProxyImage(t)
-	docker.SetImagePrefix(testImagePrefix)
-
 	cooperDir, cfg := setupCooperDir(t)
-	t.Cleanup(func() { cleanupDocker(t) })
 
 	app := NewCooperApp(cfg, cooperDir)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := app.Start(ctx, nil); err != nil {
-		t.Fatalf("Start() failed: %v", err)
-	}
-	defer app.Stop()
 
 	// Original values from DefaultConfig.
 	if cfg.MonitorTimeoutSecs != 5 {
@@ -370,7 +357,9 @@ func TestCooperApp_UpdateSettings(t *testing.T) {
 	newBlocked := 200
 	newAllowed := 300
 	newBridgeLog := 100
-	if err := app.UpdateSettings(newTimeout, newBlocked, newAllowed, newBridgeLog); err != nil {
+	newClipboardTTL := 42
+	newClipboardMaxBytes := 512
+	if err := app.UpdateSettings(newTimeout, newBlocked, newAllowed, newBridgeLog, newClipboardTTL, newClipboardMaxBytes); err != nil {
 		t.Fatalf("UpdateSettings() failed: %v", err)
 	}
 
@@ -388,6 +377,12 @@ func TestCooperApp_UpdateSettings(t *testing.T) {
 	if got.BridgeLogLimit != newBridgeLog {
 		t.Errorf("Config().BridgeLogLimit = %d, want %d", got.BridgeLogLimit, newBridgeLog)
 	}
+	if got.ClipboardTTLSecs != newClipboardTTL {
+		t.Errorf("Config().ClipboardTTLSecs = %d, want %d", got.ClipboardTTLSecs, newClipboardTTL)
+	}
+	if got.ClipboardMaxBytes != newClipboardMaxBytes {
+		t.Errorf("Config().ClipboardMaxBytes = %d, want %d", got.ClipboardMaxBytes, newClipboardMaxBytes)
+	}
 
 	// Verify persisted config was updated.
 	cfgPath := filepath.Join(cooperDir, "config.json")
@@ -400,6 +395,31 @@ func TestCooperApp_UpdateSettings(t *testing.T) {
 	}
 	if persisted.BlockedHistoryLimit != newBlocked {
 		t.Errorf("persisted BlockedHistoryLimit = %d, want %d", persisted.BlockedHistoryLimit, newBlocked)
+	}
+	if persisted.ClipboardTTLSecs != newClipboardTTL {
+		t.Errorf("persisted ClipboardTTLSecs = %d, want %d", persisted.ClipboardTTLSecs, newClipboardTTL)
+	}
+	if persisted.ClipboardMaxBytes != newClipboardMaxBytes {
+		t.Errorf("persisted ClipboardMaxBytes = %d, want %d", persisted.ClipboardMaxBytes, newClipboardMaxBytes)
+	}
+
+	snap, err := app.ClipboardManager().Stage(clipboard.ClipboardObject{
+		Kind: clipboard.ClipboardKindText,
+		Raw:  bytes.Repeat([]byte("x"), 32),
+	}, 0)
+	if err != nil {
+		t.Fatalf("Stage() with updated max bytes should succeed: %v", err)
+	}
+	expectedExpiry := snap.CreatedAt.Add(time.Duration(newClipboardTTL) * time.Second)
+	if snap.ExpiresAt.Sub(expectedExpiry).Abs() > time.Millisecond {
+		t.Errorf("snapshot expiry = %v, want ~%v", snap.ExpiresAt, expectedExpiry)
+	}
+
+	if _, err := app.ClipboardManager().Stage(clipboard.ClipboardObject{
+		Kind: clipboard.ClipboardKindText,
+		Raw:  bytes.Repeat([]byte("x"), newClipboardMaxBytes+1),
+	}, 0); err == nil {
+		t.Fatal("expected updated clipboard max bytes to reject oversized stage")
 	}
 }
 
@@ -2534,6 +2554,72 @@ func TestCooperApp_CustomToolImage(t *testing.T) {
 	_ = cfg // cfg used by setupCooperDir
 }
 
+func TestCooperApp_CustomToolClipboardModeOffRespected(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	baseExists, _ := docker.ImageExists(docker.GetImageBase())
+	if !baseExists {
+		t.Skip("base image not found; run test-docker-build.sh first")
+	}
+
+	app := startClipboardApp(t, cfg, cooperDir)
+	defer app.Stop()
+
+	customDir := filepath.Join(cooperDir, "cli", "my-custom-off")
+	if err := os.MkdirAll(customDir, 0755); err != nil {
+		t.Fatalf("mkdir custom dir: %v", err)
+	}
+	dockerfile := fmt.Sprintf(
+		"FROM %s\nENV COOPER_CLI_TOOL=my-custom-off\nENV COOPER_CLIPBOARD_MODE=off\n",
+		docker.GetImageBase(),
+	)
+	if err := os.WriteFile(filepath.Join(customDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
+		t.Fatalf("write custom Dockerfile: %v", err)
+	}
+
+	imageName := docker.GetImageCLI("my-custom-off")
+	if err := docker.BuildImage(imageName, filepath.Join(customDir, "Dockerfile"), customDir, nil, false); err != nil {
+		t.Fatalf("BuildImage(my-custom-off) failed: %v", err)
+	}
+	t.Cleanup(func() { _ = docker.RemoveImage(imageName) })
+
+	workspaceDir := t.TempDir()
+	barrelName := docker.BarrelContainerName(workspaceDir, "my-custom-off")
+	token, err := clipboard.GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken() failed: %v", err)
+	}
+	if _, err := clipboard.WriteTokenFile(cooperDir, barrelName, token); err != nil {
+		t.Fatalf("WriteTokenFile() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = clipboard.RemoveTokenFile(cooperDir, barrelName) })
+
+	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "my-custom-off"); err != nil {
+		t.Fatalf("StartBarrel(my-custom-off) failed: %v", err)
+	}
+	t.Cleanup(func() { _ = docker.StopBarrel(barrelName) })
+	waitForContainer(t, barrelName, 15*time.Second)
+
+	out, err := barrelExec(barrelName, `printf "%s" "$COOPER_CLIPBOARD_MODE"`)
+	if err != nil {
+		t.Fatalf("read COOPER_CLIPBOARD_MODE: %v", err)
+	}
+	if strings.TrimSpace(out) != "off" {
+		t.Fatalf("COOPER_CLIPBOARD_MODE = %q, want off", strings.TrimSpace(out))
+	}
+
+	resp := clipboardGet(t, cfg.BridgePort, "/clipboard/type", token)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("custom off barrel clipboard status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
 // =====================================================================
 // Clipboard integration tests
 // =====================================================================
@@ -2573,6 +2659,20 @@ func writeTestToken(t *testing.T, cooperDir, name string) string {
 	return token
 }
 
+func registerTestBarrelSession(t *testing.T, app *CooperApp, session clipboard.BarrelSession) string {
+	t.Helper()
+	if err := app.ClipboardManager().RegisterBarrel(session); err != nil {
+		t.Fatalf("RegisterBarrel() failed: %v", err)
+	}
+	for _, s := range app.ClipboardManager().ActiveSessions() {
+		if s.ContainerName == session.ContainerName {
+			return s.Token
+		}
+	}
+	t.Fatalf("could not find token for registered barrel %s", session.ContainerName)
+	return ""
+}
+
 // clipboardGet performs a GET request to the clipboard endpoint with optional
 // bearer token and returns the response.
 func clipboardGet(t *testing.T, port int, path, token string) *http.Response {
@@ -2607,8 +2707,12 @@ func TestCooperApp_ClipboardEndpointAuth(t *testing.T) {
 	app := startClipboardApp(t, cfg, cooperDir)
 	defer app.Stop()
 
-	// Write a valid token file to the tokens directory.
-	validToken := writeTestToken(t, cooperDir, "barrel-auth-test")
+	validToken := registerTestBarrelSession(t, app, clipboard.BarrelSession{
+		ContainerName: "barrel-auth-test",
+		ToolName:      "claude",
+		ClipboardMode: "shim",
+		Eligible:      true,
+	})
 
 	// GET /clipboard/type with valid token -> 200.
 	resp := clipboardGet(t, cfg.BridgePort, "/clipboard/type", validToken)
@@ -2646,8 +2750,12 @@ func TestCooperApp_ClipboardStageAndFetch(t *testing.T) {
 	app := startClipboardApp(t, cfg, cooperDir)
 	defer app.Stop()
 
-	// Write a token file for authentication.
-	token := writeTestToken(t, cooperDir, "barrel-stage-test")
+	token := registerTestBarrelSession(t, app, clipboard.BarrelSession{
+		ContainerName: "barrel-stage-test",
+		ToolName:      "claude",
+		ClipboardMode: "shim",
+		Eligible:      true,
+	})
 
 	// Stage a clipboard object via the Manager directly.
 	// Use a minimal valid PNG (1x1 pixel) to simulate a real clipboard capture.
@@ -2762,10 +2870,8 @@ func TestCooperApp_ClipboardIneligibleBarrel(t *testing.T) {
 	}
 }
 
-// TestCooperApp_ClipboardTokenFromDisk verifies that tokens written to the
-// {cooperDir}/tokens/ directory are validated by the clipboard handler.
-// This simulates what `cooper cli` does: it writes a token file when
-// starting a barrel, and the barrel uses that token to authenticate.
+// TestCooperApp_ClipboardTokenFromDisk verifies the supported disk-token path:
+// a real running barrel with a token file mounted from {cooperDir}/tokens/.
 func TestCooperApp_ClipboardTokenFromDisk(t *testing.T) {
 	skipIfNoDocker(t)
 	skipIfNoProxyImage(t)
@@ -2774,32 +2880,44 @@ func TestCooperApp_ClipboardTokenFromDisk(t *testing.T) {
 	cooperDir, cfg := setupCooperDir(t)
 	t.Cleanup(func() { cleanupDocker(t) })
 
+	baseExists, _ := docker.ImageExists(docker.GetImageBase())
+	if !baseExists {
+		t.Skip("base image not found; run test-docker-build.sh first")
+	}
+
 	app := startClipboardApp(t, cfg, cooperDir)
 	defer app.Stop()
 
-	// Write a token file directly to {cooperDir}/tokens/barrel-test.
-	// This is what `cooper cli` does when starting a barrel in a separate
-	// process from `cooper up`.
-	token := writeTestToken(t, cooperDir, "barrel-test")
+	customDir := filepath.Join(cooperDir, "cli", "my-custom-disk")
+	if err := os.MkdirAll(customDir, 0755); err != nil {
+		t.Fatalf("mkdir custom dir: %v", err)
+	}
+	dockerfile := fmt.Sprintf("FROM %s\nENV COOPER_CLI_TOOL=my-custom-disk\n", docker.GetImageBase())
+	if err := os.WriteFile(filepath.Join(customDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
+		t.Fatalf("write custom Dockerfile: %v", err)
+	}
+
+	imageName := docker.GetImageCLI("my-custom-disk")
+	if err := docker.BuildImage(imageName, filepath.Join(customDir, "Dockerfile"), customDir, nil, false); err != nil {
+		t.Fatalf("BuildImage(my-custom-disk) failed: %v", err)
+	}
+	t.Cleanup(func() { _ = docker.RemoveImage(imageName) })
+
+	workspaceDir := t.TempDir()
+	barrelName := docker.BarrelContainerName(workspaceDir, "my-custom-disk")
+	token := writeTestToken(t, cooperDir, barrelName)
+	t.Cleanup(func() { _ = clipboard.RemoveTokenFile(cooperDir, barrelName) })
+	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "my-custom-disk"); err != nil {
+		t.Fatalf("StartBarrel(my-custom-disk) failed: %v", err)
+	}
+	t.Cleanup(func() { _ = docker.StopBarrel(barrelName) })
+	waitForContainer(t, barrelName, 15*time.Second)
 
 	// GET /clipboard/type with the disk-based token -> 200.
 	resp := clipboardGet(t, cfg.BridgePort, "/clipboard/type", token)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("disk-based token: status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-
-	// Verify the session was cached in memory after the first disk lookup.
-	sessions := app.ClipboardManager().ActiveSessions()
-	found := false
-	for _, s := range sessions {
-		if s.ContainerName == "barrel-test" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("disk-based token was not cached as an in-memory session after validation")
 	}
 }
 
@@ -2816,7 +2934,12 @@ func TestCooperApp_ClipboardTTLExpiry(t *testing.T) {
 	app := startClipboardApp(t, cfg, cooperDir)
 	defer app.Stop()
 
-	token := writeTestToken(t, cooperDir, "barrel-ttl-test")
+	token := registerTestBarrelSession(t, app, clipboard.BarrelSession{
+		ContainerName: "barrel-ttl-test",
+		ToolName:      "claude",
+		ClipboardMode: "shim",
+		Eligible:      true,
+	})
 
 	// Stage with a very short TTL (1 second).
 	pngBytes := minimalPNG()

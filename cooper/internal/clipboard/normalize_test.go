@@ -403,6 +403,21 @@ func TestNormalize_UnknownFormatFallsToExternal(t *testing.T) {
 	}
 }
 
+func TestNormalize_UsesImageMIMEHintWhenSniffingUnknown(t *testing.T) {
+	result := &CaptureResult{
+		MIME:  "image/heic",
+		Bytes: []byte("this-is-not-a-real-heic-but-should-use-the-image-mime-hint"),
+	}
+
+	_, err := Normalize(result, 0)
+	if err == nil {
+		t.Fatal("expected external conversion path to fail or succeed, got nil error")
+	}
+	if !contains(err.Error(), "external conversion") {
+		t.Fatalf("expected external conversion path, got: %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Test: detectImageFormat
 // ---------------------------------------------------------------------------

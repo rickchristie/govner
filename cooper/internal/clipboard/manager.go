@@ -23,6 +23,7 @@ import (
 //   - A separate Mutex guards the session maps to avoid lock ordering
 //     issues between snapshot reads and session lookups.
 type Manager struct {
+	policyMu sync.RWMutex
 	ttl      time.Duration
 	maxBytes int
 
@@ -60,13 +61,34 @@ func (m *Manager) SetCooperDir(dir string) {
 	m.cooperDir = dir
 }
 
+// UpdatePolicy updates the default TTL and maximum staged size used for
+// subsequent Stage calls. Zero or negative values are ignored.
+func (m *Manager) UpdatePolicy(ttl time.Duration, maxBytes int) {
+	m.policyMu.Lock()
+	defer m.policyMu.Unlock()
+
+	if ttl > 0 {
+		m.ttl = ttl
+	}
+	if maxBytes > 0 {
+		m.maxBytes = maxBytes
+	}
+}
+
+func (m *Manager) policy() (time.Duration, int) {
+	m.policyMu.RLock()
+	defer m.policyMu.RUnlock()
+	return m.ttl, m.maxBytes
+}
+
 // Stage creates a new immutable StagedSnapshot from obj and atomically
 // replaces the current snapshot. If ttl is zero the manager's default
 // TTL is used. Returns an error if the total object size exceeds
 // maxBytes.
 func (m *Manager) Stage(obj ClipboardObject, ttl time.Duration) (*StagedSnapshot, error) {
+	defaultTTL, maxBytes := m.policy()
 	if ttl == 0 {
-		ttl = m.ttl
+		ttl = defaultTTL
 	}
 
 	// Enforce size limit.
@@ -74,8 +96,8 @@ func (m *Manager) Stage(obj ClipboardObject, ttl time.Duration) (*StagedSnapshot
 	for _, v := range obj.Variants {
 		total += int64(len(v.Bytes))
 	}
-	if total > int64(m.maxBytes) {
-		return nil, fmt.Errorf("clipboard object size %d exceeds maximum %d bytes", total, m.maxBytes)
+	if total > int64(maxBytes) {
+		return nil, fmt.Errorf("clipboard object size %d exceeds maximum %d bytes", total, maxBytes)
 	}
 
 	id, err := randomHex(16)
@@ -182,24 +204,20 @@ func (m *Manager) UnregisterBarrel(containerName string) {
 // (a separate process) to authenticate without inter-process registration.
 func (m *Manager) ValidateToken(token string) (*BarrelSession, error) {
 	m.sessionMu.Lock()
-	defer m.sessionMu.Unlock()
-
-	// Fast path: in-memory session lookup.
 	if sess, ok := m.tokenToSession[token]; ok {
 		cp := *sess
+		m.sessionMu.Unlock()
 		return &cp, nil
 	}
+	cooperDir := m.cooperDir
+	m.sessionMu.Unlock()
 
 	// Slow path: scan token files on disk. This handles barrels started by
 	// `cooper cli` which writes token files but can't register in-memory
 	// with the `cooper up` process.
-	if m.cooperDir != "" {
-		if sess := m.validateTokenFromDisk(token); sess != nil {
-			// Cache the discovered session so subsequent requests are fast.
-			m.tokenToSession[token] = sess
-			m.nameToToken[sess.ContainerName] = token
-			cp := *sess
-			return &cp, nil
+	if cooperDir != "" {
+		if sess := m.validateTokenFromDisk(cooperDir, token); sess != nil {
+			return sess, nil
 		}
 	}
 
@@ -208,8 +226,8 @@ func (m *Manager) ValidateToken(token string) (*BarrelSession, error) {
 
 // validateTokenFromDisk scans the tokens directory for a file containing
 // the given token. Returns a BarrelSession if found, nil otherwise.
-func (m *Manager) validateTokenFromDisk(token string) *BarrelSession {
-	tokensDir := filepath.Join(m.cooperDir, "tokens")
+func (m *Manager) validateTokenFromDisk(cooperDir, token string) *BarrelSession {
+	tokensDir := filepath.Join(cooperDir, "tokens")
 	entries, err := os.ReadDir(tokensDir)
 	if err != nil {
 		return nil
@@ -225,13 +243,13 @@ func (m *Manager) validateTokenFromDisk(token string) *BarrelSession {
 		}
 		fileToken := strings.TrimSpace(string(data))
 		if fileToken == token {
-			return &BarrelSession{
-				Token:         token,
-				ContainerName: entry.Name(),
-				ToolName:      "", // Unknown from file alone.
-				ClipboardMode: "auto",
-				Eligible:      true, // File-based barrels are eligible by default.
+			sess, err := inspectContainerSession(entry.Name())
+			if err != nil || sess == nil {
+				continue
 			}
+			sess.Token = token
+			sess.ContainerName = entry.Name()
+			return sess
 		}
 	}
 	return nil
