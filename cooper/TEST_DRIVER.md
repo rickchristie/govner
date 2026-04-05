@@ -60,6 +60,9 @@ cd cooper
 GOCACHE=/tmp/go-build-cache go run ./cmd/cooper-test-driver --scenario clipboard-smoke
 ```
 
+When you use the default shared prefix, the CLI rebuilds the shared test
+images first and relies on Docker's build cache on subsequent runs.
+
 Useful flags:
 
 - `--prefix`: isolate Docker resources under a custom prefix
@@ -73,7 +76,7 @@ Example:
 cd cooper
 GOCACHE=/tmp/go-build-cache go run ./cmd/cooper-test-driver \
   --scenario clipboard-smoke \
-  --prefix test-mirror- \
+  --prefix cooper-gotest- \
   --keep
 ```
 
@@ -98,6 +101,11 @@ if err := testdriver.RunClipboardSmoke(ctx, driver); err != nil {
 	t.Fatal(err)
 }
 ```
+
+Plain `go test ./...` inside `cooper/` now bootstraps the shared Docker-backed
+test images automatically for the default test packages. Those images use the
+non-conflicting `cooper-gotest-` prefix so they do not collide with the
+shell-based `test-docker-build.sh` or `test-e2e.sh` flows.
 
 ## Current Built-In Scenario
 

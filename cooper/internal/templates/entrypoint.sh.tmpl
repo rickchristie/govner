@@ -136,7 +136,7 @@ SOCAT_SUPERVISORS=()
 run_socat() {
     local port=$1
     local name=$2
-    local dest_host=${3:-cooper-proxy}
+    local dest_host=${3:-${COOPER_PROXY_HOST:-cooper-proxy}}
     local dest_port=${4:-$port}
 
     (
@@ -202,7 +202,7 @@ start_socat_from_config() {
 
         if [ "$is_range" = "true" ] && [ "$range_end" -gt "$container_port" ]; then
             for port in $(seq "$container_port" "$range_end"); do
-                run_socat "$port" "${desc}-${port}" cooper-proxy "$port"
+                run_socat "$port" "${desc}-${port}" "${COOPER_PROXY_HOST:-cooper-proxy}" "$port"
             done
         else
             run_socat "$container_port" "$desc"

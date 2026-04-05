@@ -53,7 +53,7 @@ func AllContainerStats() ([]ContainerStat, error) {
 		return nil, fmt.Errorf("check proxy status: %w", err)
 	}
 	if proxyRunning {
-		s, err := ContainerStats(ContainerProxy)
+		s, err := ContainerStats(ProxyContainerName())
 		if err != nil {
 			return nil, fmt.Errorf("proxy stats: %w", err)
 		}

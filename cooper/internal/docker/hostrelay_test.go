@@ -88,7 +88,15 @@ func TestHostRelay_TearsDownOnServiceStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start loopback server: %v", err)
 	}
-	go func() { for { c, err := loopbackLn.Accept(); if err != nil { return }; c.Close() } }()
+	go func() {
+		for {
+			c, err := loopbackLn.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
 
 	logger := log.New(io.Discard, "", 0)
 	rules := []config.PortForwardRule{{ContainerPort: port, HostPort: port, Description: "test"}}

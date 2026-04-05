@@ -23,6 +23,13 @@ warn() { echo -e "  ${YELLOW}WARN${NC}  $1"; WARN=$((WARN + 1)); }
 info() { echo -e "  ${CYAN}INFO${NC}  $1"; }
 section() { echo -e "\n${CYAN}=== $1 ===${NC}"; }
 
+PROXY_HOST="${COOPER_PROXY_HOST:-cooper-proxy}"
+PROXY_PORT="$(printf '%s' "${HTTP_PROXY:-}" | sed -nE "s#^https?://${PROXY_HOST}:([0-9]+).*\$#\\1#p")"
+if [ -z "$PROXY_PORT" ]; then
+    PROXY_PORT="3128"
+fi
+INTERNAL_NETWORK="${COOPER_INTERNAL_NETWORK:-cooper-internal}"
+
 # ============================================================================
 section "Environment"
 # ============================================================================
@@ -35,7 +42,7 @@ if [ -n "${HTTP_PROXY:-}" ]; then
     pass "HTTP_PROXY set: ${HTTP_PROXY}"
 else
     fail "HTTP_PROXY not set — all traffic will bypass proxy"
-    info "  Expected: HTTP_PROXY=http://cooper-proxy:3128"
+    info "  Expected: HTTP_PROXY=http://${PROXY_HOST}:${PROXY_PORT}"
 fi
 
 if [ -n "${HTTPS_PROXY:-}" ]; then
@@ -52,13 +59,13 @@ fi
 section "DNS Resolution"
 # ============================================================================
 
-if getent hosts cooper-proxy >/dev/null 2>&1; then
-    proxy_ip=$(getent hosts cooper-proxy | awk '{print $1}')
-    pass "cooper-proxy resolves to ${proxy_ip}"
+if getent hosts "${PROXY_HOST}" >/dev/null 2>&1; then
+    proxy_ip=$(getent hosts "${PROXY_HOST}" | awk '{print $1}')
+    pass "${PROXY_HOST} resolves to ${proxy_ip}"
 else
-    fail "Cannot resolve 'cooper-proxy' — Docker DNS not working"
-    info "  This container must be on the cooper-internal network."
-    info "  Check: docker network inspect cooper-internal"
+    fail "Cannot resolve '${PROXY_HOST}' — Docker DNS not working"
+    info "  This container must be on the ${INTERNAL_NETWORK} network."
+    info "  Check: docker network inspect ${INTERNAL_NETWORK}"
 fi
 
 # ============================================================================
@@ -66,17 +73,17 @@ section "Proxy Connectivity"
 # ============================================================================
 
 # Test 1: TCP connection to proxy port
-if timeout 5 bash -c "echo > /dev/tcp/cooper-proxy/3128" 2>/dev/null; then
-    pass "TCP connection to cooper-proxy:3128"
+if timeout 5 bash -c "echo > /dev/tcp/${PROXY_HOST}/${PROXY_PORT}" 2>/dev/null; then
+    pass "TCP connection to ${PROXY_HOST}:${PROXY_PORT}"
 else
-    fail "Cannot connect to cooper-proxy:3128"
-    info "  Is the proxy container running? Check: docker ps | grep cooper-proxy"
-    info "  Is it on the internal network? Check: docker network inspect cooper-internal"
+    fail "Cannot connect to ${PROXY_HOST}:${PROXY_PORT}"
+    info "  Is the proxy container running? Check: docker ps | grep ${PROXY_HOST}"
+    info "  Is it on the internal network? Check: docker network inspect ${INTERNAL_NETWORK}"
 fi
 
 # Test 2: HTTP CONNECT through proxy (non-TLS, just protocol check)
 proxy_response=$(curl -s -o /dev/null -w "%{http_code}" \
-    -x "${HTTP_PROXY:-http://cooper-proxy:3128}" \
+    -x "${HTTP_PROXY:-http://${PROXY_HOST}:${PROXY_PORT}}" \
     --connect-timeout 5 \
     http://example.com 2>&1) || true
 if [ "$proxy_response" = "403" ] || [ "$proxy_response" = "407" ]; then
@@ -209,7 +216,7 @@ if [ "$direct_exit" = "7" ] || [ "$direct_exit" = "28" ] || [ "$direct_result" =
 elif echo "$direct_result" | grep -qE "^[23]"; then
     fail "Direct internet access SUCCEEDED (HTTP ${direct_result}) — NOT on --internal network!"
     info "  This container can bypass the proxy entirely."
-    info "  It must be on the cooper-internal Docker network (--internal flag)."
+    info "  It must be on the ${INTERNAL_NETWORK} Docker network (--internal flag)."
 else
     pass "Direct access failed (HTTP ${direct_result}, exit ${direct_exit}) — likely isolated"
 fi

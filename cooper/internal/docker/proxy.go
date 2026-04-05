@@ -29,7 +29,8 @@ func StartProxy(cfg *config.Config, cooperDir string) error {
 	}
 
 	// Remove any existing proxy container first.
-	_ = exec.Command("docker", "rm", "-f", ContainerProxy).Run()
+	proxyName := ProxyContainerName()
+	_ = exec.Command("docker", "rm", "-f", proxyName).Run()
 
 	squidConf := filepath.Join(cooperDir, "proxy", "squid.conf")
 	caCert := filepath.Join(cooperDir, "ca", "cooper-ca.pem")
@@ -52,8 +53,8 @@ func StartProxy(cfg *config.Config, cooperDir string) error {
 
 	args := []string{
 		"run", "-d",
-		"--name", ContainerProxy,
-		"--network", NetworkExternal,
+		"--name", proxyName,
+		"--network", ExternalNetworkName(),
 		"--add-host=host.docker.internal:host-gateway",
 		"--restart", "unless-stopped",
 
@@ -80,14 +81,14 @@ func StartProxy(cfg *config.Config, cooperDir string) error {
 	cmd := exec.Command("docker", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("docker run %s failed: %w\n%s", ContainerProxy, err, string(output))
+		return fmt.Errorf("docker run %s failed: %w\n%s", proxyName, err, string(output))
 	}
 
 	// Connect to internal network so barrel containers can reach us
 	// via Docker DNS as "cooper-proxy".
-	if err := ConnectContainer(ContainerProxy, NetworkInternal); err != nil {
+	if err := ConnectContainer(proxyName, InternalNetworkName()); err != nil {
 		// If this fails, stop the container to avoid a half-configured proxy.
-		_ = exec.Command("docker", "rm", "-f", ContainerProxy).Run()
+		_ = exec.Command("docker", "rm", "-f", proxyName).Run()
 		return fmt.Errorf("connect proxy to internal network: %w", err)
 	}
 
@@ -96,21 +97,22 @@ func StartProxy(cfg *config.Config, cooperDir string) error {
 
 // StopProxy stops and removes the proxy container.
 func StopProxy() error {
-	cmd := exec.Command("docker", "stop", ContainerProxy)
+	proxyName := ProxyContainerName()
+	cmd := exec.Command("docker", "stop", proxyName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// If already stopped or doesn't exist, that's fine.
 		if !strings.Contains(string(output), "No such container") &&
 			!strings.Contains(string(output), "is not running") {
-			return fmt.Errorf("docker stop %s failed: %w\n%s", ContainerProxy, err, string(output))
+			return fmt.Errorf("docker stop %s failed: %w\n%s", proxyName, err, string(output))
 		}
 	}
 
-	cmd = exec.Command("docker", "rm", "-f", ContainerProxy)
+	cmd = exec.Command("docker", "rm", "-f", proxyName)
 	output, err = cmd.CombinedOutput()
 	if err != nil {
 		if !strings.Contains(string(output), "No such container") {
-			return fmt.Errorf("docker rm %s failed: %w\n%s", ContainerProxy, err, string(output))
+			return fmt.Errorf("docker rm %s failed: %w\n%s", proxyName, err, string(output))
 		}
 	}
 
@@ -119,32 +121,34 @@ func StopProxy() error {
 
 // IsProxyRunning checks whether the proxy container is currently running.
 func IsProxyRunning() (bool, error) {
+	proxyName := ProxyContainerName()
 	cmd := exec.Command("docker", "ps",
-		"--filter", fmt.Sprintf("name=^/%s$", ContainerProxy),
+		"--filter", fmt.Sprintf("name=^/%s$", proxyName),
 		"--format", "{{.Names}}",
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("docker ps failed: %w\n%s", err, string(output))
 	}
-	return strings.TrimSpace(string(output)) == ContainerProxy, nil
+	return strings.TrimSpace(string(output)) == proxyName, nil
 }
 
 // ProxyExec executes a command inside the running proxy container and
 // returns its combined stdout/stderr output.
 func ProxyExec(cmd string) (string, error) {
+	proxyName := ProxyContainerName()
 	// Split the command string into args for exec.
 	parts := strings.Fields(cmd)
 	if len(parts) == 0 {
 		return "", fmt.Errorf("empty command")
 	}
 
-	args := append([]string{"exec", ContainerProxy}, parts...)
+	args := append([]string{"exec", proxyName}, parts...)
 	c := exec.Command("docker", args...)
 	output, err := c.CombinedOutput()
 	if err != nil {
 		return string(output), fmt.Errorf("docker exec %s %q failed: %w\n%s",
-			ContainerProxy, cmd, err, string(output))
+			proxyName, cmd, err, string(output))
 	}
 	return strings.TrimSpace(string(output)), nil
 }

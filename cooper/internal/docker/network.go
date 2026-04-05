@@ -22,10 +22,10 @@ const (
 // cooper-external is a regular bridge network (has internet access).
 // cooper-internal is created with --internal (no gateway, no internet).
 func EnsureNetworks() error {
-	if err := ensureNetwork(NetworkExternal, false); err != nil {
+	if err := ensureNetwork(ExternalNetworkName(), false); err != nil {
 		return fmt.Errorf("ensure external network: %w", err)
 	}
-	if err := ensureNetwork(NetworkInternal, true); err != nil {
+	if err := ensureNetwork(InternalNetworkName(), true); err != nil {
 		return fmt.Errorf("ensure internal network: %w", err)
 	}
 	return nil
@@ -51,6 +51,9 @@ func ensureNetwork(name string, internal bool) error {
 	cmd := exec.Command("docker", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if strings.Contains(string(output), "already exists") {
+			return nil
+		}
 		return fmt.Errorf("docker network create %s failed: %w\n%s", name, err, string(output))
 	}
 	return nil
@@ -60,10 +63,14 @@ func ensureNetwork(name string, internal bool) error {
 // Errors from individual removals are collected and returned together.
 func RemoveNetworks() error {
 	var errs []string
-	for _, name := range []string{NetworkInternal, NetworkExternal} {
+	for _, name := range []string{InternalNetworkName(), ExternalNetworkName()} {
 		cmd := exec.Command("docker", "network", "rm", name)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
+			if strings.Contains(string(output), "No such network") ||
+				strings.Contains(string(output), "not found") {
+				continue
+			}
 			errs = append(errs, fmt.Sprintf("docker network rm %s: %v\n%s", name, err, string(output)))
 		}
 	}

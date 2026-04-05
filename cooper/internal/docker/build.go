@@ -10,8 +10,9 @@ import (
 )
 
 var (
-	// imagePrefix is prepended to all Docker image/container names.
-	// Set via SetImagePrefix() for testing with isolated names.
+	// imagePrefix is prepended to all Docker image names.
+	// Runtime container/network names are controlled separately via
+	// SetRuntimeNamespace.
 	imagePrefix = ""
 
 	// Default image names (with prefix applied via functions).
@@ -21,7 +22,7 @@ var (
 
 // SetImagePrefix sets a prefix for all Docker image names.
 // Used for testing to avoid colliding with real Cooper images.
-// Example: SetImagePrefix("test-mirror-") → images become "test-mirror-cooper-proxy", etc.
+// Example: SetImagePrefix("cooper-gotest-") → images become "cooper-gotest-cooper-proxy", etc.
 // Note: container names are NOT prefixed (they're used for Docker DNS).
 func SetImagePrefix(prefix string) {
 	imagePrefix = prefix

@@ -1,5 +1,3 @@
-//go:build integration
-
 package docker
 
 import (
@@ -9,19 +7,22 @@ import (
 )
 
 // These tests require Docker and will create/remove real Docker networks.
-// Run with: go test -tags=integration ./internal/docker/...
+// They run in the default `go test` flow.
 
 func removeNetworkIfExists(name string) {
 	_ = exec.Command("docker", "network", "rm", name).Run()
 }
 
 func TestEnsureNetworks(t *testing.T) {
+	externalName := ExternalNetworkName()
+	internalName := InternalNetworkName()
+
 	// Clean up before and after.
-	removeNetworkIfExists(NetworkExternal)
-	removeNetworkIfExists(NetworkInternal)
+	removeNetworkIfExists(externalName)
+	removeNetworkIfExists(internalName)
 	t.Cleanup(func() {
-		removeNetworkIfExists(NetworkExternal)
-		removeNetworkIfExists(NetworkInternal)
+		removeNetworkIfExists(externalName)
+		removeNetworkIfExists(internalName)
 	})
 
 	if err := EnsureNetworks(); err != nil {
@@ -29,7 +30,7 @@ func TestEnsureNetworks(t *testing.T) {
 	}
 
 	// Verify both networks exist.
-	for _, name := range []string{NetworkExternal, NetworkInternal} {
+	for _, name := range []string{externalName, internalName} {
 		exists, err := NetworkExists(name)
 		if err != nil {
 			t.Fatalf("NetworkExists(%q) error: %v", name, err)
@@ -56,40 +57,42 @@ func TestNetworkExists(t *testing.T) {
 	}
 
 	// Create a network and verify it exists.
-	removeNetworkIfExists(NetworkExternal)
+	externalName := ExternalNetworkName()
+	removeNetworkIfExists(externalName)
 	t.Cleanup(func() {
-		removeNetworkIfExists(NetworkExternal)
+		removeNetworkIfExists(externalName)
 	})
 
-	cmd := exec.Command("docker", "network", "create", NetworkExternal)
+	cmd := exec.Command("docker", "network", "create", externalName)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("failed to create test network: %v\n%s", err, string(output))
 	}
 
-	exists, err = NetworkExists(NetworkExternal)
+	exists, err = NetworkExists(externalName)
 	if err != nil {
-		t.Fatalf("NetworkExists(%q) error: %v", NetworkExternal, err)
+		t.Fatalf("NetworkExists(%q) error: %v", externalName, err)
 	}
 	if !exists {
-		t.Errorf("NetworkExists(%q) = false, want true", NetworkExternal)
+		t.Errorf("NetworkExists(%q) = false, want true", externalName)
 	}
 }
 
 func TestGetGatewayIP(t *testing.T) {
 	// Create the external network (regular bridge, should have a gateway).
-	removeNetworkIfExists(NetworkExternal)
+	externalName := ExternalNetworkName()
+	removeNetworkIfExists(externalName)
 	t.Cleanup(func() {
-		removeNetworkIfExists(NetworkExternal)
+		removeNetworkIfExists(externalName)
 	})
 
-	cmd := exec.Command("docker", "network", "create", NetworkExternal)
+	cmd := exec.Command("docker", "network", "create", externalName)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("failed to create test network: %v\n%s", err, string(output))
 	}
 
-	ip, err := GetGatewayIP(NetworkExternal)
+	ip, err := GetGatewayIP(externalName)
 	if err != nil {
-		t.Fatalf("GetGatewayIP(%q) error: %v", NetworkExternal, err)
+		t.Fatalf("GetGatewayIP(%q) error: %v", externalName, err)
 	}
 	if ip == "" {
 		t.Fatal("GetGatewayIP() returned empty string")
@@ -100,32 +103,39 @@ func TestGetGatewayIP(t *testing.T) {
 	}
 }
 
-func TestGetGatewayIP_InternalHasNoGateway(t *testing.T) {
-	// The --internal network should have no gateway.
-	removeNetworkIfExists(NetworkInternal)
+func TestInternalNetworkIsMarkedInternal(t *testing.T) {
+	internalName := InternalNetworkName()
+	removeNetworkIfExists(internalName)
 	t.Cleanup(func() {
-		removeNetworkIfExists(NetworkInternal)
+		removeNetworkIfExists(internalName)
 	})
 
-	cmd := exec.Command("docker", "network", "create", "--internal", NetworkInternal)
+	cmd := exec.Command("docker", "network", "create", "--internal", internalName)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("failed to create test network: %v\n%s", err, string(output))
 	}
 
-	_, err := GetGatewayIP(NetworkInternal)
-	if err == nil {
-		t.Error("GetGatewayIP() on --internal network should return error (no gateway), got nil")
+	cmd = exec.Command("docker", "network", "inspect", "--format", "{{.Internal}}", internalName)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to inspect internal flag: %v\n%s", err, string(output))
+	}
+	if strings.TrimSpace(string(output)) != "true" {
+		t.Fatalf("network %s internal flag = %q, want true", internalName, strings.TrimSpace(string(output)))
 	}
 }
 
 func TestRemoveNetworks(t *testing.T) {
+	externalName := ExternalNetworkName()
+	internalName := InternalNetworkName()
+
 	// Create both networks first.
-	removeNetworkIfExists(NetworkExternal)
-	removeNetworkIfExists(NetworkInternal)
+	removeNetworkIfExists(externalName)
+	removeNetworkIfExists(internalName)
 
 	for _, args := range [][]string{
-		{"network", "create", NetworkExternal},
-		{"network", "create", "--internal", NetworkInternal},
+		{"network", "create", externalName},
+		{"network", "create", "--internal", internalName},
 	} {
 		cmd := exec.Command("docker", args...)
 		if output, err := cmd.CombinedOutput(); err != nil {
@@ -138,7 +148,7 @@ func TestRemoveNetworks(t *testing.T) {
 	}
 
 	// Verify both are gone.
-	for _, name := range []string{NetworkExternal, NetworkInternal} {
+	for _, name := range []string{externalName, internalName} {
 		exists, err := NetworkExists(name)
 		if err != nil {
 			t.Fatalf("NetworkExists(%q) error: %v", name, err)

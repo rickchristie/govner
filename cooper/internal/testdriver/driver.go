@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/app"
@@ -19,13 +18,12 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/templates"
+	"github.com/rickchristie/govner/cooper/internal/testdocker"
 )
 
 // DefaultImagePrefix keeps driver-created resources isolated from a user's
 // normal Cooper containers and images.
-const DefaultImagePrefix = "test-mirror-"
-
-const driverLockPath = "/tmp/cooper-testdriver.lock"
+const DefaultImagePrefix = testdocker.ImagePrefix
 
 // Options control how the runtime driver prepares and starts Cooper.
 type Options struct {
@@ -51,7 +49,7 @@ type Driver struct {
 	app           *app.CooperApp
 	imagePrefix   string
 	keepArtifacts bool
-	lockFile      *os.File
+	lock          *testdocker.Lock
 
 	started     bool
 	builtImages []string
@@ -67,14 +65,14 @@ func New(opts Options) (*Driver, error) {
 	}
 	docker.SetImagePrefix(prefix)
 
-	lockFile, err := acquireDriverLock()
+	lock, err := testdocker.AcquireLock()
 	if err != nil {
 		return nil, err
 	}
 
 	cooperDir, cfg, err := setupCooperDir(opts.ConfigMutator)
 	if err != nil {
-		releaseDriverLock(lockFile)
+		lock.Release()
 		return nil, err
 	}
 
@@ -89,7 +87,7 @@ func New(opts Options) (*Driver, error) {
 		app:           appInstance,
 		imagePrefix:   prefix,
 		keepArtifacts: opts.KeepArtifactsOnClose,
-		lockFile:      lockFile,
+		lock:          lock,
 	}, nil
 }
 
@@ -158,10 +156,12 @@ func (d *Driver) Close() error {
 		}
 	}
 
-	if err := releaseDriverLock(d.lockFile); err != nil {
-		errs = append(errs, fmt.Sprintf("release driver lock: %v", err))
+	if d.lock != nil {
+		if err := d.lock.Release(); err != nil {
+			errs = append(errs, fmt.Sprintf("release driver lock: %v", err))
+		}
 	}
-	d.lockFile = nil
+	d.lock = nil
 
 	if len(errs) > 0 {
 		return fmt.Errorf("%s", strings.Join(errs, "; "))
@@ -182,7 +182,7 @@ func (d *Driver) RequireProxyImage() error {
 		return fmt.Errorf("check proxy image %s: %w", docker.GetImageProxy(), err)
 	}
 	if !exists {
-		return fmt.Errorf("proxy image %s not found; run test-docker-build.sh first", docker.GetImageProxy())
+		return fmt.Errorf("proxy image %s not found; build shared Cooper test images first", docker.GetImageProxy())
 	}
 	return nil
 }
@@ -194,7 +194,7 @@ func (d *Driver) RequireBaseImage() error {
 		return fmt.Errorf("check base image %s: %w", docker.GetImageBase(), err)
 	}
 	if !exists {
-		return fmt.Errorf("base image %s not found; run test-docker-build.sh first", docker.GetImageBase())
+		return fmt.Errorf("base image %s not found; build shared Cooper test images first", docker.GetImageBase())
 	}
 	return nil
 }
@@ -357,6 +357,9 @@ func setupCooperDir(configMutator func(*config.Config)) (string, *config.Config,
 	}
 
 	cfg := config.DefaultConfig()
+	if err := testdocker.AssignDynamicPorts(cfg); err != nil {
+		return "", nil, fmt.Errorf("assign dynamic test ports: %w", err)
+	}
 	if configMutator != nil {
 		configMutator(cfg)
 	}
@@ -410,9 +413,7 @@ func setupCooperDir(configMutator func(*config.Config)) (string, *config.Config,
 }
 
 func cleanupDocker() {
-	_ = exec.Command("docker", "rm", "-f", docker.ContainerProxy).Run()
-	_ = exec.Command("docker", "network", "rm", docker.NetworkInternal).Run()
-	_ = exec.Command("docker", "network", "rm", docker.NetworkExternal).Run()
+	_ = docker.CleanupRuntime()
 }
 
 func fixCooperDirPermissions(cooperDir string) {
@@ -434,29 +435,6 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
-}
-
-func acquireDriverLock() (*os.File, error) {
-	lockFile, err := os.OpenFile(driverLockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open driver lock %s: %w", driverLockPath, err)
-	}
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		lockFile.Close()
-		return nil, fmt.Errorf("acquire driver lock %s: %w", driverLockPath, err)
-	}
-	return lockFile, nil
-}
-
-func releaseDriverLock(lockFile *os.File) error {
-	if lockFile == nil {
-		return nil
-	}
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
-		lockFile.Close()
-		return err
-	}
-	return lockFile.Close()
 }
 
 // DecodeJSON unmarshals a bridge response body into a map for quick scenario

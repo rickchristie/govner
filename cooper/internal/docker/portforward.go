@@ -73,7 +73,7 @@ func LoadPortForwardConfig(cooperDir string) (*PortForwardConfig, error) {
 // running containers to reload their socat processes via SIGHUP.
 //
 //  1. Write updated socat-rules.json
-//  2. Signal proxy container: docker exec cooper-proxy kill -HUP 1
+//  2. Signal proxy container: docker exec <runtime-proxy> kill -HUP 1
 //  3. Signal each running barrel: docker exec barrel-X kill -HUP 1
 //
 // Returns an error describing any signal failures. The config file is always
@@ -90,7 +90,7 @@ func ReloadSocat(cooperDir string, bridgePort int, rules []config.PortForwardRul
 	// 2. Signal proxy container.
 	running, err := IsProxyRunning()
 	if err == nil && running {
-		cmd := exec.Command("docker", "exec", ContainerProxy, "kill", "-HUP", "1")
+		cmd := exec.Command("docker", "exec", ProxyContainerName(), "kill", "-HUP", "1")
 		if output, execErr := cmd.CombinedOutput(); execErr != nil {
 			errs = append(errs, fmt.Sprintf("signal proxy: %v (%s)", execErr, strings.TrimSpace(string(output))))
 		}
@@ -103,7 +103,7 @@ func ReloadSocat(cooperDir string, bridgePort int, rules []config.PortForwardRul
 		errs = append(errs, fmt.Sprintf("list barrels: %v", err))
 	} else {
 		for _, b := range barrels {
-			if strings.HasPrefix(b.Name, "barrel-") {
+			if strings.HasPrefix(b.Name, BarrelNamePrefix()) {
 				cmd := exec.Command("docker", "exec", b.Name, "kill", "-HUP", "1")
 				if execErr := cmd.Run(); execErr != nil {
 					errs = append(errs, fmt.Sprintf("signal %s: %v", b.Name, execErr))

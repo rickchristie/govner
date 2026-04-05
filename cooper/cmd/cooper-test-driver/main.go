@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/rickchristie/govner/cooper/internal/testdocker"
 	"github.com/rickchristie/govner/cooper/internal/testdriver"
 )
 
@@ -25,6 +26,13 @@ func main() {
 	flag.BoolVar(&disableHostClipboard, "disable-host-clipboard", true, "Disable host clipboard prerequisite checks")
 	flag.DurationVar(&timeout, "timeout", 2*time.Minute, "Overall scenario timeout")
 	flag.Parse()
+
+	if imagePrefix == testdriver.DefaultImagePrefix {
+		if err := testdocker.EnsureTestImages(); err != nil {
+			fmt.Fprintf(os.Stderr, "build shared test images: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	driver, err := testdriver.New(testdriver.Options{
 		ImagePrefix:          imagePrefix,

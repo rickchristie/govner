@@ -131,7 +131,7 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 	// host.docker.internal resolves to the default bridge gateway, which may
 	// differ from the cooper-external gateway.
 	var gatewayIPs []string
-	if ip, err := docker.GetGatewayIP(docker.NetworkExternal); err == nil {
+	if ip, err := docker.GetGatewayIP(docker.ExternalNetworkName()); err == nil {
 		gatewayIPs = append(gatewayIPs, ip)
 	}
 	if ip, err := docker.GetGatewayIP("bridge"); err == nil {

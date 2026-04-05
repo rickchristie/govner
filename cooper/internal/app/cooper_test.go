@@ -1,5 +1,3 @@
-//go:build integration
-
 package app
 
 import (
@@ -22,32 +20,33 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/names"
+	"github.com/rickchristie/govner/cooper/internal/testdocker"
 
 	"github.com/rickchristie/govner/cooper/internal/templates"
 )
 
 // testImagePrefix isolates test images from production Cooper images.
-const testImagePrefix = "test-mirror-"
+const testImagePrefix = testdocker.ImagePrefix
 
-// skipIfNoDocker skips the test if the docker CLI is not available.
+// skipIfNoDocker verifies the docker CLI is available for default test runs.
 func skipIfNoDocker(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker not available")
+		t.Fatalf("docker not available: %v", err)
 	}
 }
 
-// skipIfNoProxyImage skips the test if the proxy image has not been built.
+// skipIfNoProxyImage verifies the shared proxy image exists for default test runs.
 func skipIfNoProxyImage(t *testing.T) {
 	t.Helper()
 	docker.SetImagePrefix(testImagePrefix)
 	imageName := docker.GetImageProxy()
 	exists, err := docker.ImageExists(imageName)
 	if err != nil {
-		t.Skipf("cannot check image %s: %v", imageName, err)
+		t.Fatalf("cannot check image %s: %v", imageName, err)
 	}
 	if !exists {
-		t.Skipf("proxy image %s not found; run test-docker-build.sh first", imageName)
+		t.Fatalf("proxy image %s not found after test bootstrap", imageName)
 	}
 }
 
@@ -60,6 +59,9 @@ func setupCooperDir(t *testing.T) (string, *config.Config) {
 	cooperDir := t.TempDir()
 
 	cfg := config.DefaultConfig()
+	if err := testdocker.AssignDynamicPorts(cfg); err != nil {
+		t.Fatalf("assign dynamic test ports: %v", err)
+	}
 
 	// Write config.json.
 	cfgPath := filepath.Join(cooperDir, "config.json")
@@ -141,12 +143,7 @@ func copyFileForTest(t *testing.T, src, dst string) {
 // cleanupDocker removes containers and networks created during tests.
 func cleanupDocker(t *testing.T) {
 	t.Helper()
-	// Stop and remove the proxy container.
-	_ = exec.Command("docker", "rm", "-f", docker.ContainerProxy).Run()
-
-	// Remove networks (ignore errors if they don't exist or have endpoints).
-	_ = exec.Command("docker", "network", "rm", docker.NetworkInternal).Run()
-	_ = exec.Command("docker", "network", "rm", docker.NetworkExternal).Run()
+	_ = docker.CleanupRuntime()
 }
 
 // fixCooperDirPermissions makes all files in cooperDir writable by the current
@@ -1037,7 +1034,7 @@ func TestCooperApp_ContainerStats(t *testing.T) {
 	found := false
 	for _, s := range stats {
 		t.Logf("container stat: name=%s cpu=%s mem=%s", s.Name, s.CPUPercent, s.MemUsage)
-		if s.Name == docker.ContainerProxy {
+		if s.Name == docker.ProxyContainerName() {
 			found = true
 		}
 	}
@@ -1050,17 +1047,19 @@ func TestCooperApp_ContainerStats(t *testing.T) {
 // Barrel integration tests
 // =====================================================================
 //
-// These tests require BOTH the proxy AND barrel images to be built.
-// Run test-docker-build.sh first to build them.
+// These tests require BOTH the shared proxy and barrel images to be built.
 
-// skipIfNoBarrelImage skips the test if the barrel image has not been built.
+// skipIfNoBarrelImage verifies the shared barrel image exists for default test runs.
 func skipIfNoBarrelImage(t *testing.T) {
 	t.Helper()
 	docker.SetImagePrefix(testImagePrefix)
 	imageName := docker.GetImageCLI("claude")
 	exists, err := docker.ImageExists(imageName)
-	if err != nil || !exists {
-		t.Skipf("barrel image %s not found; run test-docker-build.sh first", imageName)
+	if err != nil {
+		t.Fatalf("cannot check barrel image %s: %v", imageName, err)
+	}
+	if !exists {
+		t.Fatalf("barrel image %s not found after test bootstrap", imageName)
 	}
 }
 
@@ -1106,7 +1105,7 @@ func startAppAndBarrel(t *testing.T, cfg *config.Config, cooperDir string) (*Coo
 	// Wait for proxy to be reachable from inside the barrel.
 	// The barrel's entrypoint needs time to start, and Docker DNS
 	// needs time to propagate the "cooper-proxy" name.
-	waitForProxyFromBarrel(t, barrelName, 30*time.Second)
+	waitForProxyFromBarrel(t, barrelName, cfg.ProxyPort, 30*time.Second)
 
 	return app, barrelName
 }
@@ -1130,16 +1129,17 @@ func waitForContainer(t *testing.T, name string, timeout time.Duration) {
 // waitForProxyFromBarrel polls until the proxy is reachable from inside the
 // barrel container. This waits for Docker DNS propagation and the barrel's
 // entrypoint to finish initializing.
-func waitForProxyFromBarrel(t *testing.T, barrelName string, timeout time.Duration) {
+func waitForProxyFromBarrel(t *testing.T, barrelName string, proxyPort int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	attempt := 0
 	for time.Now().Before(deadline) {
 		attempt++
+		proxyAddr := fmt.Sprintf("http://%s:%d", docker.ProxyHost(), proxyPort)
 		// Use a separate curl call that only outputs the HTTP status code.
 		// Avoid `|| echo 000` which concatenates with curl's output on failure.
 		out, _ := exec.Command("docker", "exec", barrelName, "bash", "-c",
-			"curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 -x http://cooper-proxy:3128 http://example.com 2>/dev/null").CombinedOutput()
+			fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --connect-timeout 3 -x %s http://example.com 2>/dev/null", proxyAddr)).CombinedOutput()
 		status := strings.TrimSpace(string(out))
 
 		// A valid HTTP status is exactly 3 digits and not "000".
@@ -1151,9 +1151,9 @@ func waitForProxyFromBarrel(t *testing.T, barrelName string, timeout time.Durati
 		// Log diagnostics on first few attempts.
 		if attempt <= 3 {
 			// Check if proxy container is running.
-			proxyState, _ := exec.Command("docker", "inspect", "--format", "{{.State.Status}}", "cooper-proxy").CombinedOutput()
+			proxyState, _ := exec.Command("docker", "inspect", "--format", "{{.State.Status}}", docker.ProxyContainerName()).CombinedOutput()
 			// Check if both are on the same network.
-			netMembers, _ := exec.Command("docker", "network", "inspect", "cooper-internal",
+			netMembers, _ := exec.Command("docker", "network", "inspect", docker.InternalNetworkName(),
 				"--format", "{{range .Containers}}{{.Name}} {{end}}").CombinedOutput()
 			t.Logf("waitForProxy attempt=%d status=%q proxy=%s internal_members=[%s]",
 				attempt, status, strings.TrimSpace(string(proxyState)), strings.TrimSpace(string(netMembers)))
@@ -1185,7 +1185,7 @@ func TestCooperApp_WhitelistedDomainPassthrough(t *testing.T) {
 	// curl through the proxy to a whitelisted domain (api.anthropic.com).
 	// We expect a 2xx or 4xx status (not 403, which would mean proxy denied).
 	out, err := barrelExec(barrelName,
-		"curl -s -o /dev/null -w '%{http_code}' --connect-timeout 10 -x http://cooper-proxy:3128 https://api.anthropic.com")
+		fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s:%d https://api.anthropic.com", docker.ProxyHost(), cfg.ProxyPort))
 	if err != nil {
 		t.Fatalf("curl failed: %v\noutput: %s", err, out)
 	}
@@ -1223,7 +1223,7 @@ func TestCooperApp_BlockedDomainDenied(t *testing.T) {
 
 	// curl through the proxy to a non-whitelisted domain (example.com).
 	out, err := barrelExec(barrelName,
-		"curl -s -o /dev/null -w '%{http_code}' --connect-timeout 10 -x http://cooper-proxy:3128 https://example.com")
+		fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s:%d https://example.com", docker.ProxyHost(), cfg.ProxyPort))
 
 	statusCode := strings.TrimSpace(out)
 	t.Logf("blocked domain status code: %s (err: %v)", statusCode, err)
@@ -1271,8 +1271,7 @@ func TestCooperApp_SSLBumpWorks(t *testing.T) {
 	// will succeed without certificate errors.
 	out, err := barrelExec(barrelName,
 		"curl --cacert /usr/local/share/ca-certificates/cooper-ca.crt "+
-			"-s -o /dev/null -w '%{http_code}' --connect-timeout 10 "+
-			"-x http://cooper-proxy:3128 https://api.anthropic.com")
+			fmt.Sprintf("-s -o /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s:%d https://api.anthropic.com", docker.ProxyHost(), cfg.ProxyPort))
 	if err != nil {
 		t.Fatalf("curl with CA cert failed: %v\noutput: %s", err, out)
 	}
@@ -1348,7 +1347,7 @@ func TestCooperApp_BarrelReachesProxy(t *testing.T) {
 	// Use HTTP (not HTTPS) to avoid SSL bump complexity — we just want to
 	// verify TCP connectivity and DNS resolution to cooper-proxy.
 	out, err := barrelExec(barrelName,
-		"curl -s -o /dev/null -w '%{http_code}' --connect-timeout 10 -x http://cooper-proxy:3128 http://api.anthropic.com")
+		fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s:%d http://api.anthropic.com", docker.ProxyHost(), cfg.ProxyPort))
 	if err != nil {
 		// Even an error response proves connectivity worked at the TCP level
 		// if we got any HTTP status back.
@@ -1670,7 +1669,7 @@ func TestCooperApp_CLIChecksProxyRunning(t *testing.T) {
 	t.Cleanup(func() { cleanupDocker(t) })
 
 	// Ensure proxy is not running (clean state).
-	_ = exec.Command("docker", "rm", "-f", docker.ContainerProxy).Run()
+	_ = exec.Command("docker", "rm", "-f", docker.ProxyContainerName()).Run()
 
 	running, err := docker.IsProxyRunning()
 	if err != nil {
@@ -1750,7 +1749,7 @@ func TestCooperApp_SocatLiveReload(t *testing.T) {
 	// Verify socat processes are running inside the proxy container.
 	// Wait a moment for SIGHUP handler to spawn new socat processes.
 	time.Sleep(2 * time.Second)
-	psOut, err := exec.Command("docker", "exec", docker.ContainerProxy, "ps", "aux").CombinedOutput()
+	psOut, err := exec.Command("docker", "exec", docker.ProxyContainerName(), "ps", "aux").CombinedOutput()
 	if err != nil {
 		t.Logf("ps inside proxy failed (non-fatal): %v", err)
 	} else {
@@ -2057,12 +2056,13 @@ func TestCooperApp_ContainerNamingCollision(t *testing.T) {
 		t.Errorf("both barrels have the same name %q; expected hash suffix on the second", name1)
 	}
 
-	// The first should be "barrel-myproject", the second "barrel-myproject-XXXX".
-	if !strings.HasPrefix(name1, "barrel-myproject") {
-		t.Errorf("name1 = %q, want prefix %q", name1, "barrel-myproject")
+	basePrefix := docker.BarrelNamePrefix() + "myproject"
+	// The first should be "<barrel-prefix>myproject", the second adds a hash suffix.
+	if !strings.HasPrefix(name1, basePrefix) {
+		t.Errorf("name1 = %q, want prefix %q", name1, basePrefix)
 	}
-	if !strings.HasPrefix(name2, "barrel-myproject-") {
-		t.Errorf("name2 = %q, want prefix %q with hash suffix", name2, "barrel-myproject-")
+	if !strings.HasPrefix(name2, basePrefix+"-") {
+		t.Errorf("name2 = %q, want prefix %q with hash suffix", name2, basePrefix+"-")
 	}
 }
 
@@ -2137,7 +2137,7 @@ func TestCooperApp_Cleanup(t *testing.T) {
 		t.Errorf("barrel container %s still exists after cleanup (expected removal)", barrelName)
 	}
 
-	inspectProxy := exec.Command("docker", "inspect", docker.ContainerProxy)
+	inspectProxy := exec.Command("docker", "inspect", docker.ProxyContainerName())
 	if err := inspectProxy.Run(); err == nil {
 		t.Errorf("proxy container still exists after cleanup (expected removal)")
 	}
@@ -2521,7 +2521,7 @@ func TestCooperApp_CustomToolImage(t *testing.T) {
 	// Build the custom image (requires base image to exist).
 	baseExists, _ := docker.ImageExists(docker.GetImageBase())
 	if !baseExists {
-		t.Skip("base image not found; run test-docker-build.sh first")
+		t.Fatal("base image not found after test bootstrap")
 	}
 	if err := docker.BuildImage(imageName, filepath.Join(customDir, "Dockerfile"), customDir, nil, false); err != nil {
 		t.Fatalf("BuildImage(my-custom) failed: %v", err)
@@ -2564,7 +2564,7 @@ func TestCooperApp_CustomToolClipboardModeOffRespected(t *testing.T) {
 
 	baseExists, _ := docker.ImageExists(docker.GetImageBase())
 	if !baseExists {
-		t.Skip("base image not found; run test-docker-build.sh first")
+		t.Fatal("base image not found after test bootstrap")
 	}
 
 	app := startClipboardApp(t, cfg, cooperDir)
@@ -2882,7 +2882,7 @@ func TestCooperApp_ClipboardTokenFromDisk(t *testing.T) {
 
 	baseExists, _ := docker.ImageExists(docker.GetImageBase())
 	if !baseExists {
-		t.Skip("base image not found; run test-docker-build.sh first")
+		t.Fatal("base image not found after test bootstrap")
 	}
 
 	app := startClipboardApp(t, cfg, cooperDir)

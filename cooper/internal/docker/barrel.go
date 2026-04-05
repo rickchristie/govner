@@ -24,7 +24,7 @@ type BarrelInfo struct {
 // a short hash of the absolute path is appended (e.g., "barrel-myproject-claude-a3f1").
 func BarrelContainerName(workspaceDir, toolName string) string {
 	base := filepath.Base(workspaceDir)
-	name := "barrel-" + base + "-" + toolName
+	name := BarrelNamePrefix() + base + "-" + toolName
 
 	// Check if a container with this name already exists.
 	absPath, _ := filepath.Abs(workspaceDir)
@@ -91,7 +91,7 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 	args := []string{
 		"run", "-d",
 		"--name", name,
-		"--network", NetworkInternal,
+		"--network", InternalNetworkName(),
 
 		// Security hardening.
 		"--cap-drop=ALL",
@@ -111,9 +111,11 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 
 	// Proxy environment variables -- all traffic goes through cooper-proxy.
 	args = append(args,
-		"-e", fmt.Sprintf("HTTP_PROXY=http://cooper-proxy:%d", cfg.ProxyPort),
-		"-e", fmt.Sprintf("HTTPS_PROXY=http://cooper-proxy:%d", cfg.ProxyPort),
+		"-e", fmt.Sprintf("HTTP_PROXY=http://%s:%d", ProxyHost(), cfg.ProxyPort),
+		"-e", fmt.Sprintf("HTTPS_PROXY=http://%s:%d", ProxyHost(), cfg.ProxyPort),
 		"-e", "NO_PROXY=localhost,127.0.0.1",
+		"-e", fmt.Sprintf("COOPER_PROXY_HOST=%s", ProxyHost()),
+		"-e", fmt.Sprintf("COOPER_INTERNAL_NETWORK=%s", InternalNetworkName()),
 	)
 
 	// X11 display env vars — set for ALL barrels so Playwright and clipboard
@@ -419,7 +421,6 @@ func ExecBarrel(containerName string, cmd []string, envArgs []string, interactiv
 // Barrel containers are identified by the "barrel-" name prefix.
 func ListBarrels() ([]BarrelInfo, error) {
 	cmd := exec.Command("docker", "ps",
-		"--filter", "name=barrel-",
 		"--format", "{{.Names}}\t{{.Status}}",
 	)
 	output, err := cmd.CombinedOutput()
@@ -433,6 +434,7 @@ func ListBarrels() ([]BarrelInfo, error) {
 	}
 
 	var barrels []BarrelInfo
+	prefix := BarrelNamePrefix()
 	for _, line := range strings.Split(result, "\n") {
 		parts := strings.SplitN(line, "\t", 2)
 		if len(parts) != 2 {
@@ -440,6 +442,9 @@ func ListBarrels() ([]BarrelInfo, error) {
 		}
 		name := strings.TrimSpace(parts[0])
 		status := strings.TrimSpace(parts[1])
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
 
 		// Look up workspace path from container label.
 		workspace := containerWorkspacePath(name)
