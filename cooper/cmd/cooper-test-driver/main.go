@@ -49,9 +49,19 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "scenario %s failed: %v\n", scenario, err)
 		fmt.Fprintf(os.Stderr, "cooper dir: %s\n", driver.CooperDir())
+		if closeErr := driver.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "cleanup error: %v\n", closeErr)
+		}
+		os.Exit(1)
+	}
+
+	if closeErr := driver.Close(); closeErr != nil {
+		fmt.Fprintf(os.Stderr, "cleanup failed: %v\n", closeErr)
 		os.Exit(1)
 	}
 
 	fmt.Printf("scenario %s passed\n", scenario)
-	fmt.Printf("cooper dir: %s\n", driver.CooperDir())
+	if keepArtifacts {
+		fmt.Printf("cooper dir: %s\n", driver.CooperDir())
+	}
 }

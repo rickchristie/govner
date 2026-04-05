@@ -27,6 +27,7 @@ The driver centralizes:
 - template rendering and CA generation
 - app startup and teardown
 - Docker cleanup
+- runtime locking so multiple driver processes do not fight over Cooper's shared Docker network names
 - barrel startup helpers
 - clipboard token file helpers
 - bridge HTTP helpers
