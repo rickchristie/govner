@@ -10,6 +10,8 @@ Govner is a collection of Go development tools.
   Write tests, write scripts to test behaviors, run playwright to check console, take screenshots, run the commands.
 - **NEVER blame without evidence**, don't say something like "X fail due to Y", find evidence! 
   **Always investigate to find root cause**, if unable to find evidence, state why and clarify it's a hypothesis.
+- **ALWAYS write proper documentation**, write *why* it was done this way, and *how* only if it's not obvious.
+  Write for a human or yourself when they revisit this code in the future, what is important for them so they work faster and with less mistakes?
 
 # TUI Code Architecture Standard
 
