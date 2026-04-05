@@ -131,6 +131,12 @@ The proxy container sits on **both** networks -- it receives traffic from barrel
 go install github.com/rickchristie/govner/cooper@latest
 ```
 
+Make sure Go's bin directory is in your `PATH`. If `cooper` isn't found after install, add this to your `~/.bashrc` or `~/.zshrc`:
+
+```bash
+export PATH="$PATH:$(go env GOPATH)/bin"
+```
+
 ### Setup
 
 ```bash
