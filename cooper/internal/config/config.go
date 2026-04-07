@@ -53,6 +53,9 @@ func LoadConfig(path string) (*Config, error) {
 // This ensures existing config files written before new fields were added
 // continue to validate and work correctly.
 func (c *Config) applyMissingDefaults() {
+	if c.MonitorTimeoutSecs <= 0 {
+		c.MonitorTimeoutSecs = 30
+	}
 	if c.ClipboardTTLSecs <= 0 {
 		c.ClipboardTTLSecs = 300
 	}

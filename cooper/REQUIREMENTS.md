@@ -553,7 +553,7 @@ reserved `/clipboard/*` namespace. User bridge routes cannot use this namespace.
 Config fields in `~/.cooper/config.json`:
 ```json
 {
-  "monitor_timeout_secs": 5,
+  "monitor_timeout_secs": 30,
   "blocked_history_limit": 500,
   "allowed_history_limit": 500,
   "bridge_log_limit": 500,

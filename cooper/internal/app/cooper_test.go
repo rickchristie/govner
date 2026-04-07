@@ -28,6 +28,13 @@ import (
 // testImagePrefix isolates test images from production Cooper images.
 const testImagePrefix = testdocker.ImagePrefix
 
+const (
+	// Use Docker-network aliases instead of the public internet so proxy tests
+	// exercise the real allow/deny rules against deterministic local targets.
+	proxyAllowedTestDomain = "api.anthropic.com"
+	proxyBlockedTestDomain = "example.com"
+)
+
 // skipIfNoDocker verifies the docker CLI is available for default test runs.
 func skipIfNoDocker(t *testing.T) {
 	t.Helper()
@@ -152,6 +159,153 @@ func cleanupDocker(t *testing.T) {
 func fixCooperDirPermissions(t *testing.T, cooperDir string) {
 	t.Helper()
 	_ = testdocker.FixOwnership(cooperDir)
+}
+
+func startProxyHTTPSTarget(t *testing.T) *testdocker.HTTPSTarget {
+	t.Helper()
+
+	target, err := testdocker.StartHTTPSTarget(proxyAllowedTestDomain, proxyBlockedTestDomain)
+	if err != nil {
+		t.Fatalf("start local proxy HTTPS target: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := target.Remove(); err != nil {
+			t.Logf("remove local proxy HTTPS target: %v", err)
+		}
+	})
+	return target
+}
+
+func trustProxyHTTPSTarget(t *testing.T, target *testdocker.HTTPSTarget) {
+	t.Helper()
+
+	certPEM, err := exec.Command("docker", "exec", target.ContainerName, "cat", "/tmp/target.crt").Output()
+	if err != nil {
+		t.Fatalf("read HTTPS target certificate from %s: %v", target.ContainerName, err)
+	}
+
+	cmd := exec.Command(
+		"docker", "exec", "-i", "-u", "root",
+		docker.ProxyContainerName(),
+		"sh", "-lc",
+		"cat >/usr/local/share/ca-certificates/cooper-test-target.crt && update-ca-certificates >/tmp/cooper-test-target-ca.log 2>&1",
+	)
+	cmd.Stdin = bytes.NewReader(certPEM)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install HTTPS target certificate into proxy trust store: %v\n%s", err, string(out))
+	}
+}
+
+func waitForCondition(t *testing.T, desc string, timeout, interval time.Duration, check func(attempt int) (bool, string, error)) string {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	attempt := 0
+	lastDetail := ""
+	for {
+		attempt++
+		ok, detail, err := check(attempt)
+		if detail == "" && err != nil {
+			detail = err.Error()
+		}
+		if detail != "" {
+			lastDetail = detail
+		}
+		if ok {
+			if lastDetail != "" {
+				t.Logf("%s ready on attempt=%d: %s", desc, attempt, lastDetail)
+			}
+			return lastDetail
+		}
+
+		if err != nil {
+			t.Logf("%s pending on attempt=%d: %v", desc, attempt, err)
+		} else if detail != "" {
+			t.Logf("%s pending on attempt=%d: %s", desc, attempt, detail)
+		} else {
+			t.Logf("%s pending on attempt=%d", desc, attempt)
+		}
+
+		if time.Now().After(deadline) {
+			if lastDetail == "" {
+				lastDetail = "no detail"
+			}
+			t.Fatalf("%s did not become ready within %s (last detail: %s)", desc, timeout, lastDetail)
+		}
+		time.Sleep(interval)
+	}
+}
+
+func waitForFileContains(t *testing.T, path string, timeout time.Duration, substrings ...string) string {
+	t.Helper()
+
+	var matchedContent string
+	waitForCondition(t, "file "+path, timeout, 100*time.Millisecond, func(_ int) (bool, string, error) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return false, "", err
+		}
+		content := string(data)
+		for _, want := range substrings {
+			if !strings.Contains(content, want) {
+				return false, fmt.Sprintf("waiting for %q", want), nil
+			}
+		}
+		matchedContent = content
+		return true, fmt.Sprintf("matched %d bytes", len(content)), nil
+	})
+	return matchedContent
+}
+
+func waitForDirNotEmpty(t *testing.T, dir string, timeout time.Duration) {
+	t.Helper()
+
+	waitForCondition(t, "directory "+dir, timeout, 100*time.Millisecond, func(_ int) (bool, string, error) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return false, "", err
+		}
+		if len(entries) == 0 {
+			return false, "directory still empty", nil
+		}
+		return true, fmt.Sprintf("found %d entries", len(entries)), nil
+	})
+}
+
+func waitForBarrelCommandMatch(t *testing.T, barrelName, desc, command string, timeout, interval time.Duration, match func(out string, err error) bool) string {
+	t.Helper()
+
+	var matched string
+	waitForCondition(t, desc, timeout, interval, func(attempt int) (bool, string, error) {
+		out, err := barrelExec(barrelName, command)
+		trimmed := strings.TrimSpace(out)
+		if match(trimmed, err) {
+			matched = trimmed
+			return true, trimmed, nil
+		}
+		return false, fmt.Sprintf("output=%q err=%v", trimmed, err), nil
+	})
+	return matched
+}
+
+func waitForProxyProcessPorts(t *testing.T, timeout time.Duration, ports ...int) string {
+	t.Helper()
+
+	var processes string
+	waitForCondition(t, "proxy socat process list", timeout, 200*time.Millisecond, func(_ int) (bool, string, error) {
+		out, err := exec.Command("docker", "exec", docker.ProxyContainerName(), "ps", "aux").CombinedOutput()
+		if err != nil {
+			return false, strings.TrimSpace(string(out)), err
+		}
+		processes = string(out)
+		for _, port := range ports {
+			if !strings.Contains(processes, fmt.Sprintf("TCP-LISTEN:%d", port)) {
+				return false, fmt.Sprintf("waiting for TCP-LISTEN:%d", port), nil
+			}
+		}
+		return true, fmt.Sprintf("found ports %v", ports), nil
+	})
+	return processes
 }
 
 // TestCooperApp_StartStop verifies that a CooperApp can start (creating
@@ -950,17 +1104,8 @@ func TestCooperApp_ACLLogging(t *testing.T) {
 	conn.Read(buf)
 	conn.Close()
 
-	// Wait for log flush.
-	time.Sleep(500 * time.Millisecond)
-
-	// Read the ACL log file.
 	logPath := filepath.Join(cooperDir, "logs", "acl.log")
-	logData, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read acl.log: %v", err)
-	}
-
-	logContent := string(logData)
+	logContent := waitForFileContains(t, logPath, 3*time.Second, "domain=logged-domain.com", "decision=approved")
 
 	// Verify request was logged.
 	if !strings.Contains(logContent, "domain=logged-domain.com") {
@@ -1022,17 +1167,8 @@ func TestCooperApp_BridgeLogging(t *testing.T) {
 		t.Fatal("timed out waiting for bridge log on channel")
 	}
 
-	// Wait for log flush.
-	time.Sleep(500 * time.Millisecond)
-
-	// Read the bridge log file.
 	logPath := filepath.Join(cooperDir, "logs", "bridge.log")
-	logData, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read bridge.log: %v", err)
-	}
-
-	logContent := string(logData)
+	logContent := waitForFileContains(t, logPath, 3*time.Second, "route=/test-log", "exit=0")
 
 	// Verify the log contains route and exit code.
 	if !strings.Contains(logContent, "route=/test-log") {
@@ -1143,14 +1279,14 @@ func startAppAndBarrel(t *testing.T, cfg *config.Config, cooperDir string) (*Coo
 
 	// Wait for barrel container to be running.
 	t.Logf("waiting for barrel container %s to report running", barrelName)
-	waitForContainer(t, barrelName, 15*time.Second)
+	waitForContainer(t, barrelName, 10*time.Second)
 	t.Logf("barrel container %s is running", barrelName)
 
 	// Wait for proxy to be reachable from inside the barrel.
 	// The barrel's entrypoint needs time to start, and Docker DNS
 	// needs time to propagate the "cooper-proxy" name.
 	t.Logf("waiting for barrel %s to reach proxy %s:%d", barrelName, docker.ProxyHost(), cfg.ProxyPort)
-	waitForProxyFromBarrel(t, barrelName, cfg.ProxyPort, 30*time.Second)
+	waitForProxyFromBarrel(t, barrelName, cfg.ProxyPort, 15*time.Second)
 	t.Logf("barrel %s can reach proxy %s:%d", barrelName, docker.ProxyHost(), cfg.ProxyPort)
 
 	return app, barrelName
@@ -1170,7 +1306,7 @@ func waitForContainer(t *testing.T, name string, timeout time.Duration) {
 		if running {
 			return
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 	}
 	t.Fatalf("container %s did not become running within %v", name, timeout)
 }
@@ -1188,7 +1324,7 @@ func waitForProxyFromBarrel(t *testing.T, barrelName string, proxyPort int, time
 		// Use a separate curl call that only outputs the HTTP status code.
 		// Avoid `|| echo 000` which concatenates with curl's output on failure.
 		out, _ := exec.Command("docker", "exec", barrelName, "bash", "-c",
-			fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --connect-timeout 3 -x %s http://example.com 2>/dev/null", proxyAddr)).CombinedOutput()
+			fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --connect-timeout 2 --max-time 3 -x %s http://example.com 2>/dev/null", proxyAddr)).CombinedOutput()
 		status := strings.TrimSpace(string(out))
 
 		// A valid HTTP status is exactly 3 digits and not "000".
@@ -1205,22 +1341,22 @@ func waitForProxyFromBarrel(t *testing.T, barrelName string, proxyPort int, time
 		t.Logf("waitForProxy attempt=%d status=%q proxy=%s internal_members=[%s]",
 			attempt, status, strings.TrimSpace(string(proxyState)), strings.TrimSpace(string(netMembers)))
 
-		time.Sleep(2 * time.Second)
+		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatalf("proxy not reachable from barrel %s within %v", barrelName, timeout)
 }
 
-// TestCooperApp_WhitelistedDomainPassthrough verifies that the proxy allows
-// CONNECT tunnels to whitelisted domains. The Anthropic API is whitelisted
-// by default; it will return 401 without auth, but that proves the proxy
-// allowed the connection (not 403).
-func TestCooperApp_WhitelistedDomainPassthrough(t *testing.T) {
+// TestCooperApp_ProxyRuntimeScenarios shares one started app/barrel runtime
+// across the proxy-path integration checks. These assertions are independent,
+// but paying full Docker startup for each one dominated package time.
+func TestCooperApp_ProxyRuntimeScenarios(t *testing.T) {
 	skipIfNoDocker(t)
 	skipIfNoProxyImage(t)
 	skipIfNoBarrelImage(t)
 	docker.SetImagePrefix(testImagePrefix)
 
 	cooperDir, cfg := setupCooperDir(t)
+	cfg.MonitorTimeoutSecs = 1
 	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
 	t.Cleanup(func() {
 		exec.Command("docker", "rm", "-f", barrelName).Run()
@@ -1228,186 +1364,94 @@ func TestCooperApp_WhitelistedDomainPassthrough(t *testing.T) {
 		cleanupDocker(t)
 	})
 
-	// curl through the proxy to a whitelisted domain (api.anthropic.com).
-	// We expect a 2xx or 4xx status (not 403, which would mean proxy denied).
-	out, err := barrelExec(barrelName,
-		fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s:%d https://api.anthropic.com", docker.ProxyHost(), cfg.ProxyPort))
-	if err != nil {
-		t.Fatalf("curl failed: %v\noutput: %s", err, out)
-	}
+	target := startProxyHTTPSTarget(t)
+	trustProxyHTTPSTarget(t, target)
+	t.Logf("local proxy HTTPS target %s ready at %s for domains %s", target.ContainerName, target.IP, strings.Join(target.Domains, ", "))
 
-	statusCode := strings.TrimSpace(out)
-	t.Logf("whitelisted domain status code: %s", statusCode)
-
-	// 403 means the proxy blocked it — that would be a failure.
-	if statusCode == "403" {
-		t.Errorf("expected proxy to allow api.anthropic.com, got HTTP 403 (denied)")
-	}
-
-	// Any 2xx or 4xx (e.g. 401 unauthorized) proves the proxy forwarded the request.
-	if len(statusCode) != 3 {
-		t.Errorf("unexpected status code format: %q", statusCode)
-	}
-}
-
-// TestCooperApp_BlockedDomainDenied verifies that the proxy denies CONNECT
-// tunnels to domains that are NOT whitelisted. example.com is not in the
-// default whitelist, so the proxy should return 403.
-func TestCooperApp_BlockedDomainDenied(t *testing.T) {
-	skipIfNoDocker(t)
-	skipIfNoProxyImage(t)
-	skipIfNoBarrelImage(t)
-	docker.SetImagePrefix(testImagePrefix)
-
-	cooperDir, cfg := setupCooperDir(t)
-	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
-	t.Cleanup(func() {
-		exec.Command("docker", "rm", "-f", barrelName).Run()
-		app.Stop()
-		cleanupDocker(t)
-	})
-
-	// curl through the proxy to a non-whitelisted domain (example.com).
-	out, err := barrelExec(barrelName,
-		fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s:%d https://example.com", docker.ProxyHost(), cfg.ProxyPort))
-
-	statusCode := strings.TrimSpace(out)
-	t.Logf("blocked domain status code: %s (err: %v)", statusCode, err)
-
-	// The proxy should deny this with 403, or the connection should be refused.
-	// Either outcome proves the domain is blocked.
-	if statusCode == "403" {
-		// Expected: proxy denied the CONNECT.
-		return
-	}
-
-	// Connection refused or similar error also means blocked.
-	if err != nil {
-		// curl returned non-zero — connection was denied. This is expected.
-		t.Logf("curl failed with error (expected for blocked domain): %v", err)
-		return
-	}
-
-	// If we got a successful 2xx/3xx, the proxy incorrectly allowed the request.
-	if len(statusCode) == 3 && (statusCode[0] == '2' || statusCode[0] == '3') {
-		t.Errorf("expected proxy to block example.com, but got HTTP %s (allowed)", statusCode)
-	}
-}
-
-// TestCooperApp_SSLBumpWorks verifies that SSL bump (MITM) works end-to-end.
-// The barrel has the Cooper CA cert installed in its trust store, so curl
-// should be able to connect to HTTPS sites through the proxy without
-// certificate errors. We explicitly pass --cacert to ensure the CA is used.
-func TestCooperApp_SSLBumpWorks(t *testing.T) {
-	skipIfNoDocker(t)
-	skipIfNoProxyImage(t)
-	skipIfNoBarrelImage(t)
-	docker.SetImagePrefix(testImagePrefix)
-
-	cooperDir, cfg := setupCooperDir(t)
-	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
-	t.Cleanup(func() {
-		exec.Command("docker", "rm", "-f", barrelName).Run()
-		app.Stop()
-		cleanupDocker(t)
-	})
-
-	// Use --cacert to explicitly trust the Cooper CA cert, connecting through
-	// the proxy to a whitelisted HTTPS endpoint. If SSL bump is working, curl
-	// will succeed without certificate errors.
-	out, err := barrelExec(barrelName,
-		"curl --cacert /usr/local/share/ca-certificates/cooper-ca.crt "+
-			fmt.Sprintf("-s -o /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s:%d https://api.anthropic.com", docker.ProxyHost(), cfg.ProxyPort))
-	if err != nil {
-		t.Fatalf("curl with CA cert failed: %v\noutput: %s", err, out)
-	}
-
-	statusCode := strings.TrimSpace(out)
-	t.Logf("SSL bump status code: %s", statusCode)
-
-	// A certificate error would cause curl to exit non-zero (already caught above)
-	// or return 000. Any real HTTP status proves the SSL bump worked.
-	if statusCode == "000" {
-		t.Errorf("curl returned 000 — likely a certificate error; SSL bump may not be working")
-	}
-	if statusCode == "403" {
-		t.Errorf("proxy denied the request (403) — api.anthropic.com should be whitelisted")
-	}
-}
-
-// TestCooperApp_DirectEgressBlocked verifies that the barrel container cannot
-// reach the internet directly (bypassing the proxy). The barrel is on
-// cooper-internal which is created with --internal (no default gateway),
-// so direct TCP connections should fail.
-func TestCooperApp_DirectEgressBlocked(t *testing.T) {
-	skipIfNoDocker(t)
-	skipIfNoProxyImage(t)
-	skipIfNoBarrelImage(t)
-	docker.SetImagePrefix(testImagePrefix)
-
-	cooperDir, cfg := setupCooperDir(t)
-	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
-	t.Cleanup(func() {
-		exec.Command("docker", "rm", "-f", barrelName).Run()
-		app.Stop()
-		cleanupDocker(t)
-	})
-
-	// Attempt to connect directly (bypassing proxy via --noproxy '*') with a
-	// short timeout. On the isolated network this should fail with a connection
-	// error, NOT a proxy error.
-	out, err := barrelExec(barrelName,
-		"curl --noproxy '*' --connect-timeout 5 -s -o /dev/null -w '%{http_code}' https://example.com 2>&1")
-
-	t.Logf("direct egress output: %q (err: %v)", strings.TrimSpace(out), err)
-
-	// We expect curl to fail because there is no route to the internet.
-	if err == nil {
-		statusCode := strings.TrimSpace(out)
-		// If curl somehow succeeded with a real HTTP status, that means
-		// direct egress is NOT blocked — a serious security failure.
-		if len(statusCode) == 3 && statusCode[0] >= '1' && statusCode[0] <= '5' && statusCode != "000" {
-			t.Errorf("direct egress succeeded with HTTP %s — network isolation is broken", statusCode)
+	t.Run("WhitelistedDomainPassthrough", func(t *testing.T) {
+		out, err := barrelExec(barrelName,
+			fmt.Sprintf("curl -k -s -o /dev/null -w '%%{http_code}' --connect-timeout 2 --max-time 5 -x http://%s:%d https://%s",
+				docker.ProxyHost(), cfg.ProxyPort, proxyAllowedTestDomain))
+		if err != nil {
+			t.Fatalf("curl failed: %v\noutput: %s", err, out)
 		}
-	}
-	// err != nil is the expected case: connection timed out or refused.
-}
 
-// TestCooperApp_BarrelReachesProxy verifies that the barrel container can
-// reach the proxy via Docker DNS (cooper-proxy:3128). This tests that both
-// containers are on the cooper-internal network and DNS resolution works.
-func TestCooperApp_BarrelReachesProxy(t *testing.T) {
-	skipIfNoDocker(t)
-	skipIfNoProxyImage(t)
-	skipIfNoBarrelImage(t)
-	docker.SetImagePrefix(testImagePrefix)
-
-	cooperDir, cfg := setupCooperDir(t)
-	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
-	t.Cleanup(func() {
-		exec.Command("docker", "rm", "-f", barrelName).Run()
-		app.Stop()
-		cleanupDocker(t)
+		statusCode := strings.TrimSpace(out)
+		t.Logf("whitelisted domain status code: %s", statusCode)
+		if statusCode == "403" {
+			t.Errorf("expected proxy to allow %s, got HTTP 403 (denied)", proxyAllowedTestDomain)
+		}
+		if statusCode == "000" || len(statusCode) != 3 {
+			t.Errorf("unexpected status code format: %q", statusCode)
+		}
 	})
 
-	// Use HTTP (not HTTPS) to avoid SSL bump complexity — we just want to
-	// verify TCP connectivity and DNS resolution to cooper-proxy.
-	out, err := barrelExec(barrelName,
-		fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s:%d http://api.anthropic.com", docker.ProxyHost(), cfg.ProxyPort))
-	if err != nil {
-		// Even an error response proves connectivity worked at the TCP level
-		// if we got any HTTP status back.
-		t.Logf("curl returned error: %v (output: %s)", err, out)
-	}
+	t.Run("BlockedDomainDenied", func(t *testing.T) {
+		out, err := barrelExec(barrelName,
+			fmt.Sprintf("curl -k -s -o /dev/null -w '%%{http_code}' --connect-timeout 2 --max-time 4 -x http://%s:%d https://%s",
+				docker.ProxyHost(), cfg.ProxyPort, proxyBlockedTestDomain))
 
-	statusCode := strings.TrimSpace(out)
-	t.Logf("barrel-to-proxy status code: %s", statusCode)
+		statusCode := strings.TrimSpace(out)
+		t.Logf("blocked domain status code: %s (err: %v)", statusCode, err)
+		if statusCode == "403" {
+			return
+		}
+		if err != nil {
+			t.Logf("curl failed with error (expected for blocked domain): %v", err)
+			return
+		}
+		if len(statusCode) == 3 && (statusCode[0] == '2' || statusCode[0] == '3') {
+			t.Errorf("expected proxy to block %s, but got HTTP %s (allowed)", proxyBlockedTestDomain, statusCode)
+		}
+	})
 
-	// Any valid HTTP status code (even 403 or 503) proves the barrel resolved
-	// cooper-proxy via DNS and made a TCP connection to port 3128.
-	if statusCode == "000" || statusCode == "" {
-		t.Errorf("barrel could not reach proxy: status=%q — DNS resolution or TCP connectivity failed", statusCode)
-	}
+	t.Run("SSLBumpWorks", func(t *testing.T) {
+		out, err := barrelExec(barrelName,
+			"curl --cacert /usr/local/share/ca-certificates/cooper-ca.crt "+
+				fmt.Sprintf("-s -o /dev/null -w '%%{http_code}' --connect-timeout 2 --max-time 5 -x http://%s:%d https://%s",
+					docker.ProxyHost(), cfg.ProxyPort, proxyAllowedTestDomain))
+		if err != nil {
+			t.Fatalf("curl with CA cert failed: %v\noutput: %s", err, out)
+		}
+
+		statusCode := strings.TrimSpace(out)
+		t.Logf("SSL bump status code: %s", statusCode)
+		if statusCode == "000" {
+			t.Errorf("curl returned 000 — likely a certificate error; SSL bump may not be working")
+		}
+		if statusCode == "403" {
+			t.Errorf("proxy denied the request (403) — %s should be whitelisted", proxyAllowedTestDomain)
+		}
+	})
+
+	t.Run("DirectEgressBlocked", func(t *testing.T) {
+		out, err := barrelExec(barrelName,
+			fmt.Sprintf("curl --resolve %s:443:%s --noproxy '*' --connect-timeout 2 --max-time 4 -s -o /dev/null -w '%%{http_code}' https://%s 2>&1",
+				proxyBlockedTestDomain, target.IP, proxyBlockedTestDomain))
+
+		t.Logf("direct egress output: %q (err: %v)", strings.TrimSpace(out), err)
+		if err == nil {
+			statusCode := strings.TrimSpace(out)
+			if len(statusCode) == 3 && statusCode[0] >= '1' && statusCode[0] <= '5' && statusCode != "000" {
+				t.Errorf("direct egress succeeded with HTTP %s — network isolation is broken", statusCode)
+			}
+		}
+	})
+
+	t.Run("BarrelReachesProxy", func(t *testing.T) {
+		out, err := barrelExec(barrelName,
+			fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --connect-timeout 2 --max-time 3 -x http://%s:%d http://%s",
+				docker.ProxyHost(), cfg.ProxyPort, proxyAllowedTestDomain))
+		if err != nil {
+			t.Logf("curl returned error: %v (output: %s)", err, out)
+		}
+
+		statusCode := strings.TrimSpace(out)
+		t.Logf("barrel-to-proxy status code: %s", statusCode)
+		if statusCode == "000" || statusCode == "" {
+			t.Errorf("barrel could not reach proxy: status=%q — DNS resolution or TCP connectivity failed", statusCode)
+		}
+	})
 }
 
 // TestCooperApp_SocatPortForwarding verifies the two-hop socat relay:
@@ -1472,122 +1516,39 @@ func TestCooperApp_SocatPortForwarding(t *testing.T) {
 		cleanupDocker(t)
 	})
 
-	// Give socat relays a moment to start inside the containers.
-	time.Sleep(3 * time.Second)
-
-	// Connect from inside the barrel to localhost:19999. The socat relay in
-	// the barrel forwards this to cooper-proxy's socat, which forwards to
-	// host.docker.internal:19999, reaching our listener.
-	out, err := barrelExec(barrelName,
-		fmt.Sprintf("bash -c 'timeout 5 bash -c \"cat < /dev/tcp/localhost/%d\" 2>&1 || echo SOCAT_FAIL'", testPort))
-
-	t.Logf("socat forwarding output: %q (err: %v)", strings.TrimSpace(out), err)
-
-	trimmed := strings.TrimSpace(out)
-	if !strings.Contains(trimmed, testMessage) {
-		// Try an alternative approach with curl in case /dev/tcp is not available.
-		out2, err2 := barrelExec(barrelName,
-			fmt.Sprintf("curl -s --connect-timeout 5 telnet://localhost:%d", testPort))
-		t.Logf("socat forwarding (curl fallback) output: %q (err: %v)", strings.TrimSpace(out2), err2)
-
-		trimmed2 := strings.TrimSpace(out2)
-		if !strings.Contains(trimmed2, testMessage) {
-			t.Errorf("expected to receive %q from host through socat relay, got: %q (first attempt: %q)",
-				testMessage, trimmed2, trimmed)
+	waitForCondition(t, "socat forwarding to host", 8*time.Second, 200*time.Millisecond, func(_ int) (bool, string, error) {
+		out, err := barrelExec(barrelName,
+			fmt.Sprintf("bash -c 'timeout 3 bash -c \"cat < /dev/tcp/localhost/%d\" 2>&1 || echo SOCAT_FAIL'", testPort))
+		trimmed := strings.TrimSpace(out)
+		if strings.Contains(trimmed, testMessage) {
+			return true, fmt.Sprintf("primary output=%q", trimmed), nil
 		}
-	}
+
+		out2, err2 := barrelExec(barrelName,
+			fmt.Sprintf("curl -s --connect-timeout 2 --max-time 3 telnet://localhost:%d", testPort))
+		trimmed2 := strings.TrimSpace(out2)
+		if strings.Contains(trimmed2, testMessage) {
+			return true, fmt.Sprintf("fallback output=%q", trimmed2), nil
+		}
+
+		return false, fmt.Sprintf("primary=%q err=%v fallback=%q err=%v", trimmed, err, trimmed2, err2), nil
+	})
 }
 
 // =====================================================================
 // Additional integration tests
 // =====================================================================
 
-// TestCooperApp_CLIOneShot starts the app and a barrel, runs a one-shot
-// command via ExecBarrel with interactive=false, and verifies stdout
-// contains the expected output.
-func TestCooperApp_CLIOneShot(t *testing.T) {
+// TestCooperApp_CLIRuntimeScenarios shares one started barrel across the CLI
+// integration checks. They all validate runtime container behavior, so the
+// extra startup cost was redundant.
+func TestCooperApp_CLIRuntimeScenarios(t *testing.T) {
 	skipIfNoDocker(t)
 	skipIfNoProxyImage(t)
 	skipIfNoBarrelImage(t)
 	docker.SetImagePrefix(testImagePrefix)
 
 	cooperDir, cfg := setupCooperDir(t)
-	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
-	t.Cleanup(func() {
-		exec.Command("docker", "rm", "-f", barrelName).Run()
-		app.Stop()
-		cleanupDocker(t)
-	})
-
-	// Run a one-shot command inside the barrel (non-interactive).
-	out, err := barrelExec(barrelName, "echo hello")
-	if err != nil {
-		t.Fatalf("one-shot exec failed: %v\noutput: %s", err, out)
-	}
-
-	trimmed := strings.TrimSpace(out)
-	if trimmed != "hello" {
-		t.Errorf("one-shot output = %q, want %q", trimmed, "hello")
-	}
-}
-
-// TestCooperApp_CLITokenForwarding starts a barrel with env args containing
-// OPENAI_API_KEY and GH_TOKEN, then verifies those variables are accessible
-// inside the container via docker exec.
-func TestCooperApp_CLITokenForwarding(t *testing.T) {
-	skipIfNoDocker(t)
-	skipIfNoProxyImage(t)
-	skipIfNoBarrelImage(t)
-	docker.SetImagePrefix(testImagePrefix)
-
-	cooperDir, cfg := setupCooperDir(t)
-	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
-	t.Cleanup(func() {
-		exec.Command("docker", "rm", "-f", barrelName).Run()
-		app.Stop()
-		cleanupDocker(t)
-	})
-
-	// Simulate token forwarding by running docker exec with -e flags,
-	// the same mechanism that runCLI uses via ExecBarrel's envArgs.
-	envArgs := []string{
-		"-e", "OPENAI_API_KEY=test-openai-key-12345",
-		"-e", "GH_TOKEN=test-gh-token-67890",
-	}
-
-	// Build the docker exec command manually (ExecBarrel wires to os.Stdout,
-	// so we use exec.Command directly to capture output).
-	args := append([]string{"exec"}, envArgs...)
-	args = append(args, barrelName, "bash", "-c", "echo OPENAI=$OPENAI_API_KEY GH=$GH_TOKEN")
-	cmd := exec.Command("docker", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("exec with env args failed: %v\noutput: %s", err, output)
-	}
-
-	out := strings.TrimSpace(string(output))
-	if !strings.Contains(out, "OPENAI=test-openai-key-12345") {
-		t.Errorf("OPENAI_API_KEY not forwarded; output: %s", out)
-	}
-	if !strings.Contains(out, "GH=test-gh-token-67890") {
-		t.Errorf("GH_TOKEN not forwarded; output: %s", out)
-	}
-}
-
-// TestCooperApp_CLIClaudeCodeNotForwarded verifies that the CLAUDECODE
-// environment variable is NOT forwarded into the barrel container. Claude
-// Code sets CLAUDECODE=1 to detect nested sessions, and forwarding it would
-// cause "Error: Claude Code cannot be launched inside another Claude Code
-// session." The container must run as a fresh top-level session.
-func TestCooperApp_CLIClaudeCodeNotForwarded(t *testing.T) {
-	skipIfNoDocker(t)
-	skipIfNoProxyImage(t)
-	skipIfNoBarrelImage(t)
-	docker.SetImagePrefix(testImagePrefix)
-
-	cooperDir, cfg := setupCooperDir(t)
-
-	// Enable claude and codex so ResolveTokens exercises the full tool list.
 	cfg.AITools = []config.ToolConfig{
 		{Name: "claude", Enabled: true, Mode: config.ModeLatest},
 		{Name: "codex", Enabled: true, Mode: config.ModeLatest},
@@ -1600,116 +1561,120 @@ func TestCooperApp_CLIClaudeCodeNotForwarded(t *testing.T) {
 		cleanupDocker(t)
 	})
 
-	// Set CLAUDECODE in the current process environment (simulating a
-	// nested Claude Code session on the host).
-	t.Setenv("CLAUDECODE", "1")
-	t.Log("set host CLAUDECODE=1 for token resolution")
-
-	// Resolve tokens with the environment variable set.
-	workspaceDir := t.TempDir()
-	enabledTools := []string{"claude", "codex"}
-	t.Logf("resolving auth tokens for enabled tools: %s", strings.Join(enabledTools, ", "))
-	tokens, err := auth.ResolveTokens(workspaceDir, cooperDir, enabledTools)
-	if err != nil {
-		t.Fatalf("ResolveTokens() failed: %v", err)
-	}
-	t.Logf("resolved %d auth tokens", len(tokens))
-
-	// Verify that CLAUDECODE is NOT among the resolved tokens.
-	t.Log("verifying resolved auth tokens do not contain CLAUDECODE")
-	for _, tok := range tokens {
-		if tok.Name == "CLAUDECODE" {
-			t.Errorf("CLAUDECODE was resolved as a token but should be excluded")
+	t.Run("CLIOneShot", func(t *testing.T) {
+		out, err := barrelExec(barrelName, "echo hello")
+		if err != nil {
+			t.Fatalf("one-shot exec failed: %v\noutput: %s", err, out)
 		}
-	}
 
-	// Also verify that CLAUDECODE is not present in the barrel container's
-	// own environment (it should never have been set during StartBarrel).
-	t.Logf("inspecting barrel environment inside %s", barrelName)
-	out, err := barrelExec(barrelName, "env")
-	if err != nil {
-		t.Fatalf("env command failed: %v\noutput: %s", err, out)
-	}
-	t.Logf("barrel environment inspection returned %d bytes", len(out))
-
-	t.Log("verifying barrel environment does not contain CLAUDECODE")
-	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "CLAUDECODE=") {
-			t.Errorf("CLAUDECODE found in barrel environment: %s", line)
+		trimmed := strings.TrimSpace(out)
+		if trimmed != "hello" {
+			t.Errorf("one-shot output = %q, want %q", trimmed, "hello")
 		}
-	}
-}
-
-// TestCooperApp_CLIReusesContainer starts a barrel for a workspace, verifies
-// it is running, then calls StartBarrel again for the same workspace and
-// verifies the same container name is reused (not duplicated).
-func TestCooperApp_CLIReusesContainer(t *testing.T) {
-	skipIfNoDocker(t)
-	skipIfNoProxyImage(t)
-	skipIfNoBarrelImage(t)
-	docker.SetImagePrefix(testImagePrefix)
-
-	cooperDir, cfg := setupCooperDir(t)
-	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
-	t.Cleanup(func() {
-		exec.Command("docker", "rm", "-f", barrelName).Run()
-		app.Stop()
-		cleanupDocker(t)
 	})
 
-	// Verify the barrel is running.
-	running, err := docker.IsBarrelRunning(barrelName)
-	if err != nil {
-		t.Fatalf("IsBarrelRunning() failed: %v", err)
-	}
-	if !running {
-		t.Fatal("barrel should be running after startAppAndBarrel")
-	}
-
-	// Determine the workspace directory used by startAppAndBarrel.
-	// We can get it from the container label.
-	wsOut, err := exec.Command("docker", "inspect",
-		"--format", "{{index .Config.Labels \"cooper.workspace\"}}",
-		barrelName).Output()
-	if err != nil {
-		t.Fatalf("inspect barrel workspace label: %v", err)
-	}
-	workspaceDir := strings.TrimSpace(string(wsOut))
-
-	// Call BarrelContainerName for the same workspace -- should return same name.
-	secondName := docker.BarrelContainerName(workspaceDir, "claude")
-	if secondName != barrelName {
-		t.Errorf("BarrelContainerName returned %q on second call, want %q (reuse)", secondName, barrelName)
-	}
-
-	// Call StartBarrel again for the same workspace (it removes and recreates).
-	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "claude"); err != nil {
-		t.Fatalf("second StartBarrel() failed: %v", err)
-	}
-
-	// Container should still exist with the same name.
-	running, err = docker.IsBarrelRunning(barrelName)
-	if err != nil {
-		t.Fatalf("IsBarrelRunning() after second start: %v", err)
-	}
-	if !running {
-		t.Error("barrel should be running after second StartBarrel call")
-	}
-
-	// Verify there is exactly one container with the barrel name prefix for this workspace.
-	barrels, err := docker.ListBarrels()
-	if err != nil {
-		t.Fatalf("ListBarrels() failed: %v", err)
-	}
-	count := 0
-	for _, b := range barrels {
-		if b.WorkspaceDir == workspaceDir {
-			count++
+	t.Run("CLITokenForwarding", func(t *testing.T) {
+		envArgs := []string{
+			"-e", "OPENAI_API_KEY=test-openai-key-12345",
+			"-e", "GH_TOKEN=test-gh-token-67890",
 		}
-	}
-	if count != 1 {
-		t.Errorf("expected 1 barrel for workspace %s, found %d", workspaceDir, count)
-	}
+
+		args := append([]string{"exec"}, envArgs...)
+		args = append(args, barrelName, "bash", "-c", "echo OPENAI=$OPENAI_API_KEY GH=$GH_TOKEN")
+		cmd := exec.Command("docker", args...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("exec with env args failed: %v\noutput: %s", err, output)
+		}
+
+		out := strings.TrimSpace(string(output))
+		if !strings.Contains(out, "OPENAI=test-openai-key-12345") {
+			t.Errorf("OPENAI_API_KEY not forwarded; output: %s", out)
+		}
+		if !strings.Contains(out, "GH=test-gh-token-67890") {
+			t.Errorf("GH_TOKEN not forwarded; output: %s", out)
+		}
+	})
+
+	t.Run("CLIClaudeCodeNotForwarded", func(t *testing.T) {
+		t.Setenv("CLAUDECODE", "1")
+		t.Log("set host CLAUDECODE=1 for token resolution")
+
+		workspaceDir := t.TempDir()
+		enabledTools := []string{"claude", "codex"}
+		t.Logf("resolving auth tokens for enabled tools: %s", strings.Join(enabledTools, ", "))
+		tokens, err := auth.ResolveTokens(workspaceDir, cooperDir, enabledTools)
+		if err != nil {
+			t.Fatalf("ResolveTokens() failed: %v", err)
+		}
+		t.Logf("resolved %d auth tokens", len(tokens))
+
+		for _, tok := range tokens {
+			if tok.Name == "CLAUDECODE" {
+				t.Errorf("CLAUDECODE was resolved as a token but should be excluded")
+			}
+		}
+
+		t.Logf("inspecting barrel environment inside %s", barrelName)
+		out, err := barrelExec(barrelName, "env")
+		if err != nil {
+			t.Fatalf("env command failed: %v\noutput: %s", err, out)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "CLAUDECODE=") {
+				t.Errorf("CLAUDECODE found in barrel environment: %s", line)
+			}
+		}
+	})
+
+	t.Run("CLIReusesContainer", func(t *testing.T) {
+		running, err := docker.IsBarrelRunning(barrelName)
+		if err != nil {
+			t.Fatalf("IsBarrelRunning() failed: %v", err)
+		}
+		if !running {
+			t.Fatal("barrel should be running after startAppAndBarrel")
+		}
+
+		wsOut, err := exec.Command("docker", "inspect",
+			"--format", "{{index .Config.Labels \"cooper.workspace\"}}",
+			barrelName).Output()
+		if err != nil {
+			t.Fatalf("inspect barrel workspace label: %v", err)
+		}
+		workspaceDir := strings.TrimSpace(string(wsOut))
+
+		secondName := docker.BarrelContainerName(workspaceDir, "claude")
+		if secondName != barrelName {
+			t.Errorf("BarrelContainerName returned %q on second call, want %q (reuse)", secondName, barrelName)
+		}
+
+		if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "claude"); err != nil {
+			t.Fatalf("second StartBarrel() failed: %v", err)
+		}
+
+		running, err = docker.IsBarrelRunning(barrelName)
+		if err != nil {
+			t.Fatalf("IsBarrelRunning() after second start: %v", err)
+		}
+		if !running {
+			t.Error("barrel should be running after second StartBarrel call")
+		}
+
+		barrels, err := docker.ListBarrels()
+		if err != nil {
+			t.Fatalf("ListBarrels() failed: %v", err)
+		}
+		count := 0
+		for _, b := range barrels {
+			if b.WorkspaceDir == workspaceDir {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("expected 1 barrel for workspace %s, found %d", workspaceDir, count)
+		}
+	})
 }
 
 // TestCooperApp_CLIChecksProxyRunning verifies that without starting the
@@ -1763,8 +1728,7 @@ func TestCooperApp_SocatLiveReload(t *testing.T) {
 		cleanupDocker(t)
 	})
 
-	// Give socat relays time to start.
-	time.Sleep(3 * time.Second)
+	waitForProxyProcessPorts(t, 5*time.Second, 15000)
 
 	// Now reload with NEW rules (different port).
 	newRules := []config.PortForwardRule{
@@ -1799,22 +1763,8 @@ func TestCooperApp_SocatLiveReload(t *testing.T) {
 		t.Errorf("rule[1].ContainerPort = %d, want 16001", socatCfg.Rules[1].ContainerPort)
 	}
 
-	// Verify socat processes are running inside the proxy container.
-	// Wait a moment for SIGHUP handler to spawn new socat processes.
-	time.Sleep(2 * time.Second)
-	psOut, err := exec.Command("docker", "exec", docker.ProxyContainerName(), "ps", "aux").CombinedOutput()
-	if err != nil {
-		t.Logf("ps inside proxy failed (non-fatal): %v", err)
-	} else {
-		psStr := string(psOut)
-		t.Logf("proxy processes:\n%s", psStr)
-		// Check that socat appears in the process list.
-		if strings.Contains(psStr, "socat") {
-			t.Logf("socat processes found in proxy container")
-		} else {
-			t.Logf("no socat processes visible in proxy (entrypoint may not have started socat yet)")
-		}
-	}
+	psStr := waitForProxyProcessPorts(t, 5*time.Second, 16000, 16001)
+	t.Logf("proxy processes:\n%s", psStr)
 }
 
 // TestCooperApp_BridgeBindAddress starts the app and verifies the bridge
@@ -2300,8 +2250,7 @@ func TestCooperApp_MountedVolumeOwnership(t *testing.T) {
 
 	expectedUID := fmt.Sprintf("%d", os.Getuid())
 
-	// Wait for proxy to write logs.
-	time.Sleep(2 * time.Second)
+	waitForDirNotEmpty(t, filepath.Join(cooperDir, "logs"), 3*time.Second)
 
 	// Check proxy-created files in mounted volumes.
 	checkPaths := []struct {
@@ -2984,15 +2933,14 @@ func TestCooperApp_ClipboardTTLExpiry(t *testing.T) {
 		t.Fatalf("before expiry: /clipboard/image status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 
-	// Wait for TTL to expire.
-	time.Sleep(1500 * time.Millisecond)
-
-	// After expiry: /clipboard/image should return 204.
-	expiredImgResp := clipboardGet(t, cfg.BridgePort, "/clipboard/image", token)
-	expiredImgResp.Body.Close()
-	if expiredImgResp.StatusCode != http.StatusNoContent {
-		t.Errorf("after expiry: /clipboard/image status = %d, want %d", expiredImgResp.StatusCode, http.StatusNoContent)
-	}
+	waitForCondition(t, "clipboard TTL expiry", 3*time.Second, 100*time.Millisecond, func(_ int) (bool, string, error) {
+		expiredResp := clipboardGet(t, cfg.BridgePort, "/clipboard/image", token)
+		expiredResp.Body.Close()
+		if expiredResp.StatusCode == http.StatusNoContent {
+			return true, fmt.Sprintf("/clipboard/image status=%d", expiredResp.StatusCode), nil
+		}
+		return false, fmt.Sprintf("/clipboard/image status=%d", expiredResp.StatusCode), nil
+	})
 
 	// After expiry: /clipboard/type should return state=empty.
 	expiredTypeResp := clipboardGet(t, cfg.BridgePort, "/clipboard/type", token)

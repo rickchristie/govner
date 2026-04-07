@@ -325,6 +325,38 @@ func TestApplyMissingDefaultsBarrelSHMSize(t *testing.T) {
 	}
 }
 
+func TestApplyMissingDefaultsMonitorTimeout(t *testing.T) {
+	// Simulate an old config file that omits monitor_timeout_secs entirely
+	// (JSON unmarshal produces zero value). applyMissingDefaults should
+	// fill it with 30, not leave it at 0 (which would fail validation).
+	cfg := &Config{
+		ProxyPort:          3128,
+		BridgePort:         4343,
+		MonitorTimeoutSecs: 0, // missing from old config
+		BlockedHistoryLimit: 500,
+		AllowedHistoryLimit: 500,
+		BridgeLogLimit:     500,
+		ClipboardTTLSecs:   300,
+		ClipboardMaxBytes:  20971520,
+		BarrelSHMSize:      "1g",
+	}
+	cfg.applyMissingDefaults()
+	if cfg.MonitorTimeoutSecs != 30 {
+		t.Errorf("expected MonitorTimeoutSecs = 30 for missing field, got %d", cfg.MonitorTimeoutSecs)
+	}
+}
+
+func TestApplyMissingDefaultsPreservesExistingTimeout(t *testing.T) {
+	// An old config that has monitor_timeout_secs: 5 must keep 5.
+	cfg := &Config{
+		MonitorTimeoutSecs: 5,
+	}
+	cfg.applyMissingDefaults()
+	if cfg.MonitorTimeoutSecs != 5 {
+		t.Errorf("expected MonitorTimeoutSecs = 5 (preserved), got %d", cfg.MonitorTimeoutSecs)
+	}
+}
+
 func TestHasEnabledAITool(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.HasEnabledAITool() {

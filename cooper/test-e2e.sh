@@ -412,6 +412,104 @@ other_tools() {
     echo "${others[@]}"
 }
 
+# Barrel runtime constants and helper. Keep this aligned with
+# cooper/internal/docker/StartBarrel so the manual e2e launches exercise
+# the same container contract as the real application.
+BARREL_PROXY_HOST="cooper-proxy"
+BARREL_XAUTH_PATH="/home/user/.cooper-clipboard.xauth"
+BARREL_PLAYWRIGHT_CACHE="/home/user/.cache/ms-playwright"
+
+build_barrel_run_args() {
+    local barrel_name=$1
+    local tool_image=$2
+    local auth_mounts_name=$3
+    local extra_mounts_name=$4
+    local extra_envs_name=$5
+    local -n auth_mounts_ref="$auth_mounts_name"
+    local -n extra_mounts_ref="$extra_mounts_name"
+    local -n extra_envs_ref="$extra_envs_name"
+
+    BARREL_ARGS=(
+        "run" "-d"
+        "--name" "$barrel_name"
+        "--network" "$NETWORK_INTERNAL"
+
+        # Security hardening.
+        "--cap-drop=ALL"
+        "--security-opt=no-new-privileges"
+        "--init"
+
+        # Shared memory size for browser workloads.
+        "--shm-size" "1g"
+
+        # Label for workspace tracking.
+        "--label" "cooper.workspace=${E2E_WORKSPACE}"
+
+        # Workspace (read-write).
+        "-v" "${E2E_WORKSPACE}:${E2E_WORKSPACE}:rw"
+
+        # Tool-specific auth mounts.
+        "${auth_mounts_ref[@]}"
+
+        # Language caches (Cooper-managed, all read-write).
+        "-v" "${CONFIG_DIR}/cache/go-mod:/home/user/go/pkg/mod:rw"
+        "-v" "${CONFIG_DIR}/cache/go-build:/home/user/.cache/go-build:rw"
+        "-v" "${CONFIG_DIR}/cache/npm:/home/user/.npm:rw"
+        "-v" "${CONFIG_DIR}/cache/pip:/home/user/.cache/pip:rw"
+
+        # CA cert and socat rules (read-only).
+        "-v" "${CONFIG_DIR}/ca/cooper-ca.pem:/etc/cooper/cooper-ca.pem:ro"
+        "-v" "${CONFIG_DIR}/socat-rules.json:/etc/cooper/socat-rules.json:ro"
+
+        # Playwright support mounts: fonts (ro), browser cache (rw), per-barrel /tmp (rw).
+        "-v" "${CONFIG_DIR}/fonts:/home/user/.local/share/fonts:ro"
+        "-v" "${CONFIG_DIR}/cache/ms-playwright:${BARREL_PLAYWRIGHT_CACHE}:rw"
+        "-v" "${CONFIG_DIR}/tmp/${barrel_name}:/tmp:rw"
+
+        # Any scenario-specific extra mounts go here.
+        "${extra_mounts_ref[@]}"
+
+        # Proxy environment variables.
+        "-e" "HTTP_PROXY=http://${BARREL_PROXY_HOST}:3128"
+        "-e" "HTTPS_PROXY=http://${BARREL_PROXY_HOST}:3128"
+        "-e" "NO_PROXY=localhost,127.0.0.1"
+        "-e" "COOPER_PROXY_HOST=${BARREL_PROXY_HOST}"
+        "-e" "COOPER_INTERNAL_NETWORK=${NETWORK_INTERNAL}"
+
+        # Shared X11 display env vars.
+        "-e" "DISPLAY=127.0.0.1:99"
+        "-e" "XAUTHORITY=${BARREL_XAUTH_PATH}"
+        "-e" "COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99"
+        "-e" "COOPER_CLIPBOARD_XAUTHORITY=${BARREL_XAUTH_PATH}"
+
+        # Playwright browser cache path.
+        "-e" "PLAYWRIGHT_BROWSERS_PATH=${BARREL_PLAYWRIGHT_CACHE}"
+
+        # Clipboard bridge env vars.
+        "-e" "COOPER_CLIPBOARD_ENABLED=1"
+        "-e" "COOPER_CLIPBOARD_BRIDGE_URL=http://127.0.0.1:4343"
+        "-e" "COOPER_CLIPBOARD_TOKEN_FILE=/etc/cooper/clipboard-token"
+        "-e" "COOPER_CLIPBOARD_SHIMS=xclip,xsel"
+
+        # Any scenario-specific extra env vars go here.
+        "${extra_envs_ref[@]}"
+
+        # Working directory.
+        "-w" "${E2E_WORKSPACE}"
+    )
+
+    # Git config (read-only) is mounted only when it exists, matching runtime.
+    if [ -f "${HOME_DIR}/.gitconfig" ]; then
+        BARREL_ARGS+=("-v" "${HOME_DIR}/.gitconfig:/home/user/.gitconfig:ro")
+    fi
+
+    if [ -n "$SECCOMP_PATH" ]; then
+        BARREL_ARGS+=("--security-opt" "seccomp=${SECCOMP_PATH}")
+    fi
+
+    BARREL_ARGS+=("$tool_image" "sleep" "infinity")
+}
+
 # Language cache dirs already created above (Cooper-managed under CONFIG_DIR/cache/).
 
 # Playwright support dirs — must exist before Docker mounts them.
@@ -448,79 +546,12 @@ for tool in "${ALL_TOOLS[@]}"; do
 
     # Read auth mounts into an array.
     read -ra AUTH_MOUNTS <<< "$(auth_mounts_for "$tool")"
+    EXTRA_MOUNTS=()
+    EXTRA_ENVS=()
 
     # Start barrel container.
     info "Starting ${tool} barrel container..."
-    BARREL_ARGS=(
-        "run" "-d"
-        "--name" "$barrel_name"
-        "--network" "$NETWORK_INTERNAL"
-
-        # Security hardening.
-        "--cap-drop=ALL"
-        "--security-opt=no-new-privileges"
-        "--init"
-
-        # Label for workspace tracking.
-        "--label" "cooper.workspace=${E2E_WORKSPACE}"
-
-        # Volume mounts.
-        # Workspace (read-write).
-        "-v" "${E2E_WORKSPACE}:${E2E_WORKSPACE}:rw"
-
-        # Tool-specific auth mounts.
-        "${AUTH_MOUNTS[@]}"
-
-        # Git config (read-only).
-        "-v" "${HOME_DIR}/.gitconfig:/home/user/.gitconfig:ro"
-
-        # Language caches (Cooper-managed, all read-write).
-        "-v" "${CONFIG_DIR}/cache/go-mod:/home/user/go/pkg/mod:rw"
-        "-v" "${CONFIG_DIR}/cache/go-build:/home/user/.cache/go-build:rw"
-        "-v" "${CONFIG_DIR}/cache/npm:/home/user/.npm:rw"
-        "-v" "${CONFIG_DIR}/cache/pip:/home/user/.cache/pip:rw"
-
-        # CA cert (read-only).
-        "-v" "${CONFIG_DIR}/ca/cooper-ca.pem:/etc/cooper/cooper-ca.pem:ro"
-
-        # Socat rules (read-only).
-        "-v" "${CONFIG_DIR}/socat-rules.json:/etc/cooper/socat-rules.json:ro"
-
-        # Proxy env vars.
-        "-e" "HTTP_PROXY=http://cooper-proxy:3128"
-        "-e" "HTTPS_PROXY=http://cooper-proxy:3128"
-        "-e" "NO_PROXY=localhost,127.0.0.1"
-
-        # X11 display env vars — set for ALL barrels.
-        "-e" "DISPLAY=127.0.0.1:99"
-        "-e" "XAUTHORITY=/home/user/.cooper-clipboard.xauth"
-        "-e" "COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99"
-        "-e" "COOPER_CLIPBOARD_XAUTHORITY=/home/user/.cooper-clipboard.xauth"
-
-        # Playwright browser cache path.
-        "-e" "PLAYWRIGHT_BROWSERS_PATH=/home/user/.cache/ms-playwright"
-
-        # Shared memory size for browser workloads.
-        "--shm-size" "1g"
-
-        # Playwright support mounts: fonts (ro) and browser cache (rw).
-        "-v" "${CONFIG_DIR}/fonts:/home/user/.local/share/fonts:ro"
-        "-v" "${CONFIG_DIR}/cache/ms-playwright:/home/user/.cache/ms-playwright:rw"
-
-        # Per-barrel /tmp (rw) — isolated per container.
-        "-v" "${CONFIG_DIR}/tmp/${barrel_name}:/tmp:rw"
-
-        # Working directory.
-        "-w" "${E2E_WORKSPACE}"
-    )
-
-    # Add seccomp if available.
-    if [ -n "$SECCOMP_PATH" ]; then
-        BARREL_ARGS+=("--security-opt" "seccomp=${SECCOMP_PATH}")
-    fi
-
-    BARREL_ARGS+=("$tool_image" "sleep" "infinity")
-
+    build_barrel_run_args "$barrel_name" "$tool_image" AUTH_MOUNTS EXTRA_MOUNTS EXTRA_ENVS
     docker "${BARREL_ARGS[@]}" >/dev/null 2>&1
     pass "${tool}: barrel container started"
 
@@ -812,27 +843,10 @@ ACTIVE_TOOL="claude"
 
 info "Starting claude barrel for domain tests..."
 read -ra CLAUDE_AUTH_MOUNTS <<< "$(auth_mounts_for claude)"
-docker run -d \
-    --name "$ACTIVE_BARREL" \
-    --network "$NETWORK_INTERNAL" \
-    --cap-drop=ALL \
-    --security-opt=no-new-privileges \
-    --init \
-    --label "cooper.workspace=${E2E_WORKSPACE}" \
-    -v "${E2E_WORKSPACE}:${E2E_WORKSPACE}:rw" \
-    "${CLAUDE_AUTH_MOUNTS[@]}" \
-    -v "${HOME_DIR}/.gitconfig:/home/user/.gitconfig:ro" \
-    -v "${CONFIG_DIR}/cache/go-mod:/home/user/go/pkg/mod:rw" \
-    -v "${CONFIG_DIR}/cache/go-build:/home/user/.cache/go-build:rw" \
-    -v "${CONFIG_DIR}/cache/npm:/home/user/.npm:rw" \
-    -v "${CONFIG_DIR}/cache/pip:/home/user/.cache/pip:rw" \
-    -v "${CONFIG_DIR}/ca/cooper-ca.pem:/etc/cooper/cooper-ca.pem:ro" \
-    -v "${CONFIG_DIR}/socat-rules.json:/etc/cooper/socat-rules.json:ro" \
-    -e "HTTP_PROXY=http://cooper-proxy:3128" \
-    -e "HTTPS_PROXY=http://cooper-proxy:3128" \
-    -e "NO_PROXY=localhost,127.0.0.1" \
-    -w "${E2E_WORKSPACE}" \
-    "$ACTIVE_IMAGE" sleep infinity >/dev/null 2>&1
+CLAUDE_EXTRA_MOUNTS=()
+CLAUDE_EXTRA_ENVS=()
+build_barrel_run_args "$ACTIVE_BARREL" "$ACTIVE_IMAGE" CLAUDE_AUTH_MOUNTS CLAUDE_EXTRA_MOUNTS CLAUDE_EXTRA_ENVS
+docker "${BARREL_ARGS[@]}" >/dev/null 2>&1
 
 # Wait for it.
 barrel_running=false
@@ -917,27 +931,10 @@ section "Phase 6: Multiple Barrels Sharing Workspace"
 CODEX_BARREL="$BARREL_CODEX"
 info "Starting codex barrel alongside claude barrel..."
 read -ra CODEX_AUTH_MOUNTS <<< "$(auth_mounts_for codex)"
-docker run -d \
-    --name "$CODEX_BARREL" \
-    --network "$NETWORK_INTERNAL" \
-    --cap-drop=ALL \
-    --security-opt=no-new-privileges \
-    --init \
-    --label "cooper.workspace=${E2E_WORKSPACE}" \
-    -v "${E2E_WORKSPACE}:${E2E_WORKSPACE}:rw" \
-    "${CODEX_AUTH_MOUNTS[@]}" \
-    -v "${HOME_DIR}/.gitconfig:/home/user/.gitconfig:ro" \
-    -v "${CONFIG_DIR}/cache/go-mod:/home/user/go/pkg/mod:rw" \
-    -v "${CONFIG_DIR}/cache/go-build:/home/user/.cache/go-build:rw" \
-    -v "${CONFIG_DIR}/cache/npm:/home/user/.npm:rw" \
-    -v "${CONFIG_DIR}/cache/pip:/home/user/.cache/pip:rw" \
-    -v "${CONFIG_DIR}/ca/cooper-ca.pem:/etc/cooper/cooper-ca.pem:ro" \
-    -v "${CONFIG_DIR}/socat-rules.json:/etc/cooper/socat-rules.json:ro" \
-    -e "HTTP_PROXY=http://cooper-proxy:3128" \
-    -e "HTTPS_PROXY=http://cooper-proxy:3128" \
-    -e "NO_PROXY=localhost,127.0.0.1" \
-    -w "${E2E_WORKSPACE}" \
-    "$IMAGE_CODEX" sleep infinity >/dev/null 2>&1
+CODEX_EXTRA_MOUNTS=()
+CODEX_EXTRA_ENVS=()
+build_barrel_run_args "$CODEX_BARREL" "$IMAGE_CODEX" CODEX_AUTH_MOUNTS CODEX_EXTRA_MOUNTS CODEX_EXTRA_ENVS
+docker "${BARREL_ARGS[@]}" >/dev/null 2>&1
 
 # Wait for codex barrel to be running.
 codex_running=false
@@ -1815,36 +1812,15 @@ pass "Clipboard token file created"
 # Restart the claude barrel WITH clipboard env vars and mounts.
 info "Starting claude barrel with clipboard bridge config..."
 read -ra CLAUDE_AUTH_MOUNTS <<< "$(auth_mounts_for claude)"
-docker run -d \
-    --name "$ACTIVE_BARREL" \
-    --network "$NETWORK_INTERNAL" \
-    --cap-drop=ALL \
-    --security-opt=no-new-privileges \
-    --init \
-    --label "cooper.workspace=${E2E_WORKSPACE}" \
-    -v "${E2E_WORKSPACE}:${E2E_WORKSPACE}:rw" \
-    "${CLAUDE_AUTH_MOUNTS[@]}" \
-    -v "${HOME_DIR}/.gitconfig:/home/user/.gitconfig:ro" \
-    -v "${CONFIG_DIR}/cache/go-mod:/home/user/go/pkg/mod:rw" \
-    -v "${CONFIG_DIR}/cache/go-build:/home/user/.cache/go-build:rw" \
-    -v "${CONFIG_DIR}/cache/npm:/home/user/.npm:rw" \
-    -v "${CONFIG_DIR}/cache/pip:/home/user/.cache/pip:rw" \
-    -v "${CONFIG_DIR}/ca/cooper-ca.pem:/etc/cooper/cooper-ca.pem:ro" \
-    -v "${CONFIG_DIR}/socat-rules.json:/etc/cooper/socat-rules.json:ro" \
-    -v "${CONFIG_DIR}/tokens/${BARREL_CLAUDE}:/etc/cooper/clipboard-token:ro" \
-    -v "${CONFIG_DIR}/base/shims:/etc/cooper/shims:ro" \
-    -e "HTTP_PROXY=http://cooper-proxy:3128" \
-    -e "HTTPS_PROXY=http://cooper-proxy:3128" \
-    -e "NO_PROXY=localhost,127.0.0.1" \
-    -e "COOPER_CLIPBOARD_ENABLED=1" \
-    -e "COOPER_CLIPBOARD_BRIDGE_URL=http://127.0.0.1:4343" \
-    -e "COOPER_CLIPBOARD_TOKEN_FILE=/etc/cooper/clipboard-token" \
-    -e "COOPER_CLIPBOARD_XAUTHORITY=/etc/cooper/clipboard.xauth" \
-    -e "COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99" \
-    -e "COOPER_CLIPBOARD_SHIMS=xclip,xsel" \
-    -e "COOPER_CLIPBOARD_MODE=shim" \
-    -w "${E2E_WORKSPACE}" \
-    "$ACTIVE_IMAGE" sleep infinity >/dev/null 2>&1
+CLIPBOARD_EXTRA_MOUNTS=(
+    "-v" "${CONFIG_DIR}/tokens/${BARREL_CLAUDE}:/etc/cooper/clipboard-token:ro"
+    "-v" "${CONFIG_DIR}/base/shims:/etc/cooper/shims:ro"
+)
+CLIPBOARD_EXTRA_ENVS=(
+    "-e" "COOPER_CLIPBOARD_MODE=shim"
+)
+build_barrel_run_args "$ACTIVE_BARREL" "$ACTIVE_IMAGE" CLAUDE_AUTH_MOUNTS CLIPBOARD_EXTRA_MOUNTS CLIPBOARD_EXTRA_ENVS
+docker "${BARREL_ARGS[@]}" >/dev/null 2>&1
 
 # Wait for it.
 barrel_running=false
