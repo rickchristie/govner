@@ -116,7 +116,7 @@ func setupCooperDir(t *testing.T) (string, *config.Config) {
 	// Register cleanup that fixes permissions on files created by container
 	// processes (e.g., Squid's "squid" user), so t.TempDir() can remove them.
 	t.Cleanup(func() {
-		exec.Command("chmod", "-R", "u+rwX", cooperDir).Run()
+		_ = testdocker.FixOwnership(cooperDir)
 	})
 
 	// Stage CA cert into proxy dir (proxy Dockerfile COPYs it from context,
@@ -151,7 +151,7 @@ func cleanupDocker(t *testing.T) {
 // container's "squid" user (different UID), making them unremovable.
 func fixCooperDirPermissions(t *testing.T, cooperDir string) {
 	t.Helper()
-	_ = exec.Command("chmod", "-R", "u+rwX", cooperDir).Run()
+	_ = testdocker.FixOwnership(cooperDir)
 }
 
 // TestCooperApp_StartStop verifies that a CooperApp can start (creating
@@ -201,12 +201,51 @@ func TestCooperApp_StartStop(t *testing.T) {
 	}
 
 	// Stop the app.
+	stopStart := time.Now()
 	if err := app.Stop(); err != nil {
 		t.Fatalf("Stop() failed: %v", err)
+	}
+	stopElapsed := time.Since(stopStart)
+	t.Logf("app stop completed in %s", stopElapsed.Round(time.Millisecond))
+	if stopElapsed > 5*time.Second {
+		t.Fatalf("Stop() took too long: %s", stopElapsed)
 	}
 
 	// Verify proxy is no longer running.
 	running, _ := docker.IsProxyRunning()
+	if running {
+		t.Error("proxy still running after Stop()")
+	}
+}
+
+func TestCooperApp_StopWithBarrelReturnsQuickly(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		cleanupDocker(t)
+	})
+
+	stopStart := time.Now()
+	if err := app.Stop(); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
+	stopElapsed := time.Since(stopStart)
+	t.Logf("app stop with barrel completed in %s", stopElapsed.Round(time.Millisecond))
+	if stopElapsed > 5*time.Second {
+		t.Fatalf("Stop() with barrel took too long: %s", stopElapsed)
+	}
+
+	running, _ := docker.IsBarrelRunning(barrelName)
+	if running {
+		t.Errorf("barrel %s still running after Stop()", barrelName)
+	}
+	running, _ = docker.IsProxyRunning()
 	if running {
 		t.Error("proxy still running after Stop()")
 	}
@@ -345,8 +384,8 @@ func TestCooperApp_UpdateSettings(t *testing.T) {
 	app := NewCooperApp(cfg, cooperDir)
 
 	// Original values from DefaultConfig.
-	if cfg.MonitorTimeoutSecs != 5 {
-		t.Fatalf("precondition: MonitorTimeoutSecs = %d, want 5", cfg.MonitorTimeoutSecs)
+	if cfg.MonitorTimeoutSecs != 30 {
+		t.Fatalf("precondition: MonitorTimeoutSecs = %d, want 30", cfg.MonitorTimeoutSecs)
 	}
 
 	// Update settings.
@@ -1080,32 +1119,39 @@ func startAppAndBarrel(t *testing.T, cfg *config.Config, cooperDir string) (*Coo
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	t.Log("starting Cooper app runtime")
 	if err := app.Start(ctx, func(step int, total int, name string, err error) {
 		if err != nil {
 			t.Logf("startup step %d/%d %q failed: %v", step, total, name, err)
+			return
 		}
+		t.Logf("startup step %d/%d complete: %s", step+1, total, name)
 	}); err != nil {
 		t.Fatalf("Start() failed: %v", err)
 	}
 
 	// Create a workspace directory for the barrel.
 	workspaceDir := t.TempDir()
+	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
 
 	// Start the barrel container.
+	t.Logf("starting barrel container %s", barrelName)
 	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "claude"); err != nil {
 		app.Stop()
 		t.Fatalf("StartBarrel() failed: %v", err)
 	}
 
-	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
-
 	// Wait for barrel container to be running.
+	t.Logf("waiting for barrel container %s to report running", barrelName)
 	waitForContainer(t, barrelName, 15*time.Second)
+	t.Logf("barrel container %s is running", barrelName)
 
 	// Wait for proxy to be reachable from inside the barrel.
 	// The barrel's entrypoint needs time to start, and Docker DNS
 	// needs time to propagate the "cooper-proxy" name.
+	t.Logf("waiting for barrel %s to reach proxy %s:%d", barrelName, docker.ProxyHost(), cfg.ProxyPort)
 	waitForProxyFromBarrel(t, barrelName, cfg.ProxyPort, 30*time.Second)
+	t.Logf("barrel %s can reach proxy %s:%d", barrelName, docker.ProxyHost(), cfg.ProxyPort)
 
 	return app, barrelName
 }
@@ -1116,8 +1162,11 @@ func startAppAndBarrel(t *testing.T, cfg *config.Config, cooperDir string) (*Coo
 func waitForContainer(t *testing.T, name string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
+	attempt := 0
 	for time.Now().Before(deadline) {
-		running, _ := docker.IsBarrelRunning(name)
+		attempt++
+		running, err := docker.IsBarrelRunning(name)
+		t.Logf("waitForContainer attempt=%d container=%s running=%t err=%v", attempt, name, running, err)
 		if running {
 			return
 		}
@@ -1148,16 +1197,13 @@ func waitForProxyFromBarrel(t *testing.T, barrelName string, proxyPort int, time
 			return
 		}
 
-		// Log diagnostics on first few attempts.
-		if attempt <= 3 {
-			// Check if proxy container is running.
-			proxyState, _ := exec.Command("docker", "inspect", "--format", "{{.State.Status}}", docker.ProxyContainerName()).CombinedOutput()
-			// Check if both are on the same network.
-			netMembers, _ := exec.Command("docker", "network", "inspect", docker.InternalNetworkName(),
-				"--format", "{{range .Containers}}{{.Name}} {{end}}").CombinedOutput()
-			t.Logf("waitForProxy attempt=%d status=%q proxy=%s internal_members=[%s]",
-				attempt, status, strings.TrimSpace(string(proxyState)), strings.TrimSpace(string(netMembers)))
-		}
+		// Check if proxy container is running.
+		proxyState, _ := exec.Command("docker", "inspect", "--format", "{{.State.Status}}", docker.ProxyContainerName()).CombinedOutput()
+		// Check if both are on the same network.
+		netMembers, _ := exec.Command("docker", "network", "inspect", docker.InternalNetworkName(),
+			"--format", "{{range .Containers}}{{.Name}} {{end}}").CombinedOutput()
+		t.Logf("waitForProxy attempt=%d status=%q proxy=%s internal_members=[%s]",
+			attempt, status, strings.TrimSpace(string(proxyState)), strings.TrimSpace(string(netMembers)))
 
 		time.Sleep(2 * time.Second)
 	}
@@ -1557,16 +1603,20 @@ func TestCooperApp_CLIClaudeCodeNotForwarded(t *testing.T) {
 	// Set CLAUDECODE in the current process environment (simulating a
 	// nested Claude Code session on the host).
 	t.Setenv("CLAUDECODE", "1")
+	t.Log("set host CLAUDECODE=1 for token resolution")
 
 	// Resolve tokens with the environment variable set.
 	workspaceDir := t.TempDir()
 	enabledTools := []string{"claude", "codex"}
+	t.Logf("resolving auth tokens for enabled tools: %s", strings.Join(enabledTools, ", "))
 	tokens, err := auth.ResolveTokens(workspaceDir, cooperDir, enabledTools)
 	if err != nil {
 		t.Fatalf("ResolveTokens() failed: %v", err)
 	}
+	t.Logf("resolved %d auth tokens", len(tokens))
 
 	// Verify that CLAUDECODE is NOT among the resolved tokens.
+	t.Log("verifying resolved auth tokens do not contain CLAUDECODE")
 	for _, tok := range tokens {
 		if tok.Name == "CLAUDECODE" {
 			t.Errorf("CLAUDECODE was resolved as a token but should be excluded")
@@ -1575,11 +1625,14 @@ func TestCooperApp_CLIClaudeCodeNotForwarded(t *testing.T) {
 
 	// Also verify that CLAUDECODE is not present in the barrel container's
 	// own environment (it should never have been set during StartBarrel).
+	t.Logf("inspecting barrel environment inside %s", barrelName)
 	out, err := barrelExec(barrelName, "env")
 	if err != nil {
 		t.Fatalf("env command failed: %v\noutput: %s", err, out)
 	}
+	t.Logf("barrel environment inspection returned %d bytes", len(out))
 
+	t.Log("verifying barrel environment does not contain CLAUDECODE")
 	for _, line := range strings.Split(out, "\n") {
 		if strings.HasPrefix(line, "CLAUDECODE=") {
 			t.Errorf("CLAUDECODE found in barrel environment: %s", line)
@@ -2562,34 +2615,17 @@ func TestCooperApp_CustomToolClipboardModeOffRespected(t *testing.T) {
 	cooperDir, cfg := setupCooperDir(t)
 	t.Cleanup(func() { cleanupDocker(t) })
 
-	baseExists, _ := docker.ImageExists(docker.GetImageBase())
-	if !baseExists {
-		t.Fatal("base image not found after test bootstrap")
+	offImage := docker.GetImageCLI(testdocker.SharedClipboardOffToolName)
+	offExists, _ := docker.ImageExists(offImage)
+	if !offExists {
+		t.Fatalf("shared clipboard-off image %s not found after test bootstrap", offImage)
 	}
 
 	app := startClipboardApp(t, cfg, cooperDir)
 	defer app.Stop()
 
-	customDir := filepath.Join(cooperDir, "cli", "my-custom-off")
-	if err := os.MkdirAll(customDir, 0755); err != nil {
-		t.Fatalf("mkdir custom dir: %v", err)
-	}
-	dockerfile := fmt.Sprintf(
-		"FROM %s\nENV COOPER_CLI_TOOL=my-custom-off\nENV COOPER_CLIPBOARD_MODE=off\n",
-		docker.GetImageBase(),
-	)
-	if err := os.WriteFile(filepath.Join(customDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
-		t.Fatalf("write custom Dockerfile: %v", err)
-	}
-
-	imageName := docker.GetImageCLI("my-custom-off")
-	if err := docker.BuildImage(imageName, filepath.Join(customDir, "Dockerfile"), customDir, nil, false); err != nil {
-		t.Fatalf("BuildImage(my-custom-off) failed: %v", err)
-	}
-	t.Cleanup(func() { _ = docker.RemoveImage(imageName) })
-
 	workspaceDir := t.TempDir()
-	barrelName := docker.BarrelContainerName(workspaceDir, "my-custom-off")
+	barrelName := docker.BarrelContainerName(workspaceDir, testdocker.SharedClipboardOffToolName)
 	token, err := clipboard.GenerateToken()
 	if err != nil {
 		t.Fatalf("GenerateToken() failed: %v", err)
@@ -2599,8 +2635,8 @@ func TestCooperApp_CustomToolClipboardModeOffRespected(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = clipboard.RemoveTokenFile(cooperDir, barrelName) })
 
-	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "my-custom-off"); err != nil {
-		t.Fatalf("StartBarrel(my-custom-off) failed: %v", err)
+	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, testdocker.SharedClipboardOffToolName); err != nil {
+		t.Fatalf("StartBarrel(%s) failed: %v", testdocker.SharedClipboardOffToolName, err)
 	}
 	t.Cleanup(func() { _ = docker.StopBarrel(barrelName) })
 	waitForContainer(t, barrelName, 15*time.Second)
@@ -2875,40 +2911,21 @@ func TestCooperApp_ClipboardIneligibleBarrel(t *testing.T) {
 func TestCooperApp_ClipboardTokenFromDisk(t *testing.T) {
 	skipIfNoDocker(t)
 	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
 	docker.SetImagePrefix(testImagePrefix)
 
 	cooperDir, cfg := setupCooperDir(t)
 	t.Cleanup(func() { cleanupDocker(t) })
 
-	baseExists, _ := docker.ImageExists(docker.GetImageBase())
-	if !baseExists {
-		t.Fatal("base image not found after test bootstrap")
-	}
-
 	app := startClipboardApp(t, cfg, cooperDir)
 	defer app.Stop()
 
-	customDir := filepath.Join(cooperDir, "cli", "my-custom-disk")
-	if err := os.MkdirAll(customDir, 0755); err != nil {
-		t.Fatalf("mkdir custom dir: %v", err)
-	}
-	dockerfile := fmt.Sprintf("FROM %s\nENV COOPER_CLI_TOOL=my-custom-disk\n", docker.GetImageBase())
-	if err := os.WriteFile(filepath.Join(customDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
-		t.Fatalf("write custom Dockerfile: %v", err)
-	}
-
-	imageName := docker.GetImageCLI("my-custom-disk")
-	if err := docker.BuildImage(imageName, filepath.Join(customDir, "Dockerfile"), customDir, nil, false); err != nil {
-		t.Fatalf("BuildImage(my-custom-disk) failed: %v", err)
-	}
-	t.Cleanup(func() { _ = docker.RemoveImage(imageName) })
-
 	workspaceDir := t.TempDir()
-	barrelName := docker.BarrelContainerName(workspaceDir, "my-custom-disk")
+	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
 	token := writeTestToken(t, cooperDir, barrelName)
 	t.Cleanup(func() { _ = clipboard.RemoveTokenFile(cooperDir, barrelName) })
-	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "my-custom-disk"); err != nil {
-		t.Fatalf("StartBarrel(my-custom-disk) failed: %v", err)
+	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "claude"); err != nil {
+		t.Fatalf("StartBarrel(claude) failed: %v", err)
 	}
 	t.Cleanup(func() { _ = docker.StopBarrel(barrelName) })
 	waitForContainer(t, barrelName, 15*time.Second)

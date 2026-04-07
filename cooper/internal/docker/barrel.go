@@ -74,8 +74,8 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 	}
 
 	// Create host directories that may not exist yet.
-	if err := ensureBarrelHostDirs(absWorkspace, toolName, cooperDir); err != nil {
-		return fmt.Errorf("create host directories: %w", err)
+	if err := ensureBarrelMountDirs(toolName, cooperDir, name, cfg); err != nil {
+		return fmt.Errorf("create mount directories: %w", err)
 	}
 
 	// Ensure seccomp profile is written to disk.
@@ -141,13 +141,6 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 		"-e", "COOPER_CLIPBOARD_SHIMS=xclip,xsel",
 	)
 
-	// If Go is enabled, set GOFLAGS=-mod=readonly to prevent the AI from
-	// modifying go.mod/go.sum inside the container. Dependencies must be
-	// installed on the host.
-	if isGoEnabled(cfg) {
-		args = append(args, "-e", "GOFLAGS=-mod=readonly")
-	}
-
 	// Working directory inside the container matches host workspace.
 	args = append(args, "-w", absWorkspace)
 
@@ -210,8 +203,8 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 		args = append(args, "-v", fmt.Sprintf("%s:%s:ro", gitconfig, filepath.Join(containerHome, ".gitconfig")))
 	}
 
-	// Language-specific caches (based on enabled programming tools).
-	args = appendLanguageCacheMounts(args, homeDir, cfg)
+	// Language-specific caches (Cooper-managed, under cooperDir/cache/).
+	args = appendLanguageCacheMounts(args, cooperDir, cfg)
 
 	// CA certificate for SSL bump trust. Volume-mounted so the barrel always
 	// uses the same CA as the running proxy, even if the CA was regenerated
@@ -247,6 +240,12 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 	pwCacheDir := filepath.Join(cooperDir, "cache", "ms-playwright")
 	args = append(args, "-v", pwCacheDir+":/home/user/.cache/ms-playwright:rw")
 
+	// Per-barrel /tmp directory. Each barrel gets its own host-backed /tmp
+	// under ~/.cooper/tmp/{containerName}/ to avoid collisions between
+	// barrels and to persist temp files across container restarts.
+	barrelTmpDir := filepath.Join(cooperDir, "tmp", containerName)
+	args = append(args, "-v", barrelTmpDir+":/tmp:rw")
+
 	return args
 }
 
@@ -257,86 +256,27 @@ func mountRW(homeDir, relPath string, args *[]string) {
 	*args = append(*args, "-v", fmt.Sprintf("%s:%s:rw", hostPath, containerPath))
 }
 
-// appendLanguageCacheMounts adds cache volume mounts based on which
-// programming tools are enabled in the configuration. Container-side
-// paths use containerHome so the barrel user can find caches.
-func appendLanguageCacheMounts(args []string, homeDir string, cfg *config.Config) []string {
-	for _, tool := range cfg.ProgrammingTools {
-		if !tool.Enabled {
-			continue
-		}
-		switch tool.Name {
-		case "go":
-			gopath := os.Getenv("GOPATH")
-			if gopath == "" {
-				gopath = filepath.Join(homeDir, "go")
-			}
-			hostModCache := filepath.Join(gopath, "pkg", "mod")
-			hostBuildCache := filepath.Join(homeDir, ".cache", "go-build")
-			containerModCache := filepath.Join(containerHome, "go", "pkg", "mod")
-			containerBuildCache := filepath.Join(containerHome, ".cache", "go-build")
-			args = append(args,
-				"-v", fmt.Sprintf("%s:%s:ro", hostModCache, containerModCache),
-				"-v", fmt.Sprintf("%s:%s:rw", hostBuildCache, containerBuildCache),
-			)
-		case "node":
-			hostNpm := filepath.Join(homeDir, ".npm")
-			containerNpm := filepath.Join(containerHome, ".npm")
-			args = append(args, "-v", fmt.Sprintf("%s:%s:ro", hostNpm, containerNpm))
-		case "python":
-			hostPip := filepath.Join(homeDir, ".cache", "pip")
-			containerPip := filepath.Join(containerHome, ".cache", "pip")
-			args = append(args, "-v", fmt.Sprintf("%s:%s:ro", hostPip, containerPip))
-		}
+// appendLanguageCacheMounts adds Cooper-managed cache volume mounts based
+// on which programming tools are enabled. All caches live under
+// cooperDir/cache/ and are mounted read-write — no host caches are used.
+func appendLanguageCacheMounts(args []string, cooperDir string, cfg *config.Config) []string {
+	for _, spec := range languageCacheSpecs(cooperDir, cfg) {
+		args = append(args, "-v", fmt.Sprintf("%s:%s:rw", spec.HostPath, spec.ContainerPath))
 	}
 	return args
 }
 
-// ensureBarrelHostDirs creates directories on the host that must exist
-// before Docker can mount them as volumes.
-func ensureBarrelHostDirs(absWorkspace, toolName, cooperDir string) error {
+// ensureBarrelMountDirs creates directories on the host that must exist
+// before Docker can bind-mount them into a barrel. The directory list
+// comes from barrelMountDirs (pure helper); this function is the thin
+// I/O wrapper that calls os.MkdirAll.
+func ensureBarrelMountDirs(toolName, cooperDir, containerName string, cfg *config.Config) error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("get home dir: %w", err)
 	}
 
-	gopath := os.Getenv("GOPATH")
-	if gopath == "" {
-		gopath = filepath.Join(homeDir, "go")
-	}
-
-	// Tool-specific auth dirs.
-	var dirs []string
-	switch toolName {
-	case "claude":
-		dirs = append(dirs, filepath.Join(homeDir, ".claude"))
-	case "copilot":
-		dirs = append(dirs, filepath.Join(homeDir, ".copilot"))
-	case "codex":
-		dirs = append(dirs, filepath.Join(homeDir, ".codex"))
-	case "opencode":
-		dirs = append(dirs,
-			filepath.Join(homeDir, ".config", "opencode"),
-			filepath.Join(homeDir, ".local", "share", "opencode"),
-		)
-	}
-
-	// Language cache dirs (always needed).
-	dirs = append(dirs,
-		filepath.Join(homeDir, ".npm"),
-		filepath.Join(homeDir, ".cache", "pip"),
-		filepath.Join(homeDir, ".cache", "go-build"),
-		filepath.Join(gopath, "pkg", "mod"),
-	)
-
-	// Playwright support dirs — must exist before Docker mounts them
-	// so Docker does not create them as root-owned directories.
-	dirs = append(dirs,
-		filepath.Join(cooperDir, "fonts"),
-		filepath.Join(cooperDir, "cache", "ms-playwright"),
-	)
-
-	for _, dir := range dirs {
+	for _, dir := range barrelMountDirs(homeDir, toolName, cooperDir, containerName, cfg) {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
@@ -346,24 +286,7 @@ func ensureBarrelHostDirs(absWorkspace, toolName, cooperDir string) error {
 
 // StopBarrel stops and removes a barrel container by name.
 func StopBarrel(name string) error {
-	cmd := exec.Command("docker", "stop", name)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		if !strings.Contains(string(output), "No such container") &&
-			!strings.Contains(string(output), "is not running") {
-			return fmt.Errorf("docker stop %s failed: %w\n%s", name, err, string(output))
-		}
-	}
-
-	cmd = exec.Command("docker", "rm", "-f", name)
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		if !strings.Contains(string(output), "No such container") {
-			return fmt.Errorf("docker rm %s failed: %w\n%s", name, err, string(output))
-		}
-	}
-
-	return nil
+	return stopAndRemoveContainer(name)
 }
 
 // RestartBarrel restarts a barrel container by name. This is a simple
@@ -504,16 +427,6 @@ func clipboardModeForTool(toolName string) string {
 	default:
 		return "auto"
 	}
-}
-
-// isGoEnabled checks if Go is enabled in the programming tools config.
-func isGoEnabled(cfg *config.Config) bool {
-	for _, t := range cfg.ProgrammingTools {
-		if strings.EqualFold(t.Name, "go") && t.Enabled {
-			return true
-		}
-	}
-	return false
 }
 
 // dirExists returns true if the path exists and is a directory.

@@ -17,6 +17,43 @@ if [ -f /etc/cooper/cooper-ca.pem ]; then
 fi
 
 SOCAT_RULES="/etc/cooper/socat-rules.json"
+SOCAT_SUPERVISORS=()
+MAIN_PID=""
+XVFB_PID=""
+X11_BRIDGE_SUPERVISOR_PID=""
+SHUTDOWN_IN_PROGRESS=0
+
+stop_pid() {
+  local pid=$1
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+}
+
+stop_socat_supervisors() {
+  local old=("${SOCAT_SUPERVISORS[@]}")
+  SOCAT_SUPERVISORS=()
+  for pid in "${old[@]}"; do
+    stop_pid "$pid"
+  done
+}
+
+cleanup_container() {
+  if [ "$SHUTDOWN_IN_PROGRESS" = "1" ]; then
+    return
+  fi
+  SHUTDOWN_IN_PROGRESS=1
+  stop_pid "$MAIN_PID"
+  stop_pid "$X11_BRIDGE_SUPERVISOR_PID"
+  stop_pid "$XVFB_PID"
+  stop_socat_supervisors
+}
+
+handle_shutdown_signal() {
+  cleanup_container
+  exit 0
+}
 
 # ============================================================================
 # PATH setup — written to the TOP of .bashrc (before Debian's interactive guard)
@@ -101,6 +138,7 @@ start_shared_xvfb() {
     -auth "$XAUTH_FILE" \
     -listen tcp \
     -nolisten unix >/tmp/xvfb.log 2>&1 &
+  XVFB_PID=$!
 
   export DISPLAY="$DISPLAY_ADDR"
   export XAUTHORITY="$XAUTH_FILE"
@@ -131,8 +169,6 @@ start_shared_xvfb() {
 # Parent tracks supervisor PIDs. Each supervisor manages one socat process
 # with auto-restart. On reload, parent TERMs supervisors; each supervisor
 # traps TERM, kills its socat child, and exits cleanly.
-SOCAT_SUPERVISORS=()
-
 run_socat() {
     local port=$1
     local name=$2
@@ -242,6 +278,7 @@ reload_socat() {
 
 # Handle SIGHUP for live reload
 trap 'reload_socat' HUP
+trap 'handle_shutdown_signal' TERM INT
 
 # Start socat BEFORE Xvfb — port forwarding has no dependency on the X11
 # display, and the Xvfb readiness wait (up to 3 s) would delay socat binding.
@@ -301,6 +338,7 @@ if [ "$CLIP_MODE" = "x11" ] || [ "$CLIP_MODE" = "auto" ]; then
         sleep 1
       done
     ) &
+    X11_BRIDGE_SUPERVISOR_PID=$!
   fi
 fi
 {{end}}
@@ -337,6 +375,9 @@ fi
 MAIN_PID=$!
 while wait $MAIN_PID; exit_code=$?; do
     if ! kill -0 $MAIN_PID 2>/dev/null; then
-        exit $exit_code
+        break
     fi
 done
+
+cleanup_container
+exit $exit_code

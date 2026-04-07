@@ -69,7 +69,7 @@ flowchart TB
         direction LR
         subgraph barrel1["<b>barrel-myproject-claude</b>"]
             claude["Claude Code<br/><i>auto-approve</i>"]
-            tools1["Go + Node + Python<br/>Workspace mounted rw<br/>Caches mounted ro"]
+            tools1["Go + Node + Python<br/>Workspace mounted rw<br/>Cooper-managed caches rw"]
         end
         subgraph barrel2["<b>barrel-myproject-codex</b>"]
             codex["Codex CLI<br/><i>auto-approve</i>"]
@@ -92,25 +92,6 @@ flowchart TB
     barrel1 --x denied
     barrel2 --x denied
 
-    style host fill:#1a1a2e,stroke:#e94560,stroke-width:2px,color:#eee
-    style tui fill:#16213e,stroke:#0f3460,stroke-width:2px,color:#eee
-    style external fill:#0f3460,stroke:#533483,stroke-width:2px,color:#eee
-    style internal fill:#1a0000,stroke:#e94560,stroke-width:3px,color:#eee
-    style proxy_box fill:#16213e,stroke:#533483,stroke-width:1px,color:#eee
-    style barrel1 fill:#162447,stroke:#e94560,stroke-width:1px,color:#eee
-    style barrel2 fill:#162447,stroke:#e94560,stroke-width:1px,color:#eee
-    style allowed fill:#1b4332,stroke:#52b788,stroke-width:2px,color:#eee
-    style denied fill:#641220,stroke:#e94560,stroke-width:2px,color:#eee
-    style monitor fill:#533483,stroke:#e94560,stroke-width:1px,color:#eee
-    style bridge_api fill:#16213e,stroke:#0f3460,stroke-width:1px,color:#eee
-    style clipboard fill:#16213e,stroke:#0f3460,stroke-width:1px,color:#eee
-    style host_services fill:#16213e,stroke:#0f3460,stroke-width:1px,color:#eee
-    style squid fill:#533483,stroke:#e94560,stroke-width:1px,color:#eee
-    style socat_proxy fill:#16213e,stroke:#0f3460,stroke-width:1px,color:#eee
-    style claude fill:#162447,stroke:none,color:#eee
-    style tools1 fill:#162447,stroke:none,color:#aaa
-    style codex fill:#162447,stroke:none,color:#eee
-    style tools2 fill:#162447,stroke:none,color:#aaa
 ```
 
 **Key insight:** The `cooper-internal` network is created with Docker's `--internal` flag -- it has **no default gateway and no route to any external network**. Containers on this network can only reach each other via Docker DNS. Even if an AI tool ignores proxy environment variables, opens raw sockets, or runs `curl --noproxy '*'`, it cannot reach the internet. There is simply no route.
@@ -231,7 +212,7 @@ All traffic is blocked by default except:
 - AI provider API domains for enabled tools (anthropic.com, openai.com, etc.)
 - `raw.githubusercontent.com` (read-only, safe)
 
-Package registries (npm, PyPI, Go proxy, crates.io) are **intentionally blocked** -- dependencies are installed on the host and mounted read-only into containers. This prevents supply-chain attacks where an AI could be tricked into downloading malicious packages or exfiltrating data through registry requests.
+Package registries (npm, PyPI, Go proxy, crates.io) are **blocked by default** to prevent supply-chain attacks where an AI could be tricked into downloading malicious packages or exfiltrating data through registry requests. You can whitelist specific registries if needed, or approve individual requests through the TUI monitor.
 
 Add trusted domains through `cooper configure` (company APIs, staging servers, metrics dashboards). For everything else, approve requests one at a time through the TUI monitor.
 
@@ -290,12 +271,13 @@ Cooper does **not** install Playwright itself or download browsers. Your project
 | `~/.codex` | `/home/user/.codex` | read-write | Codex config |
 | `~/.config/opencode` | `/home/user/...` | read-write | OpenCode config |
 | `~/.gitconfig` | `/home/user/.gitconfig` | read-only | Git identity |
-| `$GOPATH/pkg/mod` | `/go/pkg/mod` | read-only | Go module cache |
-| `~/.cache/go-build` | `/home/user/.cache/go-build` | read-write | Go build cache |
-| `~/.npm` | `/home/user/.npm` | read-only | npm cache |
-| `~/.cache/pip` | `/home/user/.cache/pip` | read-only | pip cache |
+| `~/.cooper/cache/go-mod` | `/home/user/go/pkg/mod` | read-write | Go module cache |
+| `~/.cooper/cache/go-build` | `/home/user/.cache/go-build` | read-write | Go build cache |
+| `~/.cooper/cache/npm` | `/home/user/.npm` | read-write | npm cache |
+| `~/.cooper/cache/pip` | `/home/user/.cache/pip` | read-write | pip cache |
+| `~/.cooper/tmp/{container}` | `/tmp` | read-write | Per-barrel temp directory |
 
-Caches are auto-configured based on which programming tools are enabled.
+Language caches are Cooper-managed under `~/.cooper/cache/`, auto-configured based on which programming tools are enabled. They start empty and fill naturally during normal package-manager usage. Each barrel gets its own host-backed `/tmp` directory, isolated per container to avoid collisions between barrels sharing a workspace.
 
 ## Security Model
 
@@ -309,26 +291,21 @@ Caches are auto-configured based on which programming tools are enabled.
 | **Process** | `--init` for proper PID 1 signal handling |
 | **CA** | Per-installation local CA for TLS interception, never shared |
 | **Git hooks** | `.git/hooks` mounted read-only to prevent injection |
-| **Dependencies** | Package registries blocked; caches mounted read-only |
+| **Dependencies** | Package registries blocked by default; caches Cooper-managed under `~/.cooper/cache/` |
 | **Clipboard** | User-initiated, time-limited, per-barrel authenticated, fail-closed |
 
 ## Adding Dependencies
 
-Dependencies cannot be installed from inside barrels (registries are blocked by design). Install on the host, then use inside the container:
+Package registries are blocked by default. To install dependencies inside a barrel, either whitelist the needed registries in `cooper configure` or approve individual requests through the TUI monitor.
 
 ```bash
-# Go
-cd ~/myproject && go mod download
-cooper cli claude    # go mod cache is mounted read-only
-
-# Node.js
-cd ~/myproject && npm install
-cooper cli claude    # node_modules in workspace (rw), npm cache (ro)
-
-# Python
-cd ~/myproject && pip install -r requirements.txt
-cooper cli claude    # virtualenv in workspace (rw), pip cache (ro)
+# Inside a barrel (after whitelisting registries or approving via monitor):
+go mod download          # cached in ~/.cooper/cache/go-mod
+npm install              # cached in ~/.cooper/cache/npm
+pip install -r req.txt   # cached in ~/.cooper/cache/pip
 ```
+
+Caches persist across barrel runs under `~/.cooper/cache/`, so subsequent installs are fast.
 
 ## Troubleshooting
 

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
-	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/testdocker"
 )
 
 // RunClipboardSmoke starts the real Cooper runtime and verifies the clipboard
@@ -176,15 +176,7 @@ func verifyTokenRotationAndRevocation(d *Driver) error {
 }
 
 func verifyCustomClipboardModeOff(d *Driver) error {
-	dockerfile := fmt.Sprintf(
-		"FROM %s\nENV COOPER_CLI_TOOL=driver-custom-off\nENV COOPER_CLIPBOARD_MODE=off\n",
-		docker.GetImageBase(),
-	)
-	if err := d.BuildCustomToolImage("driver-custom-off", dockerfile); err != nil {
-		return err
-	}
-
-	barrel, err := d.StartBarrel("driver-custom-off")
+	barrel, err := d.StartBarrel(testdocker.SharedClipboardOffToolName)
 	if err != nil {
 		return err
 	}

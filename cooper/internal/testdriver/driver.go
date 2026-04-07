@@ -91,6 +91,10 @@ func New(opts Options) (*Driver, error) {
 	}, nil
 }
 
+func (d *Driver) logf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "[cooper testdriver][%s] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+}
+
 // Config returns the live config snapshot used by the driver.
 func (d *Driver) Config() *config.Config {
 	return d.cfg
@@ -310,8 +314,11 @@ func (d *Driver) ReadClipboardToken(containerName string) (string, error) {
 // WaitForContainer polls docker inspect until the container reports running.
 func (d *Driver) WaitForContainer(containerName string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	attempt := 0
 	for time.Now().Before(deadline) {
+		attempt++
 		out, err := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", containerName).CombinedOutput()
+		d.logf("waitForContainer attempt=%d container=%s running=%q err=%v", attempt, containerName, strings.TrimSpace(string(out)), err)
 		if err == nil && strings.TrimSpace(string(out)) == "true" {
 			return nil
 		}
@@ -417,7 +424,7 @@ func cleanupDocker() {
 }
 
 func fixCooperDirPermissions(cooperDir string) {
-	_ = exec.Command("chmod", "-R", "u+rwX", cooperDir).Run()
+	_ = testdocker.FixOwnership(cooperDir)
 }
 
 func copyFile(src, dst string) error {

@@ -244,6 +244,13 @@ func TestValidateClipboardSettings(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigMonitorTimeoutIs30Seconds(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.MonitorTimeoutSecs != 30 {
+		t.Fatalf("MonitorTimeoutSecs = %d, want 30", cfg.MonitorTimeoutSecs)
+	}
+}
+
 func TestDefaultConfigClipboardDefaults(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.ClipboardTTLSecs != 300 {

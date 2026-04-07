@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // TokenResult holds a resolved token with its name, value, and where it was found.
@@ -77,6 +80,11 @@ var vsCodeEnvVars = []string{
 //	"Error: Claude Code cannot be launched inside another Claude Code session."
 //
 // The container needs to run Claude Code as a fresh top-level session.
+
+// shellResolveTimeout bounds login-shell fallback lookups. User shell startup
+// files can block indefinitely (prompting, networking, long-running hooks),
+// and auth resolution must fail open rather than hanging the whole CLI/test.
+const shellResolveTimeout = 3 * time.Second
 
 // WorkspaceHash returns a short hash of the absolute workspace path.
 // Uses the first 8 characters of the SHA-256 hex digest.
@@ -208,14 +216,38 @@ func resolveFromShell(varName string) (string, error) {
 	if shell == "" {
 		shell = "/bin/bash"
 	}
+
 	cmd := exec.Command(shell, "-ilc", fmt.Sprintf(`echo "${%s}"`, varName))
 	cmd.Stdin = nil
-	output, err := cmd.Output()
-	if err != nil {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	if err := cmd.Start(); err != nil {
 		return "", err
 	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return "", err
+		}
+	case <-time.After(shellResolveTimeout):
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		<-done
+		return "", fmt.Errorf("shell lookup timed out after %s", shellResolveTimeout)
+	}
+
 	// Take the last non-empty line -- shell profiles may print other output.
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
 		if line != "" {

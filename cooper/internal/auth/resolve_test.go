@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestResolveFromEnv(t *testing.T) {
@@ -266,6 +267,32 @@ func TestCLAUDECODE_NotInResolveResults(t *testing.T) {
 	}
 }
 
+func TestResolveFromShell_TimeoutDoesNotHang(t *testing.T) {
+	cooperDir := t.TempDir()
+	shellPath := filepath.Join(t.TempDir(), "slow-shell.sh")
+	script := "#!/bin/sh\nsleep 10\n"
+	if err := os.WriteFile(shellPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write slow shell: %v", err)
+	}
+
+	t.Setenv("SHELL", shellPath)
+	t.Setenv("OPENAI_API_KEY", "")
+
+	start := time.Now()
+	results, err := ResolveTokens("/tmp/test-workspace", cooperDir, []string{"claude", "codex"})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("ResolveTokens: %v", err)
+	}
+
+	if tok := findToken(results, "OPENAI_API_KEY"); tok != nil {
+		t.Fatalf("unexpected OPENAI_API_KEY from hung shell fallback: %+v", *tok)
+	}
+	if elapsed > shellResolveTimeout+2*time.Second {
+		t.Fatalf("ResolveTokens took too long with hung shell: %s", elapsed)
+	}
+}
+
 func TestEmptyToolList(t *testing.T) {
 	results, err := ResolveTokens("/tmp/test-workspace", t.TempDir(), []string{})
 	if err != nil {
@@ -442,12 +469,12 @@ func findToken(results []TokenResult, name string) *TokenResult {
 func TestVSCodeEnvVars_ExpectedList(t *testing.T) {
 	// Ensure all expected VS Code integration env vars are in the forwarding list.
 	expected := map[string]bool{
-		"TERM":                    true,
-		"TERM_PROGRAM":            true,
-		"TERM_PROGRAM_VERSION":    true,
-		"CLAUDE_CODE_SSE_PORT":    true,
-		"CLAUDE_CODE_ENTRYPOINT":  true,
-		"ENABLE_IDE_INTEGRATION":  true,
+		"TERM":                   true,
+		"TERM_PROGRAM":           true,
+		"TERM_PROGRAM_VERSION":   true,
+		"CLAUDE_CODE_SSE_PORT":   true,
+		"CLAUDE_CODE_ENTRYPOINT": true,
+		"ENABLE_IDE_INTEGRATION": true,
 	}
 
 	for _, name := range vsCodeEnvVars {

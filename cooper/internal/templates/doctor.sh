@@ -344,12 +344,12 @@ fi
 # Check GOFLAGS
 if [ -n "${GOFLAGS:-}" ]; then
     if echo "$GOFLAGS" | grep -q "mod=readonly"; then
-        pass "GOFLAGS includes -mod=readonly"
+        warn "GOFLAGS includes -mod=readonly (unexpected for Cooper-managed caches)"
     else
-        info "GOFLAGS set but no -mod=readonly: ${GOFLAGS}"
+        info "GOFLAGS set without mod=readonly: ${GOFLAGS}"
     fi
 else
-    warn "GOFLAGS not set (Go modules not in readonly mode)"
+    pass "GOFLAGS not set (Go modules are writable)"
 fi
 
 # ============================================================================

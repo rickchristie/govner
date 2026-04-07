@@ -97,26 +97,7 @@ func StartProxy(cfg *config.Config, cooperDir string) error {
 
 // StopProxy stops and removes the proxy container.
 func StopProxy() error {
-	proxyName := ProxyContainerName()
-	cmd := exec.Command("docker", "stop", proxyName)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// If already stopped or doesn't exist, that's fine.
-		if !strings.Contains(string(output), "No such container") &&
-			!strings.Contains(string(output), "is not running") {
-			return fmt.Errorf("docker stop %s failed: %w\n%s", proxyName, err, string(output))
-		}
-	}
-
-	cmd = exec.Command("docker", "rm", "-f", proxyName)
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		if !strings.Contains(string(output), "No such container") {
-			return fmt.Errorf("docker rm %s failed: %w\n%s", proxyName, err, string(output))
-		}
-	}
-
-	return nil
+	return stopAndRemoveContainer(ProxyContainerName())
 }
 
 // IsProxyRunning checks whether the proxy container is currently running.

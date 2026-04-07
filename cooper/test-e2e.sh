@@ -347,9 +347,11 @@ fi
 # Create host directories that the barrel expects.
 HOME_DIR="$(eval echo ~)"
 
-# Determine GOPATH.
-GOPATH="${GOPATH:-${HOME_DIR}/go}"
-mkdir -p "${GOPATH}/pkg/mod" 2>/dev/null || true
+# Cooper-managed language cache directories (under CONFIG_DIR/cache/).
+mkdir -p "${CONFIG_DIR}/cache/go-mod" 2>/dev/null || true
+mkdir -p "${CONFIG_DIR}/cache/go-build" 2>/dev/null || true
+mkdir -p "${CONFIG_DIR}/cache/npm" 2>/dev/null || true
+mkdir -p "${CONFIG_DIR}/cache/pip" 2>/dev/null || true
 
 # Helper: map tool name to its auth mount arguments.
 auth_mounts_for() {
@@ -410,14 +412,16 @@ other_tools() {
     echo "${others[@]}"
 }
 
-# Ensure common host dirs exist for language caches.
-mkdir -p "${HOME_DIR}/.npm" 2>/dev/null || true
-mkdir -p "${HOME_DIR}/.cache/pip" 2>/dev/null || true
-mkdir -p "${HOME_DIR}/.cache/go-build" 2>/dev/null || true
+# Language cache dirs already created above (Cooper-managed under CONFIG_DIR/cache/).
 
 # Playwright support dirs — must exist before Docker mounts them.
 mkdir -p "${CONFIG_DIR}/fonts" 2>/dev/null || true
 mkdir -p "${CONFIG_DIR}/cache/ms-playwright" 2>/dev/null || true
+
+# Per-barrel /tmp dirs — must exist before Docker mounts them.
+for tool in "${ALL_TOOLS[@]}"; do
+    mkdir -p "${CONFIG_DIR}/tmp/$(barrel_name_for "$tool")" 2>/dev/null || true
+done
 
 # Copy a test font fixture for font mount verification.
 TEST_FONT=""
@@ -470,11 +474,11 @@ for tool in "${ALL_TOOLS[@]}"; do
         # Git config (read-only).
         "-v" "${HOME_DIR}/.gitconfig:/home/user/.gitconfig:ro"
 
-        # Language caches.
-        "-v" "${GOPATH}/pkg/mod:/home/user/go/pkg/mod:ro"
-        "-v" "${HOME_DIR}/.cache/go-build:/home/user/.cache/go-build:rw"
-        "-v" "${HOME_DIR}/.npm:/home/user/.npm:ro"
-        "-v" "${HOME_DIR}/.cache/pip:/home/user/.cache/pip:ro"
+        # Language caches (Cooper-managed, all read-write).
+        "-v" "${CONFIG_DIR}/cache/go-mod:/home/user/go/pkg/mod:rw"
+        "-v" "${CONFIG_DIR}/cache/go-build:/home/user/.cache/go-build:rw"
+        "-v" "${CONFIG_DIR}/cache/npm:/home/user/.npm:rw"
+        "-v" "${CONFIG_DIR}/cache/pip:/home/user/.cache/pip:rw"
 
         # CA cert (read-only).
         "-v" "${CONFIG_DIR}/ca/cooper-ca.pem:/etc/cooper/cooper-ca.pem:ro"
@@ -486,9 +490,6 @@ for tool in "${ALL_TOOLS[@]}"; do
         "-e" "HTTP_PROXY=http://cooper-proxy:3128"
         "-e" "HTTPS_PROXY=http://cooper-proxy:3128"
         "-e" "NO_PROXY=localhost,127.0.0.1"
-
-        # GOFLAGS (since Go is enabled).
-        "-e" "GOFLAGS=-mod=readonly"
 
         # X11 display env vars — set for ALL barrels.
         "-e" "DISPLAY=127.0.0.1:99"
@@ -505,6 +506,9 @@ for tool in "${ALL_TOOLS[@]}"; do
         # Playwright support mounts: fonts (ro) and browser cache (rw).
         "-v" "${CONFIG_DIR}/fonts:/home/user/.local/share/fonts:ro"
         "-v" "${CONFIG_DIR}/cache/ms-playwright:/home/user/.cache/ms-playwright:rw"
+
+        # Per-barrel /tmp (rw) — isolated per container.
+        "-v" "${CONFIG_DIR}/tmp/${barrel_name}:/tmp:rw"
 
         # Working directory.
         "-w" "${E2E_WORKSPACE}"
@@ -730,6 +734,23 @@ for tool in "${ALL_TOOLS[@]}"; do
         fail "${tool}: Playwright cache dir is NOT writable"
     fi
 
+    # Per-barrel /tmp mount.
+    tmp_write_check=$(barrel_exec 'echo e2e-tmp-test > /tmp/e2e-tmp-test && cat /tmp/e2e-tmp-test')
+    if echo "$tmp_write_check" | grep -q "e2e-tmp-test"; then
+        pass "${tool}: /tmp is writable"
+    else
+        fail "${tool}: /tmp is NOT writable"
+    fi
+
+    # Verify /tmp is host-backed — file written inside barrel must appear
+    # on the host under the per-barrel tmp directory.
+    host_tmp_file="${CONFIG_DIR}/tmp/${barrel_name}/e2e-tmp-test"
+    if [ -f "$host_tmp_file" ] && grep -q "e2e-tmp-test" "$host_tmp_file"; then
+        pass "${tool}: /tmp is host-backed (file visible on host)"
+    else
+        fail "${tool}: /tmp file NOT found on host at ${host_tmp_file}"
+    fi
+
     # X11 runtime.
     xvfb_check=$(barrel_exec 'pgrep -x Xvfb >/dev/null 2>&1 && echo running || echo stopped')
     if echo "$xvfb_check" | grep -q "running"; then
@@ -801,16 +822,15 @@ docker run -d \
     -v "${E2E_WORKSPACE}:${E2E_WORKSPACE}:rw" \
     "${CLAUDE_AUTH_MOUNTS[@]}" \
     -v "${HOME_DIR}/.gitconfig:/home/user/.gitconfig:ro" \
-    -v "${GOPATH}/pkg/mod:/home/user/go/pkg/mod:ro" \
-    -v "${HOME_DIR}/.cache/go-build:/home/user/.cache/go-build:rw" \
-    -v "${HOME_DIR}/.npm:/home/user/.npm:ro" \
-    -v "${HOME_DIR}/.cache/pip:/home/user/.cache/pip:ro" \
+    -v "${CONFIG_DIR}/cache/go-mod:/home/user/go/pkg/mod:rw" \
+    -v "${CONFIG_DIR}/cache/go-build:/home/user/.cache/go-build:rw" \
+    -v "${CONFIG_DIR}/cache/npm:/home/user/.npm:rw" \
+    -v "${CONFIG_DIR}/cache/pip:/home/user/.cache/pip:rw" \
     -v "${CONFIG_DIR}/ca/cooper-ca.pem:/etc/cooper/cooper-ca.pem:ro" \
     -v "${CONFIG_DIR}/socat-rules.json:/etc/cooper/socat-rules.json:ro" \
     -e "HTTP_PROXY=http://cooper-proxy:3128" \
     -e "HTTPS_PROXY=http://cooper-proxy:3128" \
     -e "NO_PROXY=localhost,127.0.0.1" \
-    -e "GOFLAGS=-mod=readonly" \
     -w "${E2E_WORKSPACE}" \
     "$ACTIVE_IMAGE" sleep infinity >/dev/null 2>&1
 
@@ -907,16 +927,15 @@ docker run -d \
     -v "${E2E_WORKSPACE}:${E2E_WORKSPACE}:rw" \
     "${CODEX_AUTH_MOUNTS[@]}" \
     -v "${HOME_DIR}/.gitconfig:/home/user/.gitconfig:ro" \
-    -v "${GOPATH}/pkg/mod:/home/user/go/pkg/mod:ro" \
-    -v "${HOME_DIR}/.cache/go-build:/home/user/.cache/go-build:rw" \
-    -v "${HOME_DIR}/.npm:/home/user/.npm:ro" \
-    -v "${HOME_DIR}/.cache/pip:/home/user/.cache/pip:ro" \
+    -v "${CONFIG_DIR}/cache/go-mod:/home/user/go/pkg/mod:rw" \
+    -v "${CONFIG_DIR}/cache/go-build:/home/user/.cache/go-build:rw" \
+    -v "${CONFIG_DIR}/cache/npm:/home/user/.npm:rw" \
+    -v "${CONFIG_DIR}/cache/pip:/home/user/.cache/pip:rw" \
     -v "${CONFIG_DIR}/ca/cooper-ca.pem:/etc/cooper/cooper-ca.pem:ro" \
     -v "${CONFIG_DIR}/socat-rules.json:/etc/cooper/socat-rules.json:ro" \
     -e "HTTP_PROXY=http://cooper-proxy:3128" \
     -e "HTTPS_PROXY=http://cooper-proxy:3128" \
     -e "NO_PROXY=localhost,127.0.0.1" \
-    -e "GOFLAGS=-mod=readonly" \
     -w "${E2E_WORKSPACE}" \
     "$IMAGE_CODEX" sleep infinity >/dev/null 2>&1
 
@@ -1512,12 +1531,12 @@ else
     fail "NODE_EXTRA_CA_CERTS not set"
 fi
 
-# GOFLAGS set correctly.
+# GOFLAGS should NOT include -mod=readonly (Cooper-managed caches are writable).
 goflags=$(barrel_exec 'echo $GOFLAGS')
 if echo "$goflags" | grep -q "mod=readonly"; then
-    pass "GOFLAGS includes -mod=readonly"
+    fail "GOFLAGS unexpectedly includes -mod=readonly"
 else
-    fail "GOFLAGS not set correctly (got: ${goflags})"
+    pass "GOFLAGS does not include -mod=readonly"
 fi
 
 # ============================================================================
@@ -1806,10 +1825,10 @@ docker run -d \
     -v "${E2E_WORKSPACE}:${E2E_WORKSPACE}:rw" \
     "${CLAUDE_AUTH_MOUNTS[@]}" \
     -v "${HOME_DIR}/.gitconfig:/home/user/.gitconfig:ro" \
-    -v "${GOPATH}/pkg/mod:/home/user/go/pkg/mod:ro" \
-    -v "${HOME_DIR}/.cache/go-build:/home/user/.cache/go-build:rw" \
-    -v "${HOME_DIR}/.npm:/home/user/.npm:ro" \
-    -v "${HOME_DIR}/.cache/pip:/home/user/.cache/pip:ro" \
+    -v "${CONFIG_DIR}/cache/go-mod:/home/user/go/pkg/mod:rw" \
+    -v "${CONFIG_DIR}/cache/go-build:/home/user/.cache/go-build:rw" \
+    -v "${CONFIG_DIR}/cache/npm:/home/user/.npm:rw" \
+    -v "${CONFIG_DIR}/cache/pip:/home/user/.cache/pip:rw" \
     -v "${CONFIG_DIR}/ca/cooper-ca.pem:/etc/cooper/cooper-ca.pem:ro" \
     -v "${CONFIG_DIR}/socat-rules.json:/etc/cooper/socat-rules.json:ro" \
     -v "${CONFIG_DIR}/tokens/${BARREL_CLAUDE}:/etc/cooper/clipboard-token:ro" \
@@ -1817,7 +1836,6 @@ docker run -d \
     -e "HTTP_PROXY=http://cooper-proxy:3128" \
     -e "HTTPS_PROXY=http://cooper-proxy:3128" \
     -e "NO_PROXY=localhost,127.0.0.1" \
-    -e "GOFLAGS=-mod=readonly" \
     -e "COOPER_CLIPBOARD_ENABLED=1" \
     -e "COOPER_CLIPBOARD_BRIDGE_URL=http://127.0.0.1:4343" \
     -e "COOPER_CLIPBOARD_TOKEN_FILE=/etc/cooper/clipboard-token" \

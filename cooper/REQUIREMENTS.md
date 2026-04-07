@@ -160,8 +160,8 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
             - Trusted metrics companies, such as your company's grafana or sentry domain.
           - (UI) User is told that requests to package manager registries, such as gopkg, npm registry, pypi, etc. are not allowed by default.
             This is to prevent supply-chain attacks, AIs can be tricked to download malicious dependencies, and could even exfiltrate data through these requests.
-            User is told that the AI CLI mounts host machine's module cache (like go mod cache, npm cache, pip cache, etc.) into the CLI container as
-            read-only volume, so they can read dependencies that are already in host machine, but cannot change them. This requires action from user.
+            User is told that Cooper mounts its own managed cache directories (`~/.cooper/cache/`) into the barrel as read-write volumes.
+            Dependencies are installed inside the barrel through the proxy. Package manager registries must be explicitly whitelisted.
           - (UI) User is recommended to be as strict as possible, because control panel at `cooper up` allows the user to take a look at live network request
             and allow them on the fly. This is the recommended way, so any requests to the web are monitored.
         - Back to main screen, user can select "Save & Continue" button to save the configuration file.
@@ -231,7 +231,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
     - **Latest mode**: compares container version against latest remote version (queried from registry APIs). Warns if outdated.
     - **Pinned mode**: no warning. The version is what the user explicitly chose.
     - If any mismatch is found, it prompts user to run `cooper update` to update the CLI image.
-    - This is important because the CLI docker shares important folders with the host machine, module cache, AI CLI config folders, etc.
+    - This is important because the CLI docker shares important folders with the host machine (AI CLI config folders, Cooper-managed caches, etc.).
   - **Clipboard header bar** — always visible at the top of TUI, shows clipboard state with TTL countdown.
     User presses `c` to capture host clipboard, `x` to clear. See "Clipboard Bridge" section for full details.
   - Control panel TUI tabs (Tab/Shift+Tab navigation, each tab is its own BubbleTea sub-model):
@@ -340,19 +340,26 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - `PLAYWRIGHT_BROWSERS_PATH=/home/user/.cache/ms-playwright` environment variable
       - `DISPLAY=127.0.0.1:99` and `XAUTHORITY=/home/user/.cooper-clipboard.xauth` for Xvfb display
       - `--shm-size` from `barrel_shm_size` config (default `1g`)
-    - Language-specific caches (auto-configured based on enabled programming tools):
-      - Go: `$GOPATH/pkg/mod` (read-only), `~/.cache/go-build` (read-write), `GOFLAGS=-mod=readonly`
-      - Node: `~/.npm` (read-only)
-      - Python: `~/.cache/pip` (read-only)
+    - Per-barrel /tmp directory:
+      - `~/.cooper/tmp/{containerName}` → `/tmp` (read-write) — each barrel gets its own host-backed /tmp
+      - Isolated per container to avoid temp file collisions between barrels sharing a workspace.
+      - Persists across container restarts (useful for AI tools that write temp files for cross-session context).
+      - Host directory is pre-created before mount (`mkdir -p`), same as other mount dirs.
+    - Language-specific caches (Cooper-managed, auto-configured based on enabled programming tools):
+      - Go: `~/.cooper/cache/go-mod` → `/home/user/go/pkg/mod` (read-write), `~/.cooper/cache/go-build` → `/home/user/.cache/go-build` (read-write)
+      - Node: `~/.cooper/cache/npm` → `/home/user/.npm` (read-write)
+      - Python: `~/.cooper/cache/pip` → `/home/user/.cache/pip` (read-write)
+    - All cache directories live under `~/.cooper/cache/` — no host tool caches are mounted.
     - Directories are created on host if they don't exist (`mkdir -p` before mount).
-    - Dependency workflow per ecosystem (host-preload model — same pattern for all, different commands):
-      - Go: `go mod download` on host populates `$GOPATH/pkg/mod`, mounted read-only. `GOFLAGS=-mod=readonly` enforced.
-      - Node: `npm install` on host populates `node_modules/` in workspace (rw) and `~/.npm` cache (ro). AI can use existing deps but not install new ones from registry.
-      - Python: `pip install`, `pipenv install`, or `poetry install` on host. The workspace is mounted rw, so virtualenvs
-        created inside the workspace (e.g., `.venv/`) are accessible inside the container. `~/.cache/pip` is mounted ro
-        for cached wheels. Cooper detects which Python tool is installed and generates the Dockerfile accordingly, but
+    - Caches start empty and fill naturally during normal package-manager usage inside the barrel.
+    - No `GOFLAGS=-mod=readonly` — Go modules are fully writable. Dependencies are installed inside the barrel
+      through the proxy (package manager registries must be whitelisted or approved via the monitor).
+    - Dependency workflow per ecosystem:
+      - Go: `go mod download`, `go get`, `go mod tidy` work normally inside the barrel. Module cache persists across barrel runs in `~/.cooper/cache/go-mod`.
+      - Node: `npm install` works inside the barrel. The npm cache persists in `~/.cooper/cache/npm`. `node_modules/` lives in the workspace (rw).
+      - Python: `pip install`, `pipenv install`, or `poetry install` work inside the barrel. The pip cache persists in `~/.cooper/cache/pip`.
+        Cooper detects which Python tool is installed and generates the Dockerfile accordingly, but
         does not enforce a specific virtualenv layout — it just ensures `python` is available at the configured version.
-      - (UI) `cooper cli` welcome message reminds user: "Dependencies must be installed on the host. Run [command] on host, then re-enter the container."
   - Authentication / Token Management:
     - API keys and tokens are automatically resolved and forwarded into the container as environment variables.
     - Resolution order (first match wins): environment variable → `~/.cooper/secrets/{workspace-hash}` cache → login shell profile (`~/.bashrc`, `~/.zshrc`).
@@ -581,7 +588,7 @@ they use sensible defaults and are editable at runtime via the TUI Runtime Setti
 - **Global** (`~/.cooper/`): config.json, generated Dockerfiles, images (`cooper-proxy`, `cooper-base`, `cooper-cli-*`),
   proxy container (`cooper-proxy`), secrets cache (`~/.cooper/secrets/`), logs (`~/.cooper/logs/`),
   clipboard tokens (`~/.cooper/tokens/`), generated shim scripts (`~/.cooper/base/shims/`).
-- **Per-workspace**: CLI containers (`barrel-{dirname}-{tool}`), volume mounts (workspace dir rw, caches ro), socat port forwarding,
+- **Per-workspace**: CLI containers (`barrel-{dirname}-{tool}`), volume mounts (workspace dir rw, Cooper-managed caches rw), socat port forwarding,
   token resolution (per-workspace secret cache keyed by path hash).
 - **Per-workspace persisted** (`~/.cooper/config.json`): execution bridge route mappings (API path → script path), configured
   via the Bridges tab in the Execution Bridge screen.

@@ -87,7 +87,7 @@ func SaveConfig(path string, cfg *Config) error {
 }
 
 // DefaultConfig returns a configuration with sensible defaults.
-// Proxy port 3128 (Squid standard), bridge port 4343, monitor timeout 5s,
+// Proxy port 3128 (Squid standard), bridge port 4343, monitor timeout 30s,
 // history limits 500 entries.
 func DefaultConfig() *Config {
 	return &Config{
@@ -97,7 +97,7 @@ func DefaultConfig() *Config {
 		PortForwardRules:   []PortForwardRule{},
 		ProxyPort:          3128,
 		BridgePort:         4343,
-		MonitorTimeoutSecs: 5,
+		MonitorTimeoutSecs: 30,
 		BlockedHistoryLimit: 500,
 		AllowedHistoryLimit: 500,
 		BridgeLogLimit:     500,

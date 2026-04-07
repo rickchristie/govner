@@ -5,6 +5,41 @@
 # Starts Squid, socat relays for port forwarding and bridge, and logrotate cron.
 
 SOCAT_RULES="/etc/cooper/socat-rules.json"
+SOCAT_SUPERVISORS=()
+LOGROTATE_PID=""
+SQUID_PID=""
+SHUTDOWN_IN_PROGRESS=0
+
+stop_pid() {
+    local pid=$1
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+}
+
+stop_socat_supervisors() {
+    local old=("${SOCAT_SUPERVISORS[@]}")
+    SOCAT_SUPERVISORS=()
+    for pid in "${old[@]}"; do
+        stop_pid "$pid"
+    done
+}
+
+cleanup_container() {
+    if [ "$SHUTDOWN_IN_PROGRESS" = "1" ]; then
+        return
+    fi
+    SHUTDOWN_IN_PROGRESS=1
+    stop_pid "$SQUID_PID"
+    stop_socat_supervisors
+    stop_pid "$LOGROTATE_PID"
+}
+
+handle_shutdown_signal() {
+    cleanup_container
+    exit 0
+}
 
 # ============================================================================
 # LOGROTATE CRON
@@ -16,6 +51,7 @@ SOCAT_RULES="/etc/cooper/socat-rules.json"
         /usr/sbin/logrotate /etc/logrotate.d/squid 2>/dev/null || true
     done
 ) &
+LOGROTATE_PID=$!
 
 # ============================================================================
 # SOCAT PORT FORWARDING RELAYS (live-reloadable via SIGHUP)
@@ -28,7 +64,6 @@ SOCAT_RULES="/etc/cooper/socat-rules.json"
 # with auto-restart. On reload, parent TERMs supervisors; each supervisor
 # traps TERM, kills its socat child, and exits cleanly. No variable sharing
 # between parent and subshells, no broad pkill, no stale listeners.
-SOCAT_SUPERVISORS=()
 
 run_socat() {
     local listen_port=$1
@@ -132,6 +167,7 @@ reload_socat() {
 
 # Handle SIGHUP for live reload
 trap 'reload_socat' HUP
+trap 'handle_shutdown_signal' TERM INT
 
 echo "Starting socat relays..."
 start_socat_from_config
@@ -152,7 +188,10 @@ SQUID_PID=$!
 while wait $SQUID_PID; exit_code=$?; do
     # If squid actually exited (not a signal interruption), break.
     if ! kill -0 $SQUID_PID 2>/dev/null; then
-        exit $exit_code
+        break
     fi
     # Otherwise, a signal interrupted wait — loop and re-wait.
 done
+
+cleanup_container
+exit $exit_code
