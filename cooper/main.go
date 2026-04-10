@@ -1002,84 +1002,110 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 
 // ---------- cooper update ----------
 
-func runUpdate(cmd *cobra.Command, args []string) error {
-	cfg, cooperDir, err := loadConfig()
-	if err != nil {
-		return err
+type updatePlan struct {
+	baseChanged  bool
+	toolsChanged map[string]bool
+}
+
+// collectUpdatePlan compares the persisted container versions against either
+// the current host versions or the latest upstream versions, mutating cfg with
+// the newly selected versions when a rebuild is needed.
+func collectUpdatePlan(
+	cfg *config.Config,
+	latestResolver func(string) (string, error),
+	hostDetector func(string) (string, error),
+	out io.Writer,
+) updatePlan {
+	if out == nil {
+		out = io.Discard
 	}
 
-	baseChanged := false
-	toolsChanged := map[string]bool{}
+	plan := updatePlan{toolsChanged: map[string]bool{}}
 
-	// 1. Check programming tools for mismatches.
+	// Check programming tools. Any mismatch here requires rebuilding the base
+	// image, which in turn forces all enabled tool images to rebuild.
 	for i, tool := range cfg.ProgrammingTools {
 		if !tool.Enabled {
 			continue
 		}
 		switch tool.Mode {
 		case config.ModeLatest:
-			fmt.Fprintf(os.Stderr, "Checking latest version for %s...\n", tool.Name)
-			latest, err := config.ResolveLatestVersion(tool.Name)
+			fmt.Fprintf(out, "Checking latest version for %s...\n", tool.Name)
+			latest, err := latestResolver(tool.Name)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Warning: could not resolve latest %s: %v\n", tool.Name, err)
+				fmt.Fprintf(out, "  Warning: could not resolve latest %s: %v\n", tool.Name, err)
 				continue
 			}
 			if latest != tool.ContainerVersion {
-				fmt.Fprintf(os.Stderr, "  %s: container=%s, latest=%s (mismatch)\n",
+				fmt.Fprintf(out, "  %s: container=%s, latest=%s (mismatch)\n",
 					tool.Name, tool.ContainerVersion, latest)
-				baseChanged = true
+				plan.baseChanged = true
 				cfg.ProgrammingTools[i].PinnedVersion = latest
 			}
 		case config.ModeMirror:
-			fmt.Fprintf(os.Stderr, "Checking host version for %s...\n", tool.Name)
-			hostVer, err := config.DetectHostVersion(tool.Name)
+			fmt.Fprintf(out, "Checking host version for %s...\n", tool.Name)
+			hostVer, err := hostDetector(tool.Name)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Warning: could not detect host %s: %v\n", tool.Name, err)
+				fmt.Fprintf(out, "  Warning: could not detect host %s: %v\n", tool.Name, err)
 				continue
 			}
 			if hostVer != tool.ContainerVersion {
-				fmt.Fprintf(os.Stderr, "  %s: container=%s, host=%s (mismatch)\n",
+				fmt.Fprintf(out, "  %s: container=%s, host=%s (mismatch)\n",
 					tool.Name, tool.ContainerVersion, hostVer)
-				baseChanged = true
+				plan.baseChanged = true
 				cfg.ProgrammingTools[i].HostVersion = hostVer
 			}
 		}
 	}
 
-	// 2. Check AI tools for mismatches.
+	// Check AI tool images. These can rebuild independently unless the base
+	// image changed above.
 	for i, tool := range cfg.AITools {
 		if !tool.Enabled {
 			continue
 		}
 		switch tool.Mode {
 		case config.ModeLatest:
-			fmt.Fprintf(os.Stderr, "Checking latest version for %s...\n", tool.Name)
-			latest, err := config.ResolveLatestVersion(tool.Name)
+			fmt.Fprintf(out, "Checking latest version for %s...\n", tool.Name)
+			latest, err := latestResolver(tool.Name)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Warning: could not resolve latest %s: %v\n", tool.Name, err)
+				fmt.Fprintf(out, "  Warning: could not resolve latest %s: %v\n", tool.Name, err)
 				continue
 			}
 			if latest != tool.ContainerVersion {
-				fmt.Fprintf(os.Stderr, "  %s: container=%s, latest=%s (mismatch)\n",
+				fmt.Fprintf(out, "  %s: container=%s, latest=%s (mismatch)\n",
 					tool.Name, tool.ContainerVersion, latest)
-				toolsChanged[tool.Name] = true
+				plan.toolsChanged[tool.Name] = true
 				cfg.AITools[i].PinnedVersion = latest
 			}
 		case config.ModeMirror:
-			fmt.Fprintf(os.Stderr, "Checking host version for %s...\n", tool.Name)
-			hostVer, err := config.DetectHostVersion(tool.Name)
+			fmt.Fprintf(out, "Checking host version for %s...\n", tool.Name)
+			hostVer, err := hostDetector(tool.Name)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Warning: could not detect host %s: %v\n", tool.Name, err)
+				fmt.Fprintf(out, "  Warning: could not detect host %s: %v\n", tool.Name, err)
 				continue
 			}
 			if hostVer != tool.ContainerVersion {
-				fmt.Fprintf(os.Stderr, "  %s: container=%s, host=%s (mismatch)\n",
+				fmt.Fprintf(out, "  %s: container=%s, host=%s (mismatch)\n",
 					tool.Name, tool.ContainerVersion, hostVer)
-				toolsChanged[tool.Name] = true
+				plan.toolsChanged[tool.Name] = true
 				cfg.AITools[i].HostVersion = hostVer
 			}
 		}
 	}
+
+	return plan
+}
+
+func runUpdate(cmd *cobra.Command, args []string) error {
+	cfg, cooperDir, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	plan := collectUpdatePlan(cfg, config.ResolveLatestVersion, config.DetectHostVersion, os.Stderr)
+	baseChanged := plan.baseChanged
+	toolsChanged := plan.toolsChanged
 
 	if !baseChanged && len(toolsChanged) == 0 {
 		fmt.Fprintln(os.Stderr, "All tool versions match. No rebuild needed.")

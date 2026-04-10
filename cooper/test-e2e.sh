@@ -1,6 +1,7 @@
 #!/bin/bash
 # Cooper End-to-End Integration Test (Multi-Image Architecture)
-# Tests the FULL application lifecycle. If this passes, Cooper works.
+# Tests the real Docker/runtime lifecycle. Combined with `go test ./...`
+# and successful image builds, this is the release gate for Cooper.
 #
 # This test exercises the real cooper binary and real Docker containers
 # in the multi-image architecture where each AI tool has its own image:
@@ -2040,7 +2041,7 @@ echo "============================================"
 echo ""
 
 if [ "$FAIL_COUNT" -eq 0 ]; then
-    echo -e "${GREEN}All tests passed! Cooper works end-to-end.${NC}"
+    echo -e "${GREEN}All tests passed! Runtime and container integration checks are green.${NC}"
 else
     echo -e "${RED}${FAIL_COUNT} test(s) failed. See details above.${NC}"
 fi
