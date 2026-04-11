@@ -220,6 +220,26 @@ func TestSyncMultipleSources(t *testing.T) {
 	}
 }
 
+func TestDarwinSourcesReturnsExpectedPrefixes(t *testing.T) {
+	homeDir := "/Users/tester"
+	sources := DarwinSources(homeDir)
+	if len(sources) != 4 {
+		t.Fatalf("DarwinSources() returned %d sources, want 4", len(sources))
+	}
+
+	expected := []Source{
+		{Path: "/Users/tester/Library/Fonts", Prefix: "user-library-fonts"},
+		{Path: "/Library/Fonts", Prefix: "library-fonts"},
+		{Path: "/System/Library/Fonts", Prefix: "system-library-fonts"},
+		{Path: "/System/Library/Fonts/Supplemental", Prefix: "system-supplemental-fonts"},
+	}
+	for i, want := range expected {
+		if sources[i] != want {
+			t.Errorf("DarwinSources()[%d] = %+v, want %+v", i, sources[i], want)
+		}
+	}
+}
+
 func TestLinuxSourcesReturnsExpectedPrefixes(t *testing.T) {
 	sources := LinuxSources("/home/testuser")
 	if len(sources) != 4 {

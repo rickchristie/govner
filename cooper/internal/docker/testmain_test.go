@@ -5,14 +5,17 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
 
-const dockerTestLockPath = "/tmp/cooper-gotest.lock"
 const dockerTestRuntimeNamespace = "cooper-gotest"
+const dockerTestStateDirName = ".test-tmp"
+const dockerTestLockFileName = "cooper-gotest.lock"
 
 var (
 	dockerTestLockMu   sync.Mutex
@@ -89,13 +92,17 @@ func requireDockerForPackageTests() error {
 
 func acquireDockerTestLock() (*dockerTestLock, error) {
 	waitStart := time.Now()
+	lockPath := dockerTestLockPath()
 	dockerTestLockMu.Lock()
 	defer dockerTestLockMu.Unlock()
 
 	if dockerTestLockRefs == 0 {
-		f, err := os.OpenFile(dockerTestLockPath, os.O_CREATE|os.O_RDWR, 0o600)
+		if err := os.MkdirAll(dockerTestStateDir(), 0o755); err != nil {
+			return nil, fmt.Errorf("mkdir docker test state dir %s: %w", dockerTestStateDir(), err)
+		}
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 		if err != nil {
-			return nil, fmt.Errorf("open docker test lock %s: %w", dockerTestLockPath, err)
+			return nil, fmt.Errorf("open docker test lock %s: %w", lockPath, err)
 		}
 
 		attempt := 0
@@ -105,7 +112,7 @@ func acquireDockerTestLock() (*dockerTestLock, error) {
 				break
 			} else if !isLockBusy(err) {
 				f.Close()
-				return nil, fmt.Errorf("acquire docker test lock %s: %w", dockerTestLockPath, err)
+				return nil, fmt.Errorf("acquire docker test lock %s: %w", lockPath, err)
 			}
 
 			logTestMain(fmt.Sprintf("shared docker test lock still busy on attempt %d after %s", attempt, time.Since(waitStart).Round(time.Millisecond)))
@@ -144,14 +151,27 @@ func (l *dockerTestLock) Release() error {
 	if err := syscall.Flock(int(dockerTestLockFile.Fd()), syscall.LOCK_UN); err != nil {
 		dockerTestLockFile.Close()
 		dockerTestLockFile = nil
-		return fmt.Errorf("unlock docker test lock %s: %w", dockerTestLockPath, err)
+		return fmt.Errorf("unlock docker test lock %s: %w", dockerTestLockPath(), err)
 	}
 	err := dockerTestLockFile.Close()
 	dockerTestLockFile = nil
 	if err != nil {
-		return fmt.Errorf("close docker test lock %s: %w", dockerTestLockPath, err)
+		return fmt.Errorf("close docker test lock %s: %w", dockerTestLockPath(), err)
 	}
 	return nil
+}
+
+func dockerTestRoot() string {
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+}
+
+func dockerTestStateDir() string {
+	return filepath.Join(dockerTestRoot(), dockerTestStateDirName)
+}
+
+func dockerTestLockPath() string {
+	return filepath.Join(dockerTestStateDir(), dockerTestLockFileName)
 }
 
 func logTestMain(msg string) {

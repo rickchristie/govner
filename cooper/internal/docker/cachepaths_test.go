@@ -186,8 +186,11 @@ func TestBarrelMountDirs_OpenCodeAuthDirs(t *testing.T) {
 
 	got := barrelMountDirs(homeDir, "opencode", cooperDir, "barrel-test-opencode", cfg)
 	wantContains := []string{
+		filepath.Join(homeDir, ".cache", "opencode"),
 		filepath.Join(homeDir, ".config", "opencode"),
 		filepath.Join(homeDir, ".local", "share", "opencode"),
+		filepath.Join(homeDir, ".local", "state", "opencode"),
+		filepath.Join(homeDir, ".opencode"),
 	}
 	for _, want := range wantContains {
 		if !slices.Contains(got, want) {

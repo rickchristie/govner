@@ -83,7 +83,9 @@ ARG NODE_VERSION={{.NodeVersion}}
 {{- else}}
 ARG NODE_VERSION=22.12.0
 {{- end}}
-RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+ARG TARGETARCH
+RUN NODE_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "x64") && \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
     | tar -xJ -C /usr/local --strip-components=1 \
     && node --version && npm --version
 {{if .HasPython}}

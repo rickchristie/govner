@@ -1768,8 +1768,9 @@ func TestCooperApp_SocatLiveReload(t *testing.T) {
 }
 
 // TestCooperApp_BridgeBindAddress starts the app and verifies the bridge
-// server is reachable on 127.0.0.1:port. It also verifies that the bridge
-// is NOT reachable on 0.0.0.0 from a different interface (if possible).
+// server is reachable on 127.0.0.1:port. On Linux it may also be reachable on
+// Docker gateway IPs so barrels can reach the host bridge; other non-loopback
+// addresses should still fail.
 func TestCooperApp_BridgeBindAddress(t *testing.T) {
 	skipIfNoDocker(t)
 	skipIfNoProxyImage(t)
@@ -1801,14 +1802,24 @@ func TestCooperApp_BridgeBindAddress(t *testing.T) {
 		t.Errorf("bridge /health on 127.0.0.1 status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 
-	// Attempt to verify bridge is NOT reachable from a non-loopback address.
-	// We try to connect on a non-loopback IP; if the bridge is correctly bound
-	// to 127.0.0.1, it should refuse connections from other addresses.
+	allowedGatewayIPs, err := docker.BridgeGatewayIPs()
+	if err != nil {
+		allowedGatewayIPs = nil
+	}
+	allowed := make(map[string]bool, len(allowedGatewayIPs))
+	for _, ip := range allowedGatewayIPs {
+		allowed[ip] = true
+	}
+
+	// Prefer a non-loopback address that should NOT be reachable. If the host
+	// only exposes Docker gateway IPs, at least verify one of those works.
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		t.Logf("cannot enumerate interfaces: %v", err)
 		return
 	}
+
+	var allowedCandidate string
 
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagLoopback != 0 {
@@ -1833,17 +1844,35 @@ func TestCooperApp_BridgeBindAddress(t *testing.T) {
 				continue
 			}
 
-			// Try connecting to the bridge on a non-loopback IP.
+			if allowed[ip.String()] {
+				if allowedCandidate == "" {
+					allowedCandidate = ip.String()
+				}
+				continue
+			}
+
+			// Try connecting to a non-loopback address that should not be bound.
 			externalURL := fmt.Sprintf("http://%s:%d/health", ip.String(), cfg.BridgePort)
 			externalResp, externalErr := client.Get(externalURL)
 			if externalErr == nil {
 				externalResp.Body.Close()
 				if externalResp.StatusCode == http.StatusOK {
-					t.Errorf("bridge reachable on non-loopback address %s (should only bind to 127.0.0.1)", ip.String())
+					t.Errorf("bridge reachable on unexpected non-loopback address %s", ip.String())
 				}
 			}
-			// Connection refused or timeout is expected -- bridge is bound to localhost only.
-			return // Only need to test one non-loopback address.
+			return
+		}
+	}
+
+	if allowedCandidate != "" {
+		gatewayURL := fmt.Sprintf("http://%s:%d/health", allowedCandidate, cfg.BridgePort)
+		gatewayResp, gatewayErr := client.Get(gatewayURL)
+		if gatewayErr != nil {
+			t.Fatalf("GET %s failed: %v", gatewayURL, gatewayErr)
+		}
+		gatewayResp.Body.Close()
+		if gatewayResp.StatusCode != http.StatusOK {
+			t.Fatalf("bridge /health on gateway %s status = %d, want %d", allowedCandidate, gatewayResp.StatusCode, http.StatusOK)
 		}
 	}
 }
@@ -2617,7 +2646,7 @@ func startClipboardApp(t *testing.T, cfg *config.Config, cooperDir string) *Coop
 	t.Helper()
 	app := NewCooperApp(cfg, cooperDir)
 	// Disable the clipboard reader so Start() does not check for host
-	// clipboard tools (wl-paste/xclip). The clipboard HTTP endpoints
+	// clipboard capture prerequisites. The clipboard HTTP endpoints
 	// are driven by the Manager, not the Reader.
 	app.clipboardReader = nil
 

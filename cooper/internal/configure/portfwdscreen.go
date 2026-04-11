@@ -2,6 +2,7 @@ package configure
 
 import (
 	"fmt"
+	"runtime"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -10,6 +11,22 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tableutil"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
+
+func portForwardInfoText(goos string) string {
+	if goos == "darwin" {
+		return " " + theme.IconWarn + " On macOS with Docker Desktop, services on any bind address\n" +
+			" (including 127.0.0.1) are reachable from barrels via\n" +
+			" host.docker.internal. No HostRelay is needed.\n\n" +
+			" Forwarding uses a two-hop relay:\n" +
+			" CLI container " + theme.IconArrowRight + " cooper-proxy " + theme.IconArrowRight + " host machine"
+	}
+
+	return " " + theme.IconWarn + " Host services must bind to 0.0.0.0 or the Docker gateway IP to\n" +
+		" be reachable from containers. Services bound to 127.0.0.1 only are\n" +
+		" handled by Cooper's HostRelay when needed.\n\n" +
+		" Forwarding uses a two-hop relay:\n" +
+		" CLI container " + theme.IconArrowRight + " cooper-proxy " + theme.IconArrowRight + " host machine"
+}
 
 // portFwdResult is returned by the port forwarding screen update.
 type portFwdResult int
@@ -166,11 +183,7 @@ func (m *portFwdModel) view(width, height int) string {
 	}
 
 	content += "\n"
-	content += infoBox(" "+theme.IconWarn+" Host services must bind to 0.0.0.0 or the Docker gateway IP to\n"+
-		" be reachable from containers. Services bound to 127.0.0.1 only will\n"+
-		" NOT be accessible through port forwarding.\n\n"+
-		" Forwarding uses a two-hop relay:\n"+
-		" CLI container "+theme.IconArrowRight+" cooper-proxy "+theme.IconArrowRight+" host machine", width)
+	content += infoBox(portForwardInfoText(runtime.GOOS), width)
 
 	footer := " " + helpBar("[n New]", "[e Edit]", "[x Delete]", "[Esc Back]")
 

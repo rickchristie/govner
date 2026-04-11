@@ -186,7 +186,12 @@ var builtinTools = map[string]toolDefinition{
 	"opencode": {
 		DisplayName:     "OpenCode",
 		AutoApproveFlag: "",
-		ToolDirs:        []string{"/home/user/.config/opencode", "/home/user/.cache/opencode"},
+		ToolDirs: []string{
+			"/home/user/.config/opencode",
+			"/home/user/.local/share/opencode",
+			"/home/user/.local/state/opencode",
+			"/home/user/.opencode",
+		},
 	},
 }
 

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -40,6 +41,26 @@ func LinuxSources(homeDir string) []Source {
 	}
 }
 
+// DarwinSources returns the standard macOS font source directories.
+func DarwinSources(homeDir string) []Source {
+	return []Source{
+		{filepath.Join(homeDir, "Library", "Fonts"), "user-library-fonts"},
+		{"/Library/Fonts", "library-fonts"},
+		{"/System/Library/Fonts", "system-library-fonts"},
+		{"/System/Library/Fonts/Supplemental", "system-supplemental-fonts"},
+	}
+}
+
+// SourcesForOS returns the standard host font source directories for the given OS.
+func SourcesForOS(goos, homeDir string) []Source {
+	switch goos {
+	case "darwin":
+		return DarwinSources(homeDir)
+	default:
+		return LinuxSources(homeDir)
+	}
+}
+
 // SyncLinuxFonts copies font files from standard Linux font directories into
 // the Cooper-managed font directory at cooperDir/fonts. It preserves directory
 // structure under source-specific prefixes to avoid filename collisions.
@@ -51,6 +72,18 @@ func LinuxSources(homeDir string) []Source {
 //   - returns warnings for unreadable source roots instead of errors
 func SyncLinuxFonts(homeDir, cooperDir string) (Result, error) {
 	return SyncFonts(LinuxSources(homeDir), cooperDir)
+}
+
+// SyncDarwinFonts copies font files from standard macOS font directories into
+// the Cooper-managed font directory at cooperDir/fonts.
+func SyncDarwinFonts(homeDir, cooperDir string) (Result, error) {
+	return SyncFonts(DarwinSources(homeDir), cooperDir)
+}
+
+// SyncHostFonts copies font files from the standard font directories for the
+// current host OS into the Cooper-managed font directory at cooperDir/fonts.
+func SyncHostFonts(homeDir, cooperDir string) (Result, error) {
+	return SyncFonts(SourcesForOS(runtime.GOOS, homeDir), cooperDir)
 }
 
 // SyncFonts copies font files from the given source directories into the

@@ -34,9 +34,10 @@ Custom tools can be added by placing a Dockerfile in `~/.cooper/cli/{tool-name}/
 
 ## Supported Platforms
 
-- **Primary**: Linux (Ubuntu/Debian) with Docker Engine 20.10+.
-- **Other Linux**: Any distro with Docker Engine and bash or zsh.
-- **macOS / Windows**: Not supported in v1 (Docker Desktop networking differences).
+- **Linux**: Any distro with Docker Engine 20.10+ and bash or zsh.
+- **macOS (Apple Silicon)**: Docker Desktop 4.x+. Requires macOS 12+.
+- **macOS (Intel)**: Docker Desktop 4.x+. Untested but expected to work.
+- **Windows**: Not supported.
 
 ## How It Works
 
@@ -102,9 +103,10 @@ The proxy container sits on **both** networks -- it receives traffic from barrel
 
 ### Prerequisites
 
-- **Docker Engine 20.10+** (not Docker Desktop)
+- **Linux**: Docker Engine 20.10+
+- **macOS**: Docker Desktop 4.x+ (Docker Engine runs inside a Linux VM)
 - **Go 1.21+** (for installation via `go install`)
-- **Linux** with bash or zsh
+- bash or zsh
 
 ### Install
 
@@ -220,7 +222,9 @@ Add trusted domains through `cooper configure` (company APIs, staging servers, m
 
 Forward host service ports into barrels (e.g., PostgreSQL, Redis, dev servers). Uses a two-hop socat relay: barrel -> proxy -> host.
 
-**Note:** Host services must bind to `0.0.0.0` or the Docker gateway IP to be reachable. Services bound to `127.0.0.1` are handled by Cooper's HostRelay, which transparently proxies connections from the gateway IP to localhost.
+**Note (Linux):** Host services must bind to `0.0.0.0` or the Docker gateway IP to be reachable from containers. Services bound to `127.0.0.1` are handled by Cooper's HostRelay, which transparently proxies connections from the gateway IP to localhost.
+
+**Note (macOS):** Docker Desktop handles host access natively. Services on any bind address, including `127.0.0.1`, are reachable from containers via `host.docker.internal`. No HostRelay is needed.
 
 ### Execution Bridge
 
@@ -269,7 +273,7 @@ Cooper does **not** install Playwright itself or download browsers. Your project
 | `~/.claude`, `~/.claude.json` | `/home/user/...` | read-write | Claude Code auth/config |
 | `~/.copilot` | `/home/user/.copilot` | read-write | Copilot auth/history |
 | `~/.codex` | `/home/user/.codex` | read-write | Codex config |
-| `~/.config/opencode` | `/home/user/...` | read-write | OpenCode config |
+| `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode`, `~/.opencode` | `/home/user/...` | read-write | OpenCode config, state, and install data |
 | `~/.gitconfig` | `/home/user/.gitconfig` | read-only | Git identity |
 | `~/.cooper/cache/go-mod` | `/home/user/go/pkg/mod` | read-write | Go module cache |
 | `~/.cooper/cache/go-build` | `/home/user/.cache/go-build` | read-write | Go build cache |

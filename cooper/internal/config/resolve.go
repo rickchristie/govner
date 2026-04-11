@@ -103,6 +103,9 @@ func validateGoVersion(version string) (bool, error) {
 	// The go.dev/dl/?mode=json API only returns the latest 2 major versions.
 	// Older valid versions (e.g., 1.24.10 when 1.26 is out) won't be listed.
 	// Instead, check if the specific version download URL exists (HTTP HEAD).
+	// linux-amd64 is used here as a canonical existence check only. The actual
+	// Cooper build installs Go from the multi-arch golang: Docker image, so the
+	// version validation itself is not architecture-sensitive.
 	url := fmt.Sprintf("https://go.dev/dl/go%s.linux-amd64.tar.gz", version)
 	resp, err := httpClient.Head(url)
 	if err != nil {

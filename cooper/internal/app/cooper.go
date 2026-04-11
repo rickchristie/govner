@@ -33,7 +33,7 @@ type CooperApp struct {
 	bridgeServer     *bridge.BridgeServer
 	hostRelay        *docker.HostRelay
 	clipboardManager *clipboard.Manager
-	clipboardReader  *clipboard.LinuxReader
+	clipboardReader  clipboard.Reader
 
 	aclLogger    *logging.Logger
 	bridgeLogger *logging.Logger
@@ -61,7 +61,7 @@ func NewCooperApp(cfg *config.Config, cooperDir string) *CooperApp {
 		cfg:              cfg,
 		cooperDir:        cooperDir,
 		clipboardManager: mgr,
-		clipboardReader:  clipboard.NewLinuxReader(os.Getenv),
+		clipboardReader:  clipboard.NewHostReader(os.Getenv),
 		aclLogger:        logging.NewLogger(logDir, "acl", 10*1024*1024, 10),
 		bridgeLogger:     logging.NewLogger(logDir, "bridge", 10*1024*1024, 10),
 		aclFwd:           make(chan proxy.ACLRequest, 256),
@@ -90,6 +90,7 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 	// Refuse to start if clipboard host tools are missing.
 	if a.clipboardReader != nil {
 		if err := a.clipboardReader.CheckPrerequisites(ctx); err != nil {
+			err = fmt.Errorf("clipboard prerequisites not met: %w", err)
 			report(0, "Check clipboard prerequisites", err)
 			return err
 		}
@@ -130,16 +131,9 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 	// Bind to both the cooper-external gateway and the default bridge gateway.
 	// host.docker.internal resolves to the default bridge gateway, which may
 	// differ from the cooper-external gateway.
-	var gatewayIPs []string
-	if ip, err := docker.GetGatewayIP(docker.ExternalNetworkName()); err == nil {
-		gatewayIPs = append(gatewayIPs, ip)
-	}
-	if ip, err := docker.GetGatewayIP("bridge"); err == nil {
-		gatewayIPs = append(gatewayIPs, ip)
-	}
-	if len(gatewayIPs) == 0 {
-		err := fmt.Errorf("could not discover any Docker gateway IP\n" +
-			"Bridge won't be reachable from containers. Check that Docker networks exist")
+	gatewayIPs, err := docker.BridgeGatewayIPs()
+	if err != nil {
+		err = fmt.Errorf("%w\nBridge won't be reachable from containers. Check that Docker networks exist", err)
 		report(3, "Start bridge", err)
 		return err
 	}
@@ -158,7 +152,8 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 	}
 
 	// Start host-side lazy TCP relays so services bound to 127.0.0.1 are
-	// reachable from containers via host.docker.internal (gateway IP).
+	// reachable from containers via host.docker.internal on Linux.
+	// On macOS Docker Desktop this is a no-op because host access is tunneled.
 	a.hostRelay = docker.NewHostRelay(gatewayIPs, nil)
 	a.hostRelay.Start(a.cfg.PortForwardRules)
 
@@ -169,7 +164,7 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 		report(4, "Playwright support ready", err)
 		return err
 	}
-	fontResult, fontErr := fontsync.SyncLinuxFonts(homeDir, a.cooperDir)
+	fontResult, fontErr := fontsync.SyncHostFonts(homeDir, a.cooperDir)
 	if fontErr != nil {
 		// Font sync failure is non-fatal — add to warnings.
 		a.startupWarnings = append(a.startupWarnings, fmt.Sprintf("Font sync failed: %v", fontErr))
@@ -575,7 +570,7 @@ func (a *CooperApp) Adopt(aclListener *proxy.ACLListener, bridgeServer *bridge.B
 // AdoptClipboard replaces the internal clipboard manager and reader with
 // pre-created instances. This is used by main.go's startup path which
 // creates these early so the bridge can be wired before the app exists.
-func (a *CooperApp) AdoptClipboard(mgr *clipboard.Manager, reader *clipboard.LinuxReader) {
+func (a *CooperApp) AdoptClipboard(mgr *clipboard.Manager, reader clipboard.Reader) {
 	a.clipboardManager = mgr
 	a.clipboardReader = reader
 }

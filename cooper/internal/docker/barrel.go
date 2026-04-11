@@ -163,9 +163,12 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 const containerHome = "/home/user"
 
 // appendVolumeMounts adds all volume mount flags to the docker run args.
-// cooperDir is used to locate the socat-rules.json config file.
+// cooperDir provides Cooper-managed mounts such as language caches, CA,
+// socat rules, clipboard shims/tokens, Playwright support dirs, and the
+// per-barrel host-backed /tmp directory.
 // toolName scopes which AI tool auth directories are mounted.
-// containerName is the barrel container name, used for clipboard token mounts.
+// containerName identifies per-barrel mounts such as the clipboard token
+// file and ~/.cooper/tmp/{containerName}.
 func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config.Config, cooperDir, toolName, containerName string) []string {
 	// Workspace directory (read-write) -- symmetrical mount so IDE
 	// integration (e.g. VS Code) can resolve paths correctly.
@@ -193,8 +196,11 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 	case "codex":
 		mountRW(homeDir, ".codex", &args)
 	case "opencode":
+		mountRW(homeDir, filepath.Join(".cache", "opencode"), &args)
 		mountRW(homeDir, filepath.Join(".config", "opencode"), &args)
 		mountRW(homeDir, filepath.Join(".local", "share", "opencode"), &args)
+		mountRW(homeDir, filepath.Join(".local", "state", "opencode"), &args)
+		mountRW(homeDir, ".opencode", &args)
 	}
 
 	// Git config (read-only).

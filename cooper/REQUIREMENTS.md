@@ -18,13 +18,15 @@ Then please read through /pgflock and notice the difference:
 
 ## Supported Platforms
 
-- **Primary**: Linux (Ubuntu/Debian). This is the tested and supported platform.
-- **Other Linux**: Should work on any Linux distro (Fedora, Arch, Alpine, etc.) with Docker Engine 20.10+.
+- **Linux**: Any distro (Ubuntu/Debian, Fedora, Arch, Alpine, etc.) with Docker Engine 20.10+.
   The `cooper` binary is pure Go with no distro-specific dependencies. The CLI container Dockerfile
   uses Debian bookworm as base, but this only affects what runs *inside* the container, not the host.
   Host requirements: Docker Engine, bash or zsh (for login shell token resolution).
-- **macOS / Windows**: Not supported in v1. Docker Desktop has different networking (`host.docker.internal`
-  behavior, no `--network host` on Mac), and socat/seccomp details differ. May be explored in future versions.
+- **macOS (Apple Silicon)**: Supported with Docker Desktop 4.x+ on macOS 12+.
+  Docker Desktop runs Docker Engine inside a Linux VM, so Cooper's container-side security model still applies.
+  Host requirements: Docker Desktop, bash or zsh.
+- **macOS (Intel)**: Expected to work with Docker Desktop 4.x+, but untested.
+- **Windows**: Not supported in v1.
 
 ## New Features (Next Steps)
 - Request/response body inspection in the proxy monitor via ICAP server integration. v1 has SSL bump which gives URL, method,
@@ -45,7 +47,7 @@ What Cooper provides (always, in every barrel):
 - `PLAYWRIGHT_BROWSERS_PATH` environment variable set in every barrel
 - `DISPLAY` and `XAUTHORITY` set for every barrel (shared with clipboard-bridge X11)
 - Configurable barrel shared memory (`barrel_shm_size`, default `1g`) via `--shm-size`
-- Best-effort host font sync on `cooper up` (copies .ttf/.otf/.ttc/.otc from standard Linux font dirs)
+- Best-effort host font sync on `cooper up` (copies .ttf/.otf/.ttc/.otc from standard host font dirs for the current OS)
 
 What Cooper does NOT do:
 - Cooper does not install the Playwright npm package
@@ -174,10 +176,11 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - Shows list of port forwarding rules, each rule is like "localhost:X in CLI container is forwarded to Port Y on host machine".
       - User can add/edit/delete port forwarding rules.
       - User can self-forward in range, for example, forward port 8000-8100 to host 8000-8100, useful when development needs many ports.
-      - (UI) User is warned that host services must bind to `0.0.0.0` or the Docker gateway IP to be reachable
-        from containers. Services bound strictly to `127.0.0.1` will NOT be accessible through port forwarding.
-        This is a Linux Docker networking limitation — `host.docker.internal` resolves to the Docker bridge
-        gateway IP, not the loopback interface.
+      - (UI) Port-forwarding guidance is platform-aware:
+        - Linux: host services should bind to `0.0.0.0` or the Docker gateway IP. Services bound strictly
+          to `127.0.0.1` are reached via Cooper's HostRelay.
+        - macOS: Docker Desktop tunnels `host.docker.internal` to the host machine, so services on any bind
+          address, including `127.0.0.1`, are reachable from barrels.
       - (UI) User is guided to only forward ports that are necessary, for example,
         - The AI will need to access port of the local postgres database, so user adds a rule for that port.
         - User is using a self-hosted AI provider, so they add a rule for the port of that provider.
@@ -191,9 +194,11 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
           Needed for Chromium/Playwright browser workloads (Docker's default 64m is too small for reliable browser use).
           Accepts positive integers with optional k/m/g suffix (e.g. `64m`, `256m`, `1g`, `2g`).
         These ports must not collide, and are separate from the barrel shared memory setting.
-      - The execution bridge HTTP API binds to `127.0.0.1` AND the Docker bridge gateway IP (discovered at runtime
-        via `docker network inspect cooper-external`). This makes it reachable from localhost and Docker containers,
-        but NOT from the LAN. No authentication is required — Cooper's threat model is a single-user local dev machine.
+      - The execution bridge HTTP API always binds to `127.0.0.1`.
+        - Linux: it also binds to the Docker bridge gateway IP(s) discovered at runtime so containers can reach it
+          directly without exposing it to the LAN.
+        - macOS: Docker Desktop tunnels `host.docker.internal` to the host loopback, so no extra bind address is needed.
+        No authentication is required — Cooper's threat model is a single-user local dev machine.
         Any process with local access already has the same privileges as the bridge scripts.
         See Network Architecture for the full relay path.
       - (UI) User is explained the use-case. We might need the AI CLI to do something from the host machine, for example: deploy to staging, restart-local-dev, go-mod-tidy.
@@ -225,7 +230,9 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
   - The TUI must always be active, and just like `pgflock` when user exits the TUI, it also stops all cooper containers.
   - (UI) Exiting always pops up an exit confirmation dialog (like pgflock). This is intentional — keeping barrels running
     without proxy/bridge is unsafe, and an explicit visible TUI is preferred over a background daemon.
-  - When starting, checks clipboard prerequisites (xclip or wl-paste on host) and warns if missing.
+  - When starting, checks host clipboard prerequisites and warns if missing.
+    - Linux: `xclip` or `wl-paste`
+    - macOS: `osascript` (built-in)
   - When starting, it checks programming tool and AI CLI tool versions in the docker image against the expected version per mode:
     - **Mirror mode**: compares container version against host machine version. Warns if different.
     - **Latest mode**: compares container version against latest remote version (queried from registry APIs). Warns if outdated.
@@ -329,7 +336,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - `~/.claude` and `~/.claude.json` — Claude Code auth and config
       - `~/.copilot` — GitHub Copilot CLI auth and chat history
       - `~/.codex` — OpenAI Codex CLI config
-      - `~/.config/opencode` and `~/.local/share/opencode` — OpenCode CLI config and data
+      - `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode`, and `~/.opencode` — OpenCode CLI config, state, and install data
     - `~/.gitconfig` — git identity (read-only)
     - Clipboard bridge (read-only):
       - `~/.cooper/tokens/{containerName}` → `/etc/cooper/clipboard-token` — per-barrel auth token
@@ -567,19 +574,22 @@ they use sensible defaults and are editable at runtime via the TUI Runtime Setti
 
 ### Image Processing Pipeline
 
-1. **Read**: `LinuxReader` detects display server (Wayland vs X11 via `WAYLAND_DISPLAY` env var),
-   then calls `wl-paste` or `xclip` to read raw image bytes from host clipboard.
+1. **Read**: Cooper uses a platform-specific host reader.
+   - Linux: `LinuxReader` detects display server (Wayland vs X11 via `WAYLAND_DISPLAY` env var),
+     then calls `wl-paste` or `xclip` to read raw image bytes from host clipboard.
+   - macOS: `DarwinReader` uses `osascript` to inspect clipboard types and export image data.
 2. **Detect format**: Magic-byte detection for PNG, JPEG, GIF, BMP, TIFF, WebP, SVG. Falls back to
    `http.DetectContentType` for edge cases.
 3. **Convert**: In-process conversion to PNG for common formats (JPEG, GIF, BMP, TIFF, WebP via
    `golang.org/x/image`). External conversion via ImageMagick `magick` CLI for uncommon formats
-   (SVG, AVIF, HEIC, ICO) — 30-second timeout.
+   (SVG, AVIF, HEIC, ICO, PDF, JPEG 2000, PSD, and other uncommon formats) — 30-second timeout.
 4. **Size enforcement**: Input and output size limits enforced (configurable, default 20 MiB).
 5. **Stage**: PNG bytes stored in memory as `StagedSnapshot` with unique ID, creation time, expiry,
    and access tracking (LastAccessAt, AccessCount).
 
 ### Host Prerequisites
-- `xclip` or `wl-paste` must be installed on the host (for reading clipboard).
+- Linux: `xclip` or `wl-paste` must be installed on the host (for reading clipboard).
+- macOS: `osascript` is used for clipboard access and is built into the OS.
 - Optional: ImageMagick `magick` for uncommon image formats.
 - `cooper up` checks prerequisites at startup and warns if missing.
 
@@ -718,8 +728,8 @@ Internet:
 
 **Proxy container (on both networks):**
 - Connected to `cooper-external` at creation, then `docker network connect cooper-internal cooper-proxy`
-- Created with `--add-host=host.docker.internal:host-gateway` so it can resolve the host's Docker gateway IP
-  (required on Linux — Docker Desktop provides this automatically, but Docker Engine does not)
+- Created with `--add-host=host.docker.internal:host-gateway` so `host.docker.internal` resolves consistently for
+  the proxy's host-service relay path on both Linux Docker Engine and Docker Desktop.
 - Reaches the internet via `cooper-external` (for whitelisted/approved requests)
 - Reachable from CLI containers as `cooper-proxy` via Docker DNS on `cooper-internal`
 - Runs socat relays for host service access: listens on `cooper-internal`, forwards to host via `cooper-external`
@@ -732,22 +742,22 @@ Internet:
 - `HTTP_PROXY`/`HTTPS_PROXY` env vars point to `cooper-proxy:3128` (not `host.docker.internal`)
 
 **Execution bridge (runs on the host, inside `cooper up` process):**
-- Binds to `127.0.0.1:4343` AND `{docker-gateway-ip}:4343` — reachable from localhost and Docker containers, but NOT from LAN
-- The Docker gateway IP is discovered at runtime via `docker network inspect cooper-external` (e.g., `172.17.0.1`)
+- Always binds to `127.0.0.1:4343`
+- Linux: also binds to `{docker-gateway-ip}:4343` so containers can reach it directly without exposing it to the LAN
+- Linux: the Docker gateway IP is discovered at runtime via `docker network inspect cooper-external` (e.g., `172.17.0.1`)
+- macOS: Docker Desktop tunnels `host.docker.internal` to the host loopback, so the extra gateway bind is not needed
 - CLI containers reach it via: CLI socat (`localhost:4343`) → `cooper-proxy:4343` → proxy socat → `host.docker.internal:4343` → host
 - The bridge port relay is auto-configured in the proxy container's entrypoint (not user-configured)
 
 **Host service accessibility and HostRelay:**
-- `host.docker.internal` resolves to the Docker bridge gateway IP (e.g., `172.17.0.1`), NOT `127.0.0.1`
-- Host services must bind to `0.0.0.0` (or the Docker gateway IP) to be reachable from containers
-- Services bound strictly to `127.0.0.1` are NOT directly reachable through the socat relay chain.
-  This is documented in `cooper configure` port forwarding setup, which warns the user about this requirement.
-- **HostRelay** (`docker/hostrelay.go`) mitigates this for port-forwarded services: for each forwarding rule,
-  `cooper up` attempts to listen on `{gateway-ip}:{host-port}` and relays connections to `127.0.0.1:{host-port}`.
-  If the bind fails (service already on `0.0.0.0`), the relay is silently skipped. This means the two-hop socat
-  chain can reach loopback-bound host services via `host.docker.internal` → HostRelay → `127.0.0.1`.
-- The execution bridge binds to `127.0.0.1` + Docker gateway IP (not `0.0.0.0`) to be reachable from
-  containers without exposing the API to the LAN.
+- Linux: `host.docker.internal` resolves to the Docker bridge gateway IP (e.g., `172.17.0.1`), NOT `127.0.0.1`.
+  Services bound strictly to `127.0.0.1` are not directly reachable through the socat relay chain.
+- Linux: **HostRelay** (`docker/hostrelay.go`) mitigates this for port-forwarded services. For each forwarding rule,
+  `cooper up` listens on `{gateway-ip}:{host-port}` and relays connections to `127.0.0.1:{host-port}` when needed.
+  If the bind fails (service already on `0.0.0.0`), the relay is silently skipped.
+- macOS: Docker Desktop tunnels `host.docker.internal` to the host machine directly, so loopback-bound services are
+  reachable without HostRelay.
+- The execution bridge binds to `127.0.0.1` on every platform, plus Docker gateway IPs on Linux only.
 
 **socat port forwarding (two-hop relay):**
 - **Inside CLI container** (entrypoint): `localhost:{port}` → `cooper-proxy:{port}` (Docker DNS on internal network)
@@ -766,7 +776,7 @@ Internet:
 | Proxy monitor (approve/deny) | Squid → external ACL helper (stdin/stdout) → Unix socket → `cooper up` on host → TUI → user decision |
 | Execution bridge | CLI socat → `cooper-proxy:4343` (internal) → proxy socat → `host.docker.internal:4343` (external) → host |
 | Clipboard bridge | CLI shim/x11-bridge → socat → `cooper-proxy:{bridge_port}` → proxy socat → host bridge `/clipboard/*` |
-| Host service access (DB, etc.) | CLI socat → `cooper-proxy:{port}` (internal) → proxy socat → `host.docker.internal:{port}` (external) → host (HostRelay if loopback-only) |
+| Host service access (DB, etc.) | CLI socat → `cooper-proxy:{port}` (internal) → proxy socat → `host.docker.internal:{port}` (external) → host (HostRelay if loopback-only on Linux) |
 | Package registry blocking | CLI → `cooper-proxy:3128` → Squid → denied (not in whitelist) |
 | Direct internet bypass | IMPOSSIBLE — `cooper-internal` has no gateway, no route to any external network |
 | Raw socket bypass | IMPOSSIBLE — even without proxy env vars, no network route exists to the internet |

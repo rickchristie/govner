@@ -10,9 +10,6 @@ import (
 	"strings"
 )
 
-// execCommand is a package-level variable to allow test mocking.
-var execCommand = exec.CommandContext
-
 // backendKind identifies the display server protocol.
 type backendKind string
 
@@ -37,6 +34,10 @@ func NewLinuxReader(envLookup func(string) string) *LinuxReader {
 		backend:   detectBackend(envLookup),
 		envLookup: envLookup,
 	}
+}
+
+func newHostReader(envLookup func(string) string) Reader {
+	return NewLinuxReader(envLookup)
 }
 
 // detectBackend checks WAYLAND_DISPLAY to choose between Wayland and X11.
@@ -85,14 +86,6 @@ func (r *LinuxReader) CheckPrerequisites(ctx context.Context) error {
 	case backendX11:
 		if err := checkTool(ctx, "xclip"); err != nil {
 			return fmt.Errorf("clipboard tool not found: xclip is required for X11.\nInstall with: sudo apt install xclip")
-		}
-	}
-
-	// ImageMagick 7 provides "magick", ImageMagick 6 provides "convert".
-	// Accept either — both can do the format conversion Cooper needs.
-	if err := checkTool(ctx, "magick"); err != nil {
-		if err := checkTool(ctx, "convert"); err != nil {
-			return fmt.Errorf("ImageMagick is required for image format conversion.\nInstall with: sudo apt install imagemagick")
 		}
 	}
 
@@ -203,13 +196,4 @@ func extensionForMIME(mime string) string {
 		}
 		return ".bin"
 	}
-}
-
-// checkTool verifies that a command-line tool is available on the PATH.
-func checkTool(ctx context.Context, name string) error {
-	cmd := execCommand(ctx, "which", name)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s not found", name)
-	}
-	return nil
 }

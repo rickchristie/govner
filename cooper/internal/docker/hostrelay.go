@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"runtime"
 	"sync"
 	"time"
 
@@ -27,7 +28,7 @@ import (
 type HostRelay struct {
 	mu         sync.Mutex
 	gatewayIPs []string
-	ports      []int // all forwarded host ports (expanded from rules)
+	ports      []int              // all forwarded host ports (expanded from rules)
 	active     map[int]relayEntry // port → listeners
 	stopCh     chan struct{}
 	logger     *log.Logger
@@ -39,6 +40,10 @@ func NewHostRelay(gatewayIPs []string, logger *log.Logger) *HostRelay {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
+	gatewayIPs = hostRelayGatewayIPsForOS(runtime.GOOS, gatewayIPs)
+	if runtime.GOOS == "darwin" {
+		logger.Printf("[host-relay] skipped on macOS (Docker Desktop handles host access)")
+	}
 	return &HostRelay{
 		gatewayIPs: gatewayIPs,
 		active:     make(map[int]relayEntry),
@@ -47,8 +52,19 @@ func NewHostRelay(gatewayIPs []string, logger *log.Logger) *HostRelay {
 	}
 }
 
+func hostRelayGatewayIPsForOS(goos string, gatewayIPs []string) []string {
+	if goos == "darwin" {
+		return nil
+	}
+	return uniqueStrings(gatewayIPs)
+}
+
 // Start begins the periodic scan loop that creates/removes relays as needed.
 func (hr *HostRelay) Start(rules []config.PortForwardRule) {
+	if len(hr.gatewayIPs) == 0 {
+		return
+	}
+
 	hr.mu.Lock()
 	hr.ports = expandPorts(rules)
 	hr.mu.Unlock()
@@ -61,6 +77,10 @@ func (hr *HostRelay) Start(rules []config.PortForwardRule) {
 // UpdatePorts updates the forwarded port list and triggers an immediate rescan.
 // Relays for removed ports are torn down; new ports are picked up.
 func (hr *HostRelay) UpdatePorts(rules []config.PortForwardRule) {
+	if len(hr.gatewayIPs) == 0 {
+		return
+	}
+
 	hr.mu.Lock()
 	hr.ports = expandPorts(rules)
 	hr.mu.Unlock()

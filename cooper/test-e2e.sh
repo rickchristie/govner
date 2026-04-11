@@ -26,6 +26,7 @@ cd "$SCRIPT_DIR"
 PREFIX="test-e2e-"
 CONFIG_DIR="${SCRIPT_DIR}/.test-e2e"
 COOPER="${SCRIPT_DIR}/cooper"
+HOST_OS="$(uname -s)"
 
 # Container and network names (container names are NOT prefixed — they
 # use the same names as real Cooper for Docker DNS resolution).
@@ -77,6 +78,23 @@ info() {
 section() {
     echo ""
     echo -e "${CYAN}━━━ $1 ━━━${NC}"
+}
+
+port_in_use() {
+    local port=$1
+    bash -c "echo > /dev/tcp/127.0.0.1/${port}" >/dev/null 2>&1
+}
+
+find_free_local_port() {
+    local candidate
+    for _i in $(seq 1 200); do
+        candidate=$((20000 + RANDOM % 20000))
+        if ! port_in_use "$candidate"; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Map tool name to barrel container name.
@@ -151,6 +169,12 @@ fi
 # Register cleanup on exit so we never leave containers/networks dangling.
 trap cleanup EXIT
 
+PROXY_PORT="$(find_free_local_port)"
+BRIDGE_PORT="$(find_free_local_port)"
+while [ "$BRIDGE_PORT" = "$PROXY_PORT" ]; do
+    BRIDGE_PORT="$(find_free_local_port)"
+done
+
 # ============================================================================
 # Phase 1: Build Cooper and Docker Images
 # ============================================================================
@@ -168,7 +192,11 @@ mkdir -p "$CONFIG_DIR"
 
 # Use pinned versions from the reference test config. This is a complete
 # config that exercises all tools.
-cat > "${CONFIG_DIR}/config.json" << 'CONFIGEOF'
+#
+# monitor_timeout_secs intentionally stays at 5 here to model an older saved
+# config value. Fresh DefaultConfig() now uses 30 seconds, but persisted 5-
+# second configs must remain valid and unchanged when loaded.
+cat > "${CONFIG_DIR}/config.json" <<CONFIGEOF
 {
   "programming_tools": [
     {"name": "go", "enabled": true, "mode": "pin", "pinned_version": "1.24.10"},
@@ -197,8 +225,8 @@ cat > "${CONFIG_DIR}/config.json" << 'CONFIGEOF'
     {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"},
     {"container_port": 6379, "host_port": 6379, "description": "Redis"}
   ],
-  "proxy_port": 3128,
-  "bridge_port": 4343,
+  "proxy_port": ${PROXY_PORT},
+  "bridge_port": ${BRIDGE_PORT},
   "monitor_timeout_secs": 5,
   "blocked_history_limit": 500,
   "allowed_history_limit": 500,
@@ -274,9 +302,9 @@ docker network create --internal "$NETWORK_INTERNAL" >/dev/null 2>&1
 pass "Network created: ${NETWORK_INTERNAL} (--internal, no gateway)"
 
 # Step 7: Write socat-rules.json (same as docker.WritePortForwardConfig).
-cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCATEOF'
+cat > "${CONFIG_DIR}/socat-rules.json" <<SOCATEOF
 {
-  "bridge_port": 4343,
+  "bridge_port": ${BRIDGE_PORT},
   "rules": [
     {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"},
     {"container_port": 6379, "host_port": 6379, "description": "Redis"}
@@ -285,12 +313,13 @@ cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCATEOF'
 SOCATEOF
 pass "socat-rules.json written"
 
-# Step 8: Create mount directories.
+# Step 8: Recreate mount directories exactly like docker.StartProxy.
+rm -rf "${CONFIG_DIR}/run" "${CONFIG_DIR}/logs"
 mkdir -p "${CONFIG_DIR}/run" "${CONFIG_DIR}/logs"
 
 # Step 9: Start proxy container (replicating docker.StartProxy exactly).
 info "Starting proxy container..."
-docker run -d \
+if proxy_run_output=$(docker run -d \
     --name "$PROXY_CONTAINER" \
     --network "$NETWORK_EXTERNAL" \
     --add-host=host.docker.internal:host-gateway \
@@ -301,26 +330,36 @@ docker run -d \
     -v "${CONFIG_DIR}/run:/var/run/cooper:rw" \
     -v "${CONFIG_DIR}/logs:/var/log/squid:rw" \
     -v "${CONFIG_DIR}/socat-rules.json:/etc/cooper/socat-rules.json:ro" \
-    -p "127.0.0.1:3128:3128" \
-    "$IMAGE_PROXY" >/dev/null 2>&1
-pass "Proxy container started"
+    -p "127.0.0.1:${PROXY_PORT}:${PROXY_PORT}" \
+    "$IMAGE_PROXY" 2>&1); then
+    pass "Proxy container started"
+else
+    fail "Proxy container failed to start"
+    while IFS= read -r line; do info "  $line"; done <<< "$proxy_run_output"
+    exit 1
+fi
 
 # Step 10: Connect proxy to internal network (dual-network topology).
-docker network connect "$NETWORK_INTERNAL" "$PROXY_CONTAINER" 2>/dev/null
-pass "Proxy connected to internal network"
+if proxy_connect_output=$(docker network connect "$NETWORK_INTERNAL" "$PROXY_CONTAINER" 2>&1); then
+    pass "Proxy connected to internal network"
+else
+    fail "Proxy failed to connect to internal network"
+    while IFS= read -r line; do info "  $line"; done <<< "$proxy_connect_output"
+    exit 1
+fi
 
 # Step 11: Wait for proxy to become ready.
 info "Waiting for Squid proxy to initialize..."
 proxy_ready=false
 for i in $(seq 1 30); do
-    if docker exec "$PROXY_CONTAINER" bash -c 'echo > /dev/tcp/localhost/3128' 2>/dev/null; then
+    if docker exec "$PROXY_CONTAINER" bash -c "echo > /dev/tcp/localhost/${PROXY_PORT}" 2>/dev/null; then
         proxy_ready=true
         break
     fi
     sleep 1
 done
 if [ "$proxy_ready" = "true" ]; then
-    pass "Proxy is listening on port 3128"
+    pass "Proxy is listening on port ${PROXY_PORT}"
 else
     fail "Proxy did not start within 30 seconds"
     # Show proxy logs for debugging.
@@ -375,10 +414,16 @@ auth_mounts_for() {
             mounts+=("-v" "${HOME_DIR}/.codex:/home/user/.codex:rw")
             ;;
         opencode)
+            mkdir -p "${HOME_DIR}/.cache/opencode" 2>/dev/null || true
             mkdir -p "${HOME_DIR}/.config/opencode" 2>/dev/null || true
             mkdir -p "${HOME_DIR}/.local/share/opencode" 2>/dev/null || true
+            mkdir -p "${HOME_DIR}/.local/state/opencode" 2>/dev/null || true
+            mkdir -p "${HOME_DIR}/.opencode" 2>/dev/null || true
+            mounts+=("-v" "${HOME_DIR}/.cache/opencode:/home/user/.cache/opencode:rw")
             mounts+=("-v" "${HOME_DIR}/.config/opencode:/home/user/.config/opencode:rw")
             mounts+=("-v" "${HOME_DIR}/.local/share/opencode:/home/user/.local/share/opencode:rw")
+            mounts+=("-v" "${HOME_DIR}/.local/state/opencode:/home/user/.local/state/opencode:rw")
+            mounts+=("-v" "${HOME_DIR}/.opencode:/home/user/.opencode:rw")
             ;;
     esac
     echo "${mounts[@]}"
@@ -471,8 +516,8 @@ build_barrel_run_args() {
         "${extra_mounts_ref[@]}"
 
         # Proxy environment variables.
-        "-e" "HTTP_PROXY=http://${BARREL_PROXY_HOST}:3128"
-        "-e" "HTTPS_PROXY=http://${BARREL_PROXY_HOST}:3128"
+        "-e" "HTTP_PROXY=http://${BARREL_PROXY_HOST}:${PROXY_PORT}"
+        "-e" "HTTPS_PROXY=http://${BARREL_PROXY_HOST}:${PROXY_PORT}"
         "-e" "NO_PROXY=localhost,127.0.0.1"
         "-e" "COOPER_PROXY_HOST=${BARREL_PROXY_HOST}"
         "-e" "COOPER_INTERNAL_NETWORK=${NETWORK_INTERNAL}"
@@ -488,7 +533,7 @@ build_barrel_run_args() {
 
         # Clipboard bridge env vars.
         "-e" "COOPER_CLIPBOARD_ENABLED=1"
-        "-e" "COOPER_CLIPBOARD_BRIDGE_URL=http://127.0.0.1:4343"
+        "-e" "COOPER_CLIPBOARD_BRIDGE_URL=http://127.0.0.1:${BRIDGE_PORT}"
         "-e" "COOPER_CLIPBOARD_TOKEN_FILE=/etc/cooper/clipboard-token"
         "-e" "COOPER_CLIPBOARD_SHIMS=xclip,xsel"
 
@@ -524,7 +569,20 @@ done
 
 # Copy a test font fixture for font mount verification.
 TEST_FONT=""
-for candidate in /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf /usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf; do
+FONT_CANDIDATES=()
+if [ "$HOST_OS" = "Darwin" ]; then
+    FONT_CANDIDATES=(
+        /Library/Fonts/Arial.ttf
+        /System/Library/Fonts/Supplemental/Arial.ttf
+        /System/Library/Fonts/Supplemental/Helvetica.ttf
+    )
+else
+    FONT_CANDIDATES=(
+        /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+        /usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf
+    )
+fi
+for candidate in "${FONT_CANDIDATES[@]}"; do
     if [ -f "$candidate" ]; then
         TEST_FONT="$candidate"
         break
@@ -584,14 +642,14 @@ for tool in "${ALL_TOOLS[@]}"; do
 
     # ---- Proxy connectivity ----
     http_proxy_val=$(barrel_exec 'echo $HTTP_PROXY')
-    if echo "$http_proxy_val" | grep -q "cooper-proxy:3128"; then
+    if echo "$http_proxy_val" | grep -q "cooper-proxy:${PROXY_PORT}"; then
         pass "${tool}: HTTP_PROXY set correctly"
     else
         fail "${tool}: HTTP_PROXY not set correctly: ${http_proxy_val}"
     fi
 
     https_proxy_val=$(barrel_exec 'echo $HTTPS_PROXY')
-    if echo "$https_proxy_val" | grep -q "cooper-proxy:3128"; then
+    if echo "$https_proxy_val" | grep -q "cooper-proxy:${PROXY_PORT}"; then
         pass "${tool}: HTTPS_PROXY set correctly"
     else
         fail "${tool}: HTTPS_PROXY not set correctly: ${https_proxy_val}"
@@ -605,11 +663,11 @@ for tool in "${ALL_TOOLS[@]}"; do
         fail "${tool}: cooper-proxy DNS resolution failed: ${dns_result}"
     fi
 
-    tcp_result=$(barrel_exec 'timeout 5 bash -c "echo > /dev/tcp/cooper-proxy/3128" 2>&1 && echo ok || echo fail')
+    tcp_result=$(barrel_exec "timeout 5 bash -c 'echo > /dev/tcp/cooper-proxy/${PROXY_PORT}' 2>&1 && echo ok || echo fail")
     if echo "$tcp_result" | grep -q "ok"; then
-        pass "${tool}: TCP connection to cooper-proxy:3128"
+        pass "${tool}: TCP connection to cooper-proxy:${PROXY_PORT}"
     else
-        fail "${tool}: cannot connect to cooper-proxy:3128"
+        fail "${tool}: cannot connect to cooper-proxy:${PROXY_PORT}"
     fi
 
     ssl_status=$(barrel_exec 'curl -so /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 15 https://api.github.com 2>&1 || true')
@@ -1025,8 +1083,8 @@ fi
 socat_content=$(barrel_exec 'cat /etc/cooper/socat-rules.json')
 bridge_port_val=$(echo "$socat_content" | jq -r '.bridge_port' 2>/dev/null || echo "")
 rules_count=$(echo "$socat_content" | jq -r '.rules | length' 2>/dev/null || echo "0")
-if [ "$bridge_port_val" = "4343" ] && [ "$rules_count" = "2" ]; then
-    pass "socat-rules.json has correct content (bridge_port=4343, ${rules_count} rules)"
+if [ "$bridge_port_val" = "${BRIDGE_PORT}" ] && [ "$rules_count" = "2" ]; then
+    pass "socat-rules.json has correct content (bridge_port=${BRIDGE_PORT}, ${rules_count} rules)"
 else
     fail "socat-rules.json content unexpected (bridge_port=${bridge_port_val}, rules=${rules_count})"
 fi
@@ -1061,10 +1119,10 @@ for port in 5432 6379; do
 done
 
 # Verify bridge port socat is listening.
-if port_open 4343; then
-    pass "socat listening on bridge port 4343 in barrel"
+if port_open "$BRIDGE_PORT"; then
+    pass "socat listening on bridge port ${BRIDGE_PORT} in barrel"
 else
-    fail "socat NOT listening on bridge port 4343 in barrel"
+    fail "socat NOT listening on bridge port ${BRIDGE_PORT} in barrel"
 fi
 
 # ============================================================================
@@ -1073,9 +1131,9 @@ fi
 section "Phase 7b: Port Forwarding Live Config Change"
 
 # Remove the Redis rule (6379), keep PostgreSQL (5432).
-cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_REMOVE_EOF'
+cat > "${CONFIG_DIR}/socat-rules.json" <<SOCAT_REMOVE_EOF
 {
-  "bridge_port": 4343,
+  "bridge_port": ${BRIDGE_PORT},
   "rules": [
     {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"}
   ]
@@ -1086,7 +1144,7 @@ SOCAT_REMOVE_EOF
 # Restart barrel to pick up the new socat config.
 # SIGHUP-based reload is unreliable under tini --init, so we restart the container.
 docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
-wait_for_port 4343  # Wait for bridge socat after entrypoint restart.
+wait_for_port "$BRIDGE_PORT"  # Wait for bridge socat after entrypoint restart.
 wait_for_port 5432  # Wait for PostgreSQL socat after entrypoint restart.
 
 # After removing Redis rule, port 5432 should still listen, port 6379 should stop.
@@ -1103,9 +1161,9 @@ else
 fi
 
 # Add Redis back.
-cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_READD_EOF'
+cat > "${CONFIG_DIR}/socat-rules.json" <<SOCAT_READD_EOF
 {
-  "bridge_port": 4343,
+  "bridge_port": ${BRIDGE_PORT},
   "rules": [
     {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"},
     {"container_port": 6379, "host_port": 6379, "description": "Redis"}
@@ -1123,9 +1181,9 @@ else
 fi
 
 # Test range port forwarding.
-cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_RANGE_EOF'
+cat > "${CONFIG_DIR}/socat-rules.json" <<SOCAT_RANGE_EOF
 {
-  "bridge_port": 4343,
+  "bridge_port": ${BRIDGE_PORT},
   "rules": [
     {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"},
     {"container_port": 6379, "host_port": 6379, "description": "Redis"},
@@ -1152,9 +1210,9 @@ if [ "$range_ok" = true ]; then
 fi
 
 # Restore original rules.
-cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_RESTORE_EOF'
+cat > "${CONFIG_DIR}/socat-rules.json" <<SOCAT_RESTORE_EOF
 {
-  "bridge_port": 4343,
+  "bridge_port": ${BRIDGE_PORT},
   "rules": [
     {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"},
     {"container_port": 6379, "host_port": 6379, "description": "Redis"}
@@ -1162,12 +1220,12 @@ cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_RESTORE_EOF'
 }
 SOCAT_RESTORE_EOF
 docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
-wait_for_port 4343
+wait_for_port "$BRIDGE_PORT"
 
 # ============================================================================
-# Phase 7c: Host Relay — localhost-bound services reachable from barrels
+# Phase 7c: Host Access — localhost-bound services reachable from barrels
 # ============================================================================
-section "Phase 7c: Host Relay (localhost-bound service forwarding)"
+section "Phase 7c: Host Access (localhost-bound service forwarding)"
 
 # Build a tiny HTTP server that binds ONLY to 127.0.0.1 — simulating a
 # typical dev server that doesn't bind to 0.0.0.0.
@@ -1246,11 +1304,13 @@ RELAYHELPER
 
 RELAY_TEST_PORT=17931
 
-info "Building loopback test server and host relay..."
+info "Building loopback test server and host-access helper..."
 E2E_RELAY_SERVER="${CONFIG_DIR}/e2e-relay-server"
 E2E_RELAY_HELPER="${CONFIG_DIR}/e2e-relay-helper"
 go build -o "$E2E_RELAY_SERVER" "${E2E_RELAY_DIR}/server.go" 2>&1 || { fail "relay test server build failed"; }
-go build -o "$E2E_RELAY_HELPER" "${E2E_RELAY_DIR}/relay.go" 2>&1 || { fail "relay helper build failed"; }
+if [ "$HOST_OS" != "Darwin" ]; then
+    go build -o "$E2E_RELAY_HELPER" "${E2E_RELAY_DIR}/relay.go" 2>&1 || { fail "relay helper build failed"; }
+fi
 pass "Relay test binaries built"
 
 # Start the loopback-only HTTP server.
@@ -1259,7 +1319,11 @@ E2E_RELAY_SERVER_PID=$!
 sleep 1
 
 # Verify it's only on 127.0.0.1 and responds.
-relay_bind=$(ss -tlnp 2>/dev/null | grep ":${RELAY_TEST_PORT} " | head -1)
+if [ "$HOST_OS" = "Darwin" ]; then
+    relay_bind=$(lsof -nP -iTCP:${RELAY_TEST_PORT} -sTCP:LISTEN 2>/dev/null | tr '\n' ' ')
+else
+    relay_bind=$(ss -tlnp 2>/dev/null | grep ":${RELAY_TEST_PORT} " | head -1)
+fi
 if echo "$relay_bind" | grep -q "127.0.0.1:${RELAY_TEST_PORT}"; then
     pass "Test server bound to 127.0.0.1:${RELAY_TEST_PORT} only"
 else
@@ -1273,44 +1337,48 @@ else
     fail "Test server not responding on host: ${host_response}"
 fi
 
-# Discover Docker gateway IPs.
-GW_EXTERNAL=$(docker network inspect cooper-external --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || echo "")
-GW_BRIDGE=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || echo "")
+if [ "$HOST_OS" != "Darwin" ]; then
+    # Discover Docker gateway IPs.
+    GW_EXTERNAL=$(docker network inspect cooper-external --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || echo "")
+    GW_BRIDGE=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || echo "")
 
-# Verify the gateway IP CANNOT reach the server before relay (it's loopback-only).
-if ! curl -sf --connect-timeout 2 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" >/dev/null 2>&1; then
-    pass "Gateway IP cannot reach loopback server (before relay)"
-else
-    info "Gateway IP already reaches server (service may bind wider) — relay test still valid"
-fi
-
-# Start the host relay.
-RELAY_GW_ARGS=()
-[ -n "$GW_EXTERNAL" ] && RELAY_GW_ARGS+=("$GW_EXTERNAL")
-[ -n "$GW_BRIDGE" ] && RELAY_GW_ARGS+=("$GW_BRIDGE")
-
-"$E2E_RELAY_HELPER" "${RELAY_GW_ARGS[@]}" &
-E2E_RELAY_HELPER_PID=$!
-# Wait for the lazy relay to detect the loopback service and bind.
-for _i in $(seq 1 20); do
-    if curl -sf -o /dev/null --connect-timeout 1 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" 2>/dev/null; then
-        break
+    # Verify the gateway IP CANNOT reach the server before relay (it's loopback-only).
+    if ! curl -sf --connect-timeout 2 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" >/dev/null 2>&1; then
+        pass "Gateway IP cannot reach loopback server (before relay)"
+    else
+        info "Gateway IP already reaches server (service may bind wider) — relay test still valid"
     fi
-    sleep 0.5
-done
 
-# Verify the gateway IP CAN now reach the server via relay.
-post_relay=$(curl -sf --connect-timeout 2 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" 2>/dev/null || echo "")
-if echo "$post_relay" | grep -q "cooper-relay-test-ok"; then
-    pass "Gateway IP reaches loopback server via host relay"
+    # Start the host relay.
+    RELAY_GW_ARGS=()
+    [ -n "$GW_EXTERNAL" ] && RELAY_GW_ARGS+=("$GW_EXTERNAL")
+    [ -n "$GW_BRIDGE" ] && RELAY_GW_ARGS+=("$GW_BRIDGE")
+
+    "$E2E_RELAY_HELPER" "${RELAY_GW_ARGS[@]}" &
+    E2E_RELAY_HELPER_PID=$!
+    # Wait for the lazy relay to detect the loopback service and bind.
+    for _i in $(seq 1 20); do
+        if curl -sf -o /dev/null --connect-timeout 1 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" 2>/dev/null; then
+            break
+        fi
+        sleep 0.5
+    done
+
+    # Verify the gateway IP CAN now reach the server via relay.
+    post_relay=$(curl -sf --connect-timeout 2 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" 2>/dev/null || echo "")
+    if echo "$post_relay" | grep -q "cooper-relay-test-ok"; then
+        pass "Gateway IP reaches loopback server via host relay"
+    else
+        fail "Gateway IP still cannot reach server via relay: ${post_relay}"
+    fi
 else
-    fail "Gateway IP still cannot reach server via relay: ${post_relay}"
+    pass "macOS detected: Docker Desktop handles host.docker.internal access without HostRelay"
 fi
 
 # Add a port forwarding rule for the test port, restart barrel.
-cat > "${CONFIG_DIR}/socat-rules.json" << SOCAT_RELAY_EOF
+cat > "${CONFIG_DIR}/socat-rules.json" <<SOCAT_RELAY_EOF
 {
-  "bridge_port": 4343,
+  "bridge_port": ${BRIDGE_PORT},
   "rules": [
     {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"},
     {"container_port": 6379, "host_port": 6379, "description": "Redis"},
@@ -1323,30 +1391,37 @@ SOCAT_RELAY_EOF
 docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
 docker exec "$PROXY_CONTAINER" kill -HUP 1 2>/dev/null || true
 sleep 2  # Give proxy socat time to reload.
-wait_for_port 4343
+wait_for_port "$BRIDGE_PORT"
 wait_for_port "$RELAY_TEST_PORT"
 
 # THE KEY TEST: barrel curls localhost:{port} and gets the response from
-# a host server that only binds to 127.0.0.1, via the host relay.
+# a host server that only binds to 127.0.0.1. Linux reaches it via HostRelay;
+# macOS reaches it via Docker Desktop's built-in host.docker.internal tunneling.
 barrel_response=$(barrel_exec "curl -sf --connect-timeout 5 --max-time 10 http://localhost:${RELAY_TEST_PORT}/ 2>&1 || echo 'CURL_FAILED'")
 if echo "$barrel_response" | grep -q "cooper-relay-test-ok"; then
-    pass "Barrel reaches loopback-only host service via host relay"
+    if [ "$HOST_OS" = "Darwin" ]; then
+        pass "Barrel reaches loopback-only host service via Docker Desktop tunneling"
+    else
+        pass "Barrel reaches loopback-only host service via host relay"
+    fi
 else
     fail "Barrel cannot reach loopback host service: ${barrel_response}"
 fi
 
 # Clean up relay test resources.
-kill "$E2E_RELAY_HELPER_PID" 2>/dev/null || true
-wait "$E2E_RELAY_HELPER_PID" 2>/dev/null || true
+if [ -n "${E2E_RELAY_HELPER_PID:-}" ]; then
+    kill "$E2E_RELAY_HELPER_PID" 2>/dev/null || true
+    wait "$E2E_RELAY_HELPER_PID" 2>/dev/null || true
+fi
 kill "$E2E_RELAY_SERVER_PID" 2>/dev/null || true
 wait "$E2E_RELAY_SERVER_PID" 2>/dev/null || true
 E2E_RELAY_HELPER_PID=""
 E2E_RELAY_SERVER_PID=""
 
 # Restore original rules.
-cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_RESTORE2_EOF'
+cat > "${CONFIG_DIR}/socat-rules.json" <<SOCAT_RESTORE2_EOF
 {
-  "bridge_port": 4343,
+  "bridge_port": ${BRIDGE_PORT},
   "rules": [
     {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"},
     {"container_port": 6379, "host_port": 6379, "description": "Redis"}
@@ -1354,8 +1429,8 @@ cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT_RESTORE2_EOF'
 }
 SOCAT_RESTORE2_EOF
 docker restart "$ACTIVE_BARREL" >/dev/null 2>&1
-wait_for_port 4343
-pass "Host relay test complete, rules restored"
+wait_for_port "$BRIDGE_PORT"
+pass "Host access test complete, rules restored"
 
 # ============================================================================
 # Phase 8: Socat Live Reload
@@ -1363,9 +1438,9 @@ pass "Host relay test complete, rules restored"
 section "Phase 8: Socat Live Reload"
 
 # Write updated socat-rules.json with a new rule.
-cat > "${CONFIG_DIR}/socat-rules.json" << 'SOCAT2EOF'
+cat > "${CONFIG_DIR}/socat-rules.json" <<SOCAT2EOF
 {
-  "bridge_port": 4343,
+  "bridge_port": ${BRIDGE_PORT},
   "rules": [
     {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"},
     {"container_port": 6379, "host_port": 6379, "description": "Redis"},
@@ -1731,7 +1806,7 @@ section "Phase 14: Clipboard Bridge"
 # Build a tiny Go program that starts the bridge with clipboard handler.
 E2E_BRIDGE_DIR="${CONFIG_DIR}/e2e-bridge"
 mkdir -p "$E2E_BRIDGE_DIR"
-cat > "${E2E_BRIDGE_DIR}/main.go" << 'BRIDGEGO'
+cat > "${E2E_BRIDGE_DIR}/main.go" <<BRIDGEGO
 package main
 
 import (
@@ -1751,14 +1826,12 @@ func main() {
 	mgr := clipboard.NewManager(5*time.Minute, 20*1024*1024)
 	mgr.SetCooperDir(cooperDir)
 	handler := clipboard.NewHandler(mgr)
-	var gatewayIPs []string
-	if ip, err := docker.GetGatewayIP("cooper-external"); err == nil {
-		gatewayIPs = append(gatewayIPs, ip)
+	gatewayIPs, err := docker.BridgeGatewayIPs()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bridge gateway IPs: %v\n", err)
+		os.Exit(1)
 	}
-	if ip, err := docker.GetGatewayIP("bridge"); err == nil {
-		gatewayIPs = append(gatewayIPs, ip)
-	}
-	srv := bridge.NewBridgeServer(nil, 4343, gatewayIPs)
+	srv := bridge.NewBridgeServer(nil, ${BRIDGE_PORT}, gatewayIPs)
 	srv.SetClipboardHandler(handler)
 	if err := srv.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "bridge start: %v\n", err)
@@ -1775,22 +1848,22 @@ info "Building e2e bridge helper..."
 E2E_BRIDGE_BIN="${CONFIG_DIR}/e2e-bridge-server"
 go build -o "$E2E_BRIDGE_BIN" "${E2E_BRIDGE_DIR}/main.go" 2>&1 || { fail "e2e bridge build failed"; }
 
-# Kill any existing listener on port 4343 (leftover from a prior cooper up).
-existing_pid=$(lsof -ti tcp:4343 2>/dev/null || true)
+# Kill any existing listener on the selected bridge port (leftover from a prior cooper up).
+existing_pid=$(lsof -ti tcp:${BRIDGE_PORT} 2>/dev/null || true)
 if [ -n "$existing_pid" ]; then
-    info "Killing existing process on port 4343 (PID ${existing_pid})..."
+    info "Killing existing process on port ${BRIDGE_PORT} (PID ${existing_pid})..."
     kill "$existing_pid" 2>/dev/null || true
     sleep 1
 fi
 
-info "Starting e2e bridge server on port 4343..."
+info "Starting e2e bridge server on port ${BRIDGE_PORT}..."
 COOPER_DIR="${CONFIG_DIR}" "$E2E_BRIDGE_BIN" &
 E2E_BRIDGE_PID=$!
 
 # Wait for bridge to be ready.
 bridge_started=false
 for _i in $(seq 1 30); do
-    if curl -sf -o /dev/null -m 1 "http://127.0.0.1:4343/health" 2>/dev/null; then
+    if curl -sf -o /dev/null -m 1 "http://127.0.0.1:${BRIDGE_PORT}/health" 2>/dev/null; then
         bridge_started=true
         break
     fi
@@ -1799,7 +1872,7 @@ done
 if [ "$bridge_started" = "true" ] && kill -0 "$E2E_BRIDGE_PID" 2>/dev/null; then
     pass "E2E bridge server started (PID ${E2E_BRIDGE_PID})"
 else
-    fail "E2E bridge server did not start (check port 4343 availability)"
+    fail "E2E bridge server did not start (check port ${BRIDGE_PORT} availability)"
     kill "$E2E_BRIDGE_PID" 2>/dev/null || true
 fi
 
@@ -1873,7 +1946,7 @@ else
 fi
 
 clip_bridge_url=$(barrel_exec 'echo $COOPER_CLIPBOARD_BRIDGE_URL')
-if echo "$clip_bridge_url" | grep -q "127.0.0.1:4343"; then
+if echo "$clip_bridge_url" | grep -q "127.0.0.1:${BRIDGE_PORT}"; then
     pass "COOPER_CLIPBOARD_BRIDGE_URL set correctly"
 else
     fail "COOPER_CLIPBOARD_BRIDGE_URL not set (got: '${clip_bridge_url}')"
@@ -1976,18 +2049,18 @@ else
 fi
 
 # ---- Test 8: Clipboard bridge endpoint authentication ----
-# NOTE: These tests exercise the socat tunnel to host port 4343. If the bridge
+# NOTE: These tests exercise the socat tunnel to the configured bridge port. If the bridge
 # server is not running on the host (it's started by `cooper up`), the curl
 # calls will get connection-refused. We test connectivity and auth separately.
 info "Checking clipboard bridge connectivity..."
 
 # First check if the bridge port is reachable at all (socat tunnel).
-bridge_reachable=$(barrel_exec 'curl -sf -o /dev/null -w "%{http_code}" -m 3 "http://127.0.0.1:4343/health" 2>/dev/null || echo "unreachable"')
+bridge_reachable=$(barrel_exec "curl -sf -o /dev/null -w '%{http_code}' -m 3 'http://127.0.0.1:${BRIDGE_PORT}/health' 2>/dev/null || echo 'unreachable'")
 if echo "$bridge_reachable" | grep -q "200"; then
-    pass "Bridge server reachable on port 4343"
+    pass "Bridge server reachable on port ${BRIDGE_PORT}"
 
     # Test with valid token — should get 200 (empty clipboard).
-    http_code=$(barrel_exec "curl -sf -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer ${TOKEN}' 'http://127.0.0.1:4343/clipboard/type' 2>/dev/null || echo '000'")
+    http_code=$(barrel_exec "curl -sf -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer ${TOKEN}' 'http://127.0.0.1:${BRIDGE_PORT}/clipboard/type' 2>/dev/null || echo '000'")
     if [ "$http_code" = "200" ]; then
         pass "GET /clipboard/type with valid token returns HTTP 200"
     else
@@ -1995,7 +2068,7 @@ if echo "$bridge_reachable" | grep -q "200"; then
     fi
 
     # Test response body contains "empty" state.
-    type_resp=$(barrel_exec "curl -sf -H 'Authorization: Bearer ${TOKEN}' 'http://127.0.0.1:4343/clipboard/type' 2>/dev/null || echo '{}'")
+    type_resp=$(barrel_exec "curl -sf -H 'Authorization: Bearer ${TOKEN}' 'http://127.0.0.1:${BRIDGE_PORT}/clipboard/type' 2>/dev/null || echo '{}'")
     if echo "$type_resp" | grep -q '"empty"'; then
         pass "GET /clipboard/type returns state=empty when nothing staged"
     else
@@ -2003,7 +2076,7 @@ if echo "$bridge_reachable" | grep -q "200"; then
     fi
 
     # Test with invalid token — should get 401.
-    http_code_invalid=$(barrel_exec "curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer invalid-token-garbage' 'http://127.0.0.1:4343/clipboard/type' 2>/dev/null || echo '000'")
+    http_code_invalid=$(barrel_exec "curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer invalid-token-garbage' 'http://127.0.0.1:${BRIDGE_PORT}/clipboard/type' 2>/dev/null || echo '000'")
     if [ "$http_code_invalid" = "401" ]; then
         pass "GET /clipboard/type with invalid token returns HTTP 401"
     else
@@ -2011,14 +2084,14 @@ if echo "$bridge_reachable" | grep -q "200"; then
     fi
 
     # Test with no auth header — should get 401.
-    http_code_noauth=$(barrel_exec "curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:4343/clipboard/type' 2>/dev/null || echo '000'")
+    http_code_noauth=$(barrel_exec "curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:${BRIDGE_PORT}/clipboard/type' 2>/dev/null || echo '000'")
     if [ "$http_code_noauth" = "401" ]; then
         pass "GET /clipboard/type with no auth returns HTTP 401"
     else
         fail "GET /clipboard/type with no auth returned HTTP ${http_code_noauth} (expected 401)"
     fi
 else
-    fail "Bridge server not reachable on port 4343 (e2e bridge should be running)"
+    fail "Bridge server not reachable on port ${BRIDGE_PORT} (e2e bridge should be running)"
 fi
 
 # Stop the active barrel and bridge server.

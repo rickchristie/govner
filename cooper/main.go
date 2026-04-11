@@ -464,12 +464,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 	ttl := time.Duration(cfg.ClipboardTTLSecs) * time.Second
 	clipMgr := clipboard.NewManager(ttl, cfg.ClipboardMaxBytes)
 	clipMgr.SetCooperDir(cooperDir)
-	clipReader := clipboard.NewLinuxReader(os.Getenv)
+	clipReader := clipboard.NewHostReader(os.Getenv)
 
-	// Pre-check: verify clipboard prerequisites (xclip/wl-paste on host).
+	// Pre-check: verify host clipboard prerequisites.
 	// Refuse to start if missing — matches CooperApp.Start() contract.
 	if err := clipReader.CheckPrerequisites(context.Background()); err != nil {
-		err = fmt.Errorf("clipboard prerequisites not met: %w\nInstall xclip or wl-paste and try again", err)
+		err = fmt.Errorf("clipboard prerequisites not met: %w", err)
 		ul.LogStep(0, "Check clipboard prerequisites", err)
 		ul.LogDone(err)
 		return err
@@ -521,16 +521,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 		p.Send(loading.StepCompleteMsg{Index: 2})
 
 		// Step 3: Start execution bridge.
-		var gatewayIPs []string
-		if ip, err := docker.GetGatewayIP(docker.NetworkExternal); err == nil {
-			gatewayIPs = append(gatewayIPs, ip)
-		}
-		if ip, err := docker.GetGatewayIP("bridge"); err == nil {
-			gatewayIPs = append(gatewayIPs, ip)
-		}
-		if len(gatewayIPs) == 0 {
-			err := fmt.Errorf("could not discover any Docker gateway IP\n" +
-				"Bridge won't be reachable from containers. Check that Docker networks exist")
+		gatewayIPs, err := docker.BridgeGatewayIPs()
+		if err != nil {
+			err = fmt.Errorf("%w\nBridge won't be reachable from containers. Check that Docker networks exist", err)
 			ul.LogStep(3, "Start bridge", err)
 			p.Send(loading.StepErrorMsg{Index: 3, Err: err})
 			return
@@ -549,7 +542,8 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 
 		// Start host-side lazy TCP relays so services bound to 127.0.0.1 are
-		// reachable from containers via host.docker.internal (gateway IP).
+		// reachable from containers via host.docker.internal on Linux.
+		// On macOS Docker Desktop this is a no-op because host access is tunneled.
 		// The relay periodically scans ports and only activates when a
 		// loopback-only service is detected. Relays are torn down when
 		// the service stops (via scan or failed connection).
@@ -573,7 +567,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 			}
 		}
 		homeDir, _ := os.UserHomeDir()
-		fontResult, fontErr := fontsync.SyncLinuxFonts(homeDir, cooperDir)
+		fontResult, fontErr := fontsync.SyncHostFonts(homeDir, cooperDir)
 		if fontErr != nil {
 			startupWarnings = append(startupWarnings, fmt.Sprintf("Font sync failed: %v", fontErr))
 		} else {

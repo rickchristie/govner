@@ -8,6 +8,8 @@ package proof
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,17 +62,18 @@ type ProofContext struct {
 	// Infrastructure started by proof (cleaned up on teardown).
 	aclListener  *proxy.ACLListener
 	bridgeServer *bridge.BridgeServer
+	hostRelay    *docker.HostRelay
 
 	// Resolved tokens for AI CLI smoke tests.
 	tokens []auth.TokenResult
 
 	// For output.
-	results    []Result
-	startTime  time.Time
-	passCount  int
-	failCount  int
-	warnCount  int
-	infoCount  int
+	results   []Result
+	startTime time.Time
+	passCount int
+	failCount int
+	warnCount int
+	infoCount int
 }
 
 // Run is the main entry point. It orchestrates all phases, prints results
@@ -213,15 +216,9 @@ func (ctx *ProofContext) phaseStartup() {
 	ctx.pass("Start proxy", "cooper-proxy running")
 
 	// Start bridge.
-	var gatewayIPs []string
-	if ip, err := docker.GetGatewayIP(docker.NetworkExternal); err == nil {
-		gatewayIPs = append(gatewayIPs, ip)
-	}
-	if ip, err := docker.GetGatewayIP("bridge"); err == nil {
-		gatewayIPs = append(gatewayIPs, ip)
-	}
-	if len(gatewayIPs) == 0 {
-		ctx.fail("Start bridge", "no Docker gateway IP found")
+	gatewayIPs, err := docker.BridgeGatewayIPs()
+	if err != nil {
+		ctx.fail("Start bridge", err.Error())
 		return
 	}
 	ctx.bridgeServer = bridge.NewBridgeServer(ctx.Cfg.BridgeRoutes, ctx.Cfg.BridgePort, gatewayIPs)
@@ -235,10 +232,16 @@ func (ctx *ProofContext) phaseStartup() {
 		ctx.fail("Start bridge", err.Error())
 		return
 	}
-	ctx.pass("Start bridge", fmt.Sprintf("listening on %s", strings.Join(gatewayIPs, ", ")))
+	bindSummary := "127.0.0.1"
+	if len(gatewayIPs) > 0 {
+		bindSummary = bindSummary + ", " + strings.Join(gatewayIPs, ", ")
+	}
+	ctx.pass("Start bridge", fmt.Sprintf("listening on %s", bindSummary))
+	ctx.hostRelay = docker.NewHostRelay(gatewayIPs, nil)
+	ctx.hostRelay.Start(ctx.Cfg.PortForwardRules)
 
 	// Check clipboard prerequisites (informational, non-blocking in proof).
-	clipReader := clipboard.NewLinuxReader(os.Getenv)
+	clipReader := clipboard.NewHostReader(os.Getenv)
 	if err := clipReader.CheckPrerequisites(context.Background()); err != nil {
 		ctx.warn("Clipboard prerequisites", err.Error())
 	} else {
@@ -717,6 +720,78 @@ func (ctx *ProofContext) phasePortForwarding() {
 			}
 		}
 	}
+
+	ctx.checkLoopbackOnlyHostAccess()
+}
+
+func (ctx *ProofContext) checkLoopbackOnlyHostAccess() {
+	barrel := ctx.firstBarrel()
+	if barrel == "" {
+		ctx.warn("Loopback host access", "no barrel running")
+		return
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		ctx.fail("Loopback host access", fmt.Sprintf("start host listener: %v", err))
+		return
+	}
+	defer listener.Close()
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	httpServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("cooper-proof-loopback-ok"))
+	})}
+	go func() { _ = httpServer.Serve(listener) }()
+	defer httpServer.Close()
+
+	originalRules := append([]config.PortForwardRule(nil), ctx.Cfg.PortForwardRules...)
+	tempRules := append(append([]config.PortForwardRule(nil), originalRules...), config.PortForwardRule{
+		ContainerPort: port,
+		HostPort:      port,
+		Description:   "proof-loopback",
+	})
+
+	restore := func() {
+		if ctx.hostRelay != nil {
+			ctx.hostRelay.UpdatePorts(originalRules)
+		}
+		if err := docker.ReloadSocat(ctx.CooperDir, ctx.Cfg.BridgePort, originalRules); err != nil {
+			ctx.warn("Loopback host access restore", err.Error())
+		}
+	}
+	defer restore()
+
+	if ctx.hostRelay != nil {
+		ctx.hostRelay.UpdatePorts(tempRules)
+	}
+	if err := docker.ReloadSocat(ctx.CooperDir, ctx.Cfg.BridgePort, tempRules); err != nil {
+		ctx.fail("Loopback host access", fmt.Sprintf("reload socat: %v", err))
+		return
+	}
+
+	probe := fmt.Sprintf(`curl -sf --connect-timeout 2 --max-time 5 http://localhost:%d/ 2>&1`, port)
+	var out string
+	var probeErr error
+	for i := 0; i < 20; i++ {
+		out, probeErr = dockerExec(barrel, probe)
+		if probeErr == nil && strings.Contains(out, "cooper-proof-loopback-ok") {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if probeErr == nil && strings.Contains(out, "cooper-proof-loopback-ok") {
+		detail := fmt.Sprintf("127.0.0.1 host service reachable on port %d", port)
+		if runtime.GOOS == "darwin" {
+			detail += " via Docker Desktop host tunneling"
+		} else {
+			detail += " via HostRelay"
+		}
+		ctx.pass("Loopback host access", detail)
+		return
+	}
+	ctx.fail("Loopback host access", fmt.Sprintf("port %d not reachable (%s)", port, truncate(out, 120)))
 }
 
 // ---------------------------------------------------------------------------
@@ -736,6 +811,11 @@ func (ctx *ProofContext) phaseTeardown() {
 	if ctx.bridgeServer != nil {
 		ctx.bridgeServer.Stop()
 		ctx.info("Bridge server", "stopped")
+	}
+
+	if ctx.hostRelay != nil {
+		ctx.hostRelay.Stop()
+		ctx.info("Host relay", "stopped")
 	}
 
 	// Stop all barrels.

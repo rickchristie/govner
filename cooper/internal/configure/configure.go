@@ -47,8 +47,8 @@ type model struct {
 	quitModalConfirm bool // true = Confirm focused, false = Cancel focused
 
 	// Version changes modal — shown on startup when mirror versions changed.
-	showChangesModal  bool
-	versionChanges    []string // e.g. "claude: 2.1.89 → 2.1.90"
+	showChangesModal bool
+	versionChanges   []string // e.g. "claude: 2.1.89 → 2.1.90"
 
 	// Sub-screen models.
 	welcome     welcomeModel
@@ -88,6 +88,17 @@ func dockerInstallHint() string {
 	}
 }
 
+func dockerStartHint(goos string) string {
+	switch goos {
+	case "darwin":
+		return "Start Docker Desktop: open -a Docker"
+	case "windows":
+		return "Start Docker Desktop"
+	default:
+		return "Start Docker: sudo systemctl start docker"
+	}
+}
+
 // checkDocker verifies that Docker is installed and running, and warns if the
 // version is older than 20.10.
 func checkDocker() error {
@@ -98,11 +109,10 @@ func checkDocker() error {
 	cmd := exec.Command("docker", "version", "--format", "{{.Server.Version}}")
 	output, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("Docker is installed but the daemon is not running.\n"+
+		hint := dockerStartHint(runtime.GOOS)
+		return fmt.Errorf("%s", "Docker is installed but the daemon is not running.\n"+
 			"Please start the Docker daemon and try again.\n\n"+
-			"On Linux:  sudo systemctl start docker\n"+
-			"On macOS:  open -a Docker\n"+
-			"On Windows: start Docker Desktop")
+			hint)
 	}
 
 	version := strings.TrimSpace(string(output))
@@ -174,7 +184,6 @@ func Run(ca *app.ConfigureApp) (RunResult, error) {
 
 	return result, nil
 }
-
 
 func newModel(cfg *config.Config, cooperDir string, ca *app.ConfigureApp, existing bool) *model {
 	configPath := ""

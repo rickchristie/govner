@@ -6,13 +6,23 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/config"
 )
 
+func skipIfDarwinHostRelayNoOp(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "darwin" {
+		t.Skip("HostRelay is intentionally a no-op on macOS")
+	}
+}
+
 func TestHostRelay_LoopbackService(t *testing.T) {
+	skipIfDarwinHostRelayNoOp(t)
+
 	// Start a loopback-only HTTP server on a high port.
 	const port = 18931
 	mux := http.NewServeMux()
@@ -73,6 +83,8 @@ func TestHostRelay_LoopbackService(t *testing.T) {
 }
 
 func TestHostRelay_TearsDownOnServiceStop(t *testing.T) {
+	skipIfDarwinHostRelayNoOp(t)
+
 	// Verify that when the loopback service stops and a client tries to
 	// connect through the relay, the relay tears itself down immediately
 	// (freeing the gateway IP for a wider bind).
@@ -140,6 +152,8 @@ func TestHostRelay_TearsDownOnServiceStop(t *testing.T) {
 }
 
 func TestHostRelay_SkipsWhenGatewayReachable(t *testing.T) {
+	skipIfDarwinHostRelayNoOp(t)
+
 	// Start a server on 0.0.0.0 — gateway should already reach it.
 	const port = 18932
 	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
@@ -177,6 +191,8 @@ func TestHostRelay_SkipsWhenGatewayReachable(t *testing.T) {
 }
 
 func TestHostRelay_RemovesWhenServiceStops(t *testing.T) {
+	skipIfDarwinHostRelayNoOp(t)
+
 	const port = 18933
 
 	gwIP, err := GetGatewayIP("bridge")
@@ -232,6 +248,8 @@ func TestHostRelay_RemovesWhenServiceStops(t *testing.T) {
 }
 
 func TestHostRelay_UpdatePorts(t *testing.T) {
+	skipIfDarwinHostRelayNoOp(t)
+
 	const port1 = 18934
 	const port2 = 18935
 
@@ -301,5 +319,20 @@ func TestHostRelay_UpdatePorts(t *testing.T) {
 	}
 	if !has2 {
 		t.Error("port2 relay should have been created after UpdatePorts")
+	}
+}
+
+func TestHostRelay_DarwinNoOp(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin-only behavior")
+	}
+
+	logger := log.New(io.Discard, "", 0)
+	hr := NewHostRelay([]string{"172.17.0.1"}, logger)
+	hr.Start([]config.PortForwardRule{{ContainerPort: 5432, HostPort: 5432, Description: "postgres"}})
+	defer hr.Stop()
+
+	if hr.ActiveCount() != 0 {
+		t.Fatalf("HostRelay should stay inactive on macOS, got %d active relays", hr.ActiveCount())
 	}
 }

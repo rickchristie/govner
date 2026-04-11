@@ -121,6 +121,8 @@ func TestRenderBaseDockerfile_DefaultConfig(t *testing.T) {
 
 	// Should install Node.js via tarball with pinned version
 	assertContains(t, result, "NODE_VERSION=22.12.0")
+	assertContains(t, result, "ARG TARGETARCH")
+	assertContains(t, result, "NODE_ARCH=$([ \"$TARGETARCH\" = \"arm64\" ] && echo \"arm64\" || echo \"x64\")")
 	assertContains(t, result, "nodejs.org/dist/v${NODE_VERSION}")
 
 	// Should have Python installation
@@ -210,6 +212,7 @@ func TestRenderBaseDockerfile_NodeVersion(t *testing.T) {
 	}
 
 	assertContains(t, result, "NODE_VERSION=22.12.0")
+	assertContains(t, result, "linux-${NODE_ARCH}.tar.xz")
 }
 
 func TestRenderBaseDockerfile_PythonEnabled(t *testing.T) {
@@ -603,6 +606,10 @@ func TestRenderCLIToolDockerfile_OpenCode(t *testing.T) {
 
 	assertContains(t, result, "opencode.ai/install")
 	assertContains(t, result, "COOPER_CLI_TOOL=opencode")
+	assertContains(t, result, "/home/user/.config/opencode")
+	assertContains(t, result, "/home/user/.local/share/opencode")
+	assertContains(t, result, "/home/user/.local/state/opencode")
+	assertContains(t, result, "/home/user/.opencode")
 }
 
 func TestRenderCLIToolDockerfile_OpenCodeVersionPinned(t *testing.T) {

@@ -225,6 +225,14 @@ func TestRunCLIList(t *testing.T) {
 	driver := setupCommandDriver(t, nil)
 	withCommandGlobals(t, driver.CooperDir())
 
+	images, err := docker.ListCLIImages()
+	if err != nil {
+		t.Fatalf("ListCLIImages() failed: %v", err)
+	}
+	if len(images) == 0 {
+		t.Fatal("expected at least one CLI image in test bootstrap")
+	}
+
 	stdout, stderr, err := captureCommandIO(t, "", func() error {
 		return runCLI(nil, []string{"list"})
 	})
@@ -237,7 +245,8 @@ func TestRunCLIList(t *testing.T) {
 	if !strings.Contains(stderr, "Available CLI tool images:") {
 		t.Fatalf("expected cli list header, got %q", stderr)
 	}
-	for _, tool := range []string{"claude", "copilot", "codex", "opencode"} {
+	for _, imageName := range images {
+		tool := strings.TrimPrefix(imageName, docker.ImagePrefix()+"cooper-cli-")
 		if !strings.Contains(stderr, tool) {
 			t.Fatalf("expected tool %q in cli list output: %q", tool, stderr)
 		}

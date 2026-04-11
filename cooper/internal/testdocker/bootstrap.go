@@ -31,9 +31,11 @@ const ImagePrefix = "cooper-gotest-"
 const RuntimeNamespace = "cooper-gotest"
 
 const (
-	lockPath      = "/tmp/cooper-gotest.lock"
-	buildDir      = "/tmp/cooper-gotest-build"
-	buildStampRel = "build.stamp"
+	sharedStateDirName = ".test-tmp"
+	lockFileName       = "cooper-gotest.lock"
+	buildDirName       = "cooper-gotest-build"
+	sharedCADirName    = "cooper-gotest-shared-ca"
+	buildStampRel      = "build.stamp"
 
 	// TestStopTimeoutSeconds keeps Docker-backed tests fail-fast. When a
 	// container ignores SIGTERM or deadlocks during shutdown, we want test
@@ -66,12 +68,16 @@ func AcquireLock() (*Lock, error) {
 
 func acquireLock(name string) (*Lock, error) {
 	waitStart := time.Now()
+	lockPath := sharedLockPath()
 	logf(name, "waiting for shared docker test lock %s", lockPath)
 
 	lockMu.Lock()
 	defer lockMu.Unlock()
 
 	if lockRefs == 0 {
+		if err := os.MkdirAll(sharedStateDir(), 0o755); err != nil {
+			return nil, fmt.Errorf("mkdir shared test state dir %s: %w", sharedStateDir(), err)
+		}
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 		if err != nil {
 			return nil, fmt.Errorf("open docker test lock %s: %w", lockPath, err)
@@ -124,12 +130,12 @@ func (l *Lock) Release() error {
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
 		lockFile.Close()
 		lockFile = nil
-		return fmt.Errorf("unlock docker test lock %s: %w", lockPath, err)
+		return fmt.Errorf("unlock docker test lock %s: %w", sharedLockPath(), err)
 	}
 	err := lockFile.Close()
 	lockFile = nil
 	if err != nil {
-		return fmt.Errorf("close docker test lock %s: %w", lockPath, err)
+		return fmt.Errorf("close docker test lock %s: %w", sharedLockPath(), err)
 	}
 	return nil
 }
@@ -253,6 +259,8 @@ func requireDocker() error {
 
 func ensureTestImagesLocked(name string) error {
 	root := cooperRoot()
+	buildDir := sharedBuildDir()
+	sharedCADir := sharedTestCADir()
 	cfgPath := filepath.Join(root, ".testfiles", "config-pinned.json")
 	cfg, err := config.LoadConfig(cfgPath)
 	if err != nil {
@@ -307,18 +315,8 @@ func ensureTestImagesLocked(name string) error {
 		return fmt.Errorf("write test ACL helper source: %w", err)
 	}
 
-	caCertPath, caKeyPath, err := config.EnsureCA(buildDir)
-	if err != nil {
-		return fmt.Errorf("ensure test CA: %w", err)
-	}
-	if err := copyFile(caCertPath, filepath.Join(buildDir, "base", "cooper-ca.pem")); err != nil {
-		return fmt.Errorf("stage test CA into base dir: %w", err)
-	}
-	if err := copyFile(caCertPath, filepath.Join(buildDir, "proxy", "cooper-ca.pem")); err != nil {
-		return fmt.Errorf("stage test CA into proxy dir: %w", err)
-	}
-	if err := copyFile(caKeyPath, filepath.Join(buildDir, "proxy", "cooper-ca-key.pem")); err != nil {
-		return fmt.Errorf("stage test CA key into proxy dir: %w", err)
+	if err := stageSharedTestCA(sharedCADir, buildDir); err != nil {
+		return err
 	}
 
 	uidGidArgs := map[string]string{
@@ -396,12 +394,50 @@ func cooperRoot() string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
 
+func sharedStateDir() string {
+	return filepath.Join(cooperRoot(), sharedStateDirName)
+}
+
+func sharedLockPath() string {
+	return filepath.Join(sharedStateDir(), lockFileName)
+}
+
+func sharedBuildDir() string {
+	return filepath.Join(sharedStateDir(), buildDirName)
+}
+
+func sharedTestCADir() string {
+	return filepath.Join(sharedStateDir(), sharedCADirName)
+}
+
 func copyFile(src, dst string) error {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(dst, data, 0o644)
+}
+
+// stageSharedTestCA copies a stable shared test CA into the ephemeral build
+// context. The build dir is wiped on every rebuild, so generating the CA there
+// would rotate it every time and invalidate Docker cache for downstream COPY
+// and image layers. Keeping the source CA outside the wiped build dir makes
+// rebuilds materially cheaper after the first seed.
+func stageSharedTestCA(caRootDir, buildDir string) error {
+	caCertPath, caKeyPath, err := config.EnsureCA(caRootDir)
+	if err != nil {
+		return fmt.Errorf("ensure shared test CA in %s: %w", caRootDir, err)
+	}
+	if err := copyFile(caCertPath, filepath.Join(buildDir, "base", "cooper-ca.pem")); err != nil {
+		return fmt.Errorf("stage shared test CA into base dir: %w", err)
+	}
+	if err := copyFile(caCertPath, filepath.Join(buildDir, "proxy", "cooper-ca.pem")); err != nil {
+		return fmt.Errorf("stage shared test CA into proxy dir: %w", err)
+	}
+	if err := copyFile(caKeyPath, filepath.Join(buildDir, "proxy", "cooper-ca-key.pem")); err != nil {
+		return fmt.Errorf("stage shared test CA key into proxy dir: %w", err)
+	}
+	return nil
 }
 
 func findFreeTCPPort() (int, error) {
@@ -419,6 +455,7 @@ func findFreeTCPPort() (int, error) {
 }
 
 func sharedImagesUpToDate(fingerprint string) (bool, string, error) {
+	buildDir := sharedBuildDir()
 	stampPath := filepath.Join(buildDir, buildStampRel)
 	data, err := os.ReadFile(stampPath)
 	if err != nil {

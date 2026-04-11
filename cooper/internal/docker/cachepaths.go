@@ -20,6 +20,12 @@ type cacheMountSpec struct {
 // programming tool. All host paths live under cooperDir/cache/ so Cooper
 // fully owns the cache lifecycle — no host tool caches are mounted.
 //
+// These caches are intentionally runtime-only: build/update stay image-
+// focused, barrel startup just creates and mounts the directories, and the
+// caches start empty and fill naturally during normal package-manager usage.
+// Cooper does not seed or import host caches during build, update, or barrel
+// startup.
+//
 // This is the single source of truth for language cache paths. It is used
 // by appendLanguageCacheMounts (volume flags), barrelMountDirs (directory
 // pre-creation), and unit tests.
@@ -82,8 +88,11 @@ func barrelMountDirs(homeDir, toolName, cooperDir, containerName string, cfg *co
 		dirs = append(dirs, filepath.Join(homeDir, ".codex"))
 	case "opencode":
 		dirs = append(dirs,
+			filepath.Join(homeDir, ".cache", "opencode"),
 			filepath.Join(homeDir, ".config", "opencode"),
 			filepath.Join(homeDir, ".local", "share", "opencode"),
+			filepath.Join(homeDir, ".local", "state", "opencode"),
+			filepath.Join(homeDir, ".opencode"),
 		)
 	}
 

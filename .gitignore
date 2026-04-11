@@ -17,6 +17,7 @@ cooper/cooper-x11-bridge
 cooper/.test-mirror/
 cooper/.test-latest/
 cooper/.test-pinned/
+cooper/.test-tmp/
 cooper/.test-e2e/
 cooper/.e2e-workspace/
 

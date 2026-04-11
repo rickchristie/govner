@@ -18,6 +18,7 @@ if [[ -z "$VERSION" ]]; then
 fi
 
 TAG_NAME="cooper/v$VERSION"
+DIST_DIR="$REPO_ROOT/dist/cooper/v$VERSION"
 
 # Check if tag already exists
 if git tag -l "$TAG_NAME" | grep -q "$TAG_NAME"; then
@@ -75,6 +76,12 @@ echo ""
 echo "========================================"
 echo "  Commands to create and push release"
 echo "========================================"
+echo ""
+echo "# Step 0: Build release artifacts:"
+echo "mkdir -p \"$DIST_DIR\""
+echo "(cd \"$COOPER_DIR\" && GOOS=linux GOARCH=amd64 go build -o \"$DIST_DIR/cooper-linux-amd64\" .)"
+echo "(cd \"$COOPER_DIR\" && GOOS=darwin GOARCH=arm64 go build -o \"$DIST_DIR/cooper-darwin-arm64\" .)"
+echo "(cd \"$COOPER_DIR\" && GOOS=darwin GOARCH=amd64 go build -o \"$DIST_DIR/cooper-darwin-amd64\" .)"
 echo ""
 echo "# Step 1: Create the annotated tag:"
 echo "git tag -a \"$TAG_NAME\" -m \"$TAG_MESSAGE\""

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"runtime"
 	"strings"
 )
 
@@ -115,6 +116,49 @@ func GetGatewayIP(networkName string) (string, error) {
 		return "", fmt.Errorf("invalid gateway IP %q for network %s", ip, networkName)
 	}
 	return ip, nil
+}
+
+// BridgeGatewayIPs returns the extra host addresses that the execution bridge
+// should bind to in addition to 127.0.0.1.
+//
+// On Linux this includes the cooper-external and default bridge gateway IPs so
+// barrels can reach the host bridge directly. On macOS Docker Desktop tunnels
+// host.docker.internal to the host loopback, so no extra bind addresses are
+// needed or valid.
+func BridgeGatewayIPs() ([]string, error) {
+	return bridgeGatewayIPsForOS(runtime.GOOS)
+}
+
+func bridgeGatewayIPsForOS(goos string) ([]string, error) {
+	if goos == "darwin" {
+		return nil, nil
+	}
+
+	var gatewayIPs []string
+	for _, networkName := range []string{ExternalNetworkName(), "bridge"} {
+		if ip, err := GetGatewayIP(networkName); err == nil {
+			gatewayIPs = append(gatewayIPs, ip)
+		}
+	}
+	gatewayIPs = uniqueStrings(gatewayIPs)
+	if len(gatewayIPs) == 0 {
+		return nil, fmt.Errorf("could not discover any Docker gateway IP")
+	}
+	return gatewayIPs, nil
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 // ConnectContainer connects a container to a Docker network.
