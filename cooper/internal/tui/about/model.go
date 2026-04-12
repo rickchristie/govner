@@ -30,8 +30,9 @@ type StartupWarningsMsg struct {
 // Model is the sub-model for the About tab.
 type Model struct {
 	// Tool configs (programming + AI).
-	progTools []config.ToolConfig
-	aiTools   []config.ToolConfig
+	progTools     []config.ToolConfig
+	aiTools       []config.ToolConfig
+	implicitTools []config.ImplicitToolConfig
 
 	// Infrastructure info.
 	proxyPort  int
@@ -58,6 +59,7 @@ func New(cfg *config.Config) *Model {
 	copy(m.progTools, cfg.ProgrammingTools)
 	m.aiTools = make([]config.ToolConfig, len(cfg.AITools))
 	copy(m.aiTools, cfg.AITools)
+	m.implicitTools = config.VisibleImplicitLSPs(cfg.ImplicitTools)
 	m.checkMismatches()
 	return m
 }
@@ -150,7 +152,7 @@ func (m *Model) View(width, height int) string {
 		banner := lipgloss.NewStyle().
 			Background(theme.ColorCopper).
 			Foreground(theme.ColorVoid).
-			Width(width - 2).
+			Width(width-2).
 			Padding(0, 1).
 			Render(theme.IconWarn + " Version mismatches detected. Run  cooper update  to rebuild the container image.")
 		b.WriteString(" " + banner + "\n")
@@ -179,6 +181,13 @@ func (m *Model) View(width, height int) string {
 	b.WriteString(renderToolTable(m.aiTools, width))
 
 	b.WriteString("\n")
+
+	if len(m.implicitTools) > 0 {
+		b.WriteString(sectionHeader("Implicit Language Servers", width))
+		b.WriteString("\n")
+		b.WriteString(renderImplicitToolTable(m.implicitTools, width))
+		b.WriteString("\n")
+	}
 
 	// Infrastructure section.
 	b.WriteString(sectionHeader("Infrastructure", width))
@@ -291,4 +300,49 @@ func renderInfraRow(label, value string) string {
 	l := lipgloss.NewStyle().Foreground(theme.ColorDusty).Width(18).Render(label)
 	v := lipgloss.NewStyle().Foreground(theme.ColorLinen).Render(value)
 	return " " + l + v + "\n"
+}
+
+func renderImplicitToolTable(tools []config.ImplicitToolConfig, width int) string {
+	if len(tools) == 0 {
+		return lipgloss.NewStyle().Foreground(theme.ColorFaded).Italic(true).
+			Render("  No implicit language servers built.") + "\n"
+	}
+
+	verStyle := lipgloss.NewStyle().Foreground(theme.ColorLinen)
+	nameStyle := lipgloss.NewStyle().Foreground(theme.ColorParchment)
+	notInstalled := lipgloss.NewStyle().Foreground(theme.ColorFaded).Italic(true)
+
+	tbl := tableutil.NewTable("TOOL", "FOR", "BINARY", "CONTAINER VERSION")
+	tbl.SetHeaderStyle(theme.ColorDusty, true)
+	sepColor := theme.ColorOakLight
+	tbl.SetSeparator(theme.BorderH, &sepColor)
+
+	for _, tool := range tools {
+		version := notInstalled.Render("(not built)")
+		if strings.TrimSpace(tool.ContainerVersion) != "" {
+			version = verStyle.Render(tool.ContainerVersion)
+		}
+		tbl.AddRow(
+			nameStyle.Render(tool.Name),
+			nameStyle.Render(tool.ParentTool),
+			verStyle.Render(displayImplicitValue(tool.Binary)),
+			version,
+		)
+	}
+
+	var b strings.Builder
+	b.WriteString(" " + tbl.RenderHeader() + "\n")
+	b.WriteString(theme.DividerStyle.Render(" "+strings.Repeat(theme.BorderH, width-2)) + "\n")
+	_, rows := tbl.RenderRows(0)
+	for _, row := range rows {
+		b.WriteString(" " + row + "\n")
+	}
+	return b.String()
+}
+
+func displayImplicitValue(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return theme.BorderH
+	}
+	return value
 }

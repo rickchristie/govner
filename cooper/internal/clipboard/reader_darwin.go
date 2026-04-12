@@ -27,6 +27,9 @@ func newHostReader(envLookup func(string) string) Reader {
 
 // Read captures the current clipboard image by asking AppleScript for the
 // available clipboard types, then exporting the best supported image type.
+// macOS does not expose binary image clipboard payloads through pbpaste in a
+// reliable way for this workflow, so Cooper uses osascript to inspect the
+// pasteboard and coerce it into an image representation we can export.
 func (r *DarwinReader) Read(ctx context.Context) (*CaptureResult, error) {
 	info, err := r.clipboardInfo(ctx)
 	if err != nil {

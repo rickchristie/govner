@@ -91,6 +91,41 @@ func TestResolveGoLatestInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestResolveGoplsLatest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"Version":"v0.21.1"}`)
+	}))
+	defer server.Close()
+
+	origURL := goplsLatestURL
+	goplsLatestURL = server.URL
+	defer func() { goplsLatestURL = origURL }()
+
+	version, err := ResolveGoplsLatest()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if version != "v0.21.1" {
+		t.Fatalf("got %q, want v0.21.1", version)
+	}
+}
+
+func TestResolveGoplsLatestInvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `not-json`)
+	}))
+	defer server.Close()
+
+	origURL := goplsLatestURL
+	goplsLatestURL = server.URL
+	defer func() { goplsLatestURL = origURL }()
+
+	if _, err := ResolveGoplsLatest(); err == nil {
+		t.Fatal("expected invalid JSON error")
+	}
+}
+
 // --- Node.js version resolution tests ---
 
 func TestResolveNodeLatest(t *testing.T) {
@@ -309,6 +344,66 @@ func TestResolveNPMPackageLatestInvalidJSON(t *testing.T) {
 	_, err := ResolveNPMPackageLatest("@anthropic-ai/claude-code")
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestResolveNPMPackageMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"version":"5.1.3","engines":{"node":">=20"}}`)
+	}))
+	defer server.Close()
+
+	origURL := npmRegistryURL
+	npmRegistryURL = server.URL
+	defer func() { npmRegistryURL = origURL }()
+
+	meta, err := ResolveNPMPackageMetadata("typescript-language-server", "5.1.3")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if meta.Version != "5.1.3" || meta.Engines.Node != ">=20" {
+		t.Fatalf("unexpected metadata: %+v", meta)
+	}
+}
+
+func TestResolvePyPIPackageLatest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"info":{"version":"1.14.0","requires_python":">=3.9"}}`)
+	}))
+	defer server.Close()
+
+	origURL := pyPIBaseURL
+	pyPIBaseURL = server.URL
+	defer func() { pyPIBaseURL = origURL }()
+
+	version, err := ResolvePyPIPackageLatest("python-lsp-server")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if version != "1.14.0" {
+		t.Fatalf("got %q, want 1.14.0", version)
+	}
+}
+
+func TestResolvePyPIPackageVersionMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"info":{"version":"1.12.2","requires_python":">=3.8"}}`)
+	}))
+	defer server.Close()
+
+	origURL := pyPIBaseURL
+	pyPIBaseURL = server.URL
+	defer func() { pyPIBaseURL = origURL }()
+
+	meta, err := ResolvePyPIPackageVersionMetadata("python-lsp-server", "1.12.2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if meta.Version != "1.12.2" || meta.RequiresPython != ">=3.8" {
+		t.Fatalf("unexpected metadata: %+v", meta)
 	}
 }
 

@@ -93,7 +93,11 @@ func setupCooperDir(t *testing.T) (string, *config.Config) {
 	}
 
 	// Render base + per-tool CLI templates (entrypoint.sh, base Dockerfile, per-tool Dockerfiles).
-	if err := templates.WriteAllTemplates(baseDir, cliDir, cfg); err != nil {
+	implicit, err := config.ResolveImplicitTools(cfg)
+	if err != nil {
+		t.Fatalf("resolve implicit tools: %v", err)
+	}
+	if err := templates.WriteAllTemplates(baseDir, cliDir, cfg, implicit); err != nil {
 		t.Fatalf("write cli templates: %v", err)
 	}
 
@@ -2204,7 +2208,11 @@ func TestCooperApp_PerToolDockerfiles(t *testing.T) {
 	}
 
 	// Render base Dockerfile and verify no AI tools leak in.
-	base, err := templates.RenderBaseDockerfile(cfg)
+	implicit, err := config.ResolveImplicitTools(cfg)
+	if err != nil {
+		t.Fatalf("resolve implicit tools: %v", err)
+	}
+	base, err := templates.RenderBaseDockerfile(cfg, implicit)
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}

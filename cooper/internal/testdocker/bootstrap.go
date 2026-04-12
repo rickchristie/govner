@@ -305,7 +305,11 @@ func ensureTestImagesLocked(name string) error {
 		return fmt.Errorf("save test config %s: %w", cfgPathOut, err)
 	}
 
-	if err := templates.WriteAllTemplates(filepath.Join(buildDir, "base"), filepath.Join(buildDir, "cli"), cfg); err != nil {
+	implicit, err := config.ResolveImplicitTools(cfg)
+	if err != nil {
+		return fmt.Errorf("resolve implicit tools for shared test images: %w", err)
+	}
+	if err := templates.WriteAllTemplates(filepath.Join(buildDir, "base"), filepath.Join(buildDir, "cli"), cfg, implicit); err != nil {
 		return fmt.Errorf("write test cli templates: %w", err)
 	}
 	if err := templates.WriteProxyTemplates(filepath.Join(buildDir, "proxy"), cfg); err != nil {
@@ -495,6 +499,7 @@ func buildFingerprint(root string) (string, error) {
 	h := sha256.New()
 	paths := []string{
 		filepath.Join(root, ".testfiles", "config-pinned.json"),
+		filepath.Join(root, "internal", "config"),
 		filepath.Join(root, "internal", "templates"),
 		filepath.Join(root, "internal", "aclsrc"),
 		filepath.Join(root, "internal", "x11src"),

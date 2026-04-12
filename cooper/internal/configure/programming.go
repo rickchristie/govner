@@ -42,11 +42,11 @@ type programmingModel struct {
 	pinError     string
 
 	// Scroll state for layout.
-	scrollOffset         int
-	detailScrollOffset   int
-	lastHeight           int // cached terminal height for scroll calculations in Update
-	lastMaxScroll        int // cached max scroll offset from last render
-	lastDetailMaxScroll  int
+	scrollOffset        int
+	detailScrollOffset  int
+	lastHeight          int // cached terminal height for scroll calculations in Update
+	lastMaxScroll       int // cached max scroll offset from last render
+	lastDetailMaxScroll int
 }
 
 var defaultProgrammingTools = []toolEntry{
@@ -253,7 +253,7 @@ func (m *programmingModel) viewList(width, height int) string {
 	header := breadcrumb
 
 	description := lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(
-		" Detected host tools are shown. Toggle tools on/off, select to configure version.")
+		" Detected host tools are shown. Toggle tools on/off, select to configure version. Built-in language servers are installed automatically.")
 
 	onStyle := lipgloss.NewStyle().Foreground(theme.ColorProof)
 	offStyle := lipgloss.NewStyle().Foreground(theme.ColorFaded)
@@ -418,6 +418,9 @@ func (m *programmingModel) viewDetail(width, height int) string {
 	}
 
 	inner += "\n"
+	if summary := programmingToolImplicitSummary(t.name); summary != "" {
+		inner += lipgloss.NewStyle().Foreground(theme.ColorDusty).Render("  "+summary) + "\n\n"
+	}
 	inner += lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(
 		" "+theme.BorderH+theme.BorderH+" Version Info "+repeatStr(theme.BorderH, 40)) + "\n\n"
 
@@ -580,4 +583,17 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func programmingToolImplicitSummary(name string) string {
+	switch name {
+	case "go":
+		return "Also installs gopls, selected from the configured Go version."
+	case "node":
+		return "Also installs typescript-language-server and typescript, selected from the configured Node.js version."
+	case "python":
+		return "Also installs pyright and python-lsp-server, selected from the configured Python version and the base Node.js runtime."
+	default:
+		return ""
+	}
 }

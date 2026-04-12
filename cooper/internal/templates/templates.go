@@ -35,6 +35,12 @@ type baseDockerfileData struct {
 	HasCodex    bool // Controls bubblewrap build
 	HasOpenCode bool // Controls xvfb/xclip install
 	ProxyPort   int
+
+	GoLSPVersion          string
+	NodeTSLSPVersion      string
+	NodeTypeScriptVersion string
+	PythonPyrightVersion  string
+	PythonPylspVersion    string
 }
 
 // cliToolDockerfileData holds template data for per-tool Dockerfiles.
@@ -115,41 +121,74 @@ func isToolEnabled(tools []config.ToolConfig, name string) bool {
 func getToolVersion(tools []config.ToolConfig, name string) string {
 	for _, t := range tools {
 		if strings.EqualFold(t.Name, name) && t.Enabled {
-			if t.PinnedVersion != "" {
-				return t.PinnedVersion
-			}
-			if t.HostVersion != "" {
+			switch t.Mode {
+			case config.ModeMirror:
 				return t.HostVersion
+			case config.ModePin, config.ModeLatest:
+				return t.PinnedVersion
+			default:
+				if t.PinnedVersion != "" {
+					return t.PinnedVersion
+				}
+				if t.HostVersion != "" {
+					return t.HostVersion
+				}
+				return ""
 			}
-			// No concrete version — return empty so template uses default install method.
-			return ""
 		}
 	}
 	return ""
 }
 
 // buildBaseDockerfileData constructs template data for the base image from a Config.
-func buildBaseDockerfileData(cfg *config.Config) baseDockerfileData {
-	return baseDockerfileData{
+func buildBaseDockerfileData(cfg *config.Config, implicit []config.ImplicitToolConfig) (baseDockerfileData, error) {
+	goVersion, _, err := config.EffectiveProgrammingToolVersion(cfg, "go")
+	if err != nil {
+		return baseDockerfileData{}, err
+	}
+	nodeVersion, err := config.EffectiveBaseNodeVersion(cfg)
+	if err != nil {
+		return baseDockerfileData{}, err
+	}
+
+	data := baseDockerfileData{
 		HasGo:       isToolEnabled(cfg.ProgrammingTools, "go"),
-		GoVersion:   getToolVersion(cfg.ProgrammingTools, "go"),
+		GoVersion:   goVersion,
 		HasNode:     isToolEnabled(cfg.ProgrammingTools, "node"),
-		NodeVersion: getToolVersion(cfg.ProgrammingTools, "node"),
+		NodeVersion: nodeVersion,
 		HasPython:   isToolEnabled(cfg.ProgrammingTools, "python"),
 		HasCodex:    isToolEnabled(cfg.AITools, "codex"),
 		HasOpenCode: isToolEnabled(cfg.AITools, "opencode"),
 		ProxyPort:   cfg.ProxyPort,
 	}
+	for _, tool := range implicit {
+		switch tool.Name {
+		case "gopls":
+			data.GoLSPVersion = tool.ContainerVersion
+		case "typescript-language-server":
+			data.NodeTSLSPVersion = tool.ContainerVersion
+		case "typescript":
+			data.NodeTypeScriptVersion = tool.ContainerVersion
+		case "pyright":
+			data.PythonPyrightVersion = tool.ContainerVersion
+		case "python-lsp-server":
+			data.PythonPylspVersion = tool.ContainerVersion
+		}
+	}
+	return data, nil
 }
 
 // RenderBaseDockerfile renders the base image Dockerfile from config.
-func RenderBaseDockerfile(cfg *config.Config) (string, error) {
+func RenderBaseDockerfile(cfg *config.Config, implicit []config.ImplicitToolConfig) (string, error) {
 	tmpl, err := template.ParseFS(templateFS, "base.Dockerfile.tmpl")
 	if err != nil {
 		return "", fmt.Errorf("failed to parse base Dockerfile template: %w", err)
 	}
 
-	data := buildBaseDockerfileData(cfg)
+	data, err := buildBaseDockerfileData(cfg, implicit)
+	if err != nil {
+		return "", fmt.Errorf("failed to build base Dockerfile data: %w", err)
+	}
 
 	var buf strings.Builder
 	if err := tmpl.Execute(&buf, data); err != nil {
@@ -347,13 +386,13 @@ func RenderEntrypoint(cfg *config.Config) (string, error) {
 // and per-tool Dockerfiles to cli/<tool>/ directories.
 // baseDir is the path to ~/.cooper/base/.
 // cliDir is the path to ~/.cooper/cli/.
-func WriteAllTemplates(baseDir, cliDir string, cfg *config.Config) error {
+func WriteAllTemplates(baseDir, cliDir string, cfg *config.Config, implicit []config.ImplicitToolConfig) error {
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return fmt.Errorf("failed to create base directory: %w", err)
 	}
 
 	// Generate and write base Dockerfile.
-	baseDockerfile, err := RenderBaseDockerfile(cfg)
+	baseDockerfile, err := RenderBaseDockerfile(cfg, implicit)
 	if err != nil {
 		return err
 	}

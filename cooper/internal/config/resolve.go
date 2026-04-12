@@ -24,6 +24,15 @@ var npmPackageNames = map[string]string{
 	"opencode": "opencode-ai",
 }
 
+// LatestVersionResolver is the shared latest-version hook used by configure,
+// build, update, and startup warning code paths. Tests override it to keep
+// those flows deterministic.
+var LatestVersionResolver = ResolveLatestVersion
+
+// VersionValidator is the shared validation hook used by strict refresh flows.
+// Tests override it to avoid live registry calls.
+var VersionValidator = ValidateVersion
+
 // ResolveLatestVersion dispatches to the tool-specific resolver and returns
 // the latest stable version string for the given tool.
 func ResolveLatestVersion(toolName string) (string, error) {
@@ -251,8 +260,12 @@ func validatePythonVersion(version string) (bool, error) {
 		return false, fmt.Errorf("failed to parse Python version JSON: %w", err)
 	}
 
+	requestedCycle := version
+	if parts := strings.Split(version, "."); len(parts) >= 2 {
+		requestedCycle = strings.Join(parts[:2], ".")
+	}
 	for _, r := range releases {
-		if r.Latest == version {
+		if r.Latest == version || r.Cycle == requestedCycle {
 			return true, nil
 		}
 	}
@@ -269,6 +282,15 @@ var npmRegistryURL = "https://registry.npmjs.org"
 type npmPackageResponse struct {
 	DistTags map[string]string          `json:"dist-tags"`
 	Versions map[string]json.RawMessage `json:"versions"`
+}
+
+// NPMPackageMetadata is the subset of version-specific npm metadata used by
+// implicit tooling compatibility checks.
+type NPMPackageMetadata struct {
+	Version string `json:"version"`
+	Engines struct {
+		Node string `json:"node"`
+	} `json:"engines"`
 }
 
 // ResolveNPMPackageLatest fetches the latest version of an npm package from the registry.
@@ -290,6 +312,22 @@ func ResolveNPMPackageLatest(packageName string) (string, error) {
 	}
 
 	return latest, nil
+}
+
+// ResolveNPMPackageMetadata fetches version-specific npm metadata.
+func ResolveNPMPackageMetadata(packageName, version string) (NPMPackageMetadata, error) {
+	url := npmRegistryURL + "/" + packageName + "/" + version
+	body, err := httpGet(url)
+	if err != nil {
+		return NPMPackageMetadata{}, fmt.Errorf("failed to fetch npm package %q version %q: %w", packageName, version, err)
+	}
+
+	var meta NPMPackageMetadata
+	if err := json.Unmarshal(body, &meta); err != nil {
+		return NPMPackageMetadata{}, fmt.Errorf("failed to parse npm metadata for %q version %q: %w", packageName, version, err)
+	}
+
+	return meta, nil
 }
 
 // validateNPMVersion checks if a specific version exists for an npm package.

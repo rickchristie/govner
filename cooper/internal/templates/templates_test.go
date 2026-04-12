@@ -105,13 +105,22 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+func resolveImplicitForTest(t *testing.T, cfg *config.Config) []config.ImplicitToolConfig {
+	t.Helper()
+	implicit, err := config.ResolveImplicitTools(cfg)
+	if err != nil {
+		t.Fatalf("ResolveImplicitTools failed: %v", err)
+	}
+	return implicit
+}
+
 // ---------------------------------------------------------------------------
 // RenderBaseDockerfile tests
 // ---------------------------------------------------------------------------
 
 func TestRenderBaseDockerfile_DefaultConfig(t *testing.T) {
 	cfg := testConfig()
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -119,7 +128,10 @@ func TestRenderBaseDockerfile_DefaultConfig(t *testing.T) {
 	// Should use Go base image when Go is enabled
 	assertContains(t, result, "golang:1.24.10-bookworm")
 
-	// Should install Node.js via tarball with pinned version
+	// Should install Node.js via tarball with pinned version.
+	// This test only verifies that the generated Dockerfile is architecture-aware;
+	// native arm64 vs amd64 validation still requires building on the target host
+	// because Docker injects TARGETARCH at build time.
 	assertContains(t, result, "NODE_VERSION=22.12.0")
 	assertContains(t, result, "ARG TARGETARCH")
 	assertContains(t, result, "NODE_ARCH=$([ \"$TARGETARCH\" = \"arm64\" ] && echo \"arm64\" || echo \"x64\")")
@@ -169,7 +181,7 @@ func TestRenderBaseDockerfile_DefaultConfig(t *testing.T) {
 
 func TestRenderBaseDockerfile_GoEnabled(t *testing.T) {
 	cfg := testConfig()
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -185,7 +197,7 @@ func TestRenderBaseDockerfile_NoGo(t *testing.T) {
 		}
 	}
 
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -206,7 +218,7 @@ func TestRenderBaseDockerfile_NodeVersion(t *testing.T) {
 		BridgePort: 4343,
 	}
 
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -225,7 +237,7 @@ func TestRenderBaseDockerfile_PythonEnabled(t *testing.T) {
 		BridgePort: 4343,
 	}
 
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -245,7 +257,7 @@ func TestRenderBaseDockerfile_BubblewrapForCodex(t *testing.T) {
 		BridgePort: 4343,
 	}
 
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -265,7 +277,7 @@ func TestRenderBaseDockerfile_XvfbForOpenCode(t *testing.T) {
 		BridgePort: 4343,
 	}
 
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -285,7 +297,7 @@ func TestRenderBaseDockerfile_PlaywrightRuntimePackages(t *testing.T) {
 		BridgePort:       4343,
 	}
 
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -312,6 +324,52 @@ func TestRenderBaseDockerfile_PlaywrightRuntimePackages(t *testing.T) {
 	assertContains(t, result, "xauth")
 }
 
+func TestRenderBaseDockerfile_InstallsImplicitTools(t *testing.T) {
+	cfg := testConfig()
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+	assertContains(t, result, "go install golang.org/x/tools/gopls@")
+	assertContains(t, result, "typescript-language-server@")
+	assertContains(t, result, "typescript@")
+	assertContains(t, result, "pyright@")
+	assertContains(t, result, "python-lsp-server==")
+}
+
+func TestRenderBaseDockerfile_ImplicitToolsAppearBeforeRuntimeProxyEnv(t *testing.T) {
+	cfg := testConfig()
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+	userIdx := strings.Index(result, "USER user")
+	goplsIdx := strings.Index(result, "go install golang.org/x/tools/gopls@")
+	proxyIdx := strings.Index(result, "ENV HTTP_PROXY=http://cooper-proxy")
+	if userIdx == -1 || goplsIdx == -1 || proxyIdx == -1 {
+		t.Fatalf("expected USER user, gopls install, and proxy env sections in Dockerfile")
+	}
+	if !(userIdx < goplsIdx && goplsIdx < proxyIdx) {
+		t.Fatalf("implicit tool installs are not placed between user setup and runtime proxy envs")
+	}
+}
+
+func TestRenderBaseDockerfile_PythonOnlyOmitsNodeLSPButKeepsPythonOnes(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{{Name: "python", Enabled: true, PinnedVersion: "3.12.1"}},
+		ProxyPort:        3128,
+		BridgePort:       4343,
+	}
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
+	if err != nil {
+		t.Fatalf("RenderBaseDockerfile failed: %v", err)
+	}
+	assertContains(t, result, "pyright@")
+	assertContains(t, result, "python-lsp-server==")
+	assertNotContains(t, result, "typescript-language-server@")
+	assertNotContains(t, result, "go install golang.org/x/tools/gopls@")
+}
+
 func TestRenderBaseDockerfile_ProxyEnvVars(t *testing.T) {
 	cfg := &config.Config{
 		ProgrammingTools: []config.ToolConfig{},
@@ -320,7 +378,7 @@ func TestRenderBaseDockerfile_ProxyEnvVars(t *testing.T) {
 		BridgePort:       4343,
 	}
 
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -337,7 +395,7 @@ func TestRenderBaseDockerfile_CACertInjection(t *testing.T) {
 		BridgePort:       4343,
 	}
 
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -354,7 +412,7 @@ func TestRenderBaseDockerfile_UserSetup(t *testing.T) {
 		BridgePort:       4343,
 	}
 
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -374,7 +432,7 @@ func TestRenderBaseDockerfile_NoAITools(t *testing.T) {
 		BridgePort: 4343,
 	}
 
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -396,7 +454,7 @@ func TestRenderBaseDockerfile_HasEntrypoint(t *testing.T) {
 		BridgePort:       4343,
 	}
 
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -413,7 +471,7 @@ func TestRenderBaseDockerfile_HasDoctorScript(t *testing.T) {
 		BridgePort:       4343,
 	}
 
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -432,7 +490,7 @@ func TestRenderBaseDockerfile_RuntimeDepsIncluded(t *testing.T) {
 		BridgePort: 4343,
 	}
 
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -456,7 +514,7 @@ func TestRenderBaseDockerfile_RuntimeDepsExcluded(t *testing.T) {
 		BridgePort: 4343,
 	}
 
-	result, err := RenderBaseDockerfile(cfg)
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
@@ -826,7 +884,7 @@ func TestWriteAllTemplates(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "base")
 	cliDir := filepath.Join(t.TempDir(), "cli")
 
-	err := WriteAllTemplates(baseDir, cliDir, cfg)
+	err := WriteAllTemplates(baseDir, cliDir, cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("WriteAllTemplates failed: %v", err)
 	}
@@ -887,7 +945,7 @@ func TestWriteAllTemplates_CreatesDirectory(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "nested", "base")
 	cliDir := filepath.Join(t.TempDir(), "nested", "cli")
 
-	err := WriteAllTemplates(baseDir, cliDir, cfg)
+	err := WriteAllTemplates(baseDir, cliDir, cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("WriteAllTemplates failed: %v", err)
 	}
@@ -909,7 +967,7 @@ func TestWriteAllTemplates_FileContents(t *testing.T) {
 	baseDir := filepath.Join(t.TempDir(), "base")
 	cliDir := filepath.Join(t.TempDir(), "cli")
 
-	err := WriteAllTemplates(baseDir, cliDir, cfg)
+	err := WriteAllTemplates(baseDir, cliDir, cfg, resolveImplicitForTest(t, cfg))
 	if err != nil {
 		t.Fatalf("WriteAllTemplates failed: %v", err)
 	}

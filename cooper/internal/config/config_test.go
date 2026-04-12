@@ -309,15 +309,15 @@ func TestValidateBarrelSHMSize(t *testing.T) {
 func TestApplyMissingDefaultsBarrelSHMSize(t *testing.T) {
 	// Simulate loading a config file that was written before barrel_shm_size existed.
 	cfg := &Config{
-		ProxyPort:          3128,
-		BridgePort:         4343,
-		MonitorTimeoutSecs: 5,
+		ProxyPort:           3128,
+		BridgePort:          4343,
+		MonitorTimeoutSecs:  5,
 		BlockedHistoryLimit: 500,
 		AllowedHistoryLimit: 500,
-		BridgeLogLimit:     500,
-		ClipboardTTLSecs:   300,
-		ClipboardMaxBytes:  20971520,
-		BarrelSHMSize:      "", // missing from old config
+		BridgeLogLimit:      500,
+		ClipboardTTLSecs:    300,
+		ClipboardMaxBytes:   20971520,
+		BarrelSHMSize:       "", // missing from old config
 	}
 	cfg.applyMissingDefaults()
 	if cfg.BarrelSHMSize != "1g" {
@@ -330,15 +330,15 @@ func TestApplyMissingDefaultsMonitorTimeout(t *testing.T) {
 	// (JSON unmarshal produces zero value). applyMissingDefaults should
 	// fill it with 30, not leave it at 0 (which would fail validation).
 	cfg := &Config{
-		ProxyPort:          3128,
-		BridgePort:         4343,
-		MonitorTimeoutSecs: 0, // missing from old config
+		ProxyPort:           3128,
+		BridgePort:          4343,
+		MonitorTimeoutSecs:  0, // missing from old config
 		BlockedHistoryLimit: 500,
 		AllowedHistoryLimit: 500,
-		BridgeLogLimit:     500,
-		ClipboardTTLSecs:   300,
-		ClipboardMaxBytes:  20971520,
-		BarrelSHMSize:      "1g",
+		BridgeLogLimit:      500,
+		ClipboardTTLSecs:    300,
+		ClipboardMaxBytes:   20971520,
+		BarrelSHMSize:       "1g",
 	}
 	cfg.applyMissingDefaults()
 	if cfg.MonitorTimeoutSecs != 30 {
@@ -382,10 +382,10 @@ func TestJSONRoundTrip(t *testing.T) {
 	original := DefaultConfig()
 	original.ProgrammingTools = []ToolConfig{
 		{
-			Name:          "go",
-			Enabled:       true,
-			Mode:          ModeMirror,
-			HostVersion:   "1.22.5",
+			Name:             "go",
+			Enabled:          true,
+			Mode:             ModeMirror,
+			HostVersion:      "1.22.5",
 			ContainerVersion: "1.22.5",
 		},
 		{
@@ -465,6 +465,45 @@ func TestSaveAndLoadConfig(t *testing.T) {
 
 	if !reflect.DeepEqual(*original, *loaded) {
 		t.Errorf("save/load mismatch.\nOriginal: %+v\nLoaded: %+v", *original, *loaded)
+	}
+}
+
+func TestConfigJSONRoundTrip_WithImplicitTools(t *testing.T) {
+	original := DefaultConfig()
+	original.BaseNodeVersion = DefaultBaseNodeVersion
+	original.ImplicitTools = []ImplicitToolConfig{{
+		Name:             "gopls",
+		Kind:             ImplicitToolKindLSP,
+		ParentTool:       "go",
+		Binary:           "gopls",
+		ContainerVersion: "v0.21.1",
+	}}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var restored Config
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if !reflect.DeepEqual(*original, restored) {
+		t.Fatalf("round-trip mismatch with implicit tools\noriginal=%+v\nrestored=%+v", *original, restored)
+	}
+}
+
+func TestLoadConfig_MissingImplicitToolsBackwardCompatible(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"programming_tools":[],"ai_tools":[],"proxy_port":3128,"bridge_port":4343}`), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if loaded.ImplicitTools == nil {
+		t.Fatal("expected missing implicit_tools to load as an empty slice, not nil")
 	}
 }
 
@@ -765,13 +804,13 @@ func TestParseVersionNoMatch(t *testing.T) {
 
 func TestToolConfigJSONRoundTrip(t *testing.T) {
 	original := ToolConfig{
-		Name:          "go",
-		Enabled:       true,
-		Mode:          ModeMirror,
-		PinnedVersion: "",
-		HostVersion:   "1.22.5",
+		Name:             "go",
+		Enabled:          true,
+		Mode:             ModeMirror,
+		PinnedVersion:    "",
+		HostVersion:      "1.22.5",
 		ContainerVersion: "1.22.4",
-		InstallCmd:    "apt-get install -y golang",
+		InstallCmd:       "apt-get install -y golang",
 	}
 
 	data, err := json.Marshal(original)

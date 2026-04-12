@@ -84,10 +84,15 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - The config file is important for the `cooper update` commands, as we can specify "latest" versions that doesn't version pin at all.
       - We can also specify "mirror", which means mirror version in the host machine, so whenever user runs `cooper update`, the Dockerfile will
         always be re-generated with the version that is currently in the host machine.
+      - The config file also persists built state used by `cooper update` and startup drift warnings, including top-level built `container_version`
+        values, resolved implicit language-server/support-tool versions in `implicit_tools`, and the built base Node runtime in `base_node_version`.
     - Programming Tool Setup Flow:
       - Sets up programming language environment in Dockerfile for the AI CLI to use.
       - This is important, because we want the AI to be able to run tests, run lints, run builds, etc.
       - Out-of-the box support for: Golang, Nodejs (npm, yarn, bun), Python (pip, pipenv, poetry).
+        Standard language-server tooling is installed automatically for enabled programming tools:
+        Go -> `gopls`, Node.js -> `typescript-language-server` + `typescript`, Python -> `pyright` + `python-lsp-server`.
+        These are implicit defaults attached to the language runtime, not separately user-configurable tools.
         User is able to auto-generate Dockerfile for these.
       - User is instructed that they can add programming language/tools that they want manually if not in the list.
         - User customizations can be added as custom image directories in `~/.cooper/cli/{custom-name}/` containing a Dockerfile.
@@ -117,6 +122,8 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
             with "latest" or "mirror" version in the future.
           - (UI) Mirror button shows the version in the host machine.
         - Back to main screen, user can select "Save & Continue" button to save the configuration file.
+          Save-only generation may reuse last-built implicit tool versions when offline, but only if Cooper can prove the relevant built runtime still
+          matches the current desired runtime. Otherwise it fails rather than rendering misleading templates.
     - AI CLI Tool Setup Flow:
       - Sets up which AI CLI tool to install in the CLI container, so when user runs `cooper cli` to enter the CLI container, the AI CLIs are ready to use.
       - Out-of-the-box support for: Claude Code, GitHub Copilot CLI, OpenAI Codex, OpenCode.
@@ -296,19 +303,20 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
     - **About** tab:
       - Shows Cooper version, infrastructure info (proxy/bridge ports).
       - Shows list of active programming tools/CLIs, each with their installed version, compared to the version in the host machine (if any).
-      - Displays startup warnings (version mismatches).
+      - Shows built implicit language servers and their installed versions.
+      - Displays startup warnings for desired-vs-built drift, including implicit tooling and base Node runtime mismatches.
   - Even though log views are capped, they are actually written to `~/.cooper/logs` using logrotate at 10 files, each at 10MB max.
 
 - `cooper update` regenerates Dockerfiles and rebuilds CLI images.
   - This is used when user wants to update CLI images with new versions of programming tools or AI CLI tools.
   - Detects version mismatches for programming tools (mirror/latest modes) and AI tools, then:
-    - Rebuilds `cooper-base` if programming tool versions changed.
+    - Rebuilds `cooper-base` if programming tool versions changed, if implicit language-server/support-tool versions drifted, or if the effective base Node runtime drifted from the last built `base_node_version`.
     - Rebuilds individual `cooper-cli-{toolname}` images if AI tool versions changed.
   - This is cheaper than `cooper build` — it only rebuilds images that have version mismatches.
   - If AI tool selection has changed (tools added/removed), `cooper update` also regenerates the proxy squid.conf
     (to add/remove the corresponding API domains) and hot-reloads it via `squid -k reconfigure`. No proxy image rebuild needed —
     squid.conf is volume-mounted, not baked into the image.
-  - Updates `ContainerVersion` in config.json to reflect what was just built.
+  - Updates built state in `config.json` to reflect what was just built, including top-level `ContainerVersion` fields, `implicit_tools`, and `base_node_version`.
 
 - `cooper cli {tool-name}` opens a CLI container for a specific AI tool:
   - Usage: `cooper cli claude`, `cooper cli codex`, `cooper cli copilot`, `cooper cli opencode`.

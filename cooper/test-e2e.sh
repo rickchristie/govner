@@ -262,6 +262,12 @@ else
     fail "CA certificate not found"
 fi
 
+if jq -e '.implicit_tools | length > 0' "${CONFIG_DIR}/config.json" >/dev/null 2>&1; then
+    pass "config.json contains built implicit_tools"
+else
+    fail "config.json missing built implicit_tools"
+fi
+
 # Assert generated files exist (base + per-tool Dockerfiles + proxy files).
 for f in "base/Dockerfile" "base/entrypoint.sh" "proxy/proxy.Dockerfile" "proxy/squid.conf"; do
     if [ -f "${CONFIG_DIR}/${f}" ]; then
@@ -446,6 +452,35 @@ get_tool_version() {
     jq -r ".${tool_type}[] | select(.name==\"${tool_name}\" and .enabled) | .pinned_version // .host_version // empty" "${CONFIG_DIR}/config.json"
 }
 
+get_implicit_tool_version() {
+    local tool_name=$1
+    jq -r ".implicit_tools[] | select(.name==\"${tool_name}\") | .container_version // empty" "${CONFIG_DIR}/config.json"
+}
+
+require_expected_version() {
+    local label=$1
+    local value=$2
+    if [ -z "$value" ]; then
+        fail "${label}: expected version missing from config.json"
+        return 1
+    fi
+    return 0
+}
+
+assert_output_contains_expected_version() {
+    local label=$1
+    local expected=$2
+    local actual=$3
+    if ! require_expected_version "$label" "$expected"; then
+        return
+    fi
+    if printf '%s' "$actual" | grep -Fq -- "$expected"; then
+        pass "${label} ${expected} installed"
+    else
+        fail "${label} ${expected} expected, got: ${actual}"
+    fi
+}
+
 # Helper: map tool name to other tools (for negative assertions).
 other_tools() {
     local tool=$1
@@ -554,6 +589,97 @@ build_barrel_run_args() {
     fi
 
     BARREL_ARGS+=("$tool_image" "sleep" "infinity")
+}
+
+run_implicit_isolation_fixture() {
+    local fixture_name=$1
+    local programming_tools_json=$2
+    local expect_gopls=$3
+    local expect_tsls=$4
+    local expect_pyright=$5
+    local expect_pylsp=$6
+
+    local fixture_prefix="test-e2e-${fixture_name}-"
+    local fixture_dir="${SCRIPT_DIR}/.${fixture_name}-config"
+    local fixture_proxy fixture_bridge fixture_image
+    fixture_proxy=$(find_free_local_port)
+    fixture_bridge=$(find_free_local_port)
+    while [ "$fixture_bridge" = "$fixture_proxy" ]; do
+        fixture_bridge=$(find_free_local_port)
+    done
+    fixture_image="${fixture_prefix}cooper-cli-claude"
+
+    rm -rf "$fixture_dir"
+    mkdir -p "$fixture_dir"
+
+    cat > "${fixture_dir}/config.json" <<CONFIGEOF
+{
+  "programming_tools": ${programming_tools_json},
+  "ai_tools": [
+    {"name": "claude", "enabled": true, "mode": "pin", "pinned_version": "2.1.87"}
+  ],
+  "whitelisted_domains": [
+    {"domain": ".anthropic.com", "include_subdomains": true, "source": "default"},
+    {"domain": "platform.claude.com", "include_subdomains": false, "source": "default"},
+    {"domain": ".openai.com", "include_subdomains": true, "source": "default"},
+    {"domain": ".chatgpt.com", "include_subdomains": true, "source": "default"},
+    {"domain": "github.com", "include_subdomains": false, "source": "default"},
+    {"domain": "api.github.com", "include_subdomains": false, "source": "default"},
+    {"domain": ".githubcopilot.com", "include_subdomains": true, "source": "default"},
+    {"domain": "copilot-proxy.githubusercontent.com", "include_subdomains": false, "source": "default"},
+    {"domain": "raw.githubusercontent.com", "include_subdomains": false, "source": "default"},
+    {"domain": "statsig.anthropic.com", "include_subdomains": false, "source": "default"}
+  ],
+  "port_forward_rules": [],
+  "proxy_port": ${fixture_proxy},
+  "bridge_port": ${fixture_bridge},
+  "monitor_timeout_secs": 5,
+  "blocked_history_limit": 500,
+  "allowed_history_limit": 500,
+  "bridge_log_limit": 500,
+  "bridge_routes": [],
+  "barrel_shm_size": "1g"
+}
+CONFIGEOF
+
+    if "$COOPER" build --config "$fixture_dir" --prefix "$fixture_prefix" >/tmp/cooper-${fixture_name}-build.txt 2>&1; then
+        pass "${fixture_name}: cooper build succeeded"
+    else
+        fail "${fixture_name}: cooper build failed"
+        docker image rm "${fixture_prefix}cooper-proxy" "${fixture_prefix}cooper-base" "$fixture_image" >/dev/null 2>&1 || true
+        rm -rf "$fixture_dir"
+        return
+    fi
+
+    local has_gopls has_tsls has_pyright has_pylsp
+    has_gopls=$(docker run --rm --entrypoint bash "$fixture_image" -c 'command -v gopls >/dev/null 2>&1 && echo yes || echo no')
+    has_tsls=$(docker run --rm --entrypoint bash "$fixture_image" -c 'command -v typescript-language-server >/dev/null 2>&1 && echo yes || echo no')
+    has_pyright=$(docker run --rm --entrypoint bash "$fixture_image" -c 'command -v pyright >/dev/null 2>&1 && echo yes || echo no')
+    has_pylsp=$(docker run --rm --entrypoint bash "$fixture_image" -c 'command -v pylsp >/dev/null 2>&1 && echo yes || echo no')
+
+    if [ "$has_gopls" = "$expect_gopls" ]; then
+        pass "${fixture_name}: gopls presence = ${expect_gopls}"
+    else
+        fail "${fixture_name}: gopls presence expected ${expect_gopls}, got ${has_gopls}"
+    fi
+    if [ "$has_tsls" = "$expect_tsls" ]; then
+        pass "${fixture_name}: typescript-language-server presence = ${expect_tsls}"
+    else
+        fail "${fixture_name}: typescript-language-server presence expected ${expect_tsls}, got ${has_tsls}"
+    fi
+    if [ "$has_pyright" = "$expect_pyright" ]; then
+        pass "${fixture_name}: pyright presence = ${expect_pyright}"
+    else
+        fail "${fixture_name}: pyright presence expected ${expect_pyright}, got ${has_pyright}"
+    fi
+    if [ "$has_pylsp" = "$expect_pylsp" ]; then
+        pass "${fixture_name}: pylsp presence = ${expect_pylsp}"
+    else
+        fail "${fixture_name}: pylsp presence expected ${expect_pylsp}, got ${has_pylsp}"
+    fi
+
+    docker image rm "${fixture_prefix}cooper-proxy" "${fixture_prefix}cooper-base" "$fixture_image" >/dev/null 2>&1 || true
+    rm -rf "$fixture_dir"
 }
 
 # Language cache dirs already created above (Cooper-managed under CONFIG_DIR/cache/).
@@ -1644,9 +1770,44 @@ else
 fi
 
 # ============================================================================
-# Phase 11c: Interactive Login Shell PATH
+# Phase 11c: Implicit Language Servers
 # ============================================================================
-section "Phase 11c: Interactive Login Shell PATH"
+section "Phase 11c: Implicit Language Servers"
+
+expected_gopls=$(get_implicit_tool_version gopls)
+actual_gopls=$(barrel_exec 'gopls version 2>&1 || echo notfound')
+assert_output_contains_expected_version "gopls" "$expected_gopls" "$actual_gopls"
+
+expected_tsls=$(get_implicit_tool_version typescript-language-server)
+actual_tsls=$(barrel_exec 'typescript-language-server --version 2>&1 || echo notfound')
+assert_output_contains_expected_version "typescript-language-server" "$expected_tsls" "$actual_tsls"
+
+expected_pyright=$(get_implicit_tool_version pyright)
+actual_pyright=$(barrel_exec 'pyright --version 2>&1 || echo notfound')
+assert_output_contains_expected_version "pyright" "$expected_pyright" "$actual_pyright"
+
+pyright_langserver=$(barrel_exec 'command -v pyright-langserver 2>&1 || echo notfound')
+if echo "$pyright_langserver" | grep -vq "notfound"; then
+    pass "pyright-langserver binary present"
+else
+    fail "pyright-langserver binary missing"
+fi
+
+expected_pylsp=$(get_implicit_tool_version python-lsp-server)
+actual_pylsp=$(barrel_exec 'python3 -m pip show python-lsp-server 2>&1 || echo notfound')
+assert_output_contains_expected_version "python-lsp-server" "$expected_pylsp" "$actual_pylsp"
+
+pylsp_bin=$(barrel_exec 'command -v pylsp 2>&1 || echo notfound')
+if echo "$pylsp_bin" | grep -vq "notfound"; then
+    pass "pylsp binary present"
+else
+    fail "pylsp binary missing"
+fi
+
+# ============================================================================
+# Phase 11d: Interactive Login Shell PATH
+# ============================================================================
+section "Phase 11d: Interactive Login Shell PATH"
 
 login_shell_path=$(docker exec "$ACTIVE_BARREL" bash -lc 'echo $PATH' 2>&1)
 info "Login shell PATH: ${login_shell_path}"
@@ -1674,9 +1835,9 @@ else
 fi
 
 # ============================================================================
-# Phase 11d: One-Shot Command Execution
+# Phase 11e: One-Shot Command Execution
 # ============================================================================
-section "Phase 11d: One-Shot Command Execution"
+section "Phase 11e: One-Shot Command Execution"
 
 # Simple echo.
 echo_result=$(barrel_exec 'echo hello')
@@ -2103,6 +2264,26 @@ if [ -n "${E2E_BRIDGE_PID:-}" ]; then
     wait "$E2E_BRIDGE_PID" 2>/dev/null || true
     E2E_BRIDGE_PID=""
 fi
+
+# ============================================================================
+# Phase 15: Implicit Tool Isolation Fixtures
+# ============================================================================
+section "Phase 15: Implicit Tool Isolation"
+
+run_implicit_isolation_fixture \
+    "e2e-go-only" \
+    '[{"name":"go","enabled":true,"mode":"pin","pinned_version":"1.24.10"}]' \
+    yes no no no
+
+run_implicit_isolation_fixture \
+    "e2e-node-only" \
+    '[{"name":"node","enabled":true,"mode":"pin","pinned_version":"22.12.0"}]' \
+    no yes no no
+
+run_implicit_isolation_fixture \
+    "e2e-python-only" \
+    '[{"name":"python","enabled":true,"mode":"pin","pinned_version":"3.12.1"}]' \
+    no no yes yes
 
 # ============================================================================
 # Summary

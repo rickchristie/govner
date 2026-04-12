@@ -1,12 +1,78 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rickchristie/govner/cooper/internal/config"
 )
+
+func stubConfigureTestResolvers(t *testing.T) {
+	t.Helper()
+	prevLatest := config.LatestVersionResolver
+	prevValidate := config.VersionValidator
+	prevGopls := config.GoplsLatestResolver
+	prevNPMLatest := config.NPMPackageLatestResolver
+	prevNPMMeta := config.NPMPackageMetadataResolver
+	prevPyPILatest := config.PyPIPackageLatestResolver
+	prevPyPIMeta := config.PyPIPackageVersionMetadataResolver
+
+	config.LatestVersionResolver = func(name string) (string, error) {
+		switch name {
+		case "go":
+			return "1.24.10", nil
+		case "node":
+			return "22.12.0", nil
+		case "python":
+			return "3.12.1", nil
+		default:
+			return "1.0.0", nil
+		}
+	}
+	config.VersionValidator = func(toolName, version string) (bool, error) { return true, nil }
+	config.GoplsLatestResolver = func() (string, error) { return "v0.21.1", nil }
+	config.NPMPackageLatestResolver = func(name string) (string, error) {
+		switch name {
+		case "typescript-language-server":
+			return "5.1.3", nil
+		case "typescript":
+			return "6.0.2", nil
+		case "pyright":
+			return "1.1.500", nil
+		default:
+			return "1.0.0", nil
+		}
+	}
+	config.NPMPackageMetadataResolver = func(name, version string) (config.NPMPackageMetadata, error) {
+		var meta config.NPMPackageMetadata
+		meta.Version = version
+		meta.Engines.Node = ">=14.0.0"
+		if name == "typescript-language-server" {
+			meta.Engines.Node = ">=20"
+		}
+		if name == "typescript" {
+			meta.Engines.Node = ">=14.17"
+		}
+		return meta, nil
+	}
+	config.PyPIPackageLatestResolver = func(name string) (string, error) { return "1.14.0", nil }
+	config.PyPIPackageVersionMetadataResolver = func(name, version string) (config.PyPIPackageMetadata, error) {
+		return config.PyPIPackageMetadata{Version: version, RequiresPython: ">=3.9"}, nil
+	}
+
+	t.Cleanup(func() {
+		config.LatestVersionResolver = prevLatest
+		config.VersionValidator = prevValidate
+		config.GoplsLatestResolver = prevGopls
+		config.NPMPackageLatestResolver = prevNPMLatest
+		config.NPMPackageMetadataResolver = prevNPMMeta
+		config.PyPIPackageLatestResolver = prevPyPILatest
+		config.PyPIPackageVersionMetadataResolver = prevPyPIMeta
+	})
+}
 
 // TestConfigureApp_NewFresh verifies that creating a ConfigureApp with no
 // existing config.json returns defaults and IsExisting=false.
@@ -181,6 +247,8 @@ func TestConfigureApp_ValidationFails(t *testing.T) {
 // TestConfigureApp_Save verifies that Save writes config.json and generates
 // Dockerfiles and squid.conf in the cooperDir.
 func TestConfigureApp_Save(t *testing.T) {
+	stubConfigureTestResolvers(t)
+
 	cooperDir := t.TempDir()
 	ca, err := NewConfigureApp(cooperDir)
 	if err != nil {
@@ -192,8 +260,12 @@ func TestConfigureApp_Save(t *testing.T) {
 		{Name: "go", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.22.5"},
 	})
 
-	if err := ca.Save(); err != nil {
+	warnings, err := ca.Save()
+	if err != nil {
 		t.Fatalf("Save: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no save warnings, got %v", warnings)
 	}
 
 	// Check that config.json was written.
@@ -209,6 +281,9 @@ func TestConfigureApp_Save(t *testing.T) {
 	}
 	if len(loaded.ProgrammingTools) != 1 || loaded.ProgrammingTools[0].Name != "go" {
 		t.Errorf("loaded config ProgrammingTools mismatch: %+v", loaded.ProgrammingTools)
+	}
+	if len(loaded.ImplicitTools) != 0 {
+		t.Fatalf("save-only should not persist built implicit tools, got %+v", loaded.ImplicitTools)
 	}
 
 	// Check that base templates were written.
@@ -271,5 +346,97 @@ func TestConfigureApp_ConfigIsCopy(t *testing.T) {
 	}
 	if internal.WhitelistedDomains == nil {
 		t.Error("Config() returned a reference instead of a copy — WhitelistedDomains was mutated")
+	}
+}
+
+func TestConfigureApp_ConfigIsCopy_ImplicitTools(t *testing.T) {
+	cooperDir := t.TempDir()
+	ca, err := NewConfigureApp(cooperDir)
+	if err != nil {
+		t.Fatalf("NewConfigureApp: %v", err)
+	}
+
+	ca.SetProgrammingTools([]config.ToolConfig{{Name: "go", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.24.10"}})
+	ca.cfg.ImplicitTools = []config.ImplicitToolConfig{{Name: "gopls", Kind: config.ImplicitToolKindLSP, ParentTool: "go", Binary: "gopls", ContainerVersion: "v0.21.1"}}
+
+	cfg := ca.Config()
+	cfg.ImplicitTools[0].ContainerVersion = "broken"
+	if ca.Config().ImplicitTools[0].ContainerVersion != "v0.21.1" {
+		t.Fatal("Config() returned a reference instead of a deep copy for ImplicitTools")
+	}
+}
+
+func TestConfigureApp_Save_ReturnsWarnings(t *testing.T) {
+	stubConfigureTestResolvers(t)
+	prevLatest := config.LatestVersionResolver
+	config.LatestVersionResolver = func(name string) (string, error) {
+		return "", fmt.Errorf("offline")
+	}
+	defer func() { config.LatestVersionResolver = prevLatest }()
+
+	cooperDir := t.TempDir()
+	ca, err := NewConfigureApp(cooperDir)
+	if err != nil {
+		t.Fatalf("NewConfigureApp: %v", err)
+	}
+	ca.SetProgrammingTools([]config.ToolConfig{{Name: "go", Enabled: true, Mode: config.ModeLatest, PinnedVersion: "1.24.10"}})
+
+	warnings, err := ca.Save()
+	if err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if len(warnings) == 0 {
+		t.Fatal("expected stale-fallback warning from Save()")
+	}
+	if !strings.Contains(warnings[0], "last-known resolved version") {
+		t.Fatalf("unexpected warning text: %v", warnings)
+	}
+}
+
+func TestConfigureApp_Save_ImplicitLatestFallsBackToBuiltImplicitVersion(t *testing.T) {
+	stubConfigureTestResolvers(t)
+	prevGopls := config.GoplsLatestResolver
+	config.GoplsLatestResolver = func() (string, error) { return "", fmt.Errorf("offline") }
+	defer func() { config.GoplsLatestResolver = prevGopls }()
+
+	cooperDir := t.TempDir()
+	ca, err := NewConfigureApp(cooperDir)
+	if err != nil {
+		t.Fatalf("NewConfigureApp: %v", err)
+	}
+	ca.SetProgrammingTools([]config.ToolConfig{{Name: "go", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.24.10", ContainerVersion: "1.24.10"}})
+	ca.cfg.ImplicitTools = []config.ImplicitToolConfig{{Name: "gopls", Kind: config.ImplicitToolKindLSP, ParentTool: "go", Binary: "gopls", ContainerVersion: "v0.20.0"}}
+
+	warnings, err := ca.Save()
+	if err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if len(warnings) == 0 || !strings.Contains(strings.Join(warnings, "\n"), "could not refresh implicit tool gopls") {
+		t.Fatalf("expected implicit fallback warning, got %v", warnings)
+	}
+	baseDockerfile, err := os.ReadFile(filepath.Join(cooperDir, "base", "Dockerfile"))
+	if err != nil {
+		t.Fatalf("ReadFile(base Dockerfile): %v", err)
+	}
+	if !strings.Contains(string(baseDockerfile), "gopls@v0.20.0") {
+		t.Fatalf("expected stale implicit fallback version in Dockerfile, got:\n%s", string(baseDockerfile))
+	}
+}
+
+func TestConfigureApp_Save_ImplicitLatestFailsWithoutBuiltFallback(t *testing.T) {
+	stubConfigureTestResolvers(t)
+	prevGopls := config.GoplsLatestResolver
+	config.GoplsLatestResolver = func() (string, error) { return "", fmt.Errorf("offline") }
+	defer func() { config.GoplsLatestResolver = prevGopls }()
+
+	cooperDir := t.TempDir()
+	ca, err := NewConfigureApp(cooperDir)
+	if err != nil {
+		t.Fatalf("NewConfigureApp: %v", err)
+	}
+	ca.SetProgrammingTools([]config.ToolConfig{{Name: "go", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.24.10", ContainerVersion: "1.24.10"}})
+
+	if _, err := ca.Save(); err == nil {
+		t.Fatal("expected Save() to fail when implicit latest lookup fails without usable built fallback")
 	}
 }

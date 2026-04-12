@@ -11,20 +11,22 @@ import (
 // Config holds all Cooper configuration. This is the central data type
 // passed to Docker, template, TUI, proxy, and bridge packages.
 type Config struct {
-	ProgrammingTools  []ToolConfig      `json:"programming_tools"`
-	AITools           []ToolConfig      `json:"ai_tools"`
-	WhitelistedDomains []DomainEntry    `json:"whitelisted_domains"`
-	PortForwardRules  []PortForwardRule `json:"port_forward_rules"`
-	ProxyPort         int               `json:"proxy_port"`
-	BridgePort        int               `json:"bridge_port"`
-	MonitorTimeoutSecs int              `json:"monitor_timeout_secs"`
-	BlockedHistoryLimit int             `json:"blocked_history_limit"`
-	AllowedHistoryLimit int             `json:"allowed_history_limit"`
-	BridgeLogLimit    int               `json:"bridge_log_limit"`
-	BridgeRoutes      []BridgeRoute     `json:"bridge_routes"`
-	ClipboardTTLSecs  int               `json:"clipboard_ttl_secs"`
-	ClipboardMaxBytes int               `json:"clipboard_max_bytes"`
-	BarrelSHMSize     string            `json:"barrel_shm_size"`
+	ProgrammingTools    []ToolConfig         `json:"programming_tools"`
+	AITools             []ToolConfig         `json:"ai_tools"`
+	ImplicitTools       []ImplicitToolConfig `json:"implicit_tools"`
+	WhitelistedDomains  []DomainEntry        `json:"whitelisted_domains"`
+	PortForwardRules    []PortForwardRule    `json:"port_forward_rules"`
+	ProxyPort           int                  `json:"proxy_port"`
+	BridgePort          int                  `json:"bridge_port"`
+	MonitorTimeoutSecs  int                  `json:"monitor_timeout_secs"`
+	BlockedHistoryLimit int                  `json:"blocked_history_limit"`
+	AllowedHistoryLimit int                  `json:"allowed_history_limit"`
+	BridgeLogLimit      int                  `json:"bridge_log_limit"`
+	BridgeRoutes        []BridgeRoute        `json:"bridge_routes"`
+	ClipboardTTLSecs    int                  `json:"clipboard_ttl_secs"`
+	ClipboardMaxBytes   int                  `json:"clipboard_max_bytes"`
+	BaseNodeVersion     string               `json:"base_node_version,omitempty"`
+	BarrelSHMSize       string               `json:"barrel_shm_size"`
 }
 
 // LoadConfig loads configuration from a JSON file.
@@ -53,6 +55,9 @@ func LoadConfig(path string) (*Config, error) {
 // This ensures existing config files written before new fields were added
 // continue to validate and work correctly.
 func (c *Config) applyMissingDefaults() {
+	if c.ImplicitTools == nil {
+		c.ImplicitTools = []ImplicitToolConfig{}
+	}
 	if c.MonitorTimeoutSecs <= 0 {
 		c.MonitorTimeoutSecs = 30
 	}
@@ -94,21 +99,38 @@ func SaveConfig(path string, cfg *Config) error {
 // history limits 500 entries.
 func DefaultConfig() *Config {
 	return &Config{
-		ProgrammingTools:   []ToolConfig{},
-		AITools:            []ToolConfig{},
-		WhitelistedDomains: defaultWhitelistedDomains(),
-		PortForwardRules:   []PortForwardRule{},
-		ProxyPort:          3128,
-		BridgePort:         4343,
-		MonitorTimeoutSecs: 30,
+		ProgrammingTools:    []ToolConfig{},
+		AITools:             []ToolConfig{},
+		ImplicitTools:       []ImplicitToolConfig{},
+		WhitelistedDomains:  defaultWhitelistedDomains(),
+		PortForwardRules:    []PortForwardRule{},
+		ProxyPort:           3128,
+		BridgePort:          4343,
+		MonitorTimeoutSecs:  30,
 		BlockedHistoryLimit: 500,
 		AllowedHistoryLimit: 500,
-		BridgeLogLimit:     500,
-		BridgeRoutes:       []BridgeRoute{},
-		ClipboardTTLSecs:   300,
-		ClipboardMaxBytes:  20971520, // 20 MiB
-		BarrelSHMSize:      "1g",
+		BridgeLogLimit:      500,
+		BridgeRoutes:        []BridgeRoute{},
+		ClipboardTTLSecs:    300,
+		ClipboardMaxBytes:   20971520, // 20 MiB
+		BarrelSHMSize:       "1g",
 	}
+}
+
+// CloneConfig returns a deep copy of cfg so callers can safely mutate the
+// clone without affecting the original in-memory config.
+func CloneConfig(cfg *Config) *Config {
+	if cfg == nil {
+		return nil
+	}
+	cp := *cfg
+	cp.ProgrammingTools = append([]ToolConfig(nil), cfg.ProgrammingTools...)
+	cp.AITools = append([]ToolConfig(nil), cfg.AITools...)
+	cp.ImplicitTools = append([]ImplicitToolConfig(nil), cfg.ImplicitTools...)
+	cp.WhitelistedDomains = append([]DomainEntry(nil), cfg.WhitelistedDomains...)
+	cp.PortForwardRules = append([]PortForwardRule(nil), cfg.PortForwardRules...)
+	cp.BridgeRoutes = append([]BridgeRoute(nil), cfg.BridgeRoutes...)
+	return &cp
 }
 
 // defaultWhitelistedDomains returns the default set of whitelisted domains

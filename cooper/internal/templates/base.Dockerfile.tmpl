@@ -78,11 +78,10 @@ COPY --from=x11-bridge-builder /cooper-x11-bridge /usr/local/bin/cooper-x11-brid
 
 # Node.js installation via official tarball (pinned version).
 # Required for npm-based AI tools even when Node is not a programming tool.
-{{- if and .HasNode .NodeVersion}}
+# Docker 20.10+ injects TARGETARCH automatically during plain `docker build`,
+# so Cooper can select the correct linux/amd64 vs linux/arm64 tarball without
+# requiring buildx-specific logic.
 ARG NODE_VERSION={{.NodeVersion}}
-{{- else}}
-ARG NODE_VERSION=22.12.0
-{{- end}}
 ARG TARGETARCH
 RUN NODE_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "x64") && \
     curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
@@ -154,6 +153,38 @@ USER user
 ENV NPM_CONFIG_PREFIX=/home/user/.npm-global
 ENV PATH=/home/user/.local/bin:/home/user/.npm-global/bin:/home/user/.opencode/bin:$PATH
 ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/cooper-ca.crt
+
+# ============================================================================
+# Implicit language-server tooling
+# ============================================================================
+# Keep these installs after USER/PATH/npm-prefix setup because they are user-
+# scoped installs, but before runtime proxy env vars because cooper-proxy does
+# not exist during docker build.
+{{- if .GoLSPVersion}}
+RUN GOTOOLCHAIN=auto GOBIN=/home/user/.local/bin \
+    go install golang.org/x/tools/gopls@{{.GoLSPVersion}} \
+    && gopls version
+{{- end}}
+{{- if .NodeTSLSPVersion}}
+RUN npm install -g \
+    typescript@{{.NodeTypeScriptVersion}} \
+    typescript-language-server@{{.NodeTSLSPVersion}} \
+    && typescript-language-server --version \
+    && tsc --version
+{{- end}}
+{{- if .PythonPyrightVersion}}
+RUN npm install -g pyright@{{.PythonPyrightVersion}} \
+    && pyright --version \
+    && command -v pyright-langserver
+{{- end}}
+{{- if .PythonPylspVersion}}
+# python-lsp-server follows the configured Python version, but Cooper still
+# installs Debian's default python3 runtime in the image.
+RUN python3 -m pip install --user "python-lsp-server=={{.PythonPylspVersion}}" \
+    --break-system-packages \
+    && command -v pylsp \
+    && python3 -m pip show python-lsp-server
+{{- end}}
 
 # ============================================================================
 # Proxy environment variables

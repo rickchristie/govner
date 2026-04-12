@@ -136,14 +136,20 @@ func TestCollectUpdatePlan(t *testing.T) {
 				{Name: "go", Enabled: true, Mode: config.ModeMirror, ContainerVersion: "0.0.0"},
 			},
 		}
+		prevLatest := config.LatestVersionResolver
+		prevHost := config.HostVersionDetector
+		config.LatestVersionResolver = func(name string) (string, error) { return "", fmt.Errorf("unexpected latest lookup for %s", name) }
+		config.HostVersionDetector = func(name string) (string, error) { return "1.24.10", nil }
+		defer func() {
+			config.LatestVersionResolver = prevLatest
+			config.HostVersionDetector = prevHost
+		}()
 
 		var out bytes.Buffer
-		plan := collectUpdatePlan(
-			cfg,
-			func(name string) (string, error) { return "", fmt.Errorf("unexpected latest lookup for %s", name) },
-			func(name string) (string, error) { return "1.24.10", nil },
-			&out,
-		)
+		plan, err := collectUpdatePlan(cfg, t.TempDir(), &out)
+		if err != nil {
+			t.Fatalf("collectUpdatePlan() failed: %v", err)
+		}
 
 		if !plan.baseChanged {
 			t.Fatal("expected baseChanged for programming tool mirror mismatch")
@@ -154,34 +160,41 @@ func TestCollectUpdatePlan(t *testing.T) {
 		if got := cfg.ProgrammingTools[0].HostVersion; got != "1.24.10" {
 			t.Fatalf("HostVersion = %q, want 1.24.10", got)
 		}
-		if !strings.Contains(out.String(), "container=0.0.0, host=1.24.10") {
+		if !strings.Contains(out.String(), "container=0.0.0, expected=1.24.10") {
 			t.Fatalf("expected mismatch message in output, got %q", out.String())
 		}
 	})
 
 	t.Run("ai latest mismatch rebuilds only changed tool", func(t *testing.T) {
 		cfg := &config.Config{
+			BaseNodeVersion: config.DefaultBaseNodeVersion,
 			AITools: []config.ToolConfig{
 				{Name: "codex", Enabled: true, Mode: config.ModeLatest, ContainerVersion: "0.1.0"},
 				{Name: "claude", Enabled: true, Mode: config.ModeLatest, ContainerVersion: "2.1.87"},
 			},
 		}
+		prevLatest := config.LatestVersionResolver
+		prevHost := config.HostVersionDetector
+		config.LatestVersionResolver = func(name string) (string, error) {
+			switch name {
+			case "codex":
+				return "0.2.0", nil
+			case "claude":
+				return "2.1.87", nil
+			default:
+				return "", fmt.Errorf("unexpected tool %s", name)
+			}
+		}
+		config.HostVersionDetector = func(name string) (string, error) { return "", fmt.Errorf("unexpected host lookup for %s", name) }
+		defer func() {
+			config.LatestVersionResolver = prevLatest
+			config.HostVersionDetector = prevHost
+		}()
 
-		plan := collectUpdatePlan(
-			cfg,
-			func(name string) (string, error) {
-				switch name {
-				case "codex":
-					return "0.2.0", nil
-				case "claude":
-					return "2.1.87", nil
-				default:
-					return "", fmt.Errorf("unexpected tool %s", name)
-				}
-			},
-			func(name string) (string, error) { return "", fmt.Errorf("unexpected host lookup for %s", name) },
-			nil,
-		)
+		plan, err := collectUpdatePlan(cfg, t.TempDir(), nil)
+		if err != nil {
+			t.Fatalf("collectUpdatePlan() failed: %v", err)
+		}
 
 		if plan.baseChanged {
 			t.Fatal("baseChanged should be false for AI-tool-only mismatch")
@@ -197,28 +210,225 @@ func TestCollectUpdatePlan(t *testing.T) {
 		}
 	})
 
-	t.Run("lookup errors warn and continue", func(t *testing.T) {
+	t.Run("lookup errors fail update planning", func(t *testing.T) {
 		cfg := &config.Config{
 			ProgrammingTools: []config.ToolConfig{
 				{Name: "go", Enabled: true, Mode: config.ModeLatest, ContainerVersion: "1.24.10"},
 			},
 		}
+		prevLatest := config.LatestVersionResolver
+		prevHost := config.HostVersionDetector
+		config.LatestVersionResolver = func(name string) (string, error) { return "", fmt.Errorf("boom") }
+		config.HostVersionDetector = func(name string) (string, error) { return "", fmt.Errorf("unexpected host lookup for %s", name) }
+		defer func() {
+			config.LatestVersionResolver = prevLatest
+			config.HostVersionDetector = prevHost
+		}()
 
 		var out bytes.Buffer
-		plan := collectUpdatePlan(
-			cfg,
-			func(name string) (string, error) { return "", fmt.Errorf("boom") },
-			func(name string) (string, error) { return "", fmt.Errorf("unexpected host lookup for %s", name) },
-			&out,
-		)
-
-		if plan.baseChanged || len(plan.toolsChanged) != 0 {
-			t.Fatalf("expected no changes on lookup failure, got %+v", plan)
+		_, err := collectUpdatePlan(cfg, t.TempDir(), &out)
+		if err == nil {
+			t.Fatal("expected collectUpdatePlan to fail on refresh error")
 		}
-		if !strings.Contains(out.String(), "Warning: could not resolve latest go") {
-			t.Fatalf("expected warning output, got %q", out.String())
+		if !strings.Contains(err.Error(), "latest version could not be resolved") {
+			t.Fatalf("expected strict refresh error, got %v", err)
 		}
 	})
+}
+
+func TestCheckToolVersions_IncludesImplicitToolMismatches(t *testing.T) {
+	prevLatest := config.LatestVersionResolver
+	prevGopls := config.GoplsLatestResolver
+	config.LatestVersionResolver = func(name string) (string, error) { return "1.24.10", nil }
+	config.GoplsLatestResolver = func() (string, error) { return "v0.21.1", nil }
+	defer func() {
+		config.LatestVersionResolver = prevLatest
+		config.GoplsLatestResolver = prevGopls
+	}()
+
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{{Name: "go", Enabled: true, Mode: config.ModeLatest, PinnedVersion: "1.24.10", ContainerVersion: "1.24.10"}},
+		ImplicitTools:    []config.ImplicitToolConfig{{Name: "gopls", Kind: config.ImplicitToolKindLSP, ParentTool: "go", Binary: "gopls", ContainerVersion: "v0.15.3"}},
+	}
+	warnings := checkToolVersions(cfg)
+	if len(warnings) == 0 {
+		t.Fatal("expected implicit mismatch warning")
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "gopls (for go): container=v0.15.3, expected=v0.21.1") {
+		t.Fatalf("expected gopls mismatch warning, got %v", warnings)
+	}
+}
+
+func TestCheckToolVersions_DoesNotMutateOriginalConfig(t *testing.T) {
+	prevHost := config.HostVersionDetector
+	config.HostVersionDetector = func(name string) (string, error) { return "1.24.10", nil }
+	defer func() { config.HostVersionDetector = prevHost }()
+
+	cfg := &config.Config{ProgrammingTools: []config.ToolConfig{{Name: "go", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.20.0", ContainerVersion: "1.20.0"}}}
+	_ = checkToolVersions(cfg)
+	if got := cfg.ProgrammingTools[0].HostVersion; got != "1.20.0" {
+		t.Fatalf("checkToolVersions mutated original config HostVersion to %q", got)
+	}
+}
+
+func TestCheckToolVersions_PartialImplicitFailureStillReportsOtherParents(t *testing.T) {
+	prevLatest := config.LatestVersionResolver
+	prevGopls := config.GoplsLatestResolver
+	prevNPMLatest := config.NPMPackageLatestResolver
+	prevNPMMeta := config.NPMPackageMetadataResolver
+	defer func() {
+		config.LatestVersionResolver = prevLatest
+		config.GoplsLatestResolver = prevGopls
+		config.NPMPackageLatestResolver = prevNPMLatest
+		config.NPMPackageMetadataResolver = prevNPMMeta
+	}()
+
+	config.LatestVersionResolver = func(name string) (string, error) {
+		switch name {
+		case "go":
+			return "1.24.10", nil
+		case "node":
+			return "22.12.0", nil
+		default:
+			return "1.0.0", nil
+		}
+	}
+	config.GoplsLatestResolver = func() (string, error) { return "", fmt.Errorf("gopls registry down") }
+	config.NPMPackageLatestResolver = func(name string) (string, error) {
+		switch name {
+		case "typescript-language-server":
+			return "5.1.3", nil
+		case "typescript":
+			return "6.0.2", nil
+		default:
+			return "1.0.0", nil
+		}
+	}
+	config.NPMPackageMetadataResolver = func(name, version string) (config.NPMPackageMetadata, error) {
+		meta := config.NPMPackageMetadata{Version: version}
+		if name == "typescript-language-server" {
+			meta.Engines.Node = ">=20"
+		} else {
+			meta.Engines.Node = ">=14.17"
+		}
+		return meta, nil
+	}
+
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{
+			{Name: "go", Enabled: true, Mode: config.ModeLatest, PinnedVersion: "1.24.10", ContainerVersion: "1.24.10"},
+			{Name: "node", Enabled: true, Mode: config.ModeLatest, PinnedVersion: "22.12.0", ContainerVersion: "22.12.0"},
+		},
+		ImplicitTools: []config.ImplicitToolConfig{
+			{Name: "gopls", Kind: config.ImplicitToolKindLSP, ParentTool: "go", Binary: "gopls", ContainerVersion: "v0.15.3"},
+			{Name: "typescript-language-server", Kind: config.ImplicitToolKindLSP, ParentTool: "node", Binary: "typescript-language-server", ContainerVersion: "4.4.1"},
+			{Name: "typescript", Kind: config.ImplicitToolKindSupport, ParentTool: "node", Binary: "tsc", ContainerVersion: "5.8.3"},
+		},
+	}
+
+	warnings := checkToolVersions(cfg)
+	joined := strings.Join(warnings, "\n")
+	if !strings.Contains(joined, "could not verify implicit tools for go") {
+		t.Fatalf("expected go implicit verification warning, got %v", warnings)
+	}
+	if !strings.Contains(joined, "typescript-language-server (for node)") {
+		t.Fatalf("expected node implicit mismatch warning to survive go failure, got %v", warnings)
+	}
+}
+
+func TestCheckToolVersions_DisabledParentStillWarnsAboutBuiltImplicitDrift(t *testing.T) {
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{
+			{Name: "node", Enabled: false, Mode: config.ModeOff},
+		},
+		ImplicitTools: []config.ImplicitToolConfig{
+			{Name: "typescript-language-server", Kind: config.ImplicitToolKindLSP, ParentTool: "node", Binary: "typescript-language-server", ContainerVersion: "5.1.3"},
+			{Name: "typescript", Kind: config.ImplicitToolKindSupport, ParentTool: "node", Binary: "tsc", ContainerVersion: "6.0.2"},
+		},
+	}
+	warnings := checkToolVersions(cfg)
+	joined := strings.Join(warnings, "\n")
+	if !strings.Contains(joined, "typescript-language-server (for node): built but no longer expected") {
+		t.Fatalf("expected disabled node implicit drift warning, got %v", warnings)
+	}
+	if !strings.Contains(joined, "typescript (for node): built but no longer expected") {
+		t.Fatalf("expected disabled node support-tool drift warning, got %v", warnings)
+	}
+}
+
+func TestCheckToolVersions_IncludesBaseNodeRuntimeDriftWhenNodeDisabled(t *testing.T) {
+	cfg := &config.Config{BaseNodeVersion: "20.11.1"}
+	warnings := checkToolVersions(cfg)
+	joined := strings.Join(warnings, "\n")
+	if !strings.Contains(joined, "base node runtime: built=20.11.1, expected="+config.DefaultBaseNodeVersion) {
+		t.Fatalf("expected base node runtime drift warning, got %v", warnings)
+	}
+}
+
+func TestCollectUpdatePlan_ImplicitToolMismatchRebuildsBase(t *testing.T) {
+	prevValidate := config.VersionValidator
+	prevGopls := config.GoplsLatestResolver
+	config.VersionValidator = func(toolName, version string) (bool, error) { return true, nil }
+	config.GoplsLatestResolver = func() (string, error) { return "v0.21.1", nil }
+	defer func() {
+		config.VersionValidator = prevValidate
+		config.GoplsLatestResolver = prevGopls
+	}()
+
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{{Name: "go", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.24.10", ContainerVersion: "1.24.10"}},
+		ImplicitTools:    []config.ImplicitToolConfig{{Name: "gopls", Kind: config.ImplicitToolKindLSP, ParentTool: "go", Binary: "gopls", ContainerVersion: "v0.15.3"}},
+	}
+	var out bytes.Buffer
+	plan, err := collectUpdatePlan(cfg, t.TempDir(), &out)
+	if err != nil {
+		t.Fatalf("collectUpdatePlan() error = %v", err)
+	}
+	if !plan.baseChanged {
+		t.Fatal("expected implicit mismatch to mark baseChanged")
+	}
+	if !strings.Contains(out.String(), "gopls (for go): container=v0.15.3, expected=v0.21.1") {
+		t.Fatalf("expected implicit mismatch in output, got %q", out.String())
+	}
+}
+
+func TestCollectUpdatePlan_DiscoversCustomImages(t *testing.T) {
+	cliDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(cliDir, "custom-check"), 0o755); err != nil {
+		t.Fatalf("mkdir custom image dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cliDir, "custom-check", "Dockerfile"), []byte("FROM cooper-base\n"), 0o644); err != nil {
+		t.Fatalf("write custom Dockerfile: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(cliDir, "claude"), 0o755); err != nil {
+		t.Fatalf("mkdir builtin dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cliDir, "claude", "Dockerfile"), []byte("FROM cooper-base\n"), 0o644); err != nil {
+		t.Fatalf("write builtin Dockerfile: %v", err)
+	}
+
+	plan, err := collectUpdatePlan(&config.Config{}, cliDir, nil)
+	if err != nil {
+		t.Fatalf("collectUpdatePlan() error = %v", err)
+	}
+	if len(plan.customImages) != 1 || plan.customImages[0] != "custom-check" {
+		t.Fatalf("customImages = %+v, want [custom-check]", plan.customImages)
+	}
+}
+
+func TestCollectUpdatePlan_BaseNodeRuntimeDriftRebuildsBaseWhenNodeDisabled(t *testing.T) {
+	cfg := &config.Config{BaseNodeVersion: "20.11.1"}
+	var out bytes.Buffer
+	plan, err := collectUpdatePlan(cfg, t.TempDir(), &out)
+	if err != nil {
+		t.Fatalf("collectUpdatePlan() error = %v", err)
+	}
+	if !plan.baseChanged {
+		t.Fatal("expected baseChanged for base node runtime drift")
+	}
+	if !strings.Contains(out.String(), "base node runtime: built=20.11.1, expected="+config.DefaultBaseNodeVersion) {
+		t.Fatalf("expected base node runtime mismatch output, got %q", out.String())
+	}
 }
 
 func TestRunCLIList(t *testing.T) {
@@ -384,6 +594,7 @@ func TestRunUpdateNoRebuildNeeded(t *testing.T) {
 	driver := setupCommandDriver(t, func(cfg *config.Config) {
 		cfg.ProgrammingTools = nil
 		cfg.AITools = nil
+		cfg.BaseNodeVersion = config.DefaultBaseNodeVersion
 	})
 	withCommandGlobals(t, driver.CooperDir())
 

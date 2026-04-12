@@ -128,9 +128,11 @@ func (m *saveModel) doSave() error {
 		m.configureApp.SetBridgePort(m.cfg.BridgePort)
 		m.configureApp.SetBarrelSHMSize(m.cfg.BarrelSHMSize)
 
-		if err := m.configureApp.Save(); err != nil {
+		warnings, err := m.configureApp.Save()
+		if err != nil {
 			return err
 		}
+		m.doneMsgs = append(m.doneMsgs, warnings...)
 	}
 
 	m.doneMsgs = append(m.doneMsgs, fmt.Sprintf("Saved %s", m.configPath))
@@ -138,7 +140,7 @@ func (m *saveModel) doSave() error {
 	m.doneMsgs = append(m.doneMsgs, "CA certificate ensured")
 	m.doneMsgs = append(m.doneMsgs, "")
 	m.doneMsgs = append(m.doneMsgs, "Configuration saved. Run 'cooper build' to rebuild images.")
-	m.doneMsgs = append(m.doneMsgs, "  Base image: rebuilds only if programming tools changed.")
+	m.doneMsgs = append(m.doneMsgs, "  Base image: rebuilds if programming tool or implicit language-server versions changed.")
 	m.doneMsgs = append(m.doneMsgs, "  AI tool images: each tool rebuilds independently.")
 
 	return nil

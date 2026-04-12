@@ -241,6 +241,12 @@ func (ctx *ProofContext) phaseStartup() {
 	ctx.hostRelay.Start(ctx.Cfg.PortForwardRules)
 
 	// Check clipboard prerequisites (informational, non-blocking in proof).
+	// Proof intentionally stops at host prerequisite detection here instead of
+	// trying to stage a real image from the host clipboard. End-to-end clipboard
+	// capture depends on a user-controlled host clipboard payload and platform
+	// APIs (osascript on macOS, wl-paste/xclip on Linux), so automated proof
+	// covers the bridge runtime while real host capture stays a manual platform
+	// verification step when debugging regressions.
 	clipReader := clipboard.NewHostReader(os.Getenv)
 	if err := clipReader.CheckPrerequisites(context.Background()); err != nil {
 		ctx.warn("Clipboard prerequisites", err.Error())
@@ -417,6 +423,10 @@ func (ctx *ProofContext) phaseTools() {
 	ctx.printPhase("Phase 5: Tools")
 
 	// Programming tools — check in the first available barrel (base layers are shared).
+	// This phase proves the tools are runnable inside the built image. Architecture-
+	// specific validation, such as confirming Apple Silicon builds contain a native
+	// arm64 Node binary, still requires a real build on the target Docker host
+	// because TARGETARCH is resolved by the active daemon platform.
 	barrel := ctx.firstBarrel()
 	if barrel == "" {
 		ctx.fail("Programming tools", "no barrel running")
@@ -442,6 +452,64 @@ func (ctx *ProofContext) phaseTools() {
 		} else {
 			ctx.fail(t.Name, "not found in container")
 		}
+	}
+
+	implicitVersion := func(name string) string {
+		for _, tool := range ctx.Cfg.ImplicitTools {
+			if tool.Name == name {
+				return tool.ContainerVersion
+			}
+		}
+		return ""
+	}
+
+	for _, tool := range ctx.Cfg.ImplicitTools {
+		expected := tool.ContainerVersion
+		switch tool.Name {
+		case "gopls":
+			out, err := dockerExec(barrel, "gopls version")
+			if err == nil && strings.Contains(out, expected) {
+				ctx.pass("gopls", truncate(out, 80))
+			} else {
+				ctx.fail("gopls", fmt.Sprintf("expected %s, got %s", expected, truncate(out, 80)))
+			}
+		case "typescript-language-server":
+			out, err := dockerExec(barrel, "typescript-language-server --version")
+			if err == nil && strings.Contains(out, expected) {
+				ctx.pass("typescript-language-server", truncate(out, 80))
+			} else {
+				ctx.fail("typescript-language-server", fmt.Sprintf("expected %s, got %s", expected, truncate(out, 80)))
+			}
+		case "pyright":
+			out, err := dockerExec(barrel, "pyright --version")
+			if err == nil && strings.Contains(out, expected) {
+				ctx.pass("pyright", truncate(out, 80))
+			} else {
+				ctx.fail("pyright", fmt.Sprintf("expected %s, got %s", expected, truncate(out, 80)))
+			}
+			out, err = dockerExec(barrel, "command -v pyright-langserver")
+			if err == nil && strings.TrimSpace(out) != "" {
+				ctx.pass("pyright-langserver", strings.TrimSpace(out))
+			} else {
+				ctx.fail("pyright-langserver", "not found in container")
+			}
+		case "python-lsp-server":
+			out, err := dockerExec(barrel, "command -v pylsp")
+			if err == nil && strings.TrimSpace(out) != "" {
+				ctx.pass("pylsp", strings.TrimSpace(out))
+			} else {
+				ctx.fail("pylsp", "not found in container")
+			}
+			out, err = dockerExec(barrel, "python3 -m pip show python-lsp-server")
+			if err == nil && strings.Contains(out, expected) {
+				ctx.pass("python-lsp-server", truncate(out, 80))
+			} else {
+				ctx.fail("python-lsp-server", fmt.Sprintf("expected %s, got %s", expected, truncate(out, 80)))
+			}
+		}
+	}
+	if implicitVersion("gopls") == "" && implicitVersion("typescript-language-server") == "" && implicitVersion("pyright") == "" && implicitVersion("python-lsp-server") == "" {
+		ctx.info("Implicit language servers", "no implicit tools enabled")
 	}
 
 	// AI tool installations — check in each tool's own barrel.

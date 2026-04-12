@@ -162,17 +162,21 @@ var semverRegex = regexp.MustCompile(`(\d+\.\d+(?:\.\d+)?)`)
 // toolVersionCommands maps tool names to the command and args used to detect
 // the host version.
 var toolVersionCommands = map[string][]string{
-	"go":      {"go", "version"},
-	"node":    {"node", "--version"},
-	"python":  {"python3", "--version"},
-	"claude":  {"claude", "--version"},
-	"copilot": {"copilot", "--version"},
-	"codex":   {"codex", "--version"},
+	"go":       {"go", "version"},
+	"node":     {"node", "--version"},
+	"python":   {"python3", "--version"},
+	"claude":   {"claude", "--version"},
+	"copilot":  {"copilot", "--version"},
+	"codex":    {"codex", "--version"},
 	"opencode": {"opencode", "--version"},
 }
 
 // execCommand is a package-level variable to allow test mocking.
 var execCommand = exec.Command
+
+// HostVersionDetector is the shared host-version hook used by higher-level
+// refresh flows. Tests override it to avoid depending on the real host.
+var HostVersionDetector = DetectHostVersion
 
 // DetectHostVersion runs the appropriate command to detect the installed
 // version of a tool on the host machine. Returns the parsed semver string.

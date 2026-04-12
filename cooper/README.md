@@ -161,7 +161,7 @@ cooper proof
 | `cooper configure` | Interactive TUI wizard -- programming tools, AI tools, whitelist, ports, bridge |
 | `cooper build` | Build proxy and all CLI container images. `--clean` for no-cache rebuild |
 | `cooper up` | Start proxy, bridge, and TUI control panel. Must be running for barrels to work |
-| `cooper update` | Regenerate Dockerfiles and rebuild only images with version mismatches |
+| `cooper update` | Regenerate Dockerfiles and rebuild only images with desired-vs-built drift, including implicit tools and base runtime changes |
 | `cooper cli <tool>` | Launch a barrel. `-c "cmd"` for one-shot execution. `list` to show available tools |
 | `cooper proof` | Full lifecycle integration test -- preflight through AI smoke test, then teardown |
 | `cooper cleanup` | Remove all containers, images, and networks. Optionally remove `~/.cooper` |
@@ -180,7 +180,7 @@ The control panel (`cooper up`) is the nerve center. It has these tabs:
 | **Ports** | Port forwarding rules. Add/edit/delete live (applied via SIGHUP, no restart) |
 | **Routes** | Execution bridge mappings (API path to host script). Add/edit/delete at runtime |
 | **Runtime** | Monitor timeout, history limits, clipboard TTL/size. Changes take effect immediately |
-| **About** | Version info, installed tool versions vs host versions, startup warnings |
+| **About** | Version info, installed tool versions vs host versions, implicit language servers, startup warnings |
 
 **Clipboard bar** is always visible at the top -- press `c` to copy an image from your host clipboard so AI tools can paste it, `x` to clear.
 
@@ -198,7 +198,20 @@ Cooper detects Go, Node.js (npm/yarn/bun), and Python (pip/pipenv/poetry) on you
 | **Latest** | Fetches latest stable from upstream APIs | Always stay current |
 | **Pin** | Exact version you specify | Reproducible builds |
 
+Built-in programming tools also install Cooper-managed standard language-server tooling, versioned from the selected runtime:
+
+- Go -> `gopls`
+- Node.js -> `typescript-language-server` and `typescript`
+- Python -> `pyright` and `python-lsp-server`
+
+These are implicit defaults attached to the language tool, not separate top-level programming tools. TypeScript remains bundled under Node.js.
+
+`~/.cooper/config.json` stores both desired configuration and built state. That built state includes top-level `container_version` values, resolved `implicit_tools`, and the built base Node runtime (`base_node_version`). `cooper update` and startup/About warnings compare those built values against the current desired state.
+
+`cooper configure` save-only is allowed to reuse last-built implicit tool versions only when the relevant built runtime still matches the current desired runtime. If Cooper cannot prove that match, it fails instead of generating misleading Dockerfiles.
+
 Run `cooper update` to apply Mirror/Latest changes after host upgrades.
+When built language-server versions or the effective base Node runtime drift from the current desired versions, startup warnings and the About tab surface that mismatch before you open barrels.
 
 ### AI Tools
 

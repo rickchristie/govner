@@ -780,53 +780,6 @@ func (a *CooperApp) rotateClipboardToken(containerName string) error {
 // checkToolVersions compares container tool versions against expected
 // versions and returns warnings for any mismatches.
 func checkToolVersions(cfg *config.Config) []string {
-	var warnings []string
-	allTools := append(cfg.ProgrammingTools, cfg.AITools...)
-	for _, tool := range allTools {
-		if !tool.Enabled || tool.Mode == config.ModeOff {
-			continue
-		}
-
-		var expected string
-		switch tool.Mode {
-		case config.ModeMirror:
-			hostVer, err := config.DetectHostVersion(tool.Name)
-			if err != nil {
-				continue
-			}
-			expected = hostVer
-		case config.ModeLatest:
-			type result struct {
-				ver string
-				err error
-			}
-			ch := make(chan result, 1)
-			go func() {
-				v, e := config.ResolveLatestVersion(tool.Name)
-				ch <- result{v, e}
-			}()
-			select {
-			case r := <-ch:
-				if r.err != nil {
-					continue
-				}
-				expected = r.ver
-			case <-time.After(5 * time.Second):
-				continue
-			}
-		case config.ModePin:
-			expected = tool.PinnedVersion
-		default:
-			continue
-		}
-
-		status := config.CompareVersions(tool.ContainerVersion, expected, tool.Mode)
-		if status == config.VersionMismatch {
-			warnings = append(warnings, fmt.Sprintf(
-				"%s: container=%s, expected=%s (%s mode)",
-				tool.Name, tool.ContainerVersion, expected, tool.Mode,
-			))
-		}
-	}
+	_, warnings := config.PrepareToolVersionSnapshot(cfg, 5*time.Second)
 	return warnings
 }

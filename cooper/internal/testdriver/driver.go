@@ -389,7 +389,11 @@ func setupCooperDir(configMutator func(*config.Config)) (string, *config.Config,
 		}
 	}
 
-	if err := templates.WriteAllTemplates(baseDir, cliDir, cfg); err != nil {
+	implicit, err := config.ResolveImplicitTools(cfg)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve implicit tools: %w", err)
+	}
+	if err := templates.WriteAllTemplates(baseDir, cliDir, cfg, implicit); err != nil {
 		return "", nil, fmt.Errorf("write cli templates: %w", err)
 	}
 	if err := templates.WriteProxyTemplates(proxyDir, cfg); err != nil {

@@ -110,14 +110,7 @@ func detectTools(defs []struct {
 
 // Config returns a copy of the current configuration.
 func (a *ConfigureApp) Config() *config.Config {
-	cp := *a.cfg
-	// Deep-copy slices so callers cannot mutate internal state.
-	cp.ProgrammingTools = append([]config.ToolConfig(nil), a.cfg.ProgrammingTools...)
-	cp.AITools = append([]config.ToolConfig(nil), a.cfg.AITools...)
-	cp.WhitelistedDomains = append([]config.DomainEntry(nil), a.cfg.WhitelistedDomains...)
-	cp.PortForwardRules = append([]config.PortForwardRule(nil), a.cfg.PortForwardRules...)
-	cp.BridgeRoutes = append([]config.BridgeRoute(nil), a.cfg.BridgeRoutes...)
-	return &cp
+	return config.CloneConfig(a.cfg)
 }
 
 // SetProgrammingTools updates the programming tools configuration.
@@ -162,9 +155,9 @@ func (a *ConfigureApp) Validate() error {
 
 // Save writes config.json, generates all templates (CLI Dockerfiles,
 // proxy Dockerfile, squid.conf), and ensures the CA certificate exists.
-func (a *ConfigureApp) Save() error {
+func (a *ConfigureApp) Save() ([]string, error) {
 	if err := a.cfg.Validate(); err != nil {
-		return fmt.Errorf("validation failed: %w", err)
+		return nil, fmt.Errorf("validation failed: %w", err)
 	}
 
 	// Ensure cooperDir and subdirectories exist.
@@ -173,40 +166,54 @@ func (a *ConfigureApp) Save() error {
 	proxyDir := filepath.Join(a.cooperDir, "proxy")
 	for _, dir := range []string{a.cooperDir, baseDir, cliDir, proxyDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("create directory %s: %w", dir, err)
+			return nil, fmt.Errorf("create directory %s: %w", dir, err)
 		}
 	}
+
+	warnings, err := config.RefreshDesiredToolVersions(a.cfg, config.DesiredVersionRefreshOptions{AllowStaleFallback: true})
+	if err != nil {
+		return nil, err
+	}
+	implicit, implicitWarnings, err := config.ResolveImplicitToolsWithOptions(a.cfg, config.ImplicitToolResolveOptions{AllowStaleFallback: true})
+	if err != nil {
+		return warnings, err
+	}
+	warnings = append(warnings, implicitWarnings...)
 
 	// Save config.json.
 	configPath := filepath.Join(a.cooperDir, "config.json")
 	if err := config.SaveConfig(configPath, a.cfg); err != nil {
-		return fmt.Errorf("save config: %w", err)
+		return warnings, fmt.Errorf("save config: %w", err)
 	}
 
 	// Generate base + per-tool CLI templates.
-	if err := templates.WriteAllTemplates(baseDir, cliDir, a.cfg); err != nil {
-		return fmt.Errorf("write CLI templates: %w", err)
+	if err := templates.WriteAllTemplates(baseDir, cliDir, a.cfg, implicit); err != nil {
+		return warnings, fmt.Errorf("write CLI templates: %w", err)
 	}
 
 	// Generate proxy templates.
 	if err := templates.WriteProxyTemplates(proxyDir, a.cfg); err != nil {
-		return fmt.Errorf("write proxy templates: %w", err)
+		return warnings, fmt.Errorf("write proxy templates: %w", err)
 	}
 
 	// Ensure CA certificate.
 	if _, _, err := config.EnsureCA(a.cooperDir); err != nil {
-		return fmt.Errorf("ensure CA: %w", err)
+		return warnings, fmt.Errorf("ensure CA: %w", err)
 	}
 
-	return nil
+	return warnings, nil
 }
 
 // SaveAndBuild performs Save() and then triggers a Docker build of both
 // the proxy and CLI images. This is equivalent to running `cooper build`
 // after saving. The build output is written to stderr.
 func (a *ConfigureApp) SaveAndBuild() error {
-	if err := a.Save(); err != nil {
+	warnings, err := a.Save()
+	if err != nil {
 		return err
+	}
+	for _, warning := range warnings {
+		fmt.Fprintln(os.Stderr, warning)
 	}
 
 	// The actual Docker build is handled by the caller (main.go runBuild).

@@ -283,6 +283,28 @@ check_tool "Node.js" node --version
 check_tool "npm" npm --version
 check_tool "Python" python3 --version
 check_tool "pip" pip3 --version
+
+# ============================================================================
+section "Implicit Language Servers"
+# ============================================================================
+
+check_tool "gopls" gopls version
+check_tool "TypeScript Language Server" typescript-language-server --version
+check_tool "Pyright" pyright --version
+
+if command -v pyright-langserver >/dev/null 2>&1; then
+    pass "pyright-langserver: present"
+else
+    warn "pyright-langserver: not found (may not be enabled)"
+fi
+
+if command -v pylsp >/dev/null 2>&1; then
+    ver=$(python3 -m pip show python-lsp-server 2>/dev/null | grep '^Version:' | head -1)
+    pass "python-lsp-server: ${ver}"
+else
+    warn "python-lsp-server: not found (may not be enabled)"
+fi
+
 # ============================================================================
 section "AI CLI Tools"
 # ============================================================================

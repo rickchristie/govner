@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -291,12 +292,18 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Resolve latest versions for tools in ModeLatest so PinnedVersion is concrete.
+	// Resolve the full desired top-level tool state before template generation.
 	fmt.Fprintln(os.Stderr, "Resolving tool versions...")
-	resolveLatestVersions(cfg)
+	if _, err := config.RefreshDesiredToolVersions(cfg, config.DesiredVersionRefreshOptions{AllowStaleFallback: false}); err != nil {
+		return fmt.Errorf("resolve desired tool versions: %w", err)
+	}
+	implicit, err := config.ResolveImplicitTools(cfg)
+	if err != nil {
+		return fmt.Errorf("resolve implicit tools: %w", err)
+	}
 
 	fmt.Fprintln(os.Stderr, "Generating templates...")
-	if err := templates.WriteAllTemplates(baseDir, cliDir, cfg); err != nil {
+	if err := templates.WriteAllTemplates(baseDir, cliDir, cfg, implicit); err != nil {
 		return fmt.Errorf("write templates: %w", err)
 	}
 	if err := templates.WriteProxyTemplates(proxyDir, cfg); err != nil {
@@ -347,6 +354,16 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	if err := docker.BuildImage(docker.GetImageBase(), baseDockerfile, baseDir, uidGidArgs, noCache); err != nil {
 		return fmt.Errorf("build base image: %w", err)
 	}
+	// Persist base built state immediately. A later child-image failure must not
+	// make config.json lie about the already-rebuilt base because update planning,
+	// startup warnings, and About all treat the saved config as last-built truth.
+	updateProgrammingToolContainerVersions(cfg)
+	setBuiltBaseNodeVersion(cfg)
+	setBuiltImplicitTools(cfg, implicit)
+	configPath := filepath.Join(cooperDir, "config.json")
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		return fmt.Errorf("save config after base build: %w", err)
+	}
 
 	// 7. Build each enabled AI tool image.
 	for _, tool := range cfg.AITools {
@@ -359,6 +376,12 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Building %s image...\n", tool.Name)
 		if err := docker.BuildImage(imageName, dockerfile, toolDir, nil, noCache); err != nil {
 			return fmt.Errorf("build %s image: %w", tool.Name, err)
+		}
+		// Persist each successful built-in child image incrementally for the same
+		// reason: later failures must not erase already-real image state.
+		updateAIToolContainerVersion(cfg, tool.Name)
+		if err := config.SaveConfig(configPath, cfg); err != nil {
+			return fmt.Errorf("save config after %s build: %w", tool.Name, err)
 		}
 	}
 
@@ -380,56 +403,76 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 9. Update ContainerVersion in config to reflect what was just built.
-	updateContainerVersions(cfg)
-	configPath := filepath.Join(cooperDir, "config.json")
-	if err := config.SaveConfig(configPath, cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not save updated config: %v\n", err)
-	}
-
 	fmt.Fprintln(os.Stderr, "Build complete.")
 	return nil
 }
 
-// updateContainerVersions sets ContainerVersion for all enabled tools
-// to reflect what was actually built into the image.
-func updateContainerVersions(cfg *config.Config) {
+func updateProgrammingToolContainerVersions(cfg *config.Config) {
 	for i := range cfg.ProgrammingTools {
 		cfg.ProgrammingTools[i].RefreshContainerVersion()
 	}
+}
+
+func updateAIToolContainerVersion(cfg *config.Config, toolName string) {
 	for i := range cfg.AITools {
+		if cfg.AITools[i].Name != toolName {
+			continue
+		}
 		cfg.AITools[i].RefreshContainerVersion()
+		return
 	}
 }
 
-// resolveLatestVersions resolves the latest upstream version for all enabled
-// tools in ModeLatest and stores it in PinnedVersion. This ensures the
-// Dockerfile uses a concrete version and ContainerVersion is set correctly.
-func resolveLatestVersions(cfg *config.Config) {
-	for i := range cfg.ProgrammingTools {
-		t := &cfg.ProgrammingTools[i]
-		if t.Enabled && t.Mode == config.ModeLatest {
-			v, err := config.ResolveLatestVersion(t.Name)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Warning: could not resolve latest %s: %v\n", t.Name, err)
-			} else {
-				t.PinnedVersion = v
-				fmt.Fprintf(os.Stderr, "  %s: latest = %s\n", t.Name, v)
-			}
-		}
+func setBuiltBaseNodeVersion(cfg *config.Config) {
+	if cfg == nil {
+		return
 	}
-	for i := range cfg.AITools {
-		t := &cfg.AITools[i]
-		if t.Enabled && t.Mode == config.ModeLatest {
-			v, err := config.ResolveLatestVersion(t.Name)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Warning: could not resolve latest %s: %v\n", t.Name, err)
-			} else {
-				t.PinnedVersion = v
-				fmt.Fprintf(os.Stderr, "  %s: latest = %s\n", t.Name, v)
-			}
-		}
+	version, err := config.EffectiveBaseNodeVersion(cfg)
+	if err != nil {
+		return
 	}
+	cfg.BaseNodeVersion = version
+}
+
+func setBuiltImplicitTools(cfg *config.Config, tools []config.ImplicitToolConfig) {
+	if cfg == nil {
+		return
+	}
+	cfg.ImplicitTools = append([]config.ImplicitToolConfig(nil), tools...)
+}
+
+func expectedToolVersion(tool config.ToolConfig) string {
+	switch tool.Mode {
+	case config.ModeMirror:
+		return tool.HostVersion
+	case config.ModePin, config.ModeLatest:
+		return tool.PinnedVersion
+	default:
+		return ""
+	}
+}
+
+func discoverCustomImageNames(cliDir string) ([]string, error) {
+	entries, err := os.ReadDir(cliDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read cli directory %s: %w", cliDir, err)
+	}
+	builtinNames := map[string]bool{"claude": true, "copilot": true, "codex": true, "opencode": true}
+	custom := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || builtinNames[entry.Name()] {
+			continue
+		}
+		if !fileExists(filepath.Join(cliDir, entry.Name(), "Dockerfile")) {
+			continue
+		}
+		custom = append(custom, entry.Name())
+	}
+	sort.Strings(custom)
+	return custom, nil
 }
 
 // ---------- cooper up ----------
@@ -458,6 +501,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	// Startup warnings collected by the version check step.
 	var startupWarnings []string
+	aboutCfg := config.CloneConfig(cfg)
 
 	// Create clipboard manager and reader early so the bridge can be wired
 	// with the clipboard handler before it starts.
@@ -584,7 +628,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 		p.Send(loading.StepCompleteMsg{Index: 4})
 
 		// Step 5: CLI image version check (informational, non-blocking).
-		startupWarnings = append(startupWarnings, checkToolVersions(cfg)...)
+		aboutCfg, startupWarnings = config.PrepareToolVersionSnapshot(cfg, 5*time.Second)
+		if aboutCfg == nil {
+			aboutCfg = config.CloneConfig(cfg)
+		}
 		if startupCtx.Err() != nil {
 			return
 		}
@@ -687,7 +734,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	portForwardModel.SetPortForwardRules(cfg.PortForwardRules)
 	mainModel.SetPortForwardModel(portForwardModel)
 
-	aboutModel := about.New(cfg)
+	aboutModel := about.New(aboutCfg)
 	// Send startup version warnings collected during loading.
 	if warnings := cooperApp.StartupWarnings(); len(warnings) > 0 {
 		aboutModel.Update(about.StartupWarningsMsg{Warnings: warnings})
@@ -997,98 +1044,76 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 // ---------- cooper update ----------
 
 type updatePlan struct {
-	baseChanged  bool
-	toolsChanged map[string]bool
+	baseChanged    bool
+	toolsChanged   map[string]bool
+	customImages   []string
+	targetImplicit []config.ImplicitToolConfig
 }
 
-// collectUpdatePlan compares the persisted container versions against either
-// the current host versions or the latest upstream versions, mutating cfg with
-// the newly selected versions when a rebuild is needed.
-func collectUpdatePlan(
-	cfg *config.Config,
-	latestResolver func(string) (string, error),
-	hostDetector func(string) (string, error),
-	out io.Writer,
-) updatePlan {
+// collectUpdatePlan refreshes desired state, compares it with built state, and
+// returns the rebuild plan for cooper update.
+func collectUpdatePlan(cfg *config.Config, cliDir string, out io.Writer) (updatePlan, error) {
 	if out == nil {
 		out = io.Discard
 	}
 
 	plan := updatePlan{toolsChanged: map[string]bool{}}
-
-	// Check programming tools. Any mismatch here requires rebuilding the base
-	// image, which in turn forces all enabled tool images to rebuild.
-	for i, tool := range cfg.ProgrammingTools {
-		if !tool.Enabled {
-			continue
-		}
-		switch tool.Mode {
-		case config.ModeLatest:
-			fmt.Fprintf(out, "Checking latest version for %s...\n", tool.Name)
-			latest, err := latestResolver(tool.Name)
-			if err != nil {
-				fmt.Fprintf(out, "  Warning: could not resolve latest %s: %v\n", tool.Name, err)
-				continue
-			}
-			if latest != tool.ContainerVersion {
-				fmt.Fprintf(out, "  %s: container=%s, latest=%s (mismatch)\n",
-					tool.Name, tool.ContainerVersion, latest)
-				plan.baseChanged = true
-				cfg.ProgrammingTools[i].PinnedVersion = latest
-			}
-		case config.ModeMirror:
-			fmt.Fprintf(out, "Checking host version for %s...\n", tool.Name)
-			hostVer, err := hostDetector(tool.Name)
-			if err != nil {
-				fmt.Fprintf(out, "  Warning: could not detect host %s: %v\n", tool.Name, err)
-				continue
-			}
-			if hostVer != tool.ContainerVersion {
-				fmt.Fprintf(out, "  %s: container=%s, host=%s (mismatch)\n",
-					tool.Name, tool.ContainerVersion, hostVer)
-				plan.baseChanged = true
-				cfg.ProgrammingTools[i].HostVersion = hostVer
-			}
-		}
+	if _, err := config.RefreshDesiredToolVersions(cfg, config.DesiredVersionRefreshOptions{AllowStaleFallback: false}); err != nil {
+		return plan, err
 	}
 
-	// Check AI tool images. These can rebuild independently unless the base
-	// image changed above.
-	for i, tool := range cfg.AITools {
-		if !tool.Enabled {
+	for _, tool := range cfg.ProgrammingTools {
+		if !tool.Enabled || tool.Mode == config.ModeOff {
 			continue
 		}
-		switch tool.Mode {
-		case config.ModeLatest:
-			fmt.Fprintf(out, "Checking latest version for %s...\n", tool.Name)
-			latest, err := latestResolver(tool.Name)
-			if err != nil {
-				fmt.Fprintf(out, "  Warning: could not resolve latest %s: %v\n", tool.Name, err)
-				continue
-			}
-			if latest != tool.ContainerVersion {
-				fmt.Fprintf(out, "  %s: container=%s, latest=%s (mismatch)\n",
-					tool.Name, tool.ContainerVersion, latest)
-				plan.toolsChanged[tool.Name] = true
-				cfg.AITools[i].PinnedVersion = latest
-			}
-		case config.ModeMirror:
-			fmt.Fprintf(out, "Checking host version for %s...\n", tool.Name)
-			hostVer, err := hostDetector(tool.Name)
-			if err != nil {
-				fmt.Fprintf(out, "  Warning: could not detect host %s: %v\n", tool.Name, err)
-				continue
-			}
-			if hostVer != tool.ContainerVersion {
-				fmt.Fprintf(out, "  %s: container=%s, host=%s (mismatch)\n",
-					tool.Name, tool.ContainerVersion, hostVer)
-				plan.toolsChanged[tool.Name] = true
-				cfg.AITools[i].HostVersion = hostVer
-			}
+		expected := expectedToolVersion(tool)
+		if tool.ContainerVersion == expected {
+			continue
 		}
+		fmt.Fprintf(out, "  %s: container=%s, expected=%s (mismatch)\n", tool.Name, tool.ContainerVersion, expected)
+		plan.baseChanged = true
 	}
 
-	return plan
+	for _, tool := range cfg.AITools {
+		if !tool.Enabled || tool.Mode == config.ModeOff {
+			continue
+		}
+		expected := expectedToolVersion(tool)
+		if tool.ContainerVersion == expected {
+			continue
+		}
+		fmt.Fprintf(out, "  %s: container=%s, expected=%s (mismatch)\n", tool.Name, tool.ContainerVersion, expected)
+		plan.toolsChanged[tool.Name] = true
+	}
+
+	builtBaseNodeVersion, expectedBaseNodeVersion, baseNodeMismatch, err := config.BaseNodeVersionDrift(cfg)
+	if err != nil {
+		return plan, err
+	}
+	if baseNodeMismatch {
+		if strings.TrimSpace(builtBaseNodeVersion) == "" {
+			builtBaseNodeVersion = "(unknown)"
+		}
+		fmt.Fprintf(out, "  base node runtime: built=%s, expected=%s (mismatch)\n", builtBaseNodeVersion, expectedBaseNodeVersion)
+		plan.baseChanged = true
+	}
+
+	targetImplicit, err := config.ResolveImplicitTools(cfg)
+	if err != nil {
+		return plan, err
+	}
+	plan.targetImplicit = targetImplicit
+	for _, warning := range config.CompareImplicitTools(cfg.ImplicitTools, targetImplicit) {
+		fmt.Fprintln(out, warning)
+		plan.baseChanged = true
+	}
+
+	customImages, err := discoverCustomImageNames(cliDir)
+	if err != nil {
+		return plan, err
+	}
+	plan.customImages = customImages
+	return plan, nil
 }
 
 func runUpdate(cmd *cobra.Command, args []string) error {
@@ -1096,8 +1121,13 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	baseDir := filepath.Join(cooperDir, "base")
+	cliDir := filepath.Join(cooperDir, "cli")
 
-	plan := collectUpdatePlan(cfg, config.ResolveLatestVersion, config.DetectHostVersion, os.Stderr)
+	plan, err := collectUpdatePlan(cfg, cliDir, os.Stderr)
+	if err != nil {
+		return fmt.Errorf("collect update plan: %w", err)
+	}
 	baseChanged := plan.baseChanged
 	toolsChanged := plan.toolsChanged
 
@@ -1111,9 +1141,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	// 3. Regenerate templates.
 	fmt.Fprintln(os.Stderr, "Regenerating templates...")
-	baseDir := filepath.Join(cooperDir, "base")
-	cliDir := filepath.Join(cooperDir, "cli")
-	if err := templates.WriteAllTemplates(baseDir, cliDir, cfg); err != nil {
+	if err := templates.WriteAllTemplates(baseDir, cliDir, cfg, plan.targetImplicit); err != nil {
 		return fmt.Errorf("write templates: %w", err)
 	}
 
@@ -1132,7 +1160,9 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 5. Rebuild base if programming tools changed.
+	configPath := filepath.Join(cooperDir, "config.json")
+
+	// 5. Rebuild base if programming tools or implicit tooling changed.
 	if baseChanged {
 		fmt.Fprintln(os.Stderr, "Rebuilding base image...")
 		baseDockerfile := filepath.Join(baseDir, "Dockerfile")
@@ -1142,6 +1172,14 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		}
 		if err := docker.BuildImage(docker.GetImageBase(), baseDockerfile, baseDir, buildArgs, false); err != nil {
 			return fmt.Errorf("rebuild base image: %w", err)
+		}
+		// Persist base built state before rebuilding children. If a later child
+		// rebuild fails, the config still needs to reflect the real rebuilt base.
+		updateProgrammingToolContainerVersions(cfg)
+		setBuiltBaseNodeVersion(cfg)
+		setBuiltImplicitTools(cfg, plan.targetImplicit)
+		if err := config.SaveConfig(configPath, cfg); err != nil {
+			return fmt.Errorf("save config after base rebuild: %w", err)
 		}
 	}
 
@@ -1160,6 +1198,21 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 			if err := docker.BuildImage(imageName, dockerfile, toolDir, nil, false); err != nil {
 				return fmt.Errorf("rebuild %s: %w", tool.Name, err)
 			}
+			// Keep each successful child image reflected in built state even if a
+			// later child rebuild fails in the same update command.
+			updateAIToolContainerVersion(cfg, tool.Name)
+			if err := config.SaveConfig(configPath, cfg); err != nil {
+				return fmt.Errorf("save config after %s rebuild: %w", tool.Name, err)
+			}
+		}
+		for _, name := range plan.customImages {
+			toolDir := filepath.Join(cliDir, name)
+			imageName := docker.GetImageCLI(name)
+			dockerfile := filepath.Join(toolDir, "Dockerfile")
+			fmt.Fprintf(os.Stderr, "Rebuilding custom image %s...\n", name)
+			if err := docker.BuildImage(imageName, dockerfile, toolDir, nil, false); err != nil {
+				return fmt.Errorf("rebuild custom image %s: %w", name, err)
+			}
 		}
 	} else {
 		for name := range toolsChanged {
@@ -1169,6 +1222,12 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "Rebuilding %s image...\n", name)
 			if err := docker.BuildImage(imageName, dockerfile, toolDir, nil, false); err != nil {
 				return fmt.Errorf("rebuild %s: %w", name, err)
+			}
+			// Tool-only rebuilds also persist incrementally so the saved config keeps
+			// matching any already-successful child rebuilds from this run.
+			updateAIToolContainerVersion(cfg, name)
+			if err := config.SaveConfig(configPath, cfg); err != nil {
+				return fmt.Errorf("save config after %s rebuild: %w", name, err)
 			}
 		}
 	}
@@ -1182,13 +1241,6 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 				fmt.Fprintf(os.Stderr, "Warning: squid reconfigure failed: %v\n", err)
 			}
 		}
-	}
-
-	// 8. Update ContainerVersion and save config.
-	updateContainerVersions(cfg)
-	configPath := filepath.Join(cooperDir, "config.json")
-	if err := config.SaveConfig(configPath, cfg); err != nil {
-		return fmt.Errorf("save config: %w", err)
 	}
 
 	fmt.Fprintln(os.Stderr, "Update complete.")
@@ -1211,6 +1263,11 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 		{Name: "copilot", Enabled: true, Mode: config.ModeLatest, ContainerVersion: "0.7.2", HostVersion: "0.7.2"},
 		{Name: "codex", Enabled: false, Mode: config.ModeOff},
 		{Name: "opencode", Enabled: false, Mode: config.ModeOff},
+	}
+	cfg.ImplicitTools = []config.ImplicitToolConfig{
+		{Name: "gopls", Kind: config.ImplicitToolKindLSP, ParentTool: "go", Binary: "gopls", ContainerVersion: "v0.18.1"},
+		{Name: "typescript-language-server", Kind: config.ImplicitToolKindLSP, ParentTool: "node", Binary: "typescript-language-server", ContainerVersion: "4.4.1"},
+		{Name: "typescript", Kind: config.ImplicitToolKindSupport, ParentTool: "node", Binary: "tsc", ContainerVersion: "5.8.3"},
 	}
 	cfg.PortForwardRules = []config.PortForwardRule{
 		{ContainerPort: 5432, HostPort: 5432, Description: "PostgreSQL"},
@@ -1342,69 +1399,10 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 }
 
 // checkToolVersions inspects each enabled tool for version mismatches.
-// For Mirror mode it detects the live host version and updates cfg.HostVersion
-// so the About screen displays correct values. For Latest mode it resolves
-// the latest upstream version (with a short timeout so startup is not blocked
-// forever). Returns a slice of human-readable warning strings.
+// Startup warnings are computed from a deep-copied config so cooper up stays
+// non-destructive and the original loaded config remains unchanged.
 func checkToolVersions(cfg *config.Config) []string {
-	var warnings []string
-
-	// Helper: check a single tool, update its HostVersion in the config.
-	check := func(tool *config.ToolConfig) {
-		if !tool.Enabled || tool.Mode == config.ModeOff {
-			return
-		}
-
-		var expected string
-		switch tool.Mode {
-		case config.ModeMirror:
-			hostVer, err := config.DetectHostVersion(tool.Name)
-			if err != nil {
-				return
-			}
-			// Update the config's HostVersion so the About screen shows the live value.
-			tool.HostVersion = hostVer
-			expected = hostVer
-		case config.ModeLatest:
-			type result struct {
-				ver string
-				err error
-			}
-			ch := make(chan result, 1)
-			go func() {
-				v, e := config.ResolveLatestVersion(tool.Name)
-				ch <- result{v, e}
-			}()
-			select {
-			case r := <-ch:
-				if r.err != nil {
-					return
-				}
-				expected = r.ver
-			case <-time.After(5 * time.Second):
-				return
-			}
-		case config.ModePin:
-			expected = tool.PinnedVersion
-		default:
-			return
-		}
-
-		status := config.CompareVersions(tool.ContainerVersion, expected, tool.Mode)
-		if status == config.VersionMismatch {
-			warnings = append(warnings, fmt.Sprintf(
-				"%s: container=%s, expected=%s (%s mode)",
-				tool.Name, tool.ContainerVersion, expected, tool.Mode,
-			))
-		}
-	}
-
-	for i := range cfg.ProgrammingTools {
-		check(&cfg.ProgrammingTools[i])
-	}
-	for i := range cfg.AITools {
-		check(&cfg.AITools[i])
-	}
+	_, warnings := config.PrepareToolVersionSnapshot(cfg, 5*time.Second)
 	return warnings
 }
 
