@@ -294,7 +294,7 @@ Cooper does **not** install Playwright itself or download browsers. Your project
 | `~/.cooper/cache/pip` | `/home/user/.cache/pip` | read-write | pip cache |
 | `~/.cooper/tmp/{container}` | `/tmp` | read-write | Per-barrel temp directory |
 
-Language caches are Cooper-managed under `~/.cooper/cache/`, auto-configured based on which programming tools are enabled. They start empty and fill naturally during normal package-manager usage. Each barrel gets its own host-backed `/tmp` directory, isolated per container to avoid collisions between barrels sharing a workspace.
+Language caches are Cooper-managed under `~/.cooper/cache/`, auto-configured based on which programming tools are enabled. They start empty and fill naturally during normal package-manager usage. Each barrel gets its own host-backed `/tmp` directory, isolated per container to avoid collisions between barrels sharing a workspace. Cooper clears the entire `~/.cooper/tmp/` tree whenever `cooper up` starts and whenever it shuts down, so every control-plane session begins and ends with a pristine temp area.
 
 ## Security Model
 

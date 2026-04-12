@@ -86,6 +86,10 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 
 	homeDir, _ := os.UserHomeDir()
 
+	if err := docker.ResetBarrelTmpRoot(a.cooperDir); err != nil {
+		return fmt.Errorf("reset barrel tmp root: %w", err)
+	}
+
 	// Pre-check: verify clipboard prerequisites before anything else.
 	// Refuse to start if clipboard host tools are missing.
 	if a.clipboardReader != nil {
@@ -286,6 +290,7 @@ func (a *CooperApp) StopWithProgress(onStep func(int)) error {
 	if onStep == nil {
 		onStep = func(int) {}
 	}
+	var errs []string
 
 	// Step 0: Stop ACL listener.
 	if a.aclListener != nil {
@@ -307,21 +312,36 @@ func (a *CooperApp) StopWithProgress(onStep func(int)) error {
 	for _, b := range barrels {
 		if err := docker.StopBarrel(b.Name); err == nil {
 			a.revokeClipboardToken(b.Name)
+		} else {
+			errs = append(errs, fmt.Sprintf("stop barrel %s: %v", b.Name, err))
 		}
 	}
 	onStep(2)
 
 	// Step 3: Stop proxy container.
-	docker.StopProxy()
+	if err := docker.StopProxy(); err != nil {
+		errs = append(errs, fmt.Sprintf("stop proxy: %v", err))
+	}
 	onStep(3)
 
-	// Step 4: Sealed — close loggers and stop tailer.
+	// Step 4: Reset barrel /tmp state and close loggers.
+	if err := docker.ResetBarrelTmpRoot(a.cooperDir); err != nil {
+		errs = append(errs, fmt.Sprintf("reset barrel tmp root: %v", err))
+	}
 	if a.squidTailer != nil {
 		a.squidTailer.Stop()
 	}
-	a.bridgeLogger.Close()
-	a.aclLogger.Close()
+	if err := a.bridgeLogger.Close(); err != nil {
+		errs = append(errs, fmt.Sprintf("close bridge logger: %v", err))
+	}
+	if err := a.aclLogger.Close(); err != nil {
+		errs = append(errs, fmt.Sprintf("close ACL logger: %v", err))
+	}
 	onStep(4)
+
+	if len(errs) > 0 {
+		return fmt.Errorf("shutdown: %s", strings.Join(errs, "; "))
+	}
 
 	return nil
 }

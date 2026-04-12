@@ -358,7 +358,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
     - Per-barrel /tmp directory:
       - `~/.cooper/tmp/{containerName}` → `/tmp` (read-write) — each barrel gets its own host-backed /tmp
       - Isolated per container to avoid temp file collisions between barrels sharing a workspace.
-      - Persists across container restarts (useful for AI tools that write temp files for cross-session context).
+      - Cooper clears the entire `~/.cooper/tmp/` tree when `cooper up` starts and when it shuts down, so each control-plane session starts pristine.
       - Host directory is pre-created before mount (`mkdir -p`), same as other mount dirs.
     - Language-specific caches (Cooper-managed, auto-configured based on enabled programming tools):
       - Go: `~/.cooper/cache/go-mod` → `/home/user/go/pkg/mod` (read-write), `~/.cooper/cache/go-build` → `/home/user/.cache/go-build` (read-write)

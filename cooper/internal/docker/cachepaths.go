@@ -42,25 +42,25 @@ func languageCacheSpecs(cooperDir string, cfg *config.Config) []cacheMountSpec {
 				cacheMountSpec{
 					Name:          "go-mod",
 					HostPath:      filepath.Join(cooperDir, "cache", "go-mod"),
-					ContainerPath: filepath.Join(containerHome, "go", "pkg", "mod"),
+					ContainerPath: BarrelGoModCacheDir,
 				},
 				cacheMountSpec{
 					Name:          "go-build",
 					HostPath:      filepath.Join(cooperDir, "cache", "go-build"),
-					ContainerPath: filepath.Join(containerHome, ".cache", "go-build"),
+					ContainerPath: BarrelGoBuildCacheDir,
 				},
 			)
 		case "node":
 			specs = append(specs, cacheMountSpec{
 				Name:          "npm",
 				HostPath:      filepath.Join(cooperDir, "cache", "npm"),
-				ContainerPath: filepath.Join(containerHome, ".npm"),
+				ContainerPath: BarrelNPMCacheDir,
 			})
 		case "python":
 			specs = append(specs, cacheMountSpec{
 				Name:          "pip",
 				HostPath:      filepath.Join(cooperDir, "cache", "pip"),
-				ContainerPath: filepath.Join(containerHome, ".cache", "pip"),
+				ContainerPath: BarrelPIPCacheDir,
 			})
 		}
 	}
@@ -109,7 +109,8 @@ func barrelMountDirs(homeDir, toolName, cooperDir, containerName string, cfg *co
 	)
 
 	// Per-barrel /tmp directory — isolated per container to avoid
-	// collisions between barrels sharing a workspace.
+	// collisions between barrels sharing a workspace. Cooper resets the
+	// shared tmp root at cooper-up startup and shutdown.
 	dirs = append(dirs, filepath.Join(cooperDir, "tmp", containerName))
 
 	return dirs

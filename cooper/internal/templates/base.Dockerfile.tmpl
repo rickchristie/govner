@@ -149,9 +149,17 @@ RUN update-ca-certificates && \
 
 USER user
 
+{{- if .HasGo}}
+# Make Go's runtime cache locations explicit so barrel mounts and `go env`
+# stay aligned even if upstream image defaults change.
+ENV GOPATH={{.GoPath}}
+ENV GOMODCACHE={{.GoModCache}}
+ENV GOCACHE={{.GoBuildCache}}
+{{- end}}
+
 # Configure npm to use user-writable directory for global packages
 ENV NPM_CONFIG_PREFIX=/home/user/.npm-global
-ENV PATH=/home/user/.local/bin:/home/user/.npm-global/bin:/home/user/.opencode/bin:$PATH
+ENV PATH=/home/user/.local/bin:/home/user/.npm-global/bin:/home/user/.opencode/bin{{- if .HasGo}}:{{.GoBinDir}}{{- end}}:$PATH
 ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/cooper-ca.crt
 
 # ============================================================================

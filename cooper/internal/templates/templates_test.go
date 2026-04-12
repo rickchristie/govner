@@ -162,6 +162,10 @@ func TestRenderBaseDockerfile_DefaultConfig(t *testing.T) {
 	assertContains(t, result, "USER_UID")
 	assertContains(t, result, "USER_GID")
 	assertContains(t, result, "useradd")
+	assertContains(t, result, "ENV GOPATH="+docker.BarrelGoPath)
+	assertContains(t, result, "ENV GOMODCACHE="+docker.BarrelGoModCacheDir)
+	assertContains(t, result, "ENV GOCACHE="+docker.BarrelGoBuildCacheDir)
+	assertContains(t, result, "ENV PATH=/home/user/.local/bin:/home/user/.npm-global/bin:/home/user/.opencode/bin:"+docker.BarrelGoBinDir+":$PATH")
 
 	// Should have entrypoint
 	assertContains(t, result, "COPY entrypoint.sh")
@@ -206,6 +210,8 @@ func TestRenderBaseDockerfile_NoGo(t *testing.T) {
 	// The x11-bridge build stage always uses golang, but the runtime
 	// stage should use debian when Go is disabled.
 	assertContains(t, result, "FROM golang:1.25-bookworm AS x11-bridge-builder")
+	assertNotContains(t, result, "ENV GOPATH=")
+	assertNotContains(t, result, docker.BarrelGoBinDir)
 }
 
 func TestRenderBaseDockerfile_NodeVersion(t *testing.T) {
@@ -803,6 +809,7 @@ func TestRenderEntrypoint_UnifiedXvfb(t *testing.T) {
 	// Xvfb is now started for ALL barrels via unified start_shared_xvfb,
 	// not inside the OpenCode conditional block.
 	assertContains(t, result, "start_shared_xvfb")
+	assertContains(t, result, docker.BarrelGoBinDir)
 	assertContains(t, result, "ensure_playwright_runtime")
 	assertContains(t, result, "fc-cache")
 	assertContains(t, result, ".fonts")
@@ -817,6 +824,7 @@ func TestRenderEntrypoint_NoToolBooleans(t *testing.T) {
 	// booleans like HasClaudeCode. This is a compile-time check.
 	d := entrypointData{
 		HasGo:            true,
+		GoBinDir:         docker.BarrelGoBinDir,
 		BridgePort:       4343,
 		ClipboardEnabled: true,
 	}
@@ -827,6 +835,9 @@ func TestRenderEntrypoint_NoToolBooleans(t *testing.T) {
 	}
 	if d.BridgePort != 4343 {
 		t.Errorf("expected BridgePort=4343, got %d", d.BridgePort)
+	}
+	if d.GoBinDir != docker.BarrelGoBinDir {
+		t.Errorf("expected GoBinDir=%q, got %q", docker.BarrelGoBinDir, d.GoBinDir)
 	}
 	if !d.ClipboardEnabled {
 		t.Error("expected ClipboardEnabled=true")

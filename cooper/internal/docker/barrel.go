@@ -156,12 +156,6 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 	return nil
 }
 
-// containerHome is the home directory of the unprivileged user inside barrel
-// containers. The barrel Dockerfile creates this user as "user" with home
-// /home/user, so all auth/config/cache mounts must target paths under this
-// directory rather than the host user's home.
-const containerHome = "/home/user"
-
 // appendVolumeMounts adds all volume mount flags to the docker run args.
 // cooperDir provides Cooper-managed mounts such as language caches, CA,
 // socat rules, clipboard shims/tokens, Playwright support dirs, and the
@@ -189,7 +183,7 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 		mountRW(homeDir, ".claude", &args)
 		claudeJSON := filepath.Join(homeDir, ".claude.json")
 		if fileExists(claudeJSON) {
-			args = append(args, "-v", fmt.Sprintf("%s:%s:rw", claudeJSON, filepath.Join(containerHome, ".claude.json")))
+			args = append(args, "-v", fmt.Sprintf("%s:%s:rw", claudeJSON, filepath.Join(BarrelHomeDir, ".claude.json")))
 		}
 	case "copilot":
 		mountRW(homeDir, ".copilot", &args)
@@ -206,7 +200,7 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 	// Git config (read-only).
 	gitconfig := filepath.Join(homeDir, ".gitconfig")
 	if fileExists(gitconfig) {
-		args = append(args, "-v", fmt.Sprintf("%s:%s:ro", gitconfig, filepath.Join(containerHome, ".gitconfig")))
+		args = append(args, "-v", fmt.Sprintf("%s:%s:ro", gitconfig, filepath.Join(BarrelHomeDir, ".gitconfig")))
 	}
 
 	// Language-specific caches (Cooper-managed, under cooperDir/cache/).
@@ -241,14 +235,15 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 	// Playwright support mounts: Cooper-managed fonts (read-only) and
 	// Playwright browser cache (read-write).
 	fontsDir := filepath.Join(cooperDir, "fonts")
-	args = append(args, "-v", fontsDir+":/home/user/.local/share/fonts:ro")
+	args = append(args, "-v", fontsDir+":"+BarrelFontsDir+":ro")
 
 	pwCacheDir := filepath.Join(cooperDir, "cache", "ms-playwright")
-	args = append(args, "-v", pwCacheDir+":/home/user/.cache/ms-playwright:rw")
+	args = append(args, "-v", pwCacheDir+":"+BarrelPlaywrightCacheDir+":rw")
 
 	// Per-barrel /tmp directory. Each barrel gets its own host-backed /tmp
 	// under ~/.cooper/tmp/{containerName}/ to avoid collisions between
-	// barrels and to persist temp files across container restarts.
+	// barrels. Cooper clears the shared tmp root when cooper up starts and
+	// when it shuts down, so each control-plane session begins pristine.
 	barrelTmpDir := filepath.Join(cooperDir, "tmp", containerName)
 	args = append(args, "-v", barrelTmpDir+":/tmp:rw")
 
@@ -258,7 +253,7 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 // mountRW appends a read-write volume mount for a directory relative to home.
 func mountRW(homeDir, relPath string, args *[]string) {
 	hostPath := filepath.Join(homeDir, relPath)
-	containerPath := filepath.Join(containerHome, relPath)
+	containerPath := filepath.Join(BarrelHomeDir, relPath)
 	*args = append(*args, "-v", fmt.Sprintf("%s:%s:rw", hostPath, containerPath))
 }
 

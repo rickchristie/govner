@@ -165,6 +165,17 @@ func fixCooperDirPermissions(t *testing.T, cooperDir string) {
 	_ = testdocker.FixOwnership(cooperDir)
 }
 
+func assertDirEmpty(t *testing.T, path string) {
+	t.Helper()
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatalf("read dir %s: %v", path, err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected %s to be empty, got %d entries", path, len(entries))
+	}
+}
+
 func startProxyHTTPSTarget(t *testing.T) *testdocker.HTTPSTarget {
 	t.Helper()
 
@@ -376,6 +387,34 @@ func TestCooperApp_StartStop(t *testing.T) {
 	}
 }
 
+func TestCooperApp_StartClearsBarrelTmpRoot(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	staleFile := filepath.Join(docker.BarrelTmpRoot(cooperDir), "barrel-stale", "nested", "stale.txt")
+	if err := os.MkdirAll(filepath.Dir(staleFile), 0o755); err != nil {
+		t.Fatalf("mkdir stale tmp dir: %v", err)
+	}
+	if err := os.WriteFile(staleFile, []byte("stale"), 0o644); err != nil {
+		t.Fatalf("write stale tmp file: %v", err)
+	}
+
+	app := NewCooperApp(cfg, cooperDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	assertDirEmpty(t, docker.BarrelTmpRoot(cooperDir))
+}
+
 func TestCooperApp_StopWithBarrelReturnsQuickly(t *testing.T) {
 	skipIfNoDocker(t)
 	skipIfNoProxyImage(t)
@@ -407,6 +446,34 @@ func TestCooperApp_StopWithBarrelReturnsQuickly(t *testing.T) {
 	if running {
 		t.Error("proxy still running after Stop()")
 	}
+}
+
+func TestCooperApp_StopClearsBarrelTmpRoot(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		cleanupDocker(t)
+	})
+
+	hostTmpFile := filepath.Join(docker.BarrelTmpRoot(cooperDir), barrelName, "cooper-stop-tmp.txt")
+	if _, err := barrelExec(barrelName, "printf stop-test > /tmp/cooper-stop-tmp.txt"); err != nil {
+		t.Fatalf("write tmp file inside barrel: %v", err)
+	}
+	if _, err := os.Stat(hostTmpFile); err != nil {
+		t.Fatalf("expected host-backed tmp file before stop: %v", err)
+	}
+
+	if err := app.Stop(); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
+
+	assertDirEmpty(t, docker.BarrelTmpRoot(cooperDir))
 }
 
 // TestCooperApp_ACLFlow starts the app, subscribes to ACL channels, simulates

@@ -488,6 +488,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 	defer ul.Close()
 	ul.LogStart()
 
+	if err := docker.ResetBarrelTmpRoot(cooperDir); err != nil {
+		err = fmt.Errorf("reset barrel tmp root: %w", err)
+		ul.LogDone(err)
+		return err
+	}
+
 	// Create the loading screen model.
 	loadModel := loading.New(false)
 

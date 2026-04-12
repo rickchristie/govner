@@ -26,11 +26,15 @@ var errAccessDenied []byte
 
 // baseDockerfileData holds template data for the base image Dockerfile.
 type baseDockerfileData struct {
-	HasGo       bool
-	GoVersion   string
-	HasNode     bool
-	NodeVersion string
-	HasPython   bool
+	HasGo        bool
+	GoVersion    string
+	GoPath       string
+	GoBinDir     string
+	GoModCache   string
+	GoBuildCache string
+	HasNode      bool
+	NodeVersion  string
+	HasPython    bool
 	// Runtime deps flags (needed even though tools install in child images)
 	HasCodex    bool // Controls bubblewrap build
 	HasOpenCode bool // Controls xvfb/xclip install
@@ -72,6 +76,7 @@ type squidConfData struct {
 // not baked into the template. BridgePort is kept as a fallback default.
 type entrypointData struct {
 	HasGo            bool
+	GoBinDir         string
 	BridgePort       int
 	ClipboardEnabled bool
 }
@@ -152,14 +157,18 @@ func buildBaseDockerfileData(cfg *config.Config, implicit []config.ImplicitToolC
 	}
 
 	data := baseDockerfileData{
-		HasGo:       isToolEnabled(cfg.ProgrammingTools, "go"),
-		GoVersion:   goVersion,
-		HasNode:     isToolEnabled(cfg.ProgrammingTools, "node"),
-		NodeVersion: nodeVersion,
-		HasPython:   isToolEnabled(cfg.ProgrammingTools, "python"),
-		HasCodex:    isToolEnabled(cfg.AITools, "codex"),
-		HasOpenCode: isToolEnabled(cfg.AITools, "opencode"),
-		ProxyPort:   cfg.ProxyPort,
+		HasGo:        isToolEnabled(cfg.ProgrammingTools, "go"),
+		GoVersion:    goVersion,
+		GoPath:       docker.BarrelGoPath,
+		GoBinDir:     docker.BarrelGoBinDir,
+		GoModCache:   docker.BarrelGoModCacheDir,
+		GoBuildCache: docker.BarrelGoBuildCacheDir,
+		HasNode:      isToolEnabled(cfg.ProgrammingTools, "node"),
+		NodeVersion:  nodeVersion,
+		HasPython:    isToolEnabled(cfg.ProgrammingTools, "python"),
+		HasCodex:     isToolEnabled(cfg.AITools, "codex"),
+		HasOpenCode:  isToolEnabled(cfg.AITools, "opencode"),
+		ProxyPort:    cfg.ProxyPort,
 	}
 	for _, tool := range implicit {
 		switch tool.Name {
@@ -210,26 +219,26 @@ var builtinTools = map[string]toolDefinition{
 	"claude": {
 		DisplayName:     "Claude Code",
 		AutoApproveFlag: "--dangerously-skip-permissions",
-		ToolDirs:        []string{"/home/user/.claude"},
+		ToolDirs:        []string{filepath.Join(docker.BarrelHomeDir, ".claude")},
 	},
 	"copilot": {
 		DisplayName:     "Copilot CLI",
 		AutoApproveFlag: "--allow-all-tools",
-		ToolDirs:        []string{"/home/user/.copilot"},
+		ToolDirs:        []string{filepath.Join(docker.BarrelHomeDir, ".copilot")},
 	},
 	"codex": {
 		DisplayName:     "Codex CLI",
 		AutoApproveFlag: "--dangerously-bypass-approvals-and-sandbox",
-		ToolDirs:        []string{"/home/user/.codex"},
+		ToolDirs:        []string{filepath.Join(docker.BarrelHomeDir, ".codex")},
 	},
 	"opencode": {
 		DisplayName:     "OpenCode",
 		AutoApproveFlag: "",
 		ToolDirs: []string{
-			"/home/user/.config/opencode",
-			"/home/user/.local/share/opencode",
-			"/home/user/.local/state/opencode",
-			"/home/user/.opencode",
+			filepath.Join(docker.BarrelHomeDir, ".config", "opencode"),
+			filepath.Join(docker.BarrelHomeDir, ".local", "share", "opencode"),
+			filepath.Join(docker.BarrelHomeDir, ".local", "state", "opencode"),
+			filepath.Join(docker.BarrelHomeDir, ".opencode"),
 		},
 	},
 }
@@ -370,6 +379,7 @@ func RenderEntrypoint(cfg *config.Config) (string, error) {
 
 	data := entrypointData{
 		HasGo:            isToolEnabled(cfg.ProgrammingTools, "go"),
+		GoBinDir:         docker.BarrelGoBinDir,
 		BridgePort:       cfg.BridgePort,
 		ClipboardEnabled: anyAIToolEnabled(cfg.AITools),
 	}

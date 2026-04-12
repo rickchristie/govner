@@ -60,7 +60,7 @@ handle_shutdown_signal() {
 # so it's available to both interactive shells and autostart commands.
 # Also written to .profile for non-bash login shells.
 # ============================================================================
-COOPER_PATH_LINE='export PATH="/home/user/.local/bin:/home/user/.npm-global/bin:/home/user/.opencode/bin{{- if .HasGo}}:/usr/local/go/bin:/go/bin{{- end}}:$PATH"'
+COOPER_PATH_LINE='export PATH="/home/user/.local/bin:/home/user/.npm-global/bin:/home/user/.opencode/bin{{- if .HasGo}}:/usr/local/go/bin:{{.GoBinDir}}{{- end}}:$PATH"'
 
 if ! grep -q "Cooper: PATH" /home/user/.bashrc 2>/dev/null; then
     # Prepend to .bashrc (before the interactive guard) so PATH is set

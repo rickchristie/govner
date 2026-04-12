@@ -48,22 +48,22 @@ func TestLanguageCacheSpecs_GoNodePython(t *testing.T) {
 		{
 			Name:          "go-mod",
 			HostPath:      filepath.Join(cooperDir, "cache", "go-mod"),
-			ContainerPath: "/home/user/go/pkg/mod",
+			ContainerPath: BarrelGoModCacheDir,
 		},
 		{
 			Name:          "go-build",
 			HostPath:      filepath.Join(cooperDir, "cache", "go-build"),
-			ContainerPath: "/home/user/.cache/go-build",
+			ContainerPath: BarrelGoBuildCacheDir,
 		},
 		{
 			Name:          "npm",
 			HostPath:      filepath.Join(cooperDir, "cache", "npm"),
-			ContainerPath: "/home/user/.npm",
+			ContainerPath: BarrelNPMCacheDir,
 		},
 		{
 			Name:          "pip",
 			HostPath:      filepath.Join(cooperDir, "cache", "pip"),
-			ContainerPath: "/home/user/.cache/pip",
+			ContainerPath: BarrelPIPCacheDir,
 		},
 	}
 
@@ -95,6 +95,41 @@ func TestLanguageCacheSpecs_GoOnly(t *testing.T) {
 	}
 	if got[1].Name != "go-build" {
 		t.Errorf("specs[1].Name = %q, want \"go-build\"", got[1].Name)
+	}
+	if got[0].ContainerPath != BarrelGoModCacheDir {
+		t.Errorf("specs[0].ContainerPath = %q, want %q", got[0].ContainerPath, BarrelGoModCacheDir)
+	}
+	if got[1].ContainerPath != BarrelGoBuildCacheDir {
+		t.Errorf("specs[1].ContainerPath = %q, want %q", got[1].ContainerPath, BarrelGoBuildCacheDir)
+	}
+}
+
+func TestLanguageCacheSpecs_UseSharedRuntimeCachePaths(t *testing.T) {
+	cooperDir := "/tmp/cooper"
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{
+			{Name: "go", Enabled: true},
+			{Name: "node", Enabled: true},
+			{Name: "python", Enabled: true},
+		},
+	}
+
+	got := languageCacheSpecs(cooperDir, cfg)
+	wantByName := map[string]string{
+		"go-mod":   BarrelGoModCacheDir,
+		"go-build": BarrelGoBuildCacheDir,
+		"npm":      BarrelNPMCacheDir,
+		"pip":      BarrelPIPCacheDir,
+	}
+
+	for _, spec := range got {
+		want, ok := wantByName[spec.Name]
+		if !ok {
+			t.Fatalf("unexpected cache spec %q", spec.Name)
+		}
+		if spec.ContainerPath != want {
+			t.Errorf("spec %q container path = %q, want %q", spec.Name, spec.ContainerPath, want)
+		}
 	}
 }
 
@@ -266,6 +301,35 @@ func TestBarrelMountDirs_AlwaysIncludesPlaywright(t *testing.T) {
 	for _, want := range wantContains {
 		if !slices.Contains(got, want) {
 			t.Errorf("mount dirs missing Playwright dir %q\ngot: %v", want, got)
+		}
+	}
+}
+
+func TestAppendVolumeMounts_UseSharedCacheDestinations(t *testing.T) {
+	homeDir := t.TempDir()
+	absWorkspace := filepath.Join(t.TempDir(), "workspace")
+	cooperDir := filepath.Join(t.TempDir(), "cooper")
+	containerName := "barrel-test-claude"
+	cfg := &config.Config{
+		ProgrammingTools: []config.ToolConfig{
+			{Name: "go", Enabled: true},
+			{Name: "node", Enabled: true},
+			{Name: "python", Enabled: true},
+		},
+	}
+
+	got := appendVolumeMounts(nil, absWorkspace, homeDir, cfg, cooperDir, "claude", containerName)
+	wantMounts := []string{
+		filepath.Join(cooperDir, "cache", "go-mod") + ":" + BarrelGoModCacheDir + ":rw",
+		filepath.Join(cooperDir, "cache", "go-build") + ":" + BarrelGoBuildCacheDir + ":rw",
+		filepath.Join(cooperDir, "cache", "npm") + ":" + BarrelNPMCacheDir + ":rw",
+		filepath.Join(cooperDir, "cache", "pip") + ":" + BarrelPIPCacheDir + ":rw",
+		filepath.Join(cooperDir, "cache", "ms-playwright") + ":" + BarrelPlaywrightCacheDir + ":rw",
+	}
+
+	for _, want := range wantMounts {
+		if !slices.Contains(got, want) {
+			t.Errorf("volume args missing cache mount %q\ngot: %v", want, got)
 		}
 	}
 }
