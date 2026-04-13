@@ -18,6 +18,11 @@ type HelpBinding struct {
 	Desc string
 }
 
+// AlertPlayer plays host-side alerts for new proxy approvals.
+type AlertPlayer interface {
+	PlayProxyApprovalNeeded() error
+}
+
 // Model is the root BubbleTea model for the Cooper TUI. It owns the
 // tab bar, modal overlay, and delegates to per-tab SubModels for content.
 type Model struct {
@@ -57,6 +62,7 @@ type Model struct {
 	clipboardError     string
 	clipboardFailedAt  time.Time
 	clipboardExpiredAt time.Time
+	alertPlayer        AlertPlayer
 
 	// Shutdown state.
 	shuttingDown  bool
@@ -124,6 +130,9 @@ func (m *Model) SetAboutModel(sm SubModel) { m.aboutModel = sm }
 
 // SetLoadingModel wires the loading/startup screen sub-model.
 func (m *Model) SetLoadingModel(sm SubModel) { m.loadingModel = sm }
+
+// SetAlertPlayer wires the global proxy alert dependency.
+func (m *Model) SetAlertPlayer(p AlertPlayer) { m.alertPlayer = p }
 
 // SetActiveTab switches to the given tab (for tui-test --screen).
 func (m *Model) SetActiveTab(tab theme.TabID) {

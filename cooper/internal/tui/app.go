@@ -113,7 +113,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				listenCmd = listenACL(ch)
 			}
 		}
-		return m, tea.Batch(cmd, listenCmd)
+		return m, tea.Batch(cmd, listenCmd, playProxyAlertCmd(m.alertPlayer))
 
 	case events.ACLDecisionMsg:
 		// Route decision to the appropriate history tab.

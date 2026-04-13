@@ -265,6 +265,11 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - Cooper uses Squid SSL bump (TLS interception) to decrypt HTTPS traffic. This allows the monitor to show
         full request details, not just the domain name. A Cooper CA certificate is generated during `cooper configure`
         and injected into CLI containers at build time (system CA store + `NODE_EXTRA_CA_CERTS` for Node.js tools).
+      - Each new pending approval triggers one short host-side alert phrase at request arrival time, not on allow/deny outcome.
+        The progression is stateful for the current `cooper up` session: plays 1-8 use the home phrase, plays 9-16 use the
+        transition phrase, then it alternates every 8 audible plays after that.
+      - Alert cooldown is fixed at `750ms` in v1. Suppressed alerts do not advance the progression state.
+      - Audio is fail-soft: if PulseAudio/PipeWire-Pulse on Linux or `afplay` on macOS is unavailable, Cooper still starts and surfaces a startup warning.
       - Two-pane UI (40% left, 60% right): left pane shows a scrolling list of pending requests to non-whitelisted domains,
         right pane shows details of the currently selected request.
       - Each request to a non-whitelisted domain appears in the left pane with a countdown timer, sorted by time remaining (most urgent at top).

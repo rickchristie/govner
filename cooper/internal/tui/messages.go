@@ -40,6 +40,16 @@ func listenACL(ch <-chan app.ACLRequest) tea.Cmd {
 	}
 }
 
+func playProxyAlertCmd(p AlertPlayer) tea.Cmd {
+	if p == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		_ = p.PlayProxyApprovalNeeded()
+		return nil
+	}
+}
+
 // listenACLDecisions returns a tea.Cmd that blocks until a decision event
 // arrives on ch. Used to feed the Blocked/Allowed history tabs.
 func listenACLDecisions(ch <-chan app.DecisionEvent) tea.Cmd {

@@ -15,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
+	"github.com/rickchristie/govner/cooper/internal/alertsound"
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/auth"
 	"github.com/rickchristie/govner/cooper/internal/barrelenv"
@@ -696,12 +697,20 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build the App, adopting the pre-started infrastructure.
+	alertPlayer, err := alertsound.New()
+	if err != nil {
+		startupWarnings = append(startupWarnings, fmt.Sprintf("Proxy alert sound disabled: %v", err))
+		alertPlayer = alertsound.NewNoop()
+	}
+	defer alertPlayer.Close()
+
 	cooperApp := app.NewCooperApp(cfg, cooperDir)
 	cooperApp.AdoptClipboard(clipMgr, clipReader)
 	cooperApp.Adopt(aclListener, bridgeServer, hostRelay, startupWarnings)
 
 	// Transition to the main TUI.
 	mainModel := tui.NewModel(cooperApp)
+	mainModel.SetAlertPlayer(alertPlayer)
 
 	// Wire all tab sub-models.
 	containersModel := containers.New(cooperApp)
@@ -1349,6 +1358,7 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 	// Build the test app and TUI model.
 	testApp := app.NewTestApp(cfg, aclCh, bridgeLogCh)
 	mainModel := tui.NewModel(testApp)
+	mainModel.SetAlertPlayer(alertsound.NewNoop())
 
 	// Wire sub-models.
 	mainModel.SetContainersModel(containers.New(testApp))

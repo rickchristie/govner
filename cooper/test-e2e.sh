@@ -28,11 +28,12 @@ CONFIG_DIR="${SCRIPT_DIR}/.test-e2e"
 COOPER="${SCRIPT_DIR}/cooper"
 HOST_OS="$(uname -s)"
 
-# Container and network names (container names are NOT prefixed — they
-# use the same names as real Cooper for Docker DNS resolution).
-PROXY_CONTAINER="cooper-proxy"
-NETWORK_EXTERNAL="cooper-external"
-NETWORK_INTERNAL="cooper-internal"
+# Container and network names. Keep these isolated from a real Cooper session
+# so the release gate can run while barrels are already active on the host.
+PROXY_CONTAINER="${PREFIX}cooper-proxy-runtime"
+NETWORK_EXTERNAL="${PREFIX}cooper-external"
+NETWORK_INTERNAL="${PREFIX}cooper-internal"
+BARREL_PROXY_HOST="cooper-proxy"
 
 # Per-tool barrel container names.
 BARREL_CLAUDE="barrel-e2e-workspace-claude"
@@ -328,6 +329,7 @@ info "Starting proxy container..."
 if proxy_run_output=$(docker run -d \
     --name "$PROXY_CONTAINER" \
     --network "$NETWORK_EXTERNAL" \
+    --network-alias "$BARREL_PROXY_HOST" \
     --add-host=host.docker.internal:host-gateway \
     --restart unless-stopped \
     -v "${CONFIG_DIR}/proxy/squid.conf:/etc/squid/squid.conf:ro" \
@@ -346,7 +348,7 @@ else
 fi
 
 # Step 10: Connect proxy to internal network (dual-network topology).
-if proxy_connect_output=$(docker network connect "$NETWORK_INTERNAL" "$PROXY_CONTAINER" 2>&1); then
+if proxy_connect_output=$(docker network connect --alias "$BARREL_PROXY_HOST" "$NETWORK_INTERNAL" "$PROXY_CONTAINER" 2>&1); then
     pass "Proxy connected to internal network"
 else
     fail "Proxy failed to connect to internal network"
@@ -496,7 +498,6 @@ other_tools() {
 # Barrel runtime constants and helper. Keep this aligned with
 # cooper/internal/docker/StartBarrel so the manual e2e launches exercise
 # the same container contract as the real application.
-BARREL_PROXY_HOST="cooper-proxy"
 BARREL_XAUTH_PATH="/home/user/.cooper-clipboard.xauth"
 BARREL_PLAYWRIGHT_CACHE="/home/user/.cache/ms-playwright"
 
@@ -1465,7 +1466,7 @@ fi
 
 if [ "$HOST_OS" != "Darwin" ]; then
     # Discover Docker gateway IPs.
-    GW_EXTERNAL=$(docker network inspect cooper-external --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || echo "")
+    GW_EXTERNAL=$(docker network inspect "$NETWORK_EXTERNAL" --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || echo "")
     GW_BRIDGE=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || echo "")
 
     # Verify the gateway IP CANNOT reach the server before relay (it's loopback-only).

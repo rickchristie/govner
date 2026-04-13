@@ -12,7 +12,7 @@ AI coding assistants need broad system access to be useful -- but that access is
 
 - **No internet escape** -- Containers run on a Docker `--internal` network with no gateway. Even raw sockets and `curl --noproxy '*'` can't get out. The [Security Model](#security-model) enforces this at the Linux networking layer -- there is simply no route.
 - **See every HTTPS request** -- SSL bump decrypts TLS traffic so the [Proxy Monitor](#tui-control-panel) shows complete URLs, methods, and headers -- not just domain names.
-- **Approve requests in real time** -- Non-whitelisted requests appear in the [TUI Control Panel](#tui-control-panel) with a countdown timer. Approve, deny, or let them timeout. One request at a time, no "always allow".
+- **Approve requests in real time** -- Non-whitelisted requests appear in the [TUI Control Panel](#tui-control-panel) with a countdown timer and a short host-side alert phrase. Approve, deny, or let them timeout. One request at a time, no "always allow".
 - **Access local host ports** -- Forward PostgreSQL, Redis, dev servers, or any host service into barrels through [Port Forwarding](#port-forwarding). Uses a two-hop socat relay so containers reach host services without any internet access.
 - **Run scripts on host** -- Let AI tools trigger deploy, restart, or test scripts through the [Execution Bridge](#execution-bridge) -- a controlled HTTP API that returns stdout/stderr without giving shell access to your machine.
 - **Copy-paste images** -- Paste screenshots and images into AI tools running inside containers with the [Clipboard Bridge](#clipboard-bridge). Press `c` in the TUI to stage your clipboard -- AI tools inside barrels see it as a normal paste. Time-limited, per-barrel authenticated.
@@ -184,6 +184,8 @@ The control panel (`cooper up`) is the nerve center. It has these tabs:
 | **About** | Version info, installed tool versions vs host versions, implicit language servers, startup warnings |
 
 **Clipboard bar** is always visible at the top -- press `c` to copy an image from your host clipboard so AI tools can paste it, `x` to clear.
+
+When a new request enters manual approval, Cooper plays one short host-side alert phrase. Linux uses PulseAudio or PipeWire's PulseAudio compatibility layer, macOS uses `afplay`, and if host audio is unavailable Cooper keeps running and disables the alert with a startup warning.
 
 ## Configuration
 
