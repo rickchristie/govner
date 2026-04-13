@@ -21,5 +21,6 @@ cooper/.test-pinned/
 cooper/.test-tmp/
 cooper/.test-e2e/
 cooper/.e2e-workspace/
+cooper/.tmp/
 
 .scratch/
