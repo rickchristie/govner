@@ -206,8 +206,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				msg.BridgeLogLimit,
 				msg.ClipboardTTLSecs,
 				msg.ClipboardMaxMB*1024*1024,
+				msg.ProxyAlertSound,
 			); err != nil {
 				log.Printf("cooper: failed to update settings: %v", err)
+			}
+		}
+		if m.alertPlayer != nil {
+			if err := m.alertPlayer.SetEnabled(msg.ProxyAlertSound); err != nil {
+				log.Printf("cooper: failed to update proxy alert sound: %v", err)
 			}
 		}
 		// Propagate new values to live TUI components.
@@ -924,7 +930,8 @@ func (m *Model) helpBar(width int) string {
 		)
 	case theme.TabRuntime:
 		bindings = append(bindings,
-			HelpBinding{Key: "Enter", Desc: "Edit"},
+			HelpBinding{Key: "Enter", Desc: "Edit/Toggle"},
+			HelpBinding{Key: "Space", Desc: "Toggle"},
 		)
 	case theme.TabPortForward:
 		bindings = append(bindings,

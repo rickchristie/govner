@@ -54,7 +54,7 @@ type App interface {
 	UpdateBridgeRoutes(routes []config.BridgeRoute) error
 
 	// Settings (live update)
-	UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTLSecs, clipboardMaxBytes int) error
+	UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTLSecs, clipboardMaxBytes int, proxyAlertSound bool) error
 
 	// Clipboard bridge
 	CaptureClipboard() (*clipboard.ClipboardEvent, error)

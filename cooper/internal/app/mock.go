@@ -44,18 +44,18 @@ type MockApp struct {
 	ClipboardSnapshotVal   *clipboard.StagedSnapshot
 
 	// Recorded calls for assertions.
-	ApprovedIDs          []string
-	DeniedIDs            []string
-	StoppedContainers    []string
-	RestartedContainers  []string
-	UpdatedPortForwards  []config.PortForwardRule
-	UpdatedBridgeRoutes  []config.BridgeRoute
-	UpdatedSettings      []SettingsUpdate
-	StartCalled          bool
-	StopCalled           bool
-	CapturedClipboard    bool
-	StagedFiles          []string
-	ClearedClipboard     bool
+	ApprovedIDs         []string
+	DeniedIDs           []string
+	StoppedContainers   []string
+	RestartedContainers []string
+	UpdatedPortForwards []config.PortForwardRule
+	UpdatedBridgeRoutes []config.BridgeRoute
+	UpdatedSettings     []SettingsUpdate
+	StartCalled         bool
+	StopCalled          bool
+	CapturedClipboard   bool
+	StagedFiles         []string
+	ClearedClipboard    bool
 
 	startupWarnings []string
 	pendingRequests []*PendingRequest
@@ -69,6 +69,7 @@ type SettingsUpdate struct {
 	BridgeLogLimit    int
 	ClipboardTTLSecs  int
 	ClipboardMaxBytes int
+	ProxyAlertSound   bool
 }
 
 // NewMockApp creates a MockApp with buffered channels and sensible defaults.
@@ -115,7 +116,7 @@ func (m *MockApp) Stop() error {
 func (m *MockApp) ACLRequests() <-chan ACLRequest     { return m.aclRequests }
 func (m *MockApp) ACLDecisions() <-chan DecisionEvent { return m.aclDecisions }
 func (m *MockApp) BridgeLogs() <-chan ExecutionLog    { return m.bridgeLogs }
-func (m *MockApp) SquidLogs() <-chan string            { return m.squidLogs }
+func (m *MockApp) SquidLogs() <-chan string           { return m.squidLogs }
 
 // InjectACLRequest sends a request on the ACL requests channel.
 func (m *MockApp) InjectACLRequest(req ACLRequest) {
@@ -209,7 +210,7 @@ func (m *MockApp) UpdateBridgeRoutes(routes []config.BridgeRoute) error {
 
 // ----- Settings -----
 
-func (m *MockApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTLSecs, clipboardMaxBytes int) error {
+func (m *MockApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTLSecs, clipboardMaxBytes int, proxyAlertSound bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.UpdatedSettings = append(m.UpdatedSettings, SettingsUpdate{
@@ -219,6 +220,7 @@ func (m *MockApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridge
 		BridgeLogLimit:    bridgeLogLimit,
 		ClipboardTTLSecs:  clipboardTTLSecs,
 		ClipboardMaxBytes: clipboardMaxBytes,
+		ProxyAlertSound:   proxyAlertSound,
 	})
 	m.cfg.MonitorTimeoutSecs = timeoutSecs
 	m.cfg.BlockedHistoryLimit = blockedLimit
@@ -226,6 +228,7 @@ func (m *MockApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridge
 	m.cfg.BridgeLogLimit = bridgeLogLimit
 	m.cfg.ClipboardTTLSecs = clipboardTTLSecs
 	m.cfg.ClipboardMaxBytes = clipboardMaxBytes
+	m.cfg.ProxyAlertSound = proxyAlertSound
 	return nil
 }
 

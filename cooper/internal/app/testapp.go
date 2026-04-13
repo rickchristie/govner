@@ -36,26 +36,26 @@ func NewTestApp(cfg *config.Config, aclCh chan ACLRequest, bridgeCh chan Executi
 }
 
 func (t *TestApp) Start(_ context.Context, _ func(int, int, string, error)) error { return nil }
-func (t *TestApp) Stop() error                                                     { return nil }
+func (t *TestApp) Stop() error                                                    { return nil }
 
-func (t *TestApp) ACLRequests() <-chan ACLRequest    { return t.aclCh }
+func (t *TestApp) ACLRequests() <-chan ACLRequest     { return t.aclCh }
 func (t *TestApp) ACLDecisions() <-chan DecisionEvent { return t.decisionCh }
-func (t *TestApp) BridgeLogs() <-chan ExecutionLog   { return t.bridgeCh }
+func (t *TestApp) BridgeLogs() <-chan ExecutionLog    { return t.bridgeCh }
 func (t *TestApp) SquidLogs() <-chan string           { return t.squidLogCh }
 
-func (t *TestApp) ApproveRequest(_ string)         {}
-func (t *TestApp) DenyRequest(_ string)             {}
+func (t *TestApp) ApproveRequest(_ string)            {}
+func (t *TestApp) DenyRequest(_ string)               {}
 func (t *TestApp) PendingRequests() []*PendingRequest { return nil }
 
-func (t *TestApp) ContainerStats() ([]ContainerStat, error)   { return nil, nil }
-func (t *TestApp) StopContainer(_ string) error                { return nil }
-func (t *TestApp) RestartContainer(_ string) error             { return nil }
-func (t *TestApp) ListContainers() ([]ContainerInfo, error)    { return nil, nil }
-func (t *TestApp) IsProxyRunning() bool                        { return t.proxyUp }
+func (t *TestApp) ContainerStats() ([]ContainerStat, error) { return nil, nil }
+func (t *TestApp) StopContainer(_ string) error             { return nil }
+func (t *TestApp) RestartContainer(_ string) error          { return nil }
+func (t *TestApp) ListContainers() ([]ContainerInfo, error) { return nil, nil }
+func (t *TestApp) IsProxyRunning() bool                     { return t.proxyUp }
 
 func (t *TestApp) UpdatePortForwards(_ []config.PortForwardRule) error { return nil }
 func (t *TestApp) UpdateBridgeRoutes(_ []config.BridgeRoute) error     { return nil }
-func (t *TestApp) UpdateSettings(_, _, _, _, _, _ int) error           { return nil }
+func (t *TestApp) UpdateSettings(_, _, _, _, _, _ int, _ bool) error   { return nil }
 
 func (t *TestApp) CaptureClipboard() (*clipboard.ClipboardEvent, error)  { return nil, nil }
 func (t *TestApp) StageFile(_ string) (*clipboard.ClipboardEvent, error) { return nil, nil }
@@ -63,5 +63,5 @@ func (t *TestApp) ClearClipboard()                                       {}
 func (t *TestApp) ClipboardSnapshot() *clipboard.StagedSnapshot          { return nil }
 
 func (t *TestApp) Config() *config.Config    { return t.cfg }
-func (t *TestApp) CooperDir() string          { return "/tmp/cooper-test" }
-func (t *TestApp) StartupWarnings() []string  { return nil }
+func (t *TestApp) CooperDir() string         { return "/tmp/cooper-test" }
+func (t *TestApp) StartupWarnings() []string { return nil }

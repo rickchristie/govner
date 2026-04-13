@@ -513,7 +513,7 @@ func (a *CooperApp) UpdateBridgeRoutes(routes []config.BridgeRoute) error {
 
 // UpdateSettings applies new timeout and limit settings to the running
 // system and persists the updated configuration.
-func (a *CooperApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTLSecs, clipboardMaxBytes int) error {
+func (a *CooperApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTLSecs, clipboardMaxBytes int, proxyAlertSound bool) error {
 	candidate := *a.cfg
 	candidate.MonitorTimeoutSecs = timeoutSecs
 	candidate.BlockedHistoryLimit = blockedLimit
@@ -521,6 +521,7 @@ func (a *CooperApp) UpdateSettings(timeoutSecs, blockedLimit, allowedLimit, brid
 	candidate.BridgeLogLimit = bridgeLogLimit
 	candidate.ClipboardTTLSecs = clipboardTTLSecs
 	candidate.ClipboardMaxBytes = clipboardMaxBytes
+	candidate.ProxyAlertSound = proxyAlertSound
 	if err := candidate.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}

@@ -112,7 +112,7 @@ func TestCooperAppUpdateSettingsIgnoresInvalidHandEditedBarrelEnv(t *testing.T) 
 	cfg.BarrelEnvVars = []config.BarrelEnvVar{{Name: "HTTP_PROXY", Value: "http://bad"}}
 
 	app := NewCooperApp(cfg, cooperDir)
-	if err := app.UpdateSettings(15, 200, 300, 100, 42, 2048); err != nil {
+	if err := app.UpdateSettings(15, 200, 300, 100, 42, 2048, true); err != nil {
 		t.Fatalf("UpdateSettings() failed: %v", err)
 	}
 
@@ -120,7 +120,7 @@ func TestCooperAppUpdateSettingsIgnoresInvalidHandEditedBarrelEnv(t *testing.T) 
 	if err != nil {
 		t.Fatalf("LoadConfig() failed: %v", err)
 	}
-	if loaded.MonitorTimeoutSecs != 15 || loaded.ClipboardTTLSecs != 42 {
+	if loaded.MonitorTimeoutSecs != 15 || loaded.ClipboardTTLSecs != 42 || !loaded.ProxyAlertSound {
 		t.Fatalf("persisted settings not updated: %+v", loaded)
 	}
 }

@@ -180,12 +180,12 @@ The control panel (`cooper up`) is the nerve center. It has these tabs:
 | **Bridge Logs** | Execution bridge invocations -- route, script, status, duration, stdout/stderr |
 | **Ports** | Port forwarding rules. Add/edit/delete live (applied via SIGHUP, no restart) |
 | **Routes** | Execution bridge mappings (API path to host script). Add/edit/delete at runtime |
-| **Runtime** | Monitor timeout, history limits, clipboard TTL/size. Changes take effect immediately |
+| **Runtime** | Monitor timeout, history limits, clipboard TTL/size, and proxy alert sound toggle. Changes take effect immediately |
 | **About** | Version info, installed tool versions vs host versions, implicit language servers, startup warnings |
 
 **Clipboard bar** is always visible at the top -- press `c` to copy an image from your host clipboard so AI tools can paste it, `x` to clear.
 
-When a new request enters manual approval, Cooper plays one short host-side alert phrase. Linux uses PulseAudio or PipeWire's PulseAudio compatibility layer, macOS uses `afplay`, and if host audio is unavailable Cooper keeps running and disables the alert with a startup warning.
+When a new request enters manual approval, Cooper can play one short host-side alert phrase. The Runtime tab includes a persisted checkbox for this, and it defaults to off so Cooper stays quiet unless you explicitly enable it. Linux uses PulseAudio or PipeWire's PulseAudio compatibility layer, macOS uses `afplay`, and if host audio is unavailable Cooper keeps running and disables the alert with a startup warning.
 
 ## Configuration
 

@@ -620,7 +620,7 @@ func TestCooperApp_UpdateSettings(t *testing.T) {
 	newBridgeLog := 100
 	newClipboardTTL := 42
 	newClipboardMaxBytes := 512
-	if err := app.UpdateSettings(newTimeout, newBlocked, newAllowed, newBridgeLog, newClipboardTTL, newClipboardMaxBytes); err != nil {
+	if err := app.UpdateSettings(newTimeout, newBlocked, newAllowed, newBridgeLog, newClipboardTTL, newClipboardMaxBytes, true); err != nil {
 		t.Fatalf("UpdateSettings() failed: %v", err)
 	}
 
@@ -644,6 +644,9 @@ func TestCooperApp_UpdateSettings(t *testing.T) {
 	if got.ClipboardMaxBytes != newClipboardMaxBytes {
 		t.Errorf("Config().ClipboardMaxBytes = %d, want %d", got.ClipboardMaxBytes, newClipboardMaxBytes)
 	}
+	if !got.ProxyAlertSound {
+		t.Error("Config().ProxyAlertSound = false, want true")
+	}
 
 	// Verify persisted config was updated.
 	cfgPath := filepath.Join(cooperDir, "config.json")
@@ -662,6 +665,9 @@ func TestCooperApp_UpdateSettings(t *testing.T) {
 	}
 	if persisted.ClipboardMaxBytes != newClipboardMaxBytes {
 		t.Errorf("persisted ClipboardMaxBytes = %d, want %d", persisted.ClipboardMaxBytes, newClipboardMaxBytes)
+	}
+	if !persisted.ProxyAlertSound {
+		t.Error("persisted ProxyAlertSound = false, want true")
 	}
 
 	snap, err := app.ClipboardManager().Stage(clipboard.ClipboardObject{

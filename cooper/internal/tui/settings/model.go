@@ -1,6 +1,6 @@
 // Package settings implements the Runtime tab sub-model.
-// It shows runtime-editable settings as labeled number inputs
-// with an inline edit modal and scrollable content viewport.
+// It shows runtime-editable settings as labeled values with
+// numeric edit modals and checkbox toggles in a scrollable viewport.
 package settings
 
 import (
@@ -26,10 +26,19 @@ type SettingsChangedMsg struct {
 	BridgeLogLimit      int
 	ClipboardTTLSecs    int
 	ClipboardMaxMB      int
+	ProxyAlertSound     bool
 }
+
+type settingKind int
+
+const (
+	settingKindNumber settingKind = iota
+	settingKindToggle
+)
 
 // settingDef describes one editable setting.
 type settingDef struct {
+	Kind        settingKind
 	Label       string
 	Unit        string
 	Description string
@@ -39,6 +48,7 @@ type settingDef struct {
 
 var settingDefs = []settingDef{
 	{
+		Kind:        settingKindNumber,
 		Label:       "Monitor approval timeout",
 		Unit:        "seconds",
 		Description: "How long to wait for approval before automatically denying a request. Lower values are more secure but require faster reactions.",
@@ -46,6 +56,7 @@ var settingDefs = []settingDef{
 		Max:         60,
 	},
 	{
+		Kind:        settingKindNumber,
 		Label:       "Blocked history limit",
 		Unit:        "entries",
 		Description: "Maximum number of blocked requests shown in the TUI. Full logs are always written to ~/.cooper/logs/ regardless of this display limit.",
@@ -53,6 +64,7 @@ var settingDefs = []settingDef{
 		Max:         10000,
 	},
 	{
+		Kind:        settingKindNumber,
 		Label:       "Allowed history limit",
 		Unit:        "entries",
 		Description: "Maximum number of allowed requests shown in the TUI. Full logs are always written to ~/.cooper/logs/ regardless of this display limit.",
@@ -60,6 +72,7 @@ var settingDefs = []settingDef{
 		Max:         10000,
 	},
 	{
+		Kind:        settingKindNumber,
 		Label:       "Bridge log limit",
 		Unit:        "entries",
 		Description: "Maximum number of bridge execution logs shown in the TUI. Full logs are always written to ~/.cooper/logs/ regardless of this display limit.",
@@ -67,6 +80,7 @@ var settingDefs = []settingDef{
 		Max:         10000,
 	},
 	{
+		Kind:        settingKindNumber,
 		Label:       "Clipboard TTL",
 		Unit:        "seconds",
 		Description: "How long a staged clipboard image remains available to barrels before it expires. User can always delete early or replace with a new capture.",
@@ -74,23 +88,30 @@ var settingDefs = []settingDef{
 		Max:         3600,
 	},
 	{
+		Kind:        settingKindNumber,
 		Label:       "Clipboard max size",
 		Unit:        "MB",
 		Description: "Maximum size of a clipboard image payload in megabytes. Oversized clipboard images are rejected at capture time.",
 		Min:         1,
 		Max:         100,
 	},
+	{
+		Kind:        settingKindToggle,
+		Label:       "Proxy approval alert sound",
+		Description: "Play a short host-side sound when a new manual proxy approval request arrives. Disabled by default so Cooper stays quiet unless you want audible prompts.",
+	},
 }
 
 // Model is the sub-model for the Runtime tab.
 type Model struct {
 	// Settings values.
-	values   [6]int // One value per settingDef.
-	selected int    // Currently highlighted setting.
-	editing  bool   // True when the settings edit modal is open.
-	editBuf  string // Buffer for digit input in modal.
-	editErr  string // Validation error shown in modal.
-	dirtyAt  time.Time // When the last value change was made (zero = no change this session).
+	values          [6]int // Numeric values in display order.
+	proxyAlertSound bool
+	selected        int       // Currently highlighted setting.
+	editing         bool      // True when the settings edit modal is open.
+	editBuf         string    // Buffer for digit input in modal.
+	editErr         string    // Validation error shown in modal.
+	dirtyAt         time.Time // When the last value change was made (zero = no change this session).
 
 	// Scrollable viewport for content.
 	viewport components.ScrollableContent
@@ -107,9 +128,10 @@ func (m *Model) IsEditing() bool {
 }
 
 // New creates a new settings model with the given initial values.
-func New(monitorTimeout, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTL, clipboardMaxMB int) *Model {
+func New(monitorTimeout, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTL, clipboardMaxMB int, proxyAlertSound bool) *Model {
 	return &Model{
-		values: [6]int{monitorTimeout, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTL, clipboardMaxMB},
+		values:          [6]int{monitorTimeout, blockedLimit, allowedLimit, bridgeLogLimit, clipboardTTL, clipboardMaxMB},
+		proxyAlertSound: proxyAlertSound,
 	}
 }
 
@@ -158,12 +180,25 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 			m.viewport.HandleKey(msg, m.bodyHeight())
 		}
 	case "enter":
+		if m.selectedDef().Kind == settingKindToggle {
+			return m, m.setProxyAlertSound(!m.proxyAlertSound)
+		}
 		m.editing = true
 		m.editBuf = strconv.Itoa(m.values[m.selected])
+	case " ":
+		if m.selectedDef().Kind == settingKindToggle {
+			return m, m.setProxyAlertSound(!m.proxyAlertSound)
+		}
 	case "left", "h":
+		if m.selectedDef().Kind == settingKindToggle {
+			return m, m.setProxyAlertSound(false)
+		}
 		m.adjustValue(-1)
 		return m, m.emitChange()
 	case "right", "l":
+		if m.selectedDef().Kind == settingKindToggle {
+			return m, m.setProxyAlertSound(true)
+		}
 		m.adjustValue(1)
 		return m, m.emitChange()
 	default:
@@ -235,8 +270,21 @@ func (m *Model) emitChange() tea.Cmd {
 		BridgeLogLimit:      m.values[3],
 		ClipboardTTLSecs:    m.values[4],
 		ClipboardMaxMB:      m.values[5],
+		ProxyAlertSound:     m.proxyAlertSound,
 	}
 	return func() tea.Msg { return msg }
+}
+
+func (m *Model) selectedDef() settingDef {
+	return settingDefs[m.selected]
+}
+
+func (m *Model) setProxyAlertSound(enabled bool) tea.Cmd {
+	if m.proxyAlertSound == enabled {
+		return nil
+	}
+	m.proxyAlertSound = enabled
+	return m.emitChange()
 }
 
 // ----- View -----
@@ -255,6 +303,9 @@ func (m *Model) bodyHeight() int {
 
 // View satisfies the SubModel interface.
 func (m *Model) View(width, height int) string {
+	if width < 2 {
+		width = 2
+	}
 	m.width = width
 	m.height = height
 
@@ -302,21 +353,11 @@ func (m *Model) renderHeader(width int) string {
 		if i == m.selected {
 			labelStyle = labelStyle.Bold(true)
 		}
-
-		bracketColor := theme.ColorOakLight
-		if i == m.selected {
-			bracketColor = theme.ColorAmber
-		}
-		valueStr := lipgloss.NewStyle().Foreground(bracketColor).Render("[") +
-			lipgloss.NewStyle().Foreground(theme.ColorAmber).Render(fmt.Sprintf("%4d", m.values[i])) +
-			lipgloss.NewStyle().Foreground(bracketColor).Render("]") +
-			" " + lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(def.Unit)
-
-		settingsTbl.AddRow(labelStyle.Render(def.Label), valueStr)
+		settingsTbl.AddRow(labelStyle.Render(def.Label), m.renderValue(i))
 	}
 
 	b.WriteString(" " + settingsTbl.RenderHeader() + "\n")
-	b.WriteString(theme.DividerStyle.Render(" " + strings.Repeat(theme.BorderH, width-2)) + "\n")
+	b.WriteString(theme.DividerStyle.Render(" "+strings.Repeat(theme.BorderH, width-2)) + "\n")
 
 	return b.String()
 }
@@ -335,17 +376,7 @@ func (m *Model) renderBody(width int) string {
 		if i == m.selected {
 			labelStyle = labelStyle.Bold(true)
 		}
-
-		bracketColor := theme.ColorOakLight
-		if i == m.selected {
-			bracketColor = theme.ColorAmber
-		}
-		valueStr := lipgloss.NewStyle().Foreground(bracketColor).Render("[") +
-			lipgloss.NewStyle().Foreground(theme.ColorAmber).Render(fmt.Sprintf("%4d", m.values[i])) +
-			lipgloss.NewStyle().Foreground(bracketColor).Render("]") +
-			" " + lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(def.Unit)
-
-		settingsTbl.AddRow(labelStyle.Render(def.Label), valueStr)
+		settingsTbl.AddRow(labelStyle.Render(def.Label), m.renderValue(i))
 	}
 
 	_, rows := settingsTbl.RenderRows(0)
@@ -448,6 +479,34 @@ func clamp(val, min, max int) int {
 		return max
 	}
 	return val
+}
+
+func (m *Model) renderValue(index int) string {
+	def := settingDefs[index]
+	bracketColor := theme.ColorOakLight
+	if index == m.selected {
+		bracketColor = theme.ColorAmber
+	}
+
+	if def.Kind == settingKindToggle {
+		checkMark := " "
+		status := "Disabled"
+		statusColor := theme.ColorDusty
+		if m.proxyAlertSound {
+			checkMark = "x"
+			status = "Enabled"
+			statusColor = theme.ColorProof
+		}
+		return lipgloss.NewStyle().Foreground(bracketColor).Render("[") +
+			lipgloss.NewStyle().Foreground(theme.ColorAmber).Render(checkMark) +
+			lipgloss.NewStyle().Foreground(bracketColor).Render("]") +
+			" " + lipgloss.NewStyle().Foreground(statusColor).Render(status)
+	}
+
+	return lipgloss.NewStyle().Foreground(bracketColor).Render("[") +
+		lipgloss.NewStyle().Foreground(theme.ColorAmber).Render(fmt.Sprintf("%4d", m.values[index])) +
+		lipgloss.NewStyle().Foreground(bracketColor).Render("]") +
+		" " + lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(def.Unit)
 }
 
 // wrapText splits text into lines that fit within maxWidth characters.

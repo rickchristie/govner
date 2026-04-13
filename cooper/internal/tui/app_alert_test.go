@@ -7,13 +7,26 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/rickchristie/govner/cooper/internal/app"
+	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/tui/events"
+	"github.com/rickchristie/govner/cooper/internal/tui/settings"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
-type fakeAlertPlayer struct{ count int }
+type fakeAlertPlayer struct {
+	count   int
+	enabled bool
+}
+
+func (f *fakeAlertPlayer) SetEnabled(enabled bool) error {
+	f.enabled = enabled
+	return nil
+}
 
 func (f *fakeAlertPlayer) PlayProxyApprovalNeeded() error {
+	if !f.enabled {
+		return nil
+	}
 	f.count++
 	return nil
 }
@@ -52,7 +65,7 @@ func runCmdAndBatchSubcommands(t *testing.T, cmd tea.Cmd) []tea.Msg {
 }
 
 func TestPlayProxyAlertCmd(t *testing.T) {
-	player := &fakeAlertPlayer{}
+	player := &fakeAlertPlayer{enabled: true}
 	cmd := playProxyAlertCmd(player)
 	if cmd == nil {
 		t.Fatal("expected alert command")
@@ -66,7 +79,7 @@ func TestPlayProxyAlertCmd(t *testing.T) {
 }
 
 func TestACLRequestTriggersAlert(t *testing.T) {
-	player := &fakeAlertPlayer{}
+	player := &fakeAlertPlayer{enabled: true}
 	recorder := &alertRecordingSubModel{}
 	m := NewModel(nil)
 	m.SetAlertPlayer(player)
@@ -92,7 +105,7 @@ func TestACLRequestTriggersAlert(t *testing.T) {
 }
 
 func TestACLRequestTriggersAlertOutsideMonitorTab(t *testing.T) {
-	player := &fakeAlertPlayer{}
+	player := &fakeAlertPlayer{enabled: true}
 	m := NewModel(nil)
 	m.SetAlertPlayer(player)
 	m.SetActiveTab(theme.TabAbout)
@@ -115,6 +128,40 @@ func TestACLDecisionDoesNotTriggerAlert(t *testing.T) {
 
 	if player.count != 0 {
 		t.Fatalf("count = %d, want 0", player.count)
+	}
+}
+
+func TestACLRequestDoesNotTriggerAlertWhenDisabled(t *testing.T) {
+	player := &fakeAlertPlayer{}
+	m := NewModel(nil)
+	m.SetAlertPlayer(player)
+
+	_, cmd := m.Update(events.ACLRequestMsg{Request: app.ACLRequest{ID: "req-1", Timestamp: time.Now()}})
+	runCmdAndBatchSubcommands(t, cmd)
+
+	if player.count != 0 {
+		t.Fatalf("count = %d, want 0", player.count)
+	}
+}
+
+func TestSettingsChangedMsgUpdatesAlertToggle(t *testing.T) {
+	player := &fakeAlertPlayer{}
+	m := NewModel(app.NewMockApp(&config.Config{}, t.TempDir()))
+	m.SetAlertPlayer(player)
+
+	_, cmd := m.Update(settings.SettingsChangedMsg{
+		MonitorTimeoutSecs:  30,
+		BlockedHistoryLimit: 500,
+		AllowedHistoryLimit: 500,
+		BridgeLogLimit:      500,
+		ClipboardTTLSecs:    300,
+		ClipboardMaxMB:      20,
+		ProxyAlertSound:     true,
+	})
+	runCmdAndBatchSubcommands(t, cmd)
+
+	if !player.enabled {
+		t.Fatal("expected alert player to be enabled")
 	}
 }
 

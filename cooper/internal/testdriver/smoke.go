@@ -57,6 +57,7 @@ func verifyStageFetchAndSettings(d *Driver) error {
 		cfg.BridgeLogLimit,
 		2,
 		1024,
+		cfg.ProxyAlertSound,
 	); err != nil {
 		return fmt.Errorf("update runtime settings: %w", err)
 	}

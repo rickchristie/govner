@@ -265,7 +265,8 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - Cooper uses Squid SSL bump (TLS interception) to decrypt HTTPS traffic. This allows the monitor to show
         full request details, not just the domain name. A Cooper CA certificate is generated during `cooper configure`
         and injected into CLI containers at build time (system CA store + `NODE_EXTRA_CA_CERTS` for Node.js tools).
-      - Each new pending approval triggers one short host-side alert phrase at request arrival time, not on allow/deny outcome.
+      - Each new pending approval can trigger one short host-side alert phrase at request arrival time, not on allow/deny outcome.
+        This is controlled by a persisted Runtime-tab checkbox and defaults to off.
         The progression is stateful for the current `cooper up` session: plays 1-8 use the home phrase, plays 9-16 use the
         transition phrase, then it alternates every 8 audible plays after that.
       - Alert cooldown is fixed at `750ms` in v1. Suppressed alerts do not advance the progression state.
@@ -312,6 +313,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - Can set how many lines of execution bridge requests in the log. Default to 500.
       - Can set clipboard TTL (10–3600 seconds, default 300). How long staged clipboard images remain available.
       - Can set clipboard max size (1–100 MB, default 20 MiB). Maximum clipboard image payload size.
+      - Can toggle proxy approval alert sound with a checkbox. Default off. When enabled, new pending approvals may play the host-side alert phrase.
       - Configuration, when changed, takes effect immediately.
       - (UI) Tells the user that full logs are available at `~/.cooper/logs/` directory.
     - **About** tab:
@@ -573,9 +575,10 @@ reserved `/clipboard/*` namespace. User bridge routes cannot use this namespace.
 - `c` — Capture clipboard from host (reads, normalizes, stages). Disabled during text input.
 - `x` — Clear staged clipboard. Only available when staged. Disabled during text input.
 
-**Runtime Settings tab** exposes two clipboard settings (editable, immediate effect):
+**Runtime Settings tab** exposes clipboard settings plus the proxy alert sound toggle (editable, immediate effect):
 - **Clipboard TTL** (10–3600 seconds, default 300) — how long staged images remain available.
 - **Clipboard max size** (1–100 MB, default 20 MiB) — maximum clipboard image payload size.
+- **Proxy alert sound** (checkbox, default off) — whether new manual approval requests play the host-side alert phrase.
 
 ### Configuration
 
@@ -587,11 +590,12 @@ Config fields in `~/.cooper/config.json`:
   "allowed_history_limit": 500,
   "bridge_log_limit": 500,
   "clipboard_ttl_secs": 300,
-  "clipboard_max_bytes": 20971520
+  "clipboard_max_bytes": 20971520,
+  "proxy_alert_sound": false
 }
 ```
 
-Runtime settings (monitor timeout, history limits, clipboard TTL/max size) are NOT part of `cooper configure` —
+Runtime settings (monitor timeout, history limits, clipboard TTL/max size, proxy alert sound) are NOT part of `cooper configure` —
 they use sensible defaults and are editable at runtime via the TUI Runtime Settings tab.
 
 ### Image Processing Pipeline

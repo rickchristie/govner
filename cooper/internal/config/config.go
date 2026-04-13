@@ -26,6 +26,7 @@ type Config struct {
 	BridgeRoutes        []BridgeRoute        `json:"bridge_routes"`
 	ClipboardTTLSecs    int                  `json:"clipboard_ttl_secs"`
 	ClipboardMaxBytes   int                  `json:"clipboard_max_bytes"`
+	ProxyAlertSound     bool                 `json:"proxy_alert_sound"`
 	BaseNodeVersion     string               `json:"base_node_version,omitempty"`
 	BarrelSHMSize       string               `json:"barrel_shm_size"`
 }
@@ -118,6 +119,7 @@ func DefaultConfig() *Config {
 		BridgeRoutes:        []BridgeRoute{},
 		ClipboardTTLSecs:    300,
 		ClipboardMaxBytes:   20971520, // 20 MiB
+		ProxyAlertSound:     false,
 		BarrelSHMSize:       "1g",
 	}
 }

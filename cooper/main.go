@@ -697,10 +697,11 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build the App, adopting the pre-started infrastructure.
-	alertPlayer, err := alertsound.New()
-	if err != nil {
-		startupWarnings = append(startupWarnings, fmt.Sprintf("Proxy alert sound disabled: %v", err))
-		alertPlayer = alertsound.NewNoop()
+	alertPlayer := alertsound.NewController()
+	if cfg.ProxyAlertSound {
+		if err := alertPlayer.SetEnabled(true); err != nil {
+			startupWarnings = append(startupWarnings, fmt.Sprintf("Proxy alert sound disabled: %v", err))
+		}
 	}
 	defer alertPlayer.Close()
 
@@ -743,6 +744,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		cfg.BridgeLogLimit,
 		cfg.ClipboardTTLSecs,
 		cfg.ClipboardMaxBytes/(1024*1024), // Convert bytes to MB for display.
+		cfg.ProxyAlertSound,
 	)
 	mainModel.SetRuntimeModel(runtimeModel)
 
@@ -1358,7 +1360,7 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 	// Build the test app and TUI model.
 	testApp := app.NewTestApp(cfg, aclCh, bridgeLogCh)
 	mainModel := tui.NewModel(testApp)
-	mainModel.SetAlertPlayer(alertsound.NewNoop())
+	mainModel.SetAlertPlayer(alertsound.NewController())
 
 	// Wire sub-models.
 	mainModel.SetContainersModel(containers.New(testApp))
@@ -1381,6 +1383,7 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 		cfg.BridgeLogLimit,
 		cfg.ClipboardTTLSecs,
 		cfg.ClipboardMaxBytes/(1024*1024),
+		cfg.ProxyAlertSound,
 	)
 	mainModel.SetRuntimeModel(tuiRuntimeModel)
 

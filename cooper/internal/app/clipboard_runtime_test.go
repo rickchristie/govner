@@ -42,20 +42,21 @@ func TestCooperAppUpdateSettingsPersistsClipboardPolicy(t *testing.T) {
 		bridgeLogLimit,
 		clipboardTTLSecs,
 		clipboardMaxBytes,
+		true,
 	); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 
-	if got := app.Config(); got.ClipboardTTLSecs != clipboardTTLSecs || got.ClipboardMaxBytes != clipboardMaxBytes {
-		t.Fatalf("config clipboard policy = (%d, %d), want (%d, %d)", got.ClipboardTTLSecs, got.ClipboardMaxBytes, clipboardTTLSecs, clipboardMaxBytes)
+	if got := app.Config(); got.ClipboardTTLSecs != clipboardTTLSecs || got.ClipboardMaxBytes != clipboardMaxBytes || !got.ProxyAlertSound {
+		t.Fatalf("config runtime policy = (%d, %d, %t), want (%d, %d, true)", got.ClipboardTTLSecs, got.ClipboardMaxBytes, got.ProxyAlertSound, clipboardTTLSecs, clipboardMaxBytes)
 	}
 
 	persisted, err := config.LoadConfig(filepath.Join(cooperDir, "config.json"))
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if persisted.ClipboardTTLSecs != clipboardTTLSecs || persisted.ClipboardMaxBytes != clipboardMaxBytes {
-		t.Fatalf("persisted clipboard policy = (%d, %d), want (%d, %d)", persisted.ClipboardTTLSecs, persisted.ClipboardMaxBytes, clipboardTTLSecs, clipboardMaxBytes)
+	if persisted.ClipboardTTLSecs != clipboardTTLSecs || persisted.ClipboardMaxBytes != clipboardMaxBytes || !persisted.ProxyAlertSound {
+		t.Fatalf("persisted runtime policy = (%d, %d, %t), want (%d, %d, true)", persisted.ClipboardTTLSecs, persisted.ClipboardMaxBytes, persisted.ProxyAlertSound, clipboardTTLSecs, clipboardMaxBytes)
 	}
 
 	snap, err := app.ClipboardManager().Stage(clipboard.ClipboardObject{

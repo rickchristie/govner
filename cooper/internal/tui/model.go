@@ -21,6 +21,7 @@ type HelpBinding struct {
 // AlertPlayer plays host-side alerts for new proxy approvals.
 type AlertPlayer interface {
 	PlayProxyApprovalNeeded() error
+	SetEnabled(bool) error
 }
 
 // Model is the root BubbleTea model for the Cooper TUI. It owns the

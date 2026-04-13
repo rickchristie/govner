@@ -259,6 +259,9 @@ func TestDefaultConfigClipboardDefaults(t *testing.T) {
 	if cfg.ClipboardMaxBytes != 20971520 {
 		t.Errorf("expected default clipboard max bytes 20971520, got %d", cfg.ClipboardMaxBytes)
 	}
+	if cfg.ProxyAlertSound {
+		t.Error("expected default proxy alert sound to be disabled")
+	}
 }
 
 func TestDefaultConfigBarrelSHMSize(t *testing.T) {
@@ -450,6 +453,7 @@ func TestSaveAndLoadConfig(t *testing.T) {
 	original := DefaultConfig()
 	original.ProxyPort = 8080
 	original.BridgePort = 9090
+	original.ProxyAlertSound = true
 	original.AITools = []ToolConfig{
 		{Name: "claude", Enabled: true, Mode: ModeLatest},
 	}
@@ -465,6 +469,21 @@ func TestSaveAndLoadConfig(t *testing.T) {
 
 	if !reflect.DeepEqual(*original, *loaded) {
 		t.Errorf("save/load mismatch.\nOriginal: %+v\nLoaded: %+v", *original, *loaded)
+	}
+}
+
+func TestLoadConfigMissingProxyAlertSoundBackwardCompatible(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"programming_tools":[],"ai_tools":[],"proxy_port":3128,"bridge_port":4343,"monitor_timeout_secs":30,"blocked_history_limit":500,"allowed_history_limit":500,"bridge_log_limit":500,"clipboard_ttl_secs":300,"clipboard_max_bytes":20971520,"barrel_shm_size":"1g"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if loaded.ProxyAlertSound {
+		t.Fatal("expected missing proxy_alert_sound to default to false")
 	}
 }
 
