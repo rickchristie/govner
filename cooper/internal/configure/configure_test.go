@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/rickchristie/govner/cooper/internal/config"
 )
 
@@ -198,6 +200,70 @@ func TestTextInput_InsertMiddle(t *testing.T) {
 	}
 }
 
+func TestTextInput_PasteStringAtEnd(t *testing.T) {
+	ti := newTextInput("", 30)
+	ti.Focus()
+
+	handled := ti.handleKey("hello world")
+	if !handled {
+		t.Fatal("expected pasted string to be handled")
+	}
+	if ti.Value() != "hello world" {
+		t.Fatalf("expected %q, got %q", "hello world", ti.Value())
+	}
+	if ti.cursorPos != len("hello world") {
+		t.Fatalf("expected cursorPos=%d, got %d", len("hello world"), ti.cursorPos)
+	}
+}
+
+func TestTextInput_PasteStringInMiddle(t *testing.T) {
+	ti := newTextInput("", 30)
+	ti.Focus()
+	ti.SetValue("helloorld")
+	ti.cursorPos = 5
+
+	handled := ti.handleKey(" w")
+	if !handled {
+		t.Fatal("expected pasted string to be handled")
+	}
+	if ti.Value() != "hello world" {
+		t.Fatalf("expected %q, got %q", "hello world", ti.Value())
+	}
+	if ti.cursorPos != 7 {
+		t.Fatalf("expected cursorPos=7, got %d", ti.cursorPos)
+	}
+}
+
+func TestTextInput_PasteStringWithControlCharacterIgnored(t *testing.T) {
+	ti := newTextInput("", 30)
+	ti.Focus()
+	ti.SetValue("abc")
+
+	handled := ti.handleKey("x\ny")
+	if handled {
+		t.Fatal("expected pasted string with control characters to be ignored")
+	}
+	if ti.Value() != "abc" {
+		t.Fatalf("expected value unchanged, got %q", ti.Value())
+	}
+	if ti.cursorPos != 3 {
+		t.Fatalf("expected cursorPos=3, got %d", ti.cursorPos)
+	}
+}
+
+func TestTextInput_HandleKeyMsgPasteString(t *testing.T) {
+	ti := newTextInput("", 30)
+	ti.Focus()
+
+	handled := ti.handleKeyMsg(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hello world"), Paste: true})
+	if !handled {
+		t.Fatal("expected pasted key message to be handled")
+	}
+	if ti.Value() != "hello world" {
+		t.Fatalf("expected %q, got %q", "hello world", ti.Value())
+	}
+}
+
 func TestTextInput_BackspaceMiddle(t *testing.T) {
 	ti := newTextInput("", 30)
 	ti.Focus()
@@ -218,7 +284,7 @@ func TestTextInput_NonPrintableIgnored(t *testing.T) {
 	ti.Focus()
 	ti.SetValue("abc")
 
-	handled := ti.handleKey("ctrl+z")
+	handled := ti.handleKeyMsg(tea.KeyMsg{Type: tea.KeyCtrlZ})
 	if handled {
 		t.Error("expected ctrl+z to not be handled")
 	}

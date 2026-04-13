@@ -288,9 +288,9 @@ func (m *barrelEnvModal) update(msg tea.Msg, entries []config.BarrelEnvVar) barr
 
 		switch m.focusField {
 		case 0:
-			m.keyInput.handleKey(msg.String())
+			m.keyInput.handleKeyMsg(msg)
 		case 1:
-			m.valueInput.handleKey(msg.String())
+			m.valueInput.handleKeyMsg(msg)
 		}
 	}
 

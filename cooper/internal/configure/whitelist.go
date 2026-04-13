@@ -185,7 +185,7 @@ func (m *whitelistModel) updateDomainModal(msg tea.Msg) whitelistResult {
 		}
 		// Route other keys to domain input when focused.
 		if m.modal.focusField == 0 {
-			m.modal.domainInput.handleKey(msg.String())
+			m.modal.domainInput.handleKeyMsg(msg)
 		}
 	}
 	return whitelistNone

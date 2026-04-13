@@ -21,14 +21,14 @@ const (
 
 // proxyModel manages the Proxy Settings screen.
 type proxyModel struct {
-	proxyPort    int
-	bridgePort   int
-	shmSize      string
-	proxyInput   textInput
-	bridgeInput  textInput
-	shmInput     textInput
-	focusField   int // 0 = proxy, 1 = bridge, 2 = shm size
-	err          string
+	proxyPort   int
+	bridgePort  int
+	shmSize     string
+	proxyInput  textInput
+	bridgeInput textInput
+	shmInput    textInput
+	focusField  int // 0 = proxy, 1 = bridge, 2 = shm size
+	err         string
 
 	// Scroll state for layout.
 	scrollOffset  int
@@ -140,11 +140,11 @@ func (m *proxyModel) update(msg tea.Msg) proxyResult {
 			// Route to focused input.
 			switch m.focusField {
 			case 0:
-				m.proxyInput.handleKey(msg.String())
+				m.proxyInput.handleKeyMsg(msg)
 			case 1:
-				m.bridgeInput.handleKey(msg.String())
+				m.bridgeInput.handleKeyMsg(msg)
 			case 2:
-				m.shmInput.handleKey(msg.String())
+				m.shmInput.handleKeyMsg(msg)
 			}
 		}
 	}

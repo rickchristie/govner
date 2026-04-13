@@ -137,11 +137,11 @@ func (pm *portModal) update(msg tea.Msg) portModalResult {
 		// Route keys to the focused input.
 		switch pm.focusField {
 		case 0:
-			pm.containerPortInput.handleKey(msg.String())
+			pm.containerPortInput.handleKeyMsg(msg)
 		case 1:
-			pm.hostPortInput.handleKey(msg.String())
+			pm.hostPortInput.handleKeyMsg(msg)
 		case 2:
-			pm.descInput.handleKey(msg.String())
+			pm.descInput.handleKeyMsg(msg)
 		}
 	}
 	return portModalNone

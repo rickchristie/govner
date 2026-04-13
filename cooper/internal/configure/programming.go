@@ -189,7 +189,7 @@ func (m *programmingModel) updateDetail(msg tea.Msg) toolScreenResult {
 				m.pinInput.Blur()
 				return toolScreenNone
 			default:
-				m.pinInput.handleKey(msg.String())
+				m.pinInput.handleKeyMsg(msg)
 			}
 		}
 		return toolScreenNone

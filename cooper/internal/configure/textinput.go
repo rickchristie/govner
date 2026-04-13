@@ -1,6 +1,7 @@
 package configure
 
 import (
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
@@ -40,7 +41,8 @@ func (t *textInput) Blur() {
 	t.focused = false
 }
 
-// handleKey processes a single key press. Returns true if the key was handled.
+// handleKey processes a single key press or pasted text. Returns true if the
+// input was handled.
 func (t *textInput) handleKey(key string) bool {
 	switch key {
 	case "backspace":
@@ -71,14 +73,44 @@ func (t *textInput) handleKey(key string) bool {
 		t.cursorPos = len(t.value)
 		return true
 	default:
-		// Insert printable characters.
-		if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
+		// Insert printable ASCII text, including multi-character paste payloads.
+		if isPrintableASCIIText(key) {
 			t.value = t.value[:t.cursorPos] + key + t.value[t.cursorPos:]
-			t.cursorPos++
+			t.cursorPos += len(key)
 			return true
 		}
 	}
 	return false
+}
+
+// handleKeyMsg processes Bubble Tea key messages so pasted text can be handled
+// as literal input without confusing named keys like ctrl+z for text.
+func (t *textInput) handleKeyMsg(msg tea.KeyMsg) bool {
+	switch msg.String() {
+	case "backspace", "delete", "left", "right", "home", "ctrl+a", "end", "ctrl+e":
+		return t.handleKey(msg.String())
+	}
+
+	switch msg.Type {
+	case tea.KeyRunes:
+		return t.handleKey(string(msg.Runes))
+	case tea.KeySpace:
+		return t.handleKey(" ")
+	default:
+		return false
+	}
+}
+
+func isPrintableASCIIText(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 32 || s[i] >= 127 {
+			return false
+		}
+	}
+	return true
 }
 
 // viewWithMargin renders the input with a left margin for alignment within indented layouts.
