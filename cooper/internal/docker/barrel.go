@@ -244,7 +244,7 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 	// under ~/.cooper/tmp/{containerName}/ to avoid collisions between
 	// barrels. Cooper clears the shared tmp root when cooper up starts and
 	// when it shuts down, so each control-plane session begins pristine.
-	barrelTmpDir := filepath.Join(cooperDir, "tmp", containerName)
+	barrelTmpDir := BarrelTmpDir(cooperDir, containerName)
 	args = append(args, "-v", barrelTmpDir+":/tmp:rw")
 
 	return args

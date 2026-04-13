@@ -124,7 +124,8 @@ export PATH="$PATH:$(go env GOPATH)/bin"
 
 ```bash
 # 1. Interactive configuration wizard
-#    Sets up programming tools, AI tools, proxy whitelist, port forwarding
+#    Sets up programming tools, AI tools, proxy whitelist, port forwarding,
+#    barrel environment variables
 cooper configure
 
 # 2. Build container images (proxy + base + per-tool CLI images)
@@ -158,7 +159,7 @@ cooper proof
 
 | Command | Description |
 |---------|-------------|
-| `cooper configure` | Interactive TUI wizard -- programming tools, AI tools, whitelist, ports, bridge |
+| `cooper configure` | Interactive TUI wizard -- programming tools, AI tools, whitelist, ports, barrel env, bridge |
 | `cooper build` | Build proxy and all CLI container images. `--clean` for no-cache rebuild |
 | `cooper up` | Start proxy, bridge, and TUI control panel. Must be running for barrels to work |
 | `cooper update` | Regenerate Dockerfiles and rebuild only images with desired-vs-built drift, including implicit tools and base runtime changes |
@@ -238,6 +239,24 @@ Forward host service ports into barrels (e.g., PostgreSQL, Redis, dev servers). 
 **Note (Linux):** Host services must bind to `0.0.0.0` or the Docker gateway IP to be reachable from containers. Services bound to `127.0.0.1` are handled by Cooper's HostRelay, which transparently proxies connections from the gateway IP to localhost.
 
 **Note (macOS):** Docker Desktop handles host access natively. Services on any bind address, including `127.0.0.1`, are reachable from containers via `host.docker.internal`. No HostRelay is needed.
+
+### Barrel Environment
+
+Use the `Barrel Environment` screen in `cooper configure` to define global env vars that are loaded into every later `cooper cli` session.
+
+Example values:
+
+```text
+API_BASE_URL=https://internal.example.com
+FEATURE_FLAG=1
+EMPTY=
+```
+
+- Scope is global: the values live in `~/.cooper/config.json` and apply to all barrels, tools, and workspaces.
+- Runtime-only: changes apply on the next `cooper cli` session. No `cooper build` is needed.
+- Precedence is safe: Cooper loads user env first, then restores protected runtime env such as `HTTP_PROXY`, `PATH`, `DISPLAY`, token env, IDE integration env, and `COOPER_*` names.
+- Protected names cannot be configured, including `HTTP_PROXY`, `PATH`, `OPENAI_API_KEY`, and any `COOPER_*` variable.
+- Values are stored in plain text in `~/.cooper/config.json`. This is not a secret store.
 
 ### Execution Bridge
 

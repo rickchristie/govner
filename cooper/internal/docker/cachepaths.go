@@ -111,7 +111,7 @@ func barrelMountDirs(homeDir, toolName, cooperDir, containerName string, cfg *co
 	// Per-barrel /tmp directory — isolated per container to avoid
 	// collisions between barrels sharing a workspace. Cooper resets the
 	// shared tmp root at cooper-up startup and shutdown.
-	dirs = append(dirs, filepath.Join(cooperDir, "tmp", containerName))
+	dirs = append(dirs, BarrelTmpDir(cooperDir, containerName))
 
 	return dirs
 }

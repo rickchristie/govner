@@ -133,6 +133,11 @@ func (a *ConfigureApp) SetPortForwardRules(rules []config.PortForwardRule) {
 	a.cfg.PortForwardRules = append([]config.PortForwardRule(nil), rules...)
 }
 
+// SetBarrelEnvVars updates the barrel environment variable configuration.
+func (a *ConfigureApp) SetBarrelEnvVars(vars []config.BarrelEnvVar) {
+	a.cfg.BarrelEnvVars = append([]config.BarrelEnvVar(nil), vars...)
+}
+
 // SetProxyPort sets the proxy port.
 func (a *ConfigureApp) SetProxyPort(port int) {
 	a.cfg.ProxyPort = port
@@ -150,7 +155,14 @@ func (a *ConfigureApp) SetBarrelSHMSize(size string) {
 
 // Validate validates the full configuration and returns any error.
 func (a *ConfigureApp) Validate() error {
-	return a.cfg.Validate()
+	if err := a.cfg.Validate(); err != nil {
+		return err
+	}
+	canonical := config.CanonicalizeBarrelEnvVars(a.cfg.BarrelEnvVars)
+	if err := config.ValidateBarrelEnvVars(canonical); err != nil {
+		return fmt.Errorf("barrel env validation failed: %w", err)
+	}
+	return nil
 }
 
 // Save writes config.json, generates all templates (CLI Dockerfiles,
@@ -159,6 +171,11 @@ func (a *ConfigureApp) Save() ([]string, error) {
 	if err := a.cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validation failed: %w", err)
 	}
+	canonicalBarrelEnvVars := config.CanonicalizeBarrelEnvVars(a.cfg.BarrelEnvVars)
+	if err := config.ValidateBarrelEnvVars(canonicalBarrelEnvVars); err != nil {
+		return nil, fmt.Errorf("barrel env validation failed: %w", err)
+	}
+	a.cfg.BarrelEnvVars = canonicalBarrelEnvVars
 
 	// Ensure cooperDir and subdirectories exist.
 	baseDir := filepath.Join(a.cooperDir, "base")

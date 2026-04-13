@@ -1,6 +1,7 @@
 // Package configure implements the interactive TUI wizard for `cooper configure`.
 // It walks the user through programming tools, AI CLI tools, proxy whitelist,
-// port forwarding, proxy settings, and a save/build step.
+// port forwarding, proxy settings, barrel environment variables, and a
+// save/build step.
 package configure
 
 import (
@@ -28,6 +29,7 @@ const (
 	ScreenWhitelist
 	ScreenPortForward
 	ScreenProxy
+	ScreenBarrelEnv
 	ScreenSave
 )
 
@@ -57,6 +59,7 @@ type model struct {
 	whitelist   whitelistModel
 	portForward portFwdModel
 	proxySetup  proxyModel
+	barrelEnv   barrelEnvModel
 	save        saveModel
 }
 
@@ -204,6 +207,7 @@ func newModel(cfg *config.Config, cooperDir string, ca *app.ConfigureApp, existi
 	m.whitelist = newWhitelistModel(cfg.WhitelistedDomains)
 	m.portForward = newPortFwdModel(cfg.PortForwardRules)
 	m.proxySetup = newProxyModel(cfg.ProxyPort, cfg.BridgePort, cfg.BarrelSHMSize)
+	m.barrelEnv = newBarrelEnvModel(cfg.BarrelEnvVars)
 	m.save = newSaveModel(cfg, cooperDir, configPath, ca)
 
 	// Detect version changes for mirror mode tools.
@@ -299,6 +303,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updatePortForward(msg)
 	case ScreenProxy:
 		return m.updateProxy(msg)
+	case ScreenBarrelEnv:
+		return m.updateBarrelEnv(msg)
 	case ScreenSave:
 		return m.updateSave(msg)
 	}
@@ -326,6 +332,10 @@ func (m *model) isTextInputActive() bool {
 	case ScreenProxy:
 		// Proxy screen always has a text input focused.
 		return true
+	case ScreenBarrelEnv:
+		if m.barrelEnv.modal.active {
+			return true
+		}
 	}
 	return false
 }
@@ -346,6 +356,8 @@ func (m *model) View() string {
 		content = m.portForward.view(m.width, m.height)
 	case ScreenProxy:
 		content = m.proxySetup.view(m.width, m.height)
+	case ScreenBarrelEnv:
+		content = m.barrelEnv.view(m.width, m.height)
 	case ScreenSave:
 		content = m.save.view(m.width, m.height)
 	default:
@@ -432,6 +444,7 @@ func (m *model) syncConfigFromSubModels() {
 	m.cfg.ProxyPort = m.proxySetup.proxyPort
 	m.cfg.BridgePort = m.proxySetup.bridgePort
 	m.cfg.BarrelSHMSize = m.proxySetup.shmSize
+	m.cfg.BarrelEnvVars = m.barrelEnv.toEntries()
 }
 
 // navigateTo switches to a new screen and syncs config.
@@ -464,6 +477,8 @@ func (m *model) updateWelcome(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case 4:
 			m.navigateTo(ScreenProxy)
 		case 5:
+			m.navigateTo(ScreenBarrelEnv)
+		case 6:
 			m.navigateTo(ScreenSave)
 		}
 	}
@@ -510,6 +525,14 @@ func (m *model) updateProxy(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *model) updateBarrelEnv(msg tea.Msg) (tea.Model, tea.Cmd) {
+	result := m.barrelEnv.update(msg)
+	if result == barrelEnvBack {
+		m.navigateTo(ScreenWelcome)
+	}
+	return m, nil
+}
+
 func (m *model) updateSave(msg tea.Msg) (tea.Model, tea.Cmd) {
 	result := m.save.update(msg)
 	switch result {
@@ -549,6 +572,7 @@ func newWelcomeModel(existing bool) welcomeModel {
 			{label: "Proxy Whitelist", desc: "Domain whitelist for network access"},
 			{label: "Port Forwarding to Host", desc: "Route container ports to host services"},
 			{label: "Proxy Settings", desc: "Proxy port, bridge port"},
+			{label: "Barrel Environment", desc: "Global env vars for every cooper cli session"},
 			{label: "Save & Build", desc: "Write config, build images"},
 		},
 	}
@@ -585,6 +609,9 @@ func (w *welcomeModel) update(msg tea.Msg) welcomeResult {
 			return welcomeSelect
 		case "6":
 			w.cursor = 5
+			return welcomeSelect
+		case "7":
+			w.cursor = 6
 			return welcomeSelect
 		}
 	}

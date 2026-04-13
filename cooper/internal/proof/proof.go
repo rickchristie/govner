@@ -18,10 +18,12 @@ import (
 	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/auth"
+	"github.com/rickchristie/govner/cooper/internal/barrelenv"
 	"github.com/rickchristie/govner/cooper/internal/bridge"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/names"
 	"github.com/rickchristie/govner/cooper/internal/proxy"
 )
 
@@ -124,6 +126,7 @@ func Run(cfg *config.Config, cooperDir string) error {
 	ctx.phaseNetworkSecurity()
 	ctx.phaseTools()
 	ctx.phaseAICLI()
+	ctx.phaseBarrelEnv()
 	ctx.phasePortForwarding()
 
 	ctx.printSummary()
@@ -739,11 +742,128 @@ func (ctx *ProofContext) phaseAICLI() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 7: Port Forwarding & Bridge
+// Phase 7: Barrel Environment
+// ---------------------------------------------------------------------------
+
+func (ctx *ProofContext) phaseBarrelEnv() {
+	if len(ctx.Cfg.BarrelEnvVars) == 0 {
+		return
+	}
+
+	ctx.printPhase("Phase 7: Barrel Environment")
+	barrelName := ctx.firstBarrel()
+	if barrelName == "" {
+		ctx.fail("Barrel environment", "no barrel running")
+		return
+	}
+
+	usable, warnings := config.NormalizeBarrelEnvVarsForRuntime(ctx.Cfg.BarrelEnvVars)
+	for _, warning := range warnings {
+		ctx.warn("Barrel env config", warning)
+	}
+
+	sessionName := names.Generate(ctx.WorkspaceDir)
+	defer names.Release(sessionName)
+	sessionEnvFile, _, err := barrelenv.PrepareSessionEnvFile(ctx.CooperDir, barrelName, sessionName, ctx.Cfg.BarrelEnvVars)
+	if err != nil {
+		ctx.fail("Barrel environment", err.Error())
+		return
+	}
+	if sessionEnvFile.HostPath != "" {
+		defer func() {
+			if removeErr := barrelenv.RemoveSessionEnvFile(sessionEnvFile.HostPath); removeErr != nil {
+				ctx.warn("Barrel env cleanup", removeErr.Error())
+			}
+		}()
+	}
+	var envArgs []string
+	var tokenNames []string
+	for _, token := range ctx.tokens {
+		envArgs = append(envArgs, fmt.Sprintf("%s=%s", token.Name, token.Value))
+		tokenNames = append(tokenNames, token.Name)
+	}
+
+	checkCmd := buildBarrelEnvProofCommand(usable)
+	wrappedCmd, err := barrelenv.BuildExecWrapperCommand(
+		sessionEnvFile.ContainerPath,
+		barrelenv.ProtectedRuntimeEnvNames(tokenNames),
+		[]string{"bash", "-c", checkCmd},
+	)
+	if err != nil {
+		ctx.fail("Barrel environment", err.Error())
+		return
+	}
+
+	out, err := dockerExecCommandWithEnvRaw(barrelName, wrappedCmd, envArgs)
+	if err != nil {
+		ctx.fail("Barrel environment", truncate(out, 150))
+		return
+	}
+
+	observed := parseBarrelEnvProofOutput(out)
+	for _, variable := range usable {
+		if got, ok := observed[variable.Name]; !ok {
+			ctx.fail("Barrel env "+variable.Name, "not visible in wrapped session")
+			continue
+		} else if got != variable.Value {
+			ctx.fail("Barrel env "+variable.Name, fmt.Sprintf("expected %q, got %q", variable.Value, got))
+			continue
+		}
+		ctx.pass("Barrel env "+variable.Name, fmt.Sprintf("value %q", variable.Value))
+	}
+
+	expectedProxy := fmt.Sprintf("http://%s:%d", docker.ProxyHost(), ctx.Cfg.ProxyPort)
+	if got := observed["HTTP_PROXY"]; got == expectedProxy {
+		ctx.pass("Protected HTTP_PROXY", expectedProxy)
+	} else {
+		ctx.fail("Protected HTTP_PROXY", fmt.Sprintf("expected %q, got %q", expectedProxy, got))
+	}
+	if got := observed["DISPLAY"]; got == "127.0.0.1:99" {
+		ctx.pass("Protected DISPLAY", got)
+	} else {
+		ctx.fail("Protected DISPLAY", fmt.Sprintf("expected %q, got %q", "127.0.0.1:99", got))
+	}
+	if got := observed["http_proxy"]; got == "" {
+		ctx.pass("Protected http_proxy", "unset")
+	} else {
+		ctx.fail("Protected http_proxy", fmt.Sprintf("expected unset, got %q", got))
+	}
+}
+
+func buildBarrelEnvProofCommand(vars []config.BarrelEnvVar) string {
+	var lines []string
+	for _, variable := range vars {
+		lines = append(lines, fmt.Sprintf("printf '%%s=%%s\\n' %q \"$%s\"", variable.Name, variable.Name))
+	}
+	lines = append(lines,
+		`printf '%s=%s\n' "HTTP_PROXY" "${HTTP_PROXY-}"`,
+		`printf '%s=%s\n' "DISPLAY" "${DISPLAY-}"`,
+		`printf '%s=%s\n' "http_proxy" "${http_proxy-}"`,
+	)
+	return strings.Join(lines, "; ")
+}
+
+func parseBarrelEnvProofOutput(out string) map[string]string {
+	values := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		values[parts[0]] = parts[1]
+	}
+	return values
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8: Port Forwarding & Bridge
 // ---------------------------------------------------------------------------
 
 func (ctx *ProofContext) phasePortForwarding() {
-	ctx.printPhase("Phase 7: Port Forwarding & Bridge")
+	ctx.printPhase("Phase 8: Port Forwarding & Bridge")
 
 	// Bridge health.
 	bridgePort := ctx.Cfg.BridgePort
@@ -972,21 +1092,29 @@ func (ctx *ProofContext) printSummary() {
 
 // dockerExec runs a command inside the container via "docker exec".
 func dockerExec(container, shellCmd string) (string, error) {
-	cmd := exec.Command("docker", "exec", container, "bash", "-c", shellCmd)
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+	return dockerExecCommandWithEnv(container, []string{"bash", "-c", shellCmd}, nil)
 }
 
 // dockerExecWithEnv runs a command inside the container with extra env vars.
 func dockerExecWithEnv(container, shellCmd string, envArgs []string) (string, error) {
+	return dockerExecCommandWithEnv(container, []string{"bash", "-c", shellCmd}, envArgs)
+}
+
+func dockerExecCommandWithEnvRaw(container string, cmdArgs []string, envArgs []string) (string, error) {
 	args := []string{"exec"}
 	for _, env := range envArgs {
 		args = append(args, "-e", env)
 	}
-	args = append(args, container, "bash", "-c", shellCmd)
+	args = append(args, container)
+	args = append(args, cmdArgs...)
 	cmd := exec.Command("docker", args...)
 	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+	return string(out), err
+}
+
+func dockerExecCommandWithEnv(container string, cmdArgs []string, envArgs []string) (string, error) {
+	out, err := dockerExecCommandWithEnvRaw(container, cmdArgs, envArgs)
+	return strings.TrimSpace(out), err
 }
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,14 @@ func TestBarrelTmpRoot(t *testing.T) {
 	}
 }
 
+func TestBarrelTmpDir(t *testing.T) {
+	got := BarrelTmpDir("/tmp/cooper", "barrel-demo-claude")
+	want := filepath.Join("/tmp/cooper", "tmp", "barrel-demo-claude")
+	if got != want {
+		t.Fatalf("BarrelTmpDir() = %q, want %q", got, want)
+	}
+}
+
 func TestResetBarrelTmpRoot_CreatesMissingDir(t *testing.T) {
 	cooperDir := t.TempDir()
 

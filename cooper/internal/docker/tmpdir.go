@@ -15,6 +15,12 @@ func BarrelTmpRoot(cooperDir string) string {
 	return filepath.Join(cooperDir, "tmp")
 }
 
+// BarrelTmpDir returns the host directory mounted to /tmp for a specific
+// barrel container.
+func BarrelTmpDir(cooperDir, containerName string) string {
+	return filepath.Join(BarrelTmpRoot(cooperDir), containerName)
+}
+
 // ResetBarrelTmpRoot removes all persisted barrel /tmp contents and recreates
 // the root directory. Cooper calls this at control-plane startup and shutdown
 // so each session begins and ends with a pristine temp tree.

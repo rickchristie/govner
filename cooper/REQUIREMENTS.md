@@ -174,9 +174,9 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
           - (UI) User is recommended to be as strict as possible, because control panel at `cooper up` allows the user to take a look at live network request
             and allow them on the fly. This is the recommended way, so any requests to the web are monitored.
         - Back to main screen, user can select "Save & Continue" button to save the configuration file.
-    - Port Forwarding Setup Flow:
-      - Port forwarding is configured as its own dedicated screen (separate from Proxy Whitelist).
-      - Port forwarding uses a two-hop socat relay (see Network Architecture): socat inside the CLI container
+     - Port Forwarding Setup Flow:
+       - Port forwarding is configured as its own dedicated screen (separate from Proxy Whitelist).
+       - Port forwarding uses a two-hop socat relay (see Network Architecture): socat inside the CLI container
         forwards `localhost:{port}` to `cooper-proxy:{port}` on the internal network, then socat inside the
         proxy container forwards to `host.docker.internal:{port}` on the external network to reach host services.
         Rules are configured centrally here and applied to both container entrypoints when `cooper cli` launches.
@@ -188,11 +188,20 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
           to `127.0.0.1` are reached via Cooper's HostRelay.
         - macOS: Docker Desktop tunnels `host.docker.internal` to the host machine, so services on any bind
           address, including `127.0.0.1`, are reachable from barrels.
-      - (UI) User is guided to only forward ports that are necessary, for example,
-        - The AI will need to access port of the local postgres database, so user adds a rule for that port.
-        - User is using a self-hosted AI provider, so they add a rule for the port of that provider.
-        - User is developing a web application, so they add a rule for the port of that application so AI can curl and test the application.
-      - Back to main screen, user can select "Save & Continue" button to save the configuration file.
+       - (UI) User is guided to only forward ports that are necessary, for example,
+         - The AI will need to access port of the local postgres database, so user adds a rule for that port.
+         - User is using a self-hosted AI provider, so they add a rule for the port of that provider.
+         - User is developing a web application, so they add a rule for the port of that application so AI can curl and test the application.
+       - Back to main screen, user can select "Save & Continue" button to save the configuration file.
+    - Barrel Environment Setup Flow:
+      - Barrel environment is configured as its own dedicated screen in `cooper configure`.
+      - User can add/edit/delete key/value environment variables.
+      - These values are global across all Cooper barrels, tools, and workspaces because they live in global `~/.cooper/config.json`.
+      - Values are loaded at `cooper cli` session start, not at image build time and not at `docker run` time.
+      - Cooper restores protected runtime env after loading user env so user config cannot override infrastructure env such as proxy, display, PATH, token env, IDE integration env, or `COOPER_*` names.
+      - Protected names cannot be configured, including `HTTP_PROXY`, `PATH`, `OPENAI_API_KEY`, and all `COOPER_*` variables.
+      - Values are stored in plain text in `~/.cooper/config.json`; this feature is not a secret store.
+      - This is runtime-only: changes apply on the next `cooper cli` session and do not require `cooper build` or a barrel restart.
     - Proxy Setup:
       - Users can set-up:
         - Which port is used by the Squid proxy. Default: 3128 (Squid standard).

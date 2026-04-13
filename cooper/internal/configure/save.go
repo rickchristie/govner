@@ -124,6 +124,7 @@ func (m *saveModel) doSave() error {
 		m.configureApp.SetAITools(m.cfg.AITools)
 		m.configureApp.SetWhitelistedDomains(m.cfg.WhitelistedDomains)
 		m.configureApp.SetPortForwardRules(m.cfg.PortForwardRules)
+		m.configureApp.SetBarrelEnvVars(m.cfg.BarrelEnvVars)
 		m.configureApp.SetProxyPort(m.cfg.ProxyPort)
 		m.configureApp.SetBridgePort(m.cfg.BridgePort)
 		m.configureApp.SetBarrelSHMSize(m.cfg.BarrelSHMSize)
@@ -139,9 +140,11 @@ func (m *saveModel) doSave() error {
 	m.doneMsgs = append(m.doneMsgs, fmt.Sprintf("Generated templates in %s", m.cooperDir))
 	m.doneMsgs = append(m.doneMsgs, "CA certificate ensured")
 	m.doneMsgs = append(m.doneMsgs, "")
-	m.doneMsgs = append(m.doneMsgs, "Configuration saved. Run 'cooper build' to rebuild images.")
-	m.doneMsgs = append(m.doneMsgs, "  Base image: rebuilds if programming tool or implicit language-server versions changed.")
-	m.doneMsgs = append(m.doneMsgs, "  AI tool images: each tool rebuilds independently.")
+	m.doneMsgs = append(m.doneMsgs, "Configuration saved.")
+	m.doneMsgs = append(m.doneMsgs, "Runtime-only settings, including barrel environment variables, apply on the next 'cooper cli' session.")
+	m.doneMsgs = append(m.doneMsgs, "Run 'cooper build' only if you changed image-affecting settings.")
+	m.doneMsgs = append(m.doneMsgs, "Base image rebuilds if programming tool or implicit language-server versions changed.")
+	m.doneMsgs = append(m.doneMsgs, "AI tool images rebuild independently.")
 
 	return nil
 }
@@ -184,6 +187,8 @@ func (m *saveModel) view(width, height int) string {
 	// Port forwarding.
 	content += " " + labelStyle.Render("Port Forwarding:    ") +
 		valueStyle.Render(fmt.Sprintf("%d rules", len(m.cfg.PortForwardRules))) + "\n"
+	content += " " + labelStyle.Render("Barrel Environment:") +
+		valueStyle.Render(fmt.Sprintf(" %d entries", len(m.cfg.BarrelEnvVars))) + "\n"
 
 	// Ports.
 	content += " " + labelStyle.Render("Proxy Port:         ") +

@@ -16,6 +16,7 @@ type Config struct {
 	ImplicitTools       []ImplicitToolConfig `json:"implicit_tools"`
 	WhitelistedDomains  []DomainEntry        `json:"whitelisted_domains"`
 	PortForwardRules    []PortForwardRule    `json:"port_forward_rules"`
+	BarrelEnvVars       []BarrelEnvVar       `json:"barrel_env_vars"`
 	ProxyPort           int                  `json:"proxy_port"`
 	BridgePort          int                  `json:"bridge_port"`
 	MonitorTimeoutSecs  int                  `json:"monitor_timeout_secs"`
@@ -57,6 +58,9 @@ func LoadConfig(path string) (*Config, error) {
 func (c *Config) applyMissingDefaults() {
 	if c.ImplicitTools == nil {
 		c.ImplicitTools = []ImplicitToolConfig{}
+	}
+	if c.BarrelEnvVars == nil {
+		c.BarrelEnvVars = []BarrelEnvVar{}
 	}
 	if c.MonitorTimeoutSecs <= 0 {
 		c.MonitorTimeoutSecs = 30
@@ -104,6 +108,7 @@ func DefaultConfig() *Config {
 		ImplicitTools:       []ImplicitToolConfig{},
 		WhitelistedDomains:  defaultWhitelistedDomains(),
 		PortForwardRules:    []PortForwardRule{},
+		BarrelEnvVars:       []BarrelEnvVar{},
 		ProxyPort:           3128,
 		BridgePort:          4343,
 		MonitorTimeoutSecs:  30,
@@ -129,6 +134,7 @@ func CloneConfig(cfg *Config) *Config {
 	cp.ImplicitTools = append([]ImplicitToolConfig(nil), cfg.ImplicitTools...)
 	cp.WhitelistedDomains = append([]DomainEntry(nil), cfg.WhitelistedDomains...)
 	cp.PortForwardRules = append([]PortForwardRule(nil), cfg.PortForwardRules...)
+	cp.BarrelEnvVars = append([]BarrelEnvVar(nil), cfg.BarrelEnvVars...)
 	cp.BridgeRoutes = append([]BridgeRoute(nil), cfg.BridgeRoutes...)
 	return &cp
 }

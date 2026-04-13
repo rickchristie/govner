@@ -17,6 +17,7 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/auth"
+	"github.com/rickchristie/govner/cooper/internal/barrelenv"
 	"github.com/rickchristie/govner/cooper/internal/bridge"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
@@ -922,6 +923,17 @@ func runCLI(cmd *cobra.Command, args []string) error {
 	// 8. Generate random name.
 	sessionName := names.Generate(workspaceDir)
 	defer names.Release(sessionName)
+	sessionEnvFile, warnings, err := barrelenv.PrepareSessionEnvFile(cooperDir, containerName, sessionName, cfg.BarrelEnvVars)
+	if err != nil {
+		return fmt.Errorf("prepare barrel env session file: %w", err)
+	}
+	if sessionEnvFile.HostPath != "" {
+		defer func() {
+			if removeErr := barrelenv.RemoveSessionEnvFile(sessionEnvFile.HostPath); removeErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: %v\n", removeErr)
+			}
+		}()
+	}
 
 	// 9. Set terminal title.
 	dirName := filepath.Base(workspaceDir)
@@ -930,16 +942,27 @@ func runCLI(cmd *cobra.Command, args []string) error {
 
 	// 10. Build environment variables for the exec.
 	var envArgs []string
+	var tokenNames []string
 	for _, t := range tokens {
 		envArgs = append(envArgs, fmt.Sprintf("%s=%s", t.Name, t.Value))
+		tokenNames = append(tokenNames, t.Name)
+	}
+	for _, warning := range warnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
 	}
 
 	// 11. Execute: one-shot command or interactive shell.
-	var execCmd []string
+	targetCmd := []string{"bash", "-l"}
 	if cliOneShot != "" {
-		execCmd = []string{"bash", "-c", cliOneShot}
-	} else {
-		execCmd = []string{"bash", "-l"}
+		targetCmd = []string{"bash", "-c", cliOneShot}
+	}
+	execCmd, err := barrelenv.BuildExecWrapperCommand(
+		sessionEnvFile.ContainerPath,
+		barrelenv.ProtectedRuntimeEnvNames(tokenNames),
+		targetCmd,
+	)
+	if err != nil {
+		return fmt.Errorf("build barrel env exec command: %w", err)
 	}
 
 	interactive := cliOneShot == ""
