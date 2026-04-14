@@ -135,7 +135,7 @@ func TestValidateBarrelEnvVarsRejectsCaseInsensitiveDuplicates(t *testing.T) {
 }
 
 func TestValidateBarrelEnvVarsRejectsProtectedNames(t *testing.T) {
-	for _, name := range []string{"HTTP_PROXY", "http_proxy", "COOPER_PROXY_HOST", "COOPER_ANYTHING", "OPENAI_API_KEY", "TERM_PROGRAM", "PATH"} {
+	for _, name := range []string{"HTTP_PROXY", "http_proxy", "COOPER_PROXY_HOST", "COOPER_ANYTHING", "OPENAI_API_KEY", "TERM_PROGRAM", "PATH", "TZ"} {
 		t.Run(name, func(t *testing.T) {
 			err := ValidateBarrelEnvVars([]BarrelEnvVar{{Name: name, Value: "x"}})
 			if err == nil {

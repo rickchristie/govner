@@ -43,6 +43,7 @@ var protectedBarrelEnvExactNames = []string{
 	"TERM",
 	"TERM_PROGRAM",
 	"TERM_PROGRAM_VERSION",
+	"TZ",
 	"CLAUDE_CODE_SSE_PORT",
 	"CLAUDE_CODE_ENTRYPOINT",
 	"ENABLE_IDE_INTEGRATION",

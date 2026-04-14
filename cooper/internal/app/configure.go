@@ -24,6 +24,20 @@ type ConfigureApp struct {
 	existing  bool // true if loaded from existing config
 }
 
+var configureSaveStepNames = []string{
+	"Validating configuration...",
+	"Preparing cooper directories...",
+	"Resolving tool versions...",
+	"Writing configuration...",
+	"Generating templates...",
+	"Ensuring CA certificate...",
+}
+
+// SaveStepNames returns the ordered progress labels for ConfigureApp.Save.
+func SaveStepNames() []string {
+	return append([]string(nil), configureSaveStepNames...)
+}
+
 // programmingToolDefs defines the known programming tools and their display names.
 var programmingToolDefs = []struct {
 	name        string
@@ -168,14 +182,31 @@ func (a *ConfigureApp) Validate() error {
 // Save writes config.json, generates all templates (CLI Dockerfiles,
 // proxy Dockerfile, squid.conf), and ensures the CA certificate exists.
 func (a *ConfigureApp) Save() ([]string, error) {
+	return a.SaveWithProgress(nil)
+}
+
+// SaveWithProgress performs Save while reporting step completion or failure.
+func (a *ConfigureApp) SaveWithProgress(onProgress func(step int, total int, name string, err error)) ([]string, error) {
+	report := func(step int, err error) {
+		if onProgress == nil {
+			return
+		}
+		onProgress(step, len(configureSaveStepNames), configureSaveStepNames[step], err)
+	}
+
 	if err := a.cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("validation failed: %w", err)
+		err = fmt.Errorf("validation failed: %w", err)
+		report(0, err)
+		return nil, err
 	}
 	canonicalBarrelEnvVars := config.CanonicalizeBarrelEnvVars(a.cfg.BarrelEnvVars)
 	if err := config.ValidateBarrelEnvVars(canonicalBarrelEnvVars); err != nil {
-		return nil, fmt.Errorf("barrel env validation failed: %w", err)
+		err = fmt.Errorf("barrel env validation failed: %w", err)
+		report(0, err)
+		return nil, err
 	}
 	a.cfg.BarrelEnvVars = canonicalBarrelEnvVars
+	report(0, nil)
 
 	// Ensure cooperDir and subdirectories exist.
 	baseDir := filepath.Join(a.cooperDir, "base")
@@ -183,40 +214,57 @@ func (a *ConfigureApp) Save() ([]string, error) {
 	proxyDir := filepath.Join(a.cooperDir, "proxy")
 	for _, dir := range []string{a.cooperDir, baseDir, cliDir, proxyDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return nil, fmt.Errorf("create directory %s: %w", dir, err)
+			err = fmt.Errorf("create directory %s: %w", dir, err)
+			report(1, err)
+			return nil, err
 		}
 	}
+	report(1, nil)
 
 	warnings, err := config.RefreshDesiredToolVersions(a.cfg, config.DesiredVersionRefreshOptions{AllowStaleFallback: true})
 	if err != nil {
+		report(2, err)
 		return nil, err
 	}
 	implicit, implicitWarnings, err := config.ResolveImplicitToolsWithOptions(a.cfg, config.ImplicitToolResolveOptions{AllowStaleFallback: true})
 	if err != nil {
+		report(2, err)
 		return warnings, err
 	}
 	warnings = append(warnings, implicitWarnings...)
+	report(2, nil)
 
 	// Save config.json.
 	configPath := filepath.Join(a.cooperDir, "config.json")
 	if err := config.SaveConfig(configPath, a.cfg); err != nil {
-		return warnings, fmt.Errorf("save config: %w", err)
+		err = fmt.Errorf("save config: %w", err)
+		report(3, err)
+		return warnings, err
 	}
+	report(3, nil)
 
 	// Generate base + per-tool CLI templates.
 	if err := templates.WriteAllTemplates(baseDir, cliDir, a.cfg, implicit); err != nil {
-		return warnings, fmt.Errorf("write CLI templates: %w", err)
+		err = fmt.Errorf("write CLI templates: %w", err)
+		report(4, err)
+		return warnings, err
 	}
 
 	// Generate proxy templates.
 	if err := templates.WriteProxyTemplates(proxyDir, a.cfg); err != nil {
-		return warnings, fmt.Errorf("write proxy templates: %w", err)
+		err = fmt.Errorf("write proxy templates: %w", err)
+		report(4, err)
+		return warnings, err
 	}
+	report(4, nil)
 
 	// Ensure CA certificate.
 	if _, _, err := config.EnsureCA(a.cooperDir); err != nil {
-		return warnings, fmt.Errorf("ensure CA: %w", err)
+		err = fmt.Errorf("ensure CA: %w", err)
+		report(5, err)
+		return warnings, err
 	}
+	report(5, nil)
 
 	return warnings, nil
 }

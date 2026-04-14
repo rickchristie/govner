@@ -36,6 +36,17 @@ type LoadingStep struct {
 var startupProgress = []float64{0.12, 0.30, 0.42, 0.55, 0.65, 0.78, 0.92, 1.0}
 var shutdownProgress = []float64{0.10, 0.30, 0.60, 0.85, 1.0}
 
+// Options customizes a loading model beyond the built-in startup/shutdown flows.
+type Options struct {
+	Shutdown        bool
+	Steps           []LoadingStep
+	ProgressTargets []float64
+	RunningSubtitle string
+	DoneSubtitle    string
+	ErrorSubtitle   string
+	AllowCancel     bool
+}
+
 // StartupSteps returns the default step list for startup.
 func StartupSteps() []LoadingStep {
 	return []LoadingStep{
@@ -75,29 +86,73 @@ type Model struct {
 	barrelFrame   int
 	displayProg   float64 // displayed progress (chases target)
 	targetProg    float64 // target progress based on completed steps
+	progressTable []float64
 	lastAnimTick  time.Time
 	holdStartTime time.Time // set when progress reaches 100%
 	holdComplete  bool
 
 	// error subtitle state.
-	errorMsg string
+	errorMsg        string
+	runningSubtitle string
+	doneSubtitle    string
+	errorSubtitle   string
+	allowCancel     bool
 }
 
 // New creates a loading model. If shutdown is true, the shutdown step
 // set and subtitle are used.
 func New(shutdown bool) Model {
 	steps := StartupSteps()
+	targets := startupProgress
+	runningSubtitle := "rolling out the barrel..."
+	doneSubtitle := "barrel-proof and ready"
+	errorSubtitle := "the barrel sprung a leak"
+	allowCancel := true
 	if shutdown {
 		steps = ShutdownSteps()
+		targets = shutdownProgress
+		runningSubtitle = "sealing the barrel..."
+		doneSubtitle = "barrel sealed"
+		errorSubtitle = "the barrel won't close"
+		allowCancel = false
 	}
-	// Mark first step as running.
+	return NewWithOptions(Options{
+		Shutdown:        shutdown,
+		Steps:           steps,
+		ProgressTargets: targets,
+		RunningSubtitle: runningSubtitle,
+		DoneSubtitle:    doneSubtitle,
+		ErrorSubtitle:   errorSubtitle,
+		AllowCancel:     allowCancel,
+	})
+}
+
+// NewWithOptions creates a loading model with custom steps and copy.
+func NewWithOptions(opts Options) Model {
+	steps := cloneSteps(opts.Steps)
+	if len(steps) == 0 {
+		if opts.Shutdown {
+			steps = ShutdownSteps()
+		} else {
+			steps = StartupSteps()
+		}
+	}
 	if len(steps) > 0 {
 		steps[0].Status = StepRunning
 	}
+	progressTable := append([]float64(nil), opts.ProgressTargets...)
+	if len(progressTable) != len(steps) {
+		progressTable = evenProgressTargets(len(steps))
+	}
 	return Model{
-		Steps:        steps,
-		IsShutdown:   shutdown,
-		lastAnimTick: time.Now(),
+		Steps:           steps,
+		IsShutdown:      opts.Shutdown,
+		progressTable:   progressTable,
+		runningSubtitle: opts.RunningSubtitle,
+		doneSubtitle:    opts.DoneSubtitle,
+		errorSubtitle:   opts.ErrorSubtitle,
+		allowCancel:     opts.AllowCancel,
+		lastAnimTick:    time.Now(),
 	}
 }
 
@@ -244,16 +299,25 @@ func (m Model) ViewSub(width, height int) string {
 
 func (m Model) subtitle() string {
 	if m.HasError {
+		if m.errorSubtitle != "" {
+			return m.errorSubtitle
+		}
 		if m.IsShutdown {
 			return "the barrel won't close"
 		}
 		return "the barrel sprung a leak"
 	}
 	if m.Done {
+		if m.doneSubtitle != "" {
+			return m.doneSubtitle
+		}
 		if m.IsShutdown {
 			return "barrel sealed"
 		}
 		return "barrel-proof and ready"
+	}
+	if m.runningSubtitle != "" {
+		return m.runningSubtitle
 	}
 	if m.IsShutdown {
 		return "sealing the barrel..."
@@ -346,6 +410,10 @@ func (m Model) helpLine() string {
 			strings.Repeat(" ", 30) + theme.BarrelEmoji
 	}
 
+	if !m.allowCancel {
+		return strings.Repeat(" ", 40) + theme.BarrelEmoji
+	}
+
 	return "[" + theme.HelpKeyStyle.Render("q") + " " +
 		theme.HelpDescStyle.Render("Cancel") + "]" +
 		strings.Repeat(" ", 30) + theme.BarrelEmoji
@@ -354,6 +422,9 @@ func (m Model) helpLine() string {
 func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
+		if !m.allowCancel && !m.HasError {
+			return m, nil
+		}
 		if m.IsShutdown && !m.HasError {
 			// Cannot cancel a normal shutdown.
 			return m, nil
@@ -371,12 +442,8 @@ func (m Model) completeStep(idx int) (Model, tea.Cmd) {
 	m.Steps[idx].Status = StepDone
 
 	// Update target progress.
-	progTable := startupProgress
-	if m.IsShutdown {
-		progTable = shutdownProgress
-	}
-	if idx < len(progTable) {
-		m.targetProg = progTable[idx]
+	if idx < len(m.progressTable) {
+		m.targetProg = m.progressTable[idx]
 	}
 
 	// Advance to next step.
@@ -475,4 +542,28 @@ func maxLineWidth(lines []string) int {
 		}
 	}
 	return max
+}
+
+func cloneSteps(steps []LoadingStep) []LoadingStep {
+	if len(steps) == 0 {
+		return nil
+	}
+	cloned := make([]LoadingStep, len(steps))
+	copy(cloned, steps)
+	for i := range cloned {
+		cloned[i].Status = StepPending
+		cloned[i].Detail = ""
+	}
+	return cloned
+}
+
+func evenProgressTargets(stepCount int) []float64 {
+	if stepCount <= 0 {
+		return nil
+	}
+	targets := make([]float64, stepCount)
+	for i := range targets {
+		targets[i] = float64(i+1) / float64(stepCount)
+	}
+	return targets
 }

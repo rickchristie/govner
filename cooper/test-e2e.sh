@@ -34,6 +34,7 @@ PROXY_CONTAINER="${PREFIX}cooper-proxy-runtime"
 NETWORK_EXTERNAL="${PREFIX}cooper-external"
 NETWORK_INTERNAL="${PREFIX}cooper-internal"
 BARREL_PROXY_HOST="cooper-proxy"
+HOST_LOCALTIME="/etc/localtime"
 
 # Per-tool barrel container names.
 BARREL_CLAUDE="barrel-e2e-workspace-claude"
@@ -500,6 +501,17 @@ other_tools() {
 # the same container contract as the real application.
 BARREL_XAUTH_PATH="/home/user/.cooper-clipboard.xauth"
 BARREL_PLAYWRIGHT_CACHE="/home/user/.cache/ms-playwright"
+BARREL_LOCALTIME_PATH="/etc/localtime"
+BARREL_TIMEZONE_FILENAME="cooper-localtime"
+
+sync_barrel_timezone_file() {
+    local barrel_name=$1
+    local host_snapshot="${CONFIG_DIR}/tmp/${barrel_name}/${BARREL_TIMEZONE_FILENAME}"
+    mkdir -p "$(dirname "$host_snapshot")"
+    cp "$HOST_LOCALTIME" "$host_snapshot"
+    chmod 644 "$host_snapshot"
+    echo "$host_snapshot"
+}
 
 build_barrel_run_args() {
     local barrel_name=$1
@@ -510,6 +522,8 @@ build_barrel_run_args() {
     local -n auth_mounts_ref="$auth_mounts_name"
     local -n extra_mounts_ref="$extra_mounts_name"
     local -n extra_envs_ref="$extra_envs_name"
+    local timezone_snapshot
+    timezone_snapshot=$(sync_barrel_timezone_file "$barrel_name")
 
     BARREL_ARGS=(
         "run" "-d"
@@ -547,6 +561,7 @@ build_barrel_run_args() {
         "-v" "${CONFIG_DIR}/fonts:/home/user/.local/share/fonts:ro"
         "-v" "${CONFIG_DIR}/cache/ms-playwright:${BARREL_PLAYWRIGHT_CACHE}:rw"
         "-v" "${CONFIG_DIR}/tmp/${barrel_name}:/tmp:rw"
+        "-v" "${timezone_snapshot}:${BARREL_LOCALTIME_PATH}:ro"
 
         # Any scenario-specific extra mounts go here.
         "${extra_mounts_ref[@]}"
@@ -555,6 +570,7 @@ build_barrel_run_args() {
         "-e" "HTTP_PROXY=http://${BARREL_PROXY_HOST}:${PROXY_PORT}"
         "-e" "HTTPS_PROXY=http://${BARREL_PROXY_HOST}:${PROXY_PORT}"
         "-e" "NO_PROXY=localhost,127.0.0.1"
+        "-e" "TZ=:${BARREL_LOCALTIME_PATH}"
         "-e" "COOPER_PROXY_HOST=${BARREL_PROXY_HOST}"
         "-e" "COOPER_INTERNAL_NETWORK=${NETWORK_INTERNAL}"
 
@@ -941,6 +957,22 @@ for tool in "${ALL_TOOLS[@]}"; do
         pass "${tool}: Playwright cache dir mounted"
     else
         fail "${tool}: Playwright cache dir not found"
+    fi
+
+    # ---- Timezone runtime environment ----
+    host_tz_offset=$(date +%z | tr -d '[:space:]')
+    tz_val=$(barrel_exec 'echo "$TZ"' | tr -d '[:space:]')
+    if [ "$tz_val" = ":/etc/localtime" ]; then
+        pass "${tool}: TZ points at /etc/localtime"
+    else
+        fail "${tool}: TZ expected :/etc/localtime, got: ${tz_val}"
+    fi
+
+    barrel_tz_offset=$(barrel_exec 'date +%z' | tr -d '[:space:]')
+    if [ "$barrel_tz_offset" = "$host_tz_offset" ]; then
+        pass "${tool}: timezone offset matches host (${host_tz_offset})"
+    else
+        fail "${tool}: timezone offset mismatch (host=${host_tz_offset}, barrel=${barrel_tz_offset})"
     fi
 
     # Playwright cache should be writable.

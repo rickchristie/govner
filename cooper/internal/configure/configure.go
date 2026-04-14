@@ -170,19 +170,31 @@ func Run(ca *app.ConfigureApp) (RunResult, error) {
 	}
 
 	var result RunResult
-	if fm, ok := finalModel.(*model); ok && fm.save.saved {
-		result.Saved = true
-		result.BuildRequested = fm.save.buildRequested
-		result.CleanBuild = fm.save.cleanBuildRequested
-		if fm.save.buildRequested {
-			if fm.save.cleanBuildRequested {
-				fmt.Fprintln(os.Stderr, "\nConfiguration saved. Starting clean build (no cache)...")
-			} else {
-				fmt.Fprintln(os.Stderr, "\nConfiguration saved. Starting build...")
-			}
+	fm, ok := finalModel.(*model)
+	if !ok || !fm.save.saveRequested {
+		return result, nil
+	}
+
+	warnings, err := runRequestedActionWithLoading(ca, fm.cfg, fm.save)
+	if err != nil {
+		return RunResult{}, err
+	}
+
+	result.Saved = true
+	result.BuildRequested = fm.save.buildRequested
+	result.CleanBuild = fm.save.cleanBuildRequested
+	for _, warning := range warnings {
+		fmt.Fprintln(os.Stderr, warning)
+	}
+	if fm.save.buildRequested {
+		if fm.save.cleanBuildRequested {
+			fmt.Fprintln(os.Stderr, "\nConfiguration saved. Clean build complete.")
 		} else {
-			fmt.Fprintln(os.Stderr, "\nConfiguration saved.")
+			fmt.Fprintln(os.Stderr, "\nConfiguration saved. Build complete.")
 		}
+		fmt.Fprintln(os.Stderr, "Start with 'cooper up'.")
+	} else {
+		fmt.Fprintln(os.Stderr, "\nConfiguration saved.")
 	}
 
 	return result, nil

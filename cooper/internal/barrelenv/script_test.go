@@ -59,7 +59,7 @@ func TestProtectedRuntimeEnvNamesDedupesAndPreservesStableOrder(t *testing.T) {
 		t.Fatalf("ProtectedRuntimeEnvNames() order is not stable\nfirst=%v\nsecond=%v", first, second)
 	}
 	joined := strings.Join(first, "\n")
-	if !strings.Contains(joined, "HTTP_PROXY") || !strings.Contains(joined, "OPENAI_API_KEY") || !strings.Contains(joined, "TERM") {
+	if !strings.Contains(joined, "HTTP_PROXY") || !strings.Contains(joined, "OPENAI_API_KEY") || !strings.Contains(joined, "TERM") || !strings.Contains(joined, "TZ") {
 		t.Fatalf("ProtectedRuntimeEnvNames() = %v, want static names plus extras", first)
 	}
 	if strings.Count(joined, "OPENAI_API_KEY") != 1 || strings.Count(joined, "TERM") != 1 {

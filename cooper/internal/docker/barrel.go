@@ -77,6 +77,9 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 	if err := ensureBarrelMountDirs(toolName, cooperDir, name, cfg); err != nil {
 		return fmt.Errorf("create mount directories: %w", err)
 	}
+	if _, err := SyncBarrelTimezoneFile(cooperDir, name); err != nil {
+		return fmt.Errorf("sync barrel timezone: %w", err)
+	}
 
 	// Ensure seccomp profile is written to disk.
 	seccompPath, err := EnsureSeccompProfile(cooperDir)
@@ -114,6 +117,7 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 		"-e", fmt.Sprintf("HTTP_PROXY=http://%s:%d", ProxyHost(), cfg.ProxyPort),
 		"-e", fmt.Sprintf("HTTPS_PROXY=http://%s:%d", ProxyHost(), cfg.ProxyPort),
 		"-e", "NO_PROXY=localhost,127.0.0.1",
+		"-e", "TZ=:/etc/localtime",
 		"-e", fmt.Sprintf("COOPER_PROXY_HOST=%s", ProxyHost()),
 		"-e", fmt.Sprintf("COOPER_INTERNAL_NETWORK=%s", InternalNetworkName()),
 	)
@@ -246,6 +250,13 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 	// when it shuts down, so each control-plane session begins pristine.
 	barrelTmpDir := BarrelTmpDir(cooperDir, containerName)
 	args = append(args, "-v", barrelTmpDir+":/tmp:rw")
+
+	// Bind the latest host timezone snapshot into /etc/localtime so startup
+	// paths and background processes share the same local time view as the CLI.
+	timezoneFile := filepath.Join(barrelTmpDir, barrelTimezoneFilename)
+	if fileExists(timezoneFile) {
+		args = append(args, "-v", timezoneFile+":"+barrelTimezoneContainerPath+":ro")
+	}
 
 	return args
 }

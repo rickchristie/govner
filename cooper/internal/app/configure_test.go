@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -323,6 +324,37 @@ func TestConfigureApp_Save(t *testing.T) {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			t.Errorf("expected %s to exist after Save", path)
 		}
+	}
+}
+
+func TestConfigureApp_SaveWithProgressReportsAllSteps(t *testing.T) {
+	stubConfigureTestResolvers(t)
+
+	cooperDir := t.TempDir()
+	ca, err := NewConfigureApp(cooperDir)
+	if err != nil {
+		t.Fatalf("NewConfigureApp: %v", err)
+	}
+	ca.SetProgrammingTools([]config.ToolConfig{{Name: "go", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.22.5"}})
+
+	var reported []string
+	warnings, err := ca.SaveWithProgress(func(step int, total int, name string, stepErr error) {
+		if stepErr != nil {
+			t.Fatalf("unexpected step error at %d (%s): %v", step, name, stepErr)
+		}
+		if total != len(SaveStepNames()) {
+			t.Fatalf("total = %d, want %d", total, len(SaveStepNames()))
+		}
+		reported = append(reported, name)
+	})
+	if err != nil {
+		t.Fatalf("SaveWithProgress: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+	if !reflect.DeepEqual(reported, SaveStepNames()) {
+		t.Fatalf("reported steps = %v, want %v", reported, SaveStepNames())
 	}
 }
 

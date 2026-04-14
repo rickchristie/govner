@@ -55,6 +55,20 @@ func stripTerminalTitleEscapes(s string) string {
 	}
 }
 
+func requireZoneinfoFile(t *testing.T, rel string) string {
+	t.Helper()
+	for _, candidate := range []string{
+		filepath.Join("/usr/share/zoneinfo", rel),
+		filepath.Join("/var/db/timezone/zoneinfo", rel),
+	} {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	t.Skipf("zoneinfo file %q not found on host", rel)
+	return ""
+}
+
 func updatePersistedBarrelEnvVars(t *testing.T, cooperDir string, vars []config.BarrelEnvVar) *config.Config {
 	t.Helper()
 	path := filepath.Join(cooperDir, "config.json")
@@ -209,6 +223,120 @@ func TestRunCLIPathCannotBeOverriddenByBadConfig(t *testing.T) {
 	}
 }
 
+func TestRunCLISessionTimezoneFollowsSyncedHostTimezoneOnReuse(t *testing.T) {
+	_, workspaceDir := setupCLIBarrelEnvTest(t, nil)
+	tokyoPath := requireZoneinfoFile(t, filepath.Join("Asia", "Tokyo"))
+	utcPath := requireZoneinfoFile(t, filepath.Join("Etc", "UTC"))
+	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
+
+	restoreTokyo := docker.SetHostLocaltimePathForTesting(tokyoPath)
+	t.Cleanup(restoreTokyo)
+	cliOneShot = `printf '%s|%s' "${TZ-}" "$(date +%z)"`
+	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	if err != nil {
+		t.Fatalf("first runCLI() failed: %v", err)
+	}
+	first := strings.TrimSpace(stripTerminalTitleEscapes(stdout))
+	firstParts := strings.Split(first, "|")
+	if len(firstParts) != 2 {
+		t.Fatalf("first stdout = %q, want TZ|offset", first)
+	}
+	if !strings.HasPrefix(firstParts[0], ":/tmp/cooper-cli-tz-") || !strings.HasSuffix(firstParts[0], ".tz") {
+		t.Fatalf("first TZ = %q, want cooper session timezone file", firstParts[0])
+	}
+	if firstParts[1] != "+0900" {
+		t.Fatalf("first offset = %q, want %q", firstParts[1], "+0900")
+	}
+	if !strings.Contains(stderr, "Starting barrel container "+barrelName) {
+		t.Fatalf("expected initial barrel start message, got %q", stderr)
+	}
+
+	restoreTokyo()
+	restoreUTC := docker.SetHostLocaltimePathForTesting(utcPath)
+	t.Cleanup(restoreUTC)
+	stdout, stderr, err = captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	if err != nil {
+		t.Fatalf("second runCLI() failed: %v", err)
+	}
+	second := strings.TrimSpace(stripTerminalTitleEscapes(stdout))
+	secondParts := strings.Split(second, "|")
+	if len(secondParts) != 2 {
+		t.Fatalf("second stdout = %q, want TZ|offset", second)
+	}
+	if !strings.HasPrefix(secondParts[0], ":/tmp/cooper-cli-tz-") || !strings.HasSuffix(secondParts[0], ".tz") {
+		t.Fatalf("second TZ = %q, want cooper session timezone file", secondParts[0])
+	}
+	if secondParts[0] == firstParts[0] {
+		t.Fatalf("expected a fresh per-session timezone file, got same path %q", secondParts[0])
+	}
+	if secondParts[1] != "+0000" {
+		t.Fatalf("second offset = %q, want %q", secondParts[1], "+0000")
+	}
+	if strings.Contains(stderr, "Starting barrel container "+barrelName) {
+		t.Fatalf("expected barrel reuse, got stderr %q", stderr)
+	}
+}
+
+func TestRunCLITimezoneCannotBeOverriddenByBadConfig(t *testing.T) {
+	_, _ = setupCLIBarrelEnvTest(t, func(cfg *config.Config) {
+		cfg.BarrelEnvVars = []config.BarrelEnvVar{{Name: "TZ", Value: "UTC"}}
+	})
+	tokyoPath := requireZoneinfoFile(t, filepath.Join("Asia", "Tokyo"))
+	restore := docker.SetHostLocaltimePathForTesting(tokyoPath)
+	t.Cleanup(restore)
+
+	cliOneShot = `printf '%s|%s' "${TZ-}" "$(date +%z)"`
+	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	if err != nil {
+		t.Fatalf("runCLI() failed: %v", err)
+	}
+	parts := strings.Split(strings.TrimSpace(stripTerminalTitleEscapes(stdout)), "|")
+	if len(parts) != 2 {
+		t.Fatalf("stdout = %q, want TZ|offset", stdout)
+	}
+	if !strings.HasPrefix(parts[0], ":/tmp/cooper-cli-tz-") || !strings.HasSuffix(parts[0], ".tz") {
+		t.Fatalf("TZ = %q, want cooper session timezone file", parts[0])
+	}
+	if parts[1] != "+0900" {
+		t.Fatalf("offset = %q, want %q", parts[1], "+0900")
+	}
+	if !strings.Contains(stderr, `TZ`) {
+		t.Fatalf("stderr missing TZ warning: %q", stderr)
+	}
+}
+
+func TestStartBarrelUsesSyncedHostTimezoneAtContainerStart(t *testing.T) {
+	driver := setupCommandDriver(t, nil)
+	tokyoPath := requireZoneinfoFile(t, filepath.Join("Asia", "Tokyo"))
+	restore := docker.SetHostLocaltimePathForTesting(tokyoPath)
+	t.Cleanup(restore)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	if err := driver.Start(ctx); err != nil {
+		t.Fatalf("start cooper runtime: %v", err)
+	}
+
+	barrel, err := driver.StartBarrel("claude")
+	if err != nil {
+		t.Fatalf("StartBarrel() failed: %v", err)
+	}
+	out, err := driver.ExecBarrel(barrel.Name, `printf '%s|%s' "${TZ-}" "$(date +%z)"`)
+	if err != nil {
+		t.Fatalf("ExecBarrel() failed: %v", err)
+	}
+	parts := strings.Split(strings.TrimSpace(out), "|")
+	if len(parts) != 2 {
+		t.Fatalf("output = %q, want TZ|offset", out)
+	}
+	if parts[0] != ":/etc/localtime" {
+		t.Fatalf("TZ = %q, want %q", parts[0], ":/etc/localtime")
+	}
+	if parts[1] != "+0900" {
+		t.Fatalf("offset = %q, want %q", parts[1], "+0900")
+	}
+}
+
 func TestRunCLISessionEnvFileIsCleanedUp(t *testing.T) {
 	driver, workspaceDir := setupCLIBarrelEnvTest(t, func(cfg *config.Config) {
 		cfg.BarrelEnvVars = []config.BarrelEnvVar{{Name: "FOO", Value: "1"}}
@@ -227,6 +355,9 @@ func TestRunCLISessionEnvFileIsCleanedUp(t *testing.T) {
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), "cooper-cli-env-") && strings.HasSuffix(entry.Name(), ".sh") {
 			t.Fatalf("unexpected leftover session env file: %s", entry.Name())
+		}
+		if strings.HasPrefix(entry.Name(), "cooper-cli-tz-") && strings.HasSuffix(entry.Name(), ".tz") {
+			t.Fatalf("unexpected leftover session timezone file: %s", entry.Name())
 		}
 	}
 }

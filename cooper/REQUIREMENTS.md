@@ -549,10 +549,12 @@ reserved `/clipboard/*` namespace. User bridge routes cannot use this namespace.
 - `COOPER_CLIPBOARD_SHIMS=xclip,xsel` — which shim scripts to install
 - `COOPER_CLIPBOARD_XAUTHORITY=/home/user/.cooper-clipboard.xauth` — X11 auth file path (x11/auto modes)
 - `COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99` — X11 display address (x11/auto modes)
+- `TZ=:/etc/localtime` — barrel startup and background processes use the host timezone snapshot from the current `cooper cli` session
 
 **Volume mounts:**
 - `~/.cooper/tokens/{containerName}` → `/etc/cooper/clipboard-token` (read-only) — per-barrel auth token
 - `~/.cooper/base/shims/` → `/etc/cooper/shims/` (read-only) — pre-generated shim scripts
+- `~/.cooper/tmp/{containerName}/cooper-localtime` → `/etc/localtime` (read-only) — host timezone snapshot refreshed on each `cooper cli` session
 
 **Base image additions:**
 - Packages: `xclip`, `xsel`, `xauth`, `xvfb` (installed unconditionally in base image)

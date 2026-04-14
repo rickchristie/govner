@@ -21,6 +21,7 @@ var protectedRuntimeStaticNames = []string{
 	"USER",
 	"LOGNAME",
 	"SHELL",
+	"TZ",
 	"DISPLAY",
 	"XAUTHORITY",
 	"PLAYWRIGHT_BROWSERS_PATH",

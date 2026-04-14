@@ -20,6 +20,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/auth"
 	"github.com/rickchristie/govner/cooper/internal/barrelenv"
 	"github.com/rickchristie/govner/cooper/internal/bridge"
+	"github.com/rickchristie/govner/cooper/internal/buildflow"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/configure"
@@ -262,14 +263,7 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	cl.LogStep(2, "Run configure wizard", nil)
-
-	if result.BuildRequested {
-		if result.CleanBuild {
-			buildClean = true
-		}
-		cl.LogDone(nil)
-		return runBuild(cmd, args)
-	}
+	_ = result
 	cl.LogDone(nil)
 	return nil
 }
@@ -283,130 +277,7 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-
-	// 1. Generate templates.
-	baseDir := filepath.Join(cooperDir, "base")
-	cliDir := filepath.Join(cooperDir, "cli")
-	proxyDir := filepath.Join(cooperDir, "proxy")
-	for _, d := range []string{baseDir, cliDir, proxyDir} {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			return fmt.Errorf("create dir %s: %w", d, err)
-		}
-	}
-
-	// Resolve the full desired top-level tool state before template generation.
-	fmt.Fprintln(os.Stderr, "Resolving tool versions...")
-	if _, err := config.RefreshDesiredToolVersions(cfg, config.DesiredVersionRefreshOptions{AllowStaleFallback: false}); err != nil {
-		return fmt.Errorf("resolve desired tool versions: %w", err)
-	}
-	implicit, err := config.ResolveImplicitTools(cfg)
-	if err != nil {
-		return fmt.Errorf("resolve implicit tools: %w", err)
-	}
-
-	fmt.Fprintln(os.Stderr, "Generating templates...")
-	if err := templates.WriteAllTemplates(baseDir, cliDir, cfg, implicit); err != nil {
-		return fmt.Errorf("write templates: %w", err)
-	}
-	if err := templates.WriteProxyTemplates(proxyDir, cfg); err != nil {
-		return fmt.Errorf("write proxy templates: %w", err)
-	}
-
-	// 2. Ensure CA certificate exists.
-	fmt.Fprintln(os.Stderr, "Ensuring CA certificate...")
-	caCertPath, caKeyPath, err := config.EnsureCA(cooperDir)
-	if err != nil {
-		return fmt.Errorf("ensure CA: %w", err)
-	}
-
-	// 3. Write ACL helper source into the proxy build context.
-	fmt.Fprintln(os.Stderr, "Writing ACL helper source...")
-	if err := templates.WriteACLHelperSource(proxyDir); err != nil {
-		return fmt.Errorf("write acl helper source: %w", err)
-	}
-
-	// 4. Stage CA files into build contexts.
-	fmt.Fprintln(os.Stderr, "Staging CA files into build contexts...")
-	if err := copyFile(caCertPath, filepath.Join(baseDir, "cooper-ca.pem")); err != nil {
-		return fmt.Errorf("stage CA cert into base dir: %w", err)
-	}
-	if err := copyFile(caCertPath, filepath.Join(proxyDir, "cooper-ca.pem")); err != nil {
-		return fmt.Errorf("stage CA cert into proxy dir: %w", err)
-	}
-	if err := copyFile(caKeyPath, filepath.Join(proxyDir, "cooper-ca-key.pem")); err != nil {
-		return fmt.Errorf("stage CA key into proxy dir: %w", err)
-	}
-
-	noCache := buildClean
-
-	// 5. Build proxy image.
-	fmt.Fprintln(os.Stderr, "Building proxy image...")
-	proxyDockerfile := filepath.Join(proxyDir, "proxy.Dockerfile")
-	uidGidArgs := map[string]string{
-		"USER_UID": fmt.Sprintf("%d", os.Getuid()),
-		"USER_GID": fmt.Sprintf("%d", os.Getgid()),
-	}
-	if err := docker.BuildImage(docker.GetImageProxy(), proxyDockerfile, proxyDir, uidGidArgs, noCache); err != nil {
-		return fmt.Errorf("build proxy image: %w", err)
-	}
-
-	// 6. Build base image (no AI tools).
-	fmt.Fprintln(os.Stderr, "Building base image...")
-	baseDockerfile := filepath.Join(baseDir, "Dockerfile")
-	if err := docker.BuildImage(docker.GetImageBase(), baseDockerfile, baseDir, uidGidArgs, noCache); err != nil {
-		return fmt.Errorf("build base image: %w", err)
-	}
-	// Persist base built state immediately. A later child-image failure must not
-	// make config.json lie about the already-rebuilt base because update planning,
-	// startup warnings, and About all treat the saved config as last-built truth.
-	updateProgrammingToolContainerVersions(cfg)
-	setBuiltBaseNodeVersion(cfg)
-	setBuiltImplicitTools(cfg, implicit)
-	configPath := filepath.Join(cooperDir, "config.json")
-	if err := config.SaveConfig(configPath, cfg); err != nil {
-		return fmt.Errorf("save config after base build: %w", err)
-	}
-
-	// 7. Build each enabled AI tool image.
-	for _, tool := range cfg.AITools {
-		if !tool.Enabled {
-			continue
-		}
-		toolDir := filepath.Join(cliDir, tool.Name)
-		imageName := docker.GetImageCLI(tool.Name)
-		dockerfile := filepath.Join(toolDir, "Dockerfile")
-		fmt.Fprintf(os.Stderr, "Building %s image...\n", tool.Name)
-		if err := docker.BuildImage(imageName, dockerfile, toolDir, nil, noCache); err != nil {
-			return fmt.Errorf("build %s image: %w", tool.Name, err)
-		}
-		// Persist each successful built-in child image incrementally for the same
-		// reason: later failures must not erase already-real image state.
-		updateAIToolContainerVersion(cfg, tool.Name)
-		if err := config.SaveConfig(configPath, cfg); err != nil {
-			return fmt.Errorf("save config after %s build: %w", tool.Name, err)
-		}
-	}
-
-	// 8. Build user-custom images (directories in cli/ not matching built-in tool names).
-	builtinNames := map[string]bool{"claude": true, "copilot": true, "codex": true, "opencode": true}
-	entries, _ := os.ReadDir(cliDir)
-	for _, e := range entries {
-		if !e.IsDir() || builtinNames[e.Name()] {
-			continue
-		}
-		customDir := filepath.Join(cliDir, e.Name())
-		customDockerfile := filepath.Join(customDir, "Dockerfile")
-		if fileExists(customDockerfile) {
-			imageName := docker.GetImageCLI(e.Name())
-			fmt.Fprintf(os.Stderr, "Building custom image %s...\n", e.Name())
-			if err := docker.BuildImage(imageName, customDockerfile, customDir, nil, noCache); err != nil {
-				return fmt.Errorf("build custom image %s: %w", e.Name(), err)
-			}
-		}
-	}
-
-	fmt.Fprintln(os.Stderr, "Build complete.")
-	return nil
+	return buildflow.Run(cfg, cooperDir, buildflow.Options{NoCache: buildClean, Out: os.Stderr})
 }
 
 func updateProgrammingToolContainerVersions(cfg *config.Config) {
@@ -895,6 +766,9 @@ func runCLI(cmd *cobra.Command, args []string) error {
 
 	// 6. Determine barrel container name (includes tool name).
 	containerName := docker.BarrelContainerName(workspaceDir, toolName)
+	if _, err := docker.SyncBarrelTimezoneFile(cooperDir, containerName); err != nil {
+		return fmt.Errorf("sync barrel timezone: %w", err)
+	}
 
 	// 7. If barrel not running, start it and wait for entrypoint readiness.
 	barrelRunning, err := docker.IsBarrelRunning(containerName)
@@ -934,6 +808,17 @@ func runCLI(cmd *cobra.Command, args []string) error {
 	// 8. Generate random name.
 	sessionName := names.Generate(workspaceDir)
 	defer names.Release(sessionName)
+	sessionTimezoneFile, err := docker.PrepareSessionTimezoneFile(cooperDir, containerName, sessionName)
+	if err != nil {
+		return fmt.Errorf("prepare barrel timezone session file: %w", err)
+	}
+	if sessionTimezoneFile.HostPath != "" {
+		defer func() {
+			if removeErr := docker.RemoveSessionTimezoneFile(sessionTimezoneFile.HostPath); removeErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: %v\n", removeErr)
+			}
+		}()
+	}
 	sessionEnvFile, warnings, err := barrelenv.PrepareSessionEnvFile(cooperDir, containerName, sessionName, cfg.BarrelEnvVars)
 	if err != nil {
 		return fmt.Errorf("prepare barrel env session file: %w", err)
@@ -953,6 +838,9 @@ func runCLI(cmd *cobra.Command, args []string) error {
 
 	// 10. Build environment variables for the exec.
 	var envArgs []string
+	if sessionTimezoneFile.ContainerPath != "" {
+		envArgs = append(envArgs, "TZ=:"+sessionTimezoneFile.ContainerPath)
+	}
 	var tokenNames []string
 	for _, t := range tokens {
 		envArgs = append(envArgs, fmt.Sprintf("%s=%s", t.Name, t.Value))

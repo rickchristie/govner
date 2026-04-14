@@ -26,11 +26,9 @@ type saveModel struct {
 	cooperDir           string
 	configPath          string
 	configureApp        *app.ConfigureApp
-	saved               bool
+	saveRequested       bool
 	buildRequested      bool
 	cleanBuildRequested bool
-	saveErr             string
-	doneMsgs            []string
 	focusBtn            int // 0=save&build, 1=save only
 
 	// Scroll state for layout.
@@ -55,36 +53,20 @@ func (m *saveModel) update(msg tea.Msg) saveResult {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
-			if m.saved {
-				return saveQuit
-			}
 			return saveBack
 		case "enter":
-			// Save & Build: save config + request build.
-			if err := m.doSave(); err != nil {
-				m.saveErr = err.Error()
-				return saveNone
-			}
+			m.saveRequested = true
 			m.buildRequested = true
-			m.saved = true
 			return saveQuit
 		case "s":
-			// Save only.
-			if err := m.doSave(); err != nil {
-				m.saveErr = err.Error()
-				return saveNone
-			}
-			m.saved = true
+			m.saveRequested = true
+			m.buildRequested = false
+			m.cleanBuildRequested = false
 			return saveQuit
 		case "c":
-			// Save & Clean Build (no Docker cache).
-			if err := m.doSave(); err != nil {
-				m.saveErr = err.Error()
-				return saveNone
-			}
+			m.saveRequested = true
 			m.buildRequested = true
 			m.cleanBuildRequested = true
-			m.saved = true
 			return saveQuit
 		case "left", "h":
 			if m.focusBtn > 0 {
@@ -115,38 +97,6 @@ func (m *saveModel) update(msg tea.Msg) saveResult {
 		}
 	}
 	return saveNone
-}
-
-func (m *saveModel) doSave() error {
-	// Sync the TUI-mutated config back into the ConfigureApp before saving.
-	if m.configureApp != nil {
-		m.configureApp.SetProgrammingTools(m.cfg.ProgrammingTools)
-		m.configureApp.SetAITools(m.cfg.AITools)
-		m.configureApp.SetWhitelistedDomains(m.cfg.WhitelistedDomains)
-		m.configureApp.SetPortForwardRules(m.cfg.PortForwardRules)
-		m.configureApp.SetBarrelEnvVars(m.cfg.BarrelEnvVars)
-		m.configureApp.SetProxyPort(m.cfg.ProxyPort)
-		m.configureApp.SetBridgePort(m.cfg.BridgePort)
-		m.configureApp.SetBarrelSHMSize(m.cfg.BarrelSHMSize)
-
-		warnings, err := m.configureApp.Save()
-		if err != nil {
-			return err
-		}
-		m.doneMsgs = append(m.doneMsgs, warnings...)
-	}
-
-	m.doneMsgs = append(m.doneMsgs, fmt.Sprintf("Saved %s", m.configPath))
-	m.doneMsgs = append(m.doneMsgs, fmt.Sprintf("Generated templates in %s", m.cooperDir))
-	m.doneMsgs = append(m.doneMsgs, "CA certificate ensured")
-	m.doneMsgs = append(m.doneMsgs, "")
-	m.doneMsgs = append(m.doneMsgs, "Configuration saved.")
-	m.doneMsgs = append(m.doneMsgs, "Runtime-only settings, including barrel environment variables, apply on the next 'cooper cli' session.")
-	m.doneMsgs = append(m.doneMsgs, "Run 'cooper build' only if you changed image-affecting settings.")
-	m.doneMsgs = append(m.doneMsgs, "Base image rebuilds if programming tool or implicit language-server versions changed.")
-	m.doneMsgs = append(m.doneMsgs, "AI tool images rebuild independently.")
-
-	return nil
 }
 
 func (m *saveModel) view(width, height int) string {
@@ -245,14 +195,6 @@ func (m *saveModel) view(width, height int) string {
 		center(saveOnlyBtn+"   "+cancelBtn, boxWidth)
 
 	content += actionBox.Render(inner) + "\n"
-
-	if m.saveErr != "" {
-		content += "\n " + lipgloss.NewStyle().Foreground(theme.ColorFlame).Bold(true).Render("Error: "+m.saveErr) + "\n"
-	}
-
-	for _, dm := range m.doneMsgs {
-		content += " " + lipgloss.NewStyle().Foreground(theme.ColorProof).Render(theme.IconCheck+" "+dm) + "\n"
-	}
 
 	footer := " " + helpBar("[Enter Build]", "[c Clean Build]", "[s Save]", "[Esc Cancel]")
 
