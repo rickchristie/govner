@@ -125,6 +125,21 @@ func TestBarrelEnvEditUpdatesSelectedRowOnly(t *testing.T) {
 	}
 }
 
+func TestBarrelEnvEditPreservesExistingTabValue(t *testing.T) {
+	m := newBarrelEnvModel([]config.BarrelEnvVar{{Name: "HAS_TAB", Value: "left\tright"}})
+	m.modal.open(true, 0, m.entries[0])
+
+	if got := m.modal.valueInput.Value(); got != "left\tright" {
+		t.Fatalf("modal value = %q, want raw tab-preserving value", got)
+	}
+
+	m.updateModal(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if got := m.entries[0].Value; got != "left\tright" {
+		t.Fatalf("entry value = %q, want raw tab-preserving value", got)
+	}
+}
+
 func TestBarrelEnvDeleteAdjustsCursor(t *testing.T) {
 	m := newBarrelEnvModel([]config.BarrelEnvVar{{Name: "FOO", Value: "1"}, {Name: "BAR", Value: "2"}})
 	m.cursor = 1

@@ -19,6 +19,9 @@ var execCommand = exec.Command
 
 type darwinBackend struct{}
 
+// macOS uses the built-in afplay command against a temporary WAV so Cooper
+// does not need a second host audio dependency. Callers treat setup/playback
+// failure as fail-soft and keep the session running silently.
 func newBackend() (backend, error) {
 	return &darwinBackend{}, nil
 }

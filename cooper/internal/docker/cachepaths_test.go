@@ -190,6 +190,7 @@ func TestBarrelMountDirs_ClaudeIncludesAuthCachesAndPlaywright(t *testing.T) {
 		filepath.Join(cooperDir, "fonts"),
 		filepath.Join(cooperDir, "cache", "ms-playwright"),
 		filepath.Join(cooperDir, "tmp", "barrel-test-claude"),
+		filepath.Join(cooperDir, "session", "barrel-test-claude"),
 	}
 
 	for _, want := range wantContains {
@@ -284,6 +285,18 @@ func TestBarrelMountDirs_PerBarrelTmpDir(t *testing.T) {
 	if slices.Contains(got1, want2) {
 		t.Errorf("claude barrel should not include copilot tmp dir %q", want2)
 	}
+
+	sessionWant1 := filepath.Join(cooperDir, "session", "barrel-proj-claude")
+	sessionWant2 := filepath.Join(cooperDir, "session", "barrel-proj-copilot")
+	if !slices.Contains(got1, sessionWant1) {
+		t.Errorf("claude barrel should include session dir %q\ngot: %v", sessionWant1, got1)
+	}
+	if !slices.Contains(got2, sessionWant2) {
+		t.Errorf("copilot barrel should include session dir %q\ngot: %v", sessionWant2, got2)
+	}
+	if slices.Contains(got1, sessionWant2) {
+		t.Errorf("claude barrel should not include copilot session dir %q", sessionWant2)
+	}
 }
 
 func TestBarrelMountDirs_AlwaysIncludesPlaywright(t *testing.T) {
@@ -331,5 +344,18 @@ func TestAppendVolumeMounts_UseSharedCacheDestinations(t *testing.T) {
 		if !slices.Contains(got, want) {
 			t.Errorf("volume args missing cache mount %q\ngot: %v", want, got)
 		}
+	}
+}
+
+func TestAppendVolumeMounts_IncludesReadOnlySessionDir(t *testing.T) {
+	homeDir := t.TempDir()
+	absWorkspace := filepath.Join(t.TempDir(), "workspace")
+	cooperDir := filepath.Join(t.TempDir(), "cooper")
+	containerName := "barrel-test-claude"
+
+	got := appendVolumeMounts(nil, absWorkspace, homeDir, &config.Config{}, cooperDir, "claude", containerName)
+	want := filepath.Join(cooperDir, "session", containerName) + ":" + BarrelSessionContainerDir + ":ro"
+	if !slices.Contains(got, want) {
+		t.Fatalf("appendVolumeMounts() missing session mount %q\ngot: %v", want, got)
 	}
 }

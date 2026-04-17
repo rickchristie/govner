@@ -53,11 +53,12 @@ instead of duplicating startup, cleanup, and fixture creation.
 
 ## Manual Usage
 
-Run the built-in smoke scenario:
+Run one of the built-in smoke scenarios:
 
 ```bash
 cd cooper
 GOCACHE=/tmp/go-build-cache go run ./cmd/cooper-test-driver --scenario clipboard-smoke
+GOCACHE=/tmp/go-build-cache go run ./cmd/cooper-test-driver --scenario barrel-env-smoke
 ```
 
 When you use the default shared prefix, the CLI rebuilds the shared test
@@ -107,7 +108,7 @@ test images automatically for the default test packages. Those images use the
 non-conflicting `cooper-gotest-` prefix so they do not collide with the
 shell-based `test-docker-build.sh` or `test-e2e.sh` flows.
 
-## Current Built-In Scenario
+## Current Built-In Scenarios
 
 `clipboard-smoke` verifies:
 - clipboard settings persist to `config.json`
@@ -116,6 +117,12 @@ shell-based `test-docker-build.sh` or `test-e2e.sh` flows.
 - barrel token rotation happens on restart
 - barrel token revocation happens on stop
 - custom images that set `COOPER_CLIPBOARD_MODE=off` keep that mode and are rejected by the clipboard bridge
+
+`barrel-env-smoke` verifies:
+- configured barrel env vars are visible in real wrapped sessions
+- protected runtime env still wins over bad hand-edited config
+- barrel env changes apply on the next session without restarting the barrel
+- the read-only session mount blocks barrel writes
 
 ## Extending It
 

@@ -71,7 +71,8 @@ func languageCacheSpecs(cooperDir string, cfg *config.Config) []cacheMountSpec {
 // barrelMountDirs returns every host directory that must exist before
 // Docker bind-mounts them into a barrel. This includes auth dirs (tool-
 // specific), language cache dirs (from languageCacheSpecs), Playwright
-// support dirs, and the per-barrel /tmp directory.
+// support dirs, the per-barrel /tmp directory, and the read-only per-barrel
+// session directory that Cooper uses for host-controlled runtime files.
 //
 // The list is computed purely from arguments — no I/O. The caller
 // (ensureBarrelMountDirs) handles os.MkdirAll.
@@ -112,6 +113,10 @@ func barrelMountDirs(homeDir, toolName, cooperDir, containerName string, cfg *co
 	// collisions between barrels sharing a workspace. Cooper resets the
 	// shared tmp root at cooper-up startup and shutdown.
 	dirs = append(dirs, BarrelTmpDir(cooperDir, containerName))
+
+	// Per-barrel session directory — mounted read-only into the barrel for
+	// host-controlled session files such as env wrappers and timezone copies.
+	dirs = append(dirs, BarrelSessionDir(cooperDir, containerName))
 
 	return dirs
 }

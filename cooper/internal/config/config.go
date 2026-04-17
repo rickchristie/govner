@@ -181,6 +181,11 @@ func (c *Config) MergeDefaultDomains() {
 // Validate checks if the configuration is valid. Returns an error if any
 // validation rule is violated.
 func (c *Config) Validate() error {
+	// Keep this focused on generic config invariants that every runtime mutation
+	// path depends on. BarrelEnvVars are intentionally excluded here because
+	// CooperApp.UpdateSettings and UpdatePortForwards reuse Validate(), and
+	// unrelated hand-edited barrel env mistakes should not block those updates.
+	// Strict barrel-env validation belongs in configure/save paths instead.
 	// Validate proxy port range
 	if c.ProxyPort <= 0 || c.ProxyPort > 65535 {
 		return fmt.Errorf("proxy port %d is out of valid range (1-65535)", c.ProxyPort)

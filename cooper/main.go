@@ -569,6 +569,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	// Build the App, adopting the pre-started infrastructure.
 	alertPlayer := alertsound.NewController()
+	// Probe audio before Adopt so any backend failure lands in startupWarnings
+	// and reaches the About tab. Proxy alerts are intentionally fail-soft: if
+	// host audio is unavailable, cooper up still succeeds and stays silent.
 	if cfg.ProxyAlertSound {
 		if err := alertPlayer.SetEnabled(true); err != nil {
 			startupWarnings = append(startupWarnings, fmt.Sprintf("Proxy alert sound disabled: %v", err))
@@ -774,6 +777,19 @@ func runCLI(cmd *cobra.Command, args []string) error {
 	barrelRunning, err := docker.IsBarrelRunning(containerName)
 	if err != nil {
 		return fmt.Errorf("check barrel: %w", err)
+	}
+	if barrelRunning {
+		hasSessionMount, err := docker.BarrelHasSessionMount(containerName)
+		if err != nil {
+			return fmt.Errorf("inspect barrel session mount: %w", err)
+		}
+		if !hasSessionMount {
+			fmt.Fprintf(os.Stderr, "Recreating legacy barrel container %s to install secure session mount...\n", containerName)
+			if err := docker.StopBarrel(containerName); err != nil {
+				return fmt.Errorf("stop legacy barrel: %w", err)
+			}
+			barrelRunning = false
+		}
 	}
 	if !barrelRunning {
 		// Generate and write clipboard token before starting the barrel.
@@ -1248,6 +1264,9 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 	// Build the test app and TUI model.
 	testApp := app.NewTestApp(cfg, aclCh, bridgeLogCh)
 	mainModel := tui.NewModel(testApp)
+	// Keep the same controller wiring as real cooper up so tui-test exercises
+	// the root-shell alert path, while the default runtime setting still keeps
+	// the test UI quiet unless the user toggles proxy alerts on.
 	mainModel.SetAlertPlayer(alertsound.NewController())
 
 	// Wire sub-models.

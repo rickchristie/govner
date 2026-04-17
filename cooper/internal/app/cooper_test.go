@@ -415,6 +415,34 @@ func TestCooperApp_StartClearsBarrelTmpRoot(t *testing.T) {
 	assertDirEmpty(t, docker.BarrelTmpRoot(cooperDir))
 }
 
+func TestCooperApp_StartClearsBarrelSessionRoot(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	staleFile := filepath.Join(docker.BarrelSessionRoot(cooperDir), "barrel-stale", "stale.txt")
+	if err := os.MkdirAll(filepath.Dir(staleFile), 0o755); err != nil {
+		t.Fatalf("mkdir stale session dir: %v", err)
+	}
+	if err := os.WriteFile(staleFile, []byte("stale"), 0o644); err != nil {
+		t.Fatalf("write stale session file: %v", err)
+	}
+
+	app := NewCooperApp(cfg, cooperDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	assertDirEmpty(t, docker.BarrelSessionRoot(cooperDir))
+}
+
 func TestCooperApp_StopWithBarrelReturnsQuickly(t *testing.T) {
 	skipIfNoDocker(t)
 	skipIfNoProxyImage(t)
@@ -474,6 +502,34 @@ func TestCooperApp_StopClearsBarrelTmpRoot(t *testing.T) {
 	}
 
 	assertDirEmpty(t, docker.BarrelTmpRoot(cooperDir))
+}
+
+func TestCooperApp_StopClearsBarrelSessionRoot(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	t.Cleanup(func() {
+		exec.Command("docker", "rm", "-f", barrelName).Run()
+		cleanupDocker(t)
+	})
+
+	hostSessionFile := filepath.Join(docker.BarrelSessionRoot(cooperDir), barrelName, "cooper-stop-session.txt")
+	if err := os.MkdirAll(filepath.Dir(hostSessionFile), 0o755); err != nil {
+		t.Fatalf("mkdir session dir: %v", err)
+	}
+	if err := os.WriteFile(hostSessionFile, []byte("session"), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	if err := app.Stop(); err != nil {
+		t.Fatalf("Stop() failed: %v", err)
+	}
+
+	assertDirEmpty(t, docker.BarrelSessionRoot(cooperDir))
 }
 
 // TestCooperApp_ACLFlow starts the app, subscribes to ACL channels, simulates

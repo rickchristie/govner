@@ -22,6 +22,9 @@ type linuxBackend struct {
 	client pulseClient
 }
 
+// Linux uses PulseAudio or PipeWire's PulseAudio compatibility layer so the
+// generated float samples can stream directly without temp files. Callers
+// treat constructor failure as a warning and leave alerts disabled.
 func newBackend() (backend, error) {
 	client, err := newPulseClient()
 	if err != nil {

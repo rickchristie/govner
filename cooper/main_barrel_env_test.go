@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -241,7 +243,7 @@ func TestRunCLISessionTimezoneFollowsSyncedHostTimezoneOnReuse(t *testing.T) {
 	if len(firstParts) != 2 {
 		t.Fatalf("first stdout = %q, want TZ|offset", first)
 	}
-	if !strings.HasPrefix(firstParts[0], ":/tmp/cooper-cli-tz-") || !strings.HasSuffix(firstParts[0], ".tz") {
+	if !strings.HasPrefix(firstParts[0], ":"+docker.BarrelSessionContainerDir+"/cooper-cli-tz-") || !strings.HasSuffix(firstParts[0], ".tz") {
 		t.Fatalf("first TZ = %q, want cooper session timezone file", firstParts[0])
 	}
 	if firstParts[1] != "+0900" {
@@ -263,7 +265,7 @@ func TestRunCLISessionTimezoneFollowsSyncedHostTimezoneOnReuse(t *testing.T) {
 	if len(secondParts) != 2 {
 		t.Fatalf("second stdout = %q, want TZ|offset", second)
 	}
-	if !strings.HasPrefix(secondParts[0], ":/tmp/cooper-cli-tz-") || !strings.HasSuffix(secondParts[0], ".tz") {
+	if !strings.HasPrefix(secondParts[0], ":"+docker.BarrelSessionContainerDir+"/cooper-cli-tz-") || !strings.HasSuffix(secondParts[0], ".tz") {
 		t.Fatalf("second TZ = %q, want cooper session timezone file", secondParts[0])
 	}
 	if secondParts[0] == firstParts[0] {
@@ -294,7 +296,7 @@ func TestRunCLITimezoneCannotBeOverriddenByBadConfig(t *testing.T) {
 	if len(parts) != 2 {
 		t.Fatalf("stdout = %q, want TZ|offset", stdout)
 	}
-	if !strings.HasPrefix(parts[0], ":/tmp/cooper-cli-tz-") || !strings.HasSuffix(parts[0], ".tz") {
+	if !strings.HasPrefix(parts[0], ":"+docker.BarrelSessionContainerDir+"/cooper-cli-tz-") || !strings.HasSuffix(parts[0], ".tz") {
 		t.Fatalf("TZ = %q, want cooper session timezone file", parts[0])
 	}
 	if parts[1] != "+0900" {
@@ -348,7 +350,7 @@ func TestRunCLISessionEnvFileIsCleanedUp(t *testing.T) {
 	}
 
 	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
-	entries, err := os.ReadDir(docker.BarrelTmpDir(driver.CooperDir(), barrelName))
+	entries, err := os.ReadDir(docker.BarrelSessionDir(driver.CooperDir(), barrelName))
 	if err != nil {
 		t.Fatalf("ReadDir() failed: %v", err)
 	}
@@ -359,5 +361,80 @@ func TestRunCLISessionEnvFileIsCleanedUp(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), "cooper-cli-tz-") && strings.HasSuffix(entry.Name(), ".tz") {
 			t.Fatalf("unexpected leftover session timezone file: %s", entry.Name())
 		}
+	}
+}
+
+func TestRunCLISessionMountIsReadOnlyAndTmpRemainsWritable(t *testing.T) {
+	driver, workspaceDir := setupCLIBarrelEnvTest(t, nil)
+	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
+
+	cliOneShot = `if touch '` + docker.BarrelSessionContainerDir + `/should-not-write' 2>/dev/null; then printf 'session-rw'; elif touch /tmp/cooper-tmp-write-check 2>/dev/null; then printf 'session-ro|tmp-rw'; else printf 'session-ro|tmp-blocked'; fi`
+	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	if err != nil {
+		t.Fatalf("runCLI() failed: %v", err)
+	}
+	if got := strings.TrimSpace(stripTerminalTitleEscapes(stdout)); got != "session-ro|tmp-rw" {
+		t.Fatalf("stdout = %q, want %q", got, "session-ro|tmp-rw")
+	}
+	if !strings.Contains(stderr, "Starting barrel container "+barrelName) {
+		t.Fatalf("expected barrel startup message, got %q", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(docker.BarrelSessionDir(driver.CooperDir(), barrelName), "should-not-write")); !os.IsNotExist(err) {
+		t.Fatalf("expected no host session write artifact, stat err=%v", err)
+	}
+}
+
+func TestRunCLIRecreatesLegacyBarrelWithoutSessionMount(t *testing.T) {
+	driver, workspaceDir := setupCLIBarrelEnvTest(t, func(cfg *config.Config) {
+		cfg.BarrelEnvVars = []config.BarrelEnvVar{{Name: "LEGACY_FIX", Value: "restored"}}
+	})
+	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
+	legacyTmpDir := docker.BarrelTmpDir(driver.CooperDir(), barrelName)
+	if err := os.MkdirAll(legacyTmpDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(legacyTmpDir) failed: %v", err)
+	}
+
+	args := []string{
+		"run", "-d",
+		"--name", barrelName,
+		"--network", docker.InternalNetworkName(),
+		"-w", workspaceDir,
+		"-v", fmt.Sprintf("%s:%s:rw", workspaceDir, workspaceDir),
+		"-v", legacyTmpDir + ":/tmp:rw",
+		docker.GetImageCLI("claude"),
+		"sleep", "infinity",
+	}
+	if out, err := exec.Command("docker", args...).CombinedOutput(); err != nil {
+		t.Fatalf("start legacy barrel failed: %v\n%s", err, string(out))
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("docker", "rm", "-f", barrelName).Run()
+	})
+
+	hasSessionMount, err := docker.BarrelHasSessionMount(barrelName)
+	if err != nil {
+		t.Fatalf("BarrelHasSessionMount(before) failed: %v", err)
+	}
+	if hasSessionMount {
+		t.Fatal("expected legacy barrel to be missing the session mount")
+	}
+
+	cliOneShot = `printf %s "$LEGACY_FIX"`
+	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	if err != nil {
+		t.Fatalf("runCLI() failed: %v", err)
+	}
+	if got := strings.TrimSpace(stripTerminalTitleEscapes(stdout)); got != "restored" {
+		t.Fatalf("stdout = %q, want %q", got, "restored")
+	}
+	if !strings.Contains(stderr, "Recreating legacy barrel container "+barrelName) {
+		t.Fatalf("stderr missing legacy recreation message: %q", stderr)
+	}
+	hasSessionMount, err = docker.BarrelHasSessionMount(barrelName)
+	if err != nil {
+		t.Fatalf("BarrelHasSessionMount(after) failed: %v", err)
+	}
+	if !hasSessionMount {
+		t.Fatal("expected recreated barrel to include the session mount")
 	}
 }

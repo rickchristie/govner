@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/testdocker"
 	"github.com/rickchristie/govner/cooper/internal/testdriver"
 )
@@ -34,10 +35,22 @@ func main() {
 		}
 	}
 
+	var configMutator func(*config.Config)
+	switch scenario {
+	case "barrel-env-smoke":
+		configMutator = func(cfg *config.Config) {
+			cfg.BarrelEnvVars = []config.BarrelEnvVar{
+				{Name: "SMOKE_ALPHA", Value: "one"},
+				{Name: "SMOKE_EMPTY", Value: ""},
+			}
+		}
+	}
+
 	driver, err := testdriver.New(testdriver.Options{
 		ImagePrefix:          imagePrefix,
 		DisableHostClipboard: disableHostClipboard,
 		KeepArtifactsOnClose: keepArtifacts,
+		ConfigMutator:        configMutator,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create test driver: %v\n", err)
@@ -51,6 +64,8 @@ func main() {
 	switch scenario {
 	case "clipboard-smoke":
 		err = testdriver.RunClipboardSmoke(ctx, driver)
+	case "barrel-env-smoke":
+		err = testdriver.RunBarrelEnvSmoke(ctx, driver)
 	default:
 		err = fmt.Errorf("unknown scenario %q", scenario)
 	}

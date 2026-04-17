@@ -31,11 +31,11 @@ type player struct {
 	logf        func(string, ...any)
 	lastPlayAt  time.Time
 	minInterval time.Duration
-	playCount   int
+	playCount   int // Advances only after audible playback; drives the session-local switchback state.
 	home        phrase
 	minor       phrase
 	closed      bool
-	disabled    bool
+	disabled    bool // Fail-soft latch after first playback failure; later calls become silent no-ops.
 }
 
 // New creates a real proxy alert player for the current platform.
@@ -68,6 +68,8 @@ func (p *player) PlayProxyApprovalNeeded() error {
 		return nil
 	}
 
+	// Sequence selection happens only after cooldown acceptance so suppressed
+	// bursts do not advance the 8-play phrase progression.
 	selected, _ := resolvePhraseForPlayIndex(p.playCount, p.home, p.minor)
 	if err := p.backend.Play(selected); err != nil {
 		if p.logf != nil {

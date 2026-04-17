@@ -25,11 +25,11 @@ func TestPrepareSessionEnvFileWritesFileWithExpectedMode(t *testing.T) {
 	if file.HostPath == "" {
 		t.Fatal("expected HostPath to be populated")
 	}
-	if file.ContainerPath != "/tmp/cooper-cli-env-session-a.sh" {
-		t.Fatalf("ContainerPath = %q, want %q", file.ContainerPath, "/tmp/cooper-cli-env-session-a.sh")
+	if !strings.HasPrefix(file.ContainerPath, docker.BarrelSessionContainerDir+"/cooper-cli-env-") || !strings.HasSuffix(file.ContainerPath, ".sh") {
+		t.Fatalf("ContainerPath = %q, want path under %q", file.ContainerPath, docker.BarrelSessionContainerDir)
 	}
-	if !strings.HasPrefix(file.HostPath, docker.BarrelTmpDir(cooperDir, containerName)+string(filepath.Separator)) {
-		t.Fatalf("HostPath = %q, want path under %q", file.HostPath, docker.BarrelTmpDir(cooperDir, containerName))
+	if !strings.HasPrefix(file.HostPath, docker.BarrelSessionDir(cooperDir, containerName)+string(filepath.Separator)) {
+		t.Fatalf("HostPath = %q, want path under %q", file.HostPath, docker.BarrelSessionDir(cooperDir, containerName))
 	}
 	info, err := os.Stat(file.HostPath)
 	if err != nil {
@@ -84,6 +84,9 @@ func TestPrepareSessionEnvFileDoesNotClobberOtherSessions(t *testing.T) {
 	if fileA.HostPath == fileB.HostPath {
 		t.Fatal("expected distinct host paths for different session names")
 	}
+	if fileA.ContainerPath == fileB.ContainerPath {
+		t.Fatal("expected distinct container paths for different session names")
+	}
 	dataA, err := os.ReadFile(fileA.HostPath)
 	if err != nil {
 		t.Fatalf("ReadFile(a) failed: %v", err)
@@ -94,5 +97,22 @@ func TestPrepareSessionEnvFileDoesNotClobberOtherSessions(t *testing.T) {
 	}
 	if string(dataA) == string(dataB) {
 		t.Fatalf("expected different file contents, got %q", string(dataA))
+	}
+}
+
+func TestPrepareSessionEnvFileRandomizesNameEvenForSameSession(t *testing.T) {
+	cooperDir := t.TempDir()
+	containerName := "barrel-demo-claude"
+
+	fileA, _, err := PrepareSessionEnvFile(cooperDir, containerName, "same-session", []config.BarrelEnvVar{{Name: "FOO", Value: "one"}})
+	if err != nil {
+		t.Fatalf("PrepareSessionEnvFile(first) failed: %v", err)
+	}
+	fileB, _, err := PrepareSessionEnvFile(cooperDir, containerName, "same-session", []config.BarrelEnvVar{{Name: "FOO", Value: "one"}})
+	if err != nil {
+		t.Fatalf("PrepareSessionEnvFile(second) failed: %v", err)
+	}
+	if fileA.HostPath == fileB.HostPath || fileA.ContainerPath == fileB.ContainerPath {
+		t.Fatalf("expected randomized session file paths, got host=%q/%q container=%q/%q", fileA.HostPath, fileB.HostPath, fileA.ContainerPath, fileB.ContainerPath)
 	}
 }

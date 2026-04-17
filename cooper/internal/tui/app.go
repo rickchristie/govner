@@ -100,6 +100,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ---- Channel events ----
 	case events.ACLRequestMsg:
 		// ACL events always go to the proxy monitor regardless of active tab.
+		// The host-side alert also fires here in the root shell, not in the
+		// proxymon sub-model, so every request that actually reached manual
+		// approval can alert even while the user is on another tab.
 		var cmd tea.Cmd
 		if m.proxyMonModel != nil {
 			var sm SubModel

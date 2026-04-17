@@ -3,7 +3,6 @@ package barrelenv
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/rickchristie/govner/cooper/internal/config"
@@ -17,17 +16,12 @@ type SessionEnvFile struct {
 	ContainerPath string
 }
 
-// PrepareSessionEnvFile writes a per-session env file into the barrel's mounted
-// tmp directory after tolerant runtime sanitization.
+// PrepareSessionEnvFile writes a per-session env file into the barrel's
+// read-only session directory after tolerant runtime sanitization.
 func PrepareSessionEnvFile(cooperDir, containerName, sessionName string, vars []config.BarrelEnvVar) (SessionEnvFile, []string, error) {
 	usable, warnings := config.NormalizeBarrelEnvVarsForRuntime(vars)
 	if len(usable) == 0 {
 		return SessionEnvFile{}, warnings, nil
-	}
-
-	tmpDir := docker.BarrelTmpDir(cooperDir, containerName)
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		return SessionEnvFile{}, warnings, fmt.Errorf("create barrel tmp dir %s: %w", tmpDir, err)
 	}
 
 	data, err := RenderUserEnvFile(usable)
@@ -35,15 +29,20 @@ func PrepareSessionEnvFile(cooperDir, containerName, sessionName string, vars []
 		return SessionEnvFile{}, warnings, fmt.Errorf("render user env file: %w", err)
 	}
 
-	filename := "cooper-cli-env-" + sessionName + ".sh"
-	hostPath := filepath.Join(tmpDir, filename)
-	if err := os.WriteFile(hostPath, data, 0o600); err != nil {
-		return SessionEnvFile{}, warnings, fmt.Errorf("write session env file %s: %w", hostPath, err)
+	hostPath, containerPath, err := docker.CreateBarrelSessionFile(
+		cooperDir,
+		containerName,
+		sessionEnvPattern(sessionName),
+		data,
+		0o600,
+	)
+	if err != nil {
+		return SessionEnvFile{}, warnings, fmt.Errorf("write session env file: %w", err)
 	}
 
 	return SessionEnvFile{
 		HostPath:      hostPath,
-		ContainerPath: "/tmp/" + filename,
+		ContainerPath: containerPath,
 	}, warnings, nil
 }
 
@@ -56,4 +55,9 @@ func RemoveSessionEnvFile(path string) error {
 		return fmt.Errorf("remove session env file %s: %w", path, err)
 	}
 	return nil
+}
+
+func sessionEnvPattern(sessionName string) string {
+	_ = strings.TrimSpace(sessionName)
+	return "cooper-cli-env-*.sh"
 }

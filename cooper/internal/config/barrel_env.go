@@ -88,7 +88,8 @@ func CanonicalizeBarrelEnvVars(vars []BarrelEnvVar) []BarrelEnvVar {
 }
 
 // ValidateBarrelEnvVars strictly validates persisted barrel env vars for the
-// configure/save path. It never mutates its input.
+// configure/save path. It never mutates its input, and it rejects duplicates
+// so config writes stay deterministic and users get immediate feedback.
 func ValidateBarrelEnvVars(vars []BarrelEnvVar) error {
 	canonical := CanonicalizeBarrelEnvVars(vars)
 	seen := make(map[string]string, len(canonical))
@@ -118,7 +119,10 @@ func ValidateBarrelEnvVars(vars []BarrelEnvVar) error {
 }
 
 // NormalizeBarrelEnvVarsForRuntime tolerantly filters malformed runtime env
-// entries so hand-edited config cannot break `cooper cli` startup.
+// entries so hand-edited config cannot break `cooper cli` startup. Unlike the
+// strict configure/save validator, it intentionally preserves duplicate order
+// for usable entries and lets normal shell export order make the last value
+// win during runtime recovery.
 func NormalizeBarrelEnvVarsForRuntime(vars []BarrelEnvVar) ([]BarrelEnvVar, []string) {
 	canonical := CanonicalizeBarrelEnvVars(vars)
 	usable := make([]BarrelEnvVar, 0, len(canonical))

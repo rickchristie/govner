@@ -15,10 +15,22 @@ func BarrelTmpRoot(cooperDir string) string {
 	return filepath.Join(cooperDir, "tmp")
 }
 
+// BarrelSessionRoot returns the Cooper-managed host directory that stores
+// host-controlled runtime session files for barrels.
+func BarrelSessionRoot(cooperDir string) string {
+	return filepath.Join(cooperDir, "session")
+}
+
 // BarrelTmpDir returns the host directory mounted to /tmp for a specific
 // barrel container.
 func BarrelTmpDir(cooperDir, containerName string) string {
 	return filepath.Join(BarrelTmpRoot(cooperDir), containerName)
+}
+
+// BarrelSessionDir returns the host directory mounted read-only into a
+// specific barrel for host-controlled runtime session files.
+func BarrelSessionDir(cooperDir, containerName string) string {
+	return filepath.Join(BarrelSessionRoot(cooperDir), containerName)
 }
 
 // ResetBarrelTmpRoot removes all persisted barrel /tmp contents and recreates
@@ -30,12 +42,27 @@ func ResetBarrelTmpRoot(cooperDir string) error {
 		return nil
 	}
 
-	tmpRoot := BarrelTmpRoot(cooperDir)
-	if err := removeAllWithPermissionRepair(tmpRoot); err != nil {
-		return fmt.Errorf("remove barrel tmp root %s: %w", tmpRoot, err)
+	return resetOwnedRoot(BarrelTmpRoot(cooperDir), "barrel tmp")
+}
+
+// ResetBarrelSessionRoot removes all persisted host-controlled session files
+// and recreates the root directory. Cooper resets this alongside BarrelTmpRoot
+// so no stale session control files survive across control-plane sessions.
+func ResetBarrelSessionRoot(cooperDir string) error {
+	cooperDir = strings.TrimSpace(cooperDir)
+	if cooperDir == "" {
+		return nil
 	}
-	if err := os.MkdirAll(tmpRoot, 0o755); err != nil {
-		return fmt.Errorf("create barrel tmp root %s: %w", tmpRoot, err)
+
+	return resetOwnedRoot(BarrelSessionRoot(cooperDir), "barrel session")
+}
+
+func resetOwnedRoot(rootPath, label string) error {
+	if err := removeAllWithPermissionRepair(rootPath); err != nil {
+		return fmt.Errorf("remove %s root %s: %w", label, rootPath, err)
+	}
+	if err := os.MkdirAll(rootPath, 0o755); err != nil {
+		return fmt.Errorf("create %s root %s: %w", label, rootPath, err)
 	}
 	return nil
 }

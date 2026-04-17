@@ -89,6 +89,9 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 	if err := docker.ResetBarrelTmpRoot(a.cooperDir); err != nil {
 		return fmt.Errorf("reset barrel tmp root: %w", err)
 	}
+	if err := docker.ResetBarrelSessionRoot(a.cooperDir); err != nil {
+		return fmt.Errorf("reset barrel session root: %w", err)
+	}
 
 	// Pre-check: verify clipboard prerequisites before anything else.
 	// Refuse to start if clipboard host tools are missing.
@@ -324,9 +327,12 @@ func (a *CooperApp) StopWithProgress(onStep func(int)) error {
 	}
 	onStep(3)
 
-	// Step 4: Reset barrel /tmp state and close loggers.
+	// Step 4: Reset barrel runtime state and close loggers.
 	if err := docker.ResetBarrelTmpRoot(a.cooperDir); err != nil {
 		errs = append(errs, fmt.Sprintf("reset barrel tmp root: %v", err))
+	}
+	if err := docker.ResetBarrelSessionRoot(a.cooperDir); err != nil {
+		errs = append(errs, fmt.Sprintf("reset barrel session root: %v", err))
 	}
 	if a.squidTailer != nil {
 		a.squidTailer.Stop()

@@ -40,6 +40,9 @@ func RunBarrelEnvSmoke(ctx context.Context, d *Driver) error {
 	if err := verifyBarrelEnvNextSessionReload(d, barrel); err != nil {
 		return err
 	}
+	if err := verifySessionMountIsolation(d, barrel); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -113,6 +116,20 @@ func verifyBarrelEnvNextSessionReload(d *Driver, barrel *Barrel) error {
 	}
 	if !running {
 		return fmt.Errorf("barrel %s stopped unexpectedly between sessions", barrel.Name)
+	}
+	return nil
+}
+
+func verifySessionMountIsolation(d *Driver, barrel *Barrel) error {
+	out, err := d.ExecBarrel(barrel.Name, `if touch '`+docker.BarrelSessionContainerDir+`/blocked' 2>/dev/null; then printf 'session-rw'; elif touch /tmp/cooper-session-check 2>/dev/null; then printf 'session-ro|tmp-rw'; else printf 'session-ro|tmp-blocked'; fi`)
+	if err != nil {
+		return fmt.Errorf("session mount isolation exec: %w", err)
+	}
+	if strings.TrimSpace(out) != "session-ro|tmp-rw" {
+		return fmt.Errorf("session mount isolation output=%q, want %q", strings.TrimSpace(out), "session-ro|tmp-rw")
+	}
+	if _, err := exec.Command("docker", "exec", barrel.Name, "test", "-w", docker.BarrelSessionContainerDir).CombinedOutput(); err == nil {
+		return fmt.Errorf("session mount %s unexpectedly writable", docker.BarrelSessionContainerDir)
 	}
 	return nil
 }

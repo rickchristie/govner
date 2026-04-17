@@ -251,9 +251,15 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 	barrelTmpDir := BarrelTmpDir(cooperDir, containerName)
 	args = append(args, "-v", barrelTmpDir+":/tmp:rw")
 
+	// Per-barrel session directory. Cooper writes host-controlled runtime
+	// files here and mounts them read-only into the barrel so the barrel
+	// cannot pre-create symlinks or modify the files after creation.
+	barrelSessionDir := BarrelSessionDir(cooperDir, containerName)
+	args = append(args, "-v", barrelSessionDir+":"+BarrelSessionContainerDir+":ro")
+
 	// Bind the latest host timezone snapshot into /etc/localtime so startup
 	// paths and background processes share the same local time view as the CLI.
-	timezoneFile := filepath.Join(barrelTmpDir, barrelTimezoneFilename)
+	timezoneFile := filepath.Join(barrelSessionDir, barrelTimezoneFilename)
 	if fileExists(timezoneFile) {
 		args = append(args, "-v", timezoneFile+":"+barrelTimezoneContainerPath+":ro")
 	}
@@ -406,6 +412,25 @@ func IsBarrelRunning(name string) (bool, error) {
 		return false, nil
 	}
 	return strings.TrimSpace(string(output)) == "true", nil
+}
+
+// BarrelHasSessionMount reports whether the running barrel includes the
+// read-only session mount introduced for host-controlled runtime files.
+func BarrelHasSessionMount(name string) (bool, error) {
+	cmd := exec.Command("docker", "inspect",
+		"--format", "{{range .Mounts}}{{println .Destination}}{{end}}",
+		name,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("inspect barrel mounts for %s: %w\n%s", name, err, string(output))
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if strings.TrimSpace(line) == BarrelSessionContainerDir {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // clipboardModeForTool returns the clipboard mode for a given tool.

@@ -62,7 +62,9 @@ func RenderUserEnvFile(vars []config.BarrelEnvVar) ([]byte, error) {
 }
 
 // ProtectedRuntimeEnvNames returns the stable runtime env restore list with any
-// dynamic token or IDE names appended once.
+// dynamic token or IDE names appended once. Callers pass the names resolved for
+// the current tool so runtime restore stays aligned with auth.ResolveTokens
+// instead of freezing a token list in this package.
 func ProtectedRuntimeEnvNames(extra []string) []string {
 	seen := make(map[string]struct{}, len(protectedRuntimeStaticNames)+len(extra))
 	names := make([]string, 0, len(protectedRuntimeStaticNames)+len(extra))
@@ -87,6 +89,10 @@ func ProtectedRuntimeEnvNames(extra []string) []string {
 
 // BuildExecWrapperCommand builds the exact argv passed to docker exec so user
 // env can be loaded without allowing protected Cooper env to be overridden.
+// The outer wrapper intentionally stays `bash -c` (non-login) while targetCmd
+// remains the final `bash -l` or `bash -c` invocation. That avoids sourcing
+// shell startup files twice and keeps one-shot command text out of the wrapper
+// script body so host-side quoting is not reintroduced.
 func BuildExecWrapperCommand(userEnvFile string, protectedNames []string, targetCmd []string) ([]string, error) {
 	if len(targetCmd) == 0 {
 		return nil, fmt.Errorf("target command is required")
@@ -100,6 +106,9 @@ func BuildExecWrapperCommand(userEnvFile string, protectedNames []string, target
 	return argv, nil
 }
 
+// buildWrapperScript snapshots protected vars before sourcing the user env
+// file, then restores them afterward while preserving whether each name was
+// originally set or unset in the wrapper process.
 func buildWrapperScript(protectedNames []string) (string, error) {
 	protectedNames = dedupeNames(protectedNames)
 

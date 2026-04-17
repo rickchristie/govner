@@ -17,7 +17,7 @@ const (
 )
 
 // SessionTimezoneFile describes one per-session timezone file staged into the
-// barrel's host-backed /tmp mount so docker exec can point TZ at it.
+// barrel's read-only session mount so docker exec can point TZ at it.
 type SessionTimezoneFile struct {
 	HostPath      string
 	ContainerPath string
@@ -34,10 +34,10 @@ func SetHostLocaltimePathForTesting(path string) func() {
 }
 
 // SyncBarrelTimezoneFile copies the host localtime file into the barrel's
-// persistent tmp directory. New barrels bind-mount this file onto /etc/localtime
-// so long-lived container processes track the host timezone too.
+// persistent session directory. New barrels bind-mount this file onto
+// /etc/localtime so long-lived container processes track the host timezone too.
 func SyncBarrelTimezoneFile(cooperDir, containerName string) (string, error) {
-	hostPath := filepath.Join(BarrelTmpDir(cooperDir, containerName), barrelTimezoneFilename)
+	hostPath := filepath.Join(BarrelSessionDir(cooperDir, containerName), barrelTimezoneFilename)
 	if err := writeTimezoneFile(hostPath); err != nil {
 		return "", err
 	}
@@ -45,24 +45,28 @@ func SyncBarrelTimezoneFile(cooperDir, containerName string) (string, error) {
 }
 
 // PrepareSessionTimezoneFile writes a per-session copy of the host localtime
-// file into the barrel's mounted /tmp directory. docker exec can then set
-// TZ=:/tmp/... so reused barrels pick up the current host timezone without a
-// container restart.
+// file into the barrel's read-only session mount. docker exec can then set
+// TZ=:/run/cooper/session/... so reused barrels pick up the current host
+// timezone without a container restart.
 func PrepareSessionTimezoneFile(cooperDir, containerName, sessionName string) (SessionTimezoneFile, error) {
-	trimmed := strings.TrimSpace(sessionName)
-	if trimmed == "" {
-		return SessionTimezoneFile{}, fmt.Errorf("session name is required")
+	data, err := readHostTimezoneData()
+	if err != nil {
+		return SessionTimezoneFile{}, err
 	}
-
-	filename := sessionTimezoneFilePrefix + trimmed + sessionTimezoneFileSuffix
-	hostPath := filepath.Join(BarrelTmpDir(cooperDir, containerName), filename)
-	if err := writeTimezoneFile(hostPath); err != nil {
+	hostPath, containerPath, err := CreateBarrelSessionFile(
+		cooperDir,
+		containerName,
+		sessionTimezonePattern(sessionName),
+		data,
+		0o644,
+	)
+	if err != nil {
 		return SessionTimezoneFile{}, err
 	}
 
 	return SessionTimezoneFile{
 		HostPath:      hostPath,
-		ContainerPath: "/tmp/" + filename,
+		ContainerPath: containerPath,
 	}, nil
 }
 
@@ -78,9 +82,9 @@ func RemoveSessionTimezoneFile(path string) error {
 }
 
 func writeTimezoneFile(hostPath string) error {
-	data, err := os.ReadFile(hostLocaltimePath)
+	data, err := readHostTimezoneData()
 	if err != nil {
-		return fmt.Errorf("read host localtime %s: %w", hostLocaltimePath, err)
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
 		return fmt.Errorf("create timezone dir %s: %w", filepath.Dir(hostPath), err)
@@ -89,4 +93,17 @@ func writeTimezoneFile(hostPath string) error {
 		return fmt.Errorf("write timezone file %s: %w", hostPath, err)
 	}
 	return nil
+}
+
+func readHostTimezoneData() ([]byte, error) {
+	data, err := os.ReadFile(hostLocaltimePath)
+	if err != nil {
+		return nil, fmt.Errorf("read host localtime %s: %w", hostLocaltimePath, err)
+	}
+	return data, nil
+}
+
+func sessionTimezonePattern(sessionName string) string {
+	_ = strings.TrimSpace(sessionName)
+	return sessionTimezoneFilePrefix + "*" + sessionTimezoneFileSuffix
 }

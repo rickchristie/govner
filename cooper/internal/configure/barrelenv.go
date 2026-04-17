@@ -227,7 +227,9 @@ func (m *barrelEnvModal) open(editing bool, index int, entry config.BarrelEnvVar
 		m.keyInput.SetValue(entry.Name)
 		// Existing invalid control characters are escaped here so a hand-edited
 		// bad config row remains visible and repairable in this single-line input.
-		m.valueInput.SetValue(displayBarrelEnvValue(entry.Value))
+		// Valid values are loaded exactly so editing does not silently rewrite
+		// tabs or other accepted bytes.
+		m.valueInput.SetValue(editableBarrelEnvValue(entry.Value))
 	} else {
 		m.keyInput.SetValue("")
 		m.valueInput.SetValue("")
@@ -431,5 +433,14 @@ func displayBarrelEnvValue(value string) string {
 	value = strings.ReplaceAll(value, "\r", `\r`)
 	value = strings.ReplaceAll(value, "\n", `\n`)
 	value = strings.ReplaceAll(value, "\t", `\t`)
+	return value
+}
+
+func editableBarrelEnvValue(value string) string {
+	if barrelEnvValueInvalid(value) {
+		value = strings.ReplaceAll(value, "\x00", `\0`)
+		value = strings.ReplaceAll(value, "\r", `\r`)
+		value = strings.ReplaceAll(value, "\n", `\n`)
+	}
 	return value
 }

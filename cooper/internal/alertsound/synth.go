@@ -15,6 +15,10 @@ type toneShape struct {
 	VibratoDepth float64
 }
 
+// buildSwitchbackPhrases renders the exact production proxy-alert phrases that
+// Cooper ships today. The note choices, timings, envelopes, and normalization
+// are intentionally fixed by tests so the approved alert sound does not drift
+// unless there is an explicit retuning pass.
 func buildSwitchbackPhrases() (phrase, phrase) {
 	homeSamples := normalizeSamples(buildBarrelRollPhrase(523.25, 659.25, 783.99, 1174.66, 261.63))
 	minorSamples := normalizeSamples(buildBarrelRollPhrase(440.00, 523.25, 659.25, 987.77, 220.00))
@@ -91,6 +95,8 @@ func envelope(t, dur, attack, release float64) float64 {
 	return a * r
 }
 
+// normalizeSamples keeps every rendered phrase at the same fixed peak so the
+// Linux PulseAudio path and the macOS afplay WAV path stay aligned in loudness.
 func normalizeSamples(samples []float64) []float32 {
 	peak := 0.0
 	for _, sample := range samples {

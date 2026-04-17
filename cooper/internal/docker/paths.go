@@ -7,6 +7,10 @@ package docker
 // actually use at runtime.
 const (
 	BarrelHomeDir = "/home/user"
+	// BarrelSessionContainerDir is a host-controlled read-only bind mount used
+	// for runtime session control files. Cooper writes per-session env/timezone
+	// files on the host here so barrels cannot pre-create or tamper with them.
+	BarrelSessionContainerDir = "/run/cooper/session"
 
 	BarrelGoPath          = "/go"
 	BarrelGoBinDir        = BarrelGoPath + "/bin"
