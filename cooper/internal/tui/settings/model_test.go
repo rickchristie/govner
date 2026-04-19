@@ -60,3 +60,15 @@ func TestRenderBodyShowsCheckboxState(t *testing.T) {
 		t.Fatalf("renderBody() missing disabled checkbox label:\n%s", body)
 	}
 }
+
+func TestHandleEditKey_PasteDigits(t *testing.T) {
+	m := New(30, 500, 500, 500, 300, 20, false)
+	m.editing = true
+	m.editBuf = ""
+
+	m.handleEditKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1234"), Paste: true})
+
+	if m.editBuf != "1234" {
+		t.Fatalf("editBuf = %q, want %q", m.editBuf, "1234")
+	}
+}

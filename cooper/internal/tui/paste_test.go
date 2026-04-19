@@ -12,6 +12,7 @@ import (
 	cooperapp "github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/tui/bridgeui"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
@@ -223,6 +224,49 @@ func TestHandleKey_PasteFallsThroughWhenNotAFile(t *testing.T) {
 	}
 	if len(recorder.messages) != 1 {
 		t.Fatalf("expected paste to reach active model, got %d messages", len(recorder.messages))
+	}
+}
+
+func TestHandleKey_PasteFilePathWhileEditingTextInputDoesNotStageFile(t *testing.T) {
+	tmp, err := os.CreateTemp("/tmp", "cp-*.sh")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	tmpFile := tmp.Name()
+	if _, err := tmp.WriteString("#!/bin/sh\n"); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatalf("failed to close temp file: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(tmpFile) })
+
+	mockApp := cooperapp.NewMockApp(&config.Config{}, t.TempDir())
+	routesModel := bridgeui.NewRoutesModel()
+
+	model := NewModel(mockApp)
+	model.SetBridgeRoutesModel(routesModel)
+	model.SetActiveTab(theme.TabBridgeRoutes)
+
+	model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	model.handleKey(tea.KeyMsg{Type: tea.KeyDown})
+
+	viewBefore := model.activeSubModel().View(100, 30)
+	_, cmd := model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tmpFile), Paste: true})
+	if cmd != nil {
+		t.Fatal("expected no clipboard staging command while editing a text field")
+	}
+
+	if len(mockApp.StagedFiles) != 0 {
+		t.Fatalf("expected no staged files, got %#v", mockApp.StagedFiles)
+	}
+
+	viewAfter := model.activeSubModel().View(100, 30)
+	if strings.Contains(viewBefore, tmpFile) {
+		t.Fatalf("path %q unexpectedly present before paste", tmpFile)
+	}
+	if !strings.Contains(viewAfter, tmpFile) {
+		t.Fatalf("expected pasted path %q to appear in edit modal", tmpFile)
 	}
 }
 

@@ -223,7 +223,7 @@ func (m *Model) handleEditKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 		return m, m.emitChange()
 	case "backspace":
 		if len(m.editBuf) > 0 {
-			m.editBuf = m.editBuf[:len(m.editBuf)-1]
+			m.editBuf = components.TrimLastRune(m.editBuf)
 		}
 	case "left", "h":
 		m.adjustValueFromBuf(-1)
@@ -234,13 +234,15 @@ func (m *Model) handleEditKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 	case "shift+right", "L":
 		m.adjustValueFromBuf(10)
 	default:
-		// Accept digits only.
-		r := msg.String()
-		if len(r) == 1 && r[0] >= '0' && r[0] <= '9' {
-			m.editBuf += r
+		if text := components.TextEntryFromKeyMsg(msg, isDigitRune); text != "" {
+			m.editBuf += text
 		}
 	}
 	return m, nil
+}
+
+func isDigitRune(r rune) bool {
+	return r >= '0' && r <= '9'
 }
 
 // adjustValue changes the currently selected value by delta and clamps it.

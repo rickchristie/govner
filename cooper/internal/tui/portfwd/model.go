@@ -64,18 +64,18 @@ const (
 // Model is the sub-model for the Port Forwarding tab.
 type Model struct {
 	// Port forwarding rules and list.
-	pfRules    []config.PortForwardRule
-	pfList     components.ScrollableList
-	pfEditMode pfEditMode
-	pfEditIdx  int // Index of rule being edited (-1 for new).
-	pfField    pfField
-	pfContBuf  string   // Container port input buffer.
-	pfHostBuf  string   // Host port input buffer.
-	pfDescBuf  string   // Description input buffer.
-	pfIsRange  bool     // Range mode toggle.
-	pfErr      string   // Validation error for port forward modal.
-	pfStatus   pfStatus // Status of the last port forward change.
-	pfStatusMsg string  // Error message when pfStatus == pfFailed.
+	pfRules     []config.PortForwardRule
+	pfList      components.ScrollableList
+	pfEditMode  pfEditMode
+	pfEditIdx   int // Index of rule being edited (-1 for new).
+	pfField     pfField
+	pfContBuf   string   // Container port input buffer.
+	pfHostBuf   string   // Host port input buffer.
+	pfDescBuf   string   // Description input buffer.
+	pfIsRange   bool     // Range mode toggle.
+	pfErr       string   // Validation error for port forward modal.
+	pfStatus    pfStatus // Status of the last port forward change.
+	pfStatusMsg string   // Error message when pfStatus == pfFailed.
 
 	// Scrollable viewport for body content.
 	viewport components.ScrollableContent
@@ -258,37 +258,33 @@ func (m *Model) handlePFEditInput(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 		switch m.pfField {
 		case pfFieldContainerPort:
 			if len(m.pfContBuf) > 0 {
-				m.pfContBuf = m.pfContBuf[:len(m.pfContBuf)-1]
+				m.pfContBuf = components.TrimLastRune(m.pfContBuf)
 			}
 		case pfFieldHostPort:
 			if len(m.pfHostBuf) > 0 {
-				m.pfHostBuf = m.pfHostBuf[:len(m.pfHostBuf)-1]
+				m.pfHostBuf = components.TrimLastRune(m.pfHostBuf)
 			}
 		case pfFieldDesc:
 			if len(m.pfDescBuf) > 0 {
-				m.pfDescBuf = m.pfDescBuf[:len(m.pfDescBuf)-1]
+				m.pfDescBuf = components.TrimLastRune(m.pfDescBuf)
 			}
 		}
 		return m, nil
 	default:
-		r := msg.String()
-		if len(r) == 1 {
-			switch m.pfField {
-			case pfFieldContainerPort:
-				// Accept digits and '-' for range mode.
-				if (r[0] >= '0' && r[0] <= '9') || r[0] == '-' {
-					m.pfContBuf += r
-				}
-			case pfFieldHostPort:
-				if (r[0] >= '0' && r[0] <= '9') || r[0] == '-' {
-					m.pfHostBuf += r
-				}
-			case pfFieldDesc:
-				m.pfDescBuf += r
-			}
+		switch m.pfField {
+		case pfFieldContainerPort:
+			m.pfContBuf += components.TextEntryFromKeyMsg(msg, isPortFieldRune)
+		case pfFieldHostPort:
+			m.pfHostBuf += components.TextEntryFromKeyMsg(msg, isPortFieldRune)
+		case pfFieldDesc:
+			m.pfDescBuf += components.TextEntryFromKeyMsg(msg, nil)
 		}
 	}
 	return m, nil
+}
+
+func isPortFieldRune(r rune) bool {
+	return (r >= '0' && r <= '9') || r == '-'
 }
 
 func (m *Model) savePFRule() (theme.SubModel, tea.Cmd) {
@@ -676,5 +672,3 @@ func (m *Model) renderPFDeleteModal(width, height int) string {
 }
 
 // ----- Helpers -----
-
-

@@ -353,15 +353,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handleKey routes keyboard input. Modal keys take priority, then global
 // keys (quit, tab switching), then delegation to the active sub-model.
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// --- Bracketed paste: detect file drag-and-drop ---
-	// Terminal emulators send dragged file paths as bracketed paste text.
-	// BubbleTea sets Paste=true on the resulting KeyMsg.
-	if msg.Paste {
-		if path := extractDroppedFilePath(msg); path != "" {
-			return m, m.stageFileCmd(path)
-		}
-	}
-
 	// --- Modal is active: arrow keys navigate, Enter/Esc confirm/cancel ---
 	if m.modal != nil && m.modal.Active {
 		switch msg.String() {
@@ -385,6 +376,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	editingText := m.isTextInputActive()
+
+	// --- Bracketed paste: detect file drag-and-drop ---
+	// Only do this when no text input is active so pasted file paths still reach
+	// focused textboxes instead of being hijacked by clipboard staging.
+	if msg.Paste && !editingText {
+		if path := extractDroppedFilePath(msg); path != "" {
+			return m, m.stageFileCmd(path)
+		}
+	}
+
 	// --- Global keys ---
 	switch msg.String() {
 	case "q", "ctrl+c":
@@ -402,7 +404,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// --- Clipboard shortcuts (only when not editing a text field) ---
-	if !m.isTextInputActive() {
+	if !editingText {
 		switch msg.String() {
 		case "c", "ctrl+v":
 			return m, m.captureClipboardCmd()

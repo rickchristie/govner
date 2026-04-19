@@ -25,10 +25,10 @@ type RoutesChangedMsg struct {
 type routeEditMode int
 
 const (
-	routeNone    routeEditMode = iota
-	routeAdding                // Adding a new route.
-	routeEditing               // Editing an existing route.
-	routeDeleting              // Delete confirmation.
+	routeNone     routeEditMode = iota
+	routeAdding                 // Adding a new route.
+	routeEditing                // Editing an existing route.
+	routeDeleting               // Delete confirmation.
 )
 
 // routeField identifies which field is active during editing.
@@ -45,12 +45,12 @@ type RoutesModel struct {
 	list   components.ScrollableList
 
 	// Editing state.
-	editMode    routeEditMode
-	editField   routeField
-	editIdx     int    // Index of route being edited (-1 for new).
-	editAPI     string // Buffer for API path input.
-	editScript  string // Buffer for script path input.
-	editErr     string // Validation error shown in edit modal.
+	editMode   routeEditMode
+	editField  routeField
+	editIdx    int    // Index of route being edited (-1 for new).
+	editAPI    string // Buffer for API path input.
+	editScript string // Buffer for script path input.
+	editErr    string // Validation error shown in edit modal.
 }
 
 // IsEditing returns true when the routes model is in an add/edit/delete modal
@@ -160,7 +160,7 @@ func (m *RoutesModel) handleEditInput(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) 
 	case "esc":
 		m.editMode = routeNone
 		return m, nil
-	case "up", "down":
+	case "up", "down", "tab", "shift+tab":
 		// Toggle between fields.
 		if m.editField == fieldAPIPath {
 			m.editField = fieldScriptPath
@@ -174,20 +174,18 @@ func (m *RoutesModel) handleEditInput(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) 
 	case "backspace":
 		m.editErr = ""
 		if m.editField == fieldAPIPath && len(m.editAPI) > 0 {
-			m.editAPI = m.editAPI[:len(m.editAPI)-1]
+			m.editAPI = components.TrimLastRune(m.editAPI)
 		} else if m.editField == fieldScriptPath && len(m.editScript) > 0 {
-			m.editScript = m.editScript[:len(m.editScript)-1]
+			m.editScript = components.TrimLastRune(m.editScript)
 		}
 		return m, nil
 	default:
-		// Append character to active field.
-		r := msg.String()
-		if len(r) == 1 {
+		if text := components.TextEntryFromKeyMsg(msg, nil); text != "" {
 			m.editErr = ""
 			if m.editField == fieldAPIPath {
-				m.editAPI += r
+				m.editAPI += text
 			} else {
-				m.editScript += r
+				m.editScript += text
 			}
 		}
 	}
