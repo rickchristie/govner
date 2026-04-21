@@ -21,22 +21,42 @@ type ContainerManager interface {
 	RestartContainer(name string) error
 }
 
+type actionState int
+
+const (
+	actionNone actionState = iota
+	actionPending
+	actionSuccess
+	actionFailed
+)
+
+type containerActionResultMsg struct {
+	Action string
+	Name   string
+	Err    error
+}
+
 // containerItem holds combined barrel info and optional resource stats for
 // a single container row.
 type containerItem struct {
 	Name       string
 	Status     string
+	ShellCount int
 	CPUPercent string
 	MemUsage   string
+	TmpUsage   string
 }
 
-// Model is the sub-model for the Containers tab. It shows a scrollable
-// list of running containers with columns: Name, Status, CPU%, Memory.
+// Model is the sub-model for the Containers tab. It shows a scrollable list of
+// running containers with columns for status, shells, CPU, memory, and /tmp.
 type Model struct {
 	list       components.ScrollableList
 	containers []containerItem
-	expanded   bool // whether the detail pane is shown for selected
+	expanded   bool
 	manager    ContainerManager
+
+	actionState actionState
+	actionText  string
 }
 
 // New creates a new containers tab model.
@@ -47,8 +67,8 @@ func New(mgr ContainerManager) *Model {
 	}
 }
 
-// Init satisfies SubModel. No commands needed at init time; the root
-// model drives container stat polling.
+// Init satisfies SubModel. No commands needed at init time; the root model
+// drives container stat polling.
 func (m *Model) Init() tea.Cmd {
 	return nil
 }
@@ -64,6 +84,11 @@ func (m *Model) Update(msg tea.Msg) (theme.SubModel, tea.Cmd) {
 	case events.ContainerStatsMsg:
 		m.applyStats(msg.Stats)
 		return m, nil
+	case events.ContainerActionConfirmMsg:
+		return m.handleConfirmedAction(msg)
+	case containerActionResultMsg:
+		m.handleActionResult(msg)
+		return m, nil
 	}
 	return m, nil
 }
@@ -75,35 +100,35 @@ func (m *Model) View(width, height int) string {
 	}
 
 	m.list.Width = width
-	m.list.Height = height
 	m.rebuildListItems()
 
-	var sections []string
+	feedbackLines := 0
+	if m.actionState != actionNone && m.actionText != "" {
+		feedbackLines = 1
+	}
 
-	// Column header.
+	var sections []string
 	header := renderHeader(width)
 	sections = append(sections, header)
-
-	// Divider under header.
 	divider := theme.DividerStyle.Render(strings.Repeat(theme.BorderH, width))
 	sections = append(sections, divider)
 
-	// List content (height minus header and divider).
-	listHeight := height - 2
+	listHeight := height - 2 - feedbackLines
 	if listHeight < 1 {
 		listHeight = 1
 	}
 	m.list.Height = listHeight
-	listView := m.list.View(renderRow)
-	sections = append(sections, listView)
+	sections = append(sections, m.list.View(renderRow))
 
-	// If expanded, show detail for selected container below the list.
+	if m.actionState != actionNone && m.actionText != "" {
+		sections = append(sections, renderActionStatus(m.actionState, m.actionText, width))
+	}
+
 	if m.expanded {
 		sel := m.list.Selected()
 		if sel != nil {
 			if ci, ok := sel.Data.(containerItem); ok {
-				detail := renderDetail(ci, width)
-				sections = append(sections, detail)
+				sections = append(sections, renderDetail(ci, width))
 			}
 		}
 	}
@@ -121,17 +146,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 		m.list.MoveDown()
 		m.expanded = false
 	case "s":
-		// Stop selected container.
 		if sel := m.list.Selected(); sel != nil {
 			if ci, ok := sel.Data.(containerItem); ok {
-				return m, m.stopContainerCmd(ci.Name)
+				return m, requestActionCmd("stop", ci.Name)
 			}
 		}
 	case "r":
-		// Restart selected container.
 		if sel := m.list.Selected(); sel != nil {
 			if ci, ok := sel.Data.(containerItem); ok {
-				return m, m.restartContainerCmd(ci.Name)
+				return m, requestActionCmd("restart", ci.Name)
 			}
 		}
 	case "enter":
@@ -140,25 +163,34 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 	return m, nil
 }
 
-// applyStats merges incoming container stats into the model. Containers
-// that appear in stats but not in the current list are added; containers
-// no longer present are removed.
+func (m *Model) handleConfirmedAction(msg events.ContainerActionConfirmMsg) (theme.SubModel, tea.Cmd) {
+	switch msg.Action {
+	case "stop":
+		m.markActionPending(msg.Name, "Stopping")
+		return m, m.stopContainerCmd(msg.Name)
+	case "restart":
+		m.markActionPending(msg.Name, "Restarting")
+		return m, m.restartContainerCmd(msg.Name)
+	default:
+		return m, nil
+	}
+}
+
+// applyStats merges incoming container stats into the model.
 func (m *Model) applyStats(stats []app.ContainerStat) {
-	// Rebuild container list from stats.
-	var updated []containerItem
+	updated := make([]containerItem, 0, len(stats))
 	for _, s := range stats {
-		ci := containerItem{
+		updated = append(updated, containerItem{
 			Name:       s.Name,
-			Status:     "running",
+			Status:     s.Status,
+			ShellCount: s.ShellCount,
 			CPUPercent: s.CPUPercent,
 			MemUsage:   s.MemUsage,
-		}
-		updated = append(updated, ci)
+			TmpUsage:   s.TmpUsage,
+		})
 	}
 
-	// Sort: proxy first, then alphabetically.
 	sort.Slice(updated, func(i, j int) bool {
-		// cooper-proxy always first.
 		if updated[i].Name == app.ContainerProxy {
 			return true
 		}
@@ -170,16 +202,17 @@ func (m *Model) applyStats(stats []app.ContainerStat) {
 
 	m.containers = updated
 	m.rebuildListItems()
+	if len(updated) == 0 {
+		m.actionState = actionNone
+		m.actionText = ""
+	}
 }
 
 // rebuildListItems syncs the ScrollableList items from the containers slice.
 func (m *Model) rebuildListItems() {
 	items := make([]components.ListItem, len(m.containers))
 	for i, c := range m.containers {
-		items[i] = components.ListItem{
-			ID:   c.Name,
-			Data: c,
-		}
+		items[i] = components.ListItem{ID: c.Name, Data: c}
 	}
 	m.list.SetItems(items)
 }
@@ -196,28 +229,79 @@ func (m *Model) emptyState(width, height int) string {
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, content)
 }
 
-// ----- Commands -----
+func (m *Model) markActionPending(name, verb string) {
+	m.updateContainerStatus(name, verb+"...")
+	m.actionState = actionPending
+	m.actionText = verb + " " + name + "..."
+}
+
+func (m *Model) handleActionResult(msg containerActionResultMsg) {
+	verbPast := map[string]string{"stop": "Stopped", "restart": "Restarted"}
+	verbPresent := map[string]string{"stop": "Running", "restart": "Running"}
+
+	if msg.Err != nil {
+		m.updateContainerStatus(msg.Name, "Running")
+		m.actionState = actionFailed
+		m.actionText = msg.Err.Error()
+		return
+	}
+
+	if msg.Action == "stop" {
+		m.removeContainer(msg.Name)
+	}
+	if status, ok := verbPresent[msg.Action]; ok {
+		m.updateContainerStatus(msg.Name, status)
+	}
+	m.actionState = actionSuccess
+	if past, ok := verbPast[msg.Action]; ok {
+		m.actionText = past + " " + msg.Name + "."
+	}
+}
+
+func (m *Model) updateContainerStatus(name, status string) {
+	for i := range m.containers {
+		if m.containers[i].Name == name {
+			m.containers[i].Status = status
+			return
+		}
+	}
+}
+
+func (m *Model) removeContainer(name string) {
+	filtered := m.containers[:0]
+	for _, item := range m.containers {
+		if item.Name != name {
+			filtered = append(filtered, item)
+		}
+	}
+	m.containers = filtered
+	m.rebuildListItems()
+}
 
 // stopContainerCmd returns a tea.Cmd that stops a container by name.
 func (m *Model) stopContainerCmd(name string) tea.Cmd {
 	mgr := m.manager
 	return func() tea.Msg {
-		if mgr != nil {
-			_ = mgr.StopContainer(name)
+		if mgr == nil {
+			return containerActionResultMsg{Action: "stop", Name: name, Err: nil}
 		}
-		return nil
+		return containerActionResultMsg{Action: "stop", Name: name, Err: mgr.StopContainer(name)}
 	}
 }
 
 // restartContainerCmd returns a tea.Cmd that restarts a container.
-// Uses docker restart to preserve the container; the next stats poll
-// will pick up the updated state.
 func (m *Model) restartContainerCmd(name string) tea.Cmd {
 	mgr := m.manager
 	return func() tea.Msg {
-		if mgr != nil {
-			_ = mgr.RestartContainer(name)
+		if mgr == nil {
+			return containerActionResultMsg{Action: "restart", Name: name, Err: nil}
 		}
-		return nil
+		return containerActionResultMsg{Action: "restart", Name: name, Err: mgr.RestartContainer(name)}
+	}
+}
+
+func requestActionCmd(action, name string) tea.Cmd {
+	return func() tea.Msg {
+		return events.ContainerActionRequestMsg{Action: action, Name: name}
 	}
 }

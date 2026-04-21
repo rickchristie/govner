@@ -41,6 +41,10 @@ type Model struct {
 	// Modal overlay (nil when no modal is active).
 	modal *components.Modal
 
+	// Pending confirmed container action while the shared root modal is open.
+	pendingContainerAction string
+	pendingContainerName   string
+
 	// Sub-models, one per tab. These are nil until the corresponding tab
 	// package supplies a concrete implementation (Work Packages 4C-4I).
 	containersModel   SubModel
@@ -63,6 +67,7 @@ type Model struct {
 	clipboardError     string
 	clipboardFailedAt  time.Time
 	clipboardExpiredAt time.Time
+	headerHealth       app.HeaderHealth
 	alertPlayer        AlertPlayer
 
 	// Shutdown state.
@@ -79,10 +84,15 @@ type Model struct {
 // call the Set* methods to wire them up before running the program.
 func NewModel(a app.App) *Model {
 	tb := components.NewTabBar(theme.AllTabs, theme.TabContainers)
+	health := app.HeaderHealth{}
+	if a != nil {
+		health = a.HeaderHealth()
+	}
 	return &Model{
-		app:       a,
-		activeTab: theme.TabContainers,
-		tabBar:    tb,
+		app:          a,
+		activeTab:    theme.TabContainers,
+		tabBar:       tb,
+		headerHealth: health,
 	}
 }
 
@@ -90,7 +100,12 @@ func NewModel(a app.App) *Model {
 
 // SetApp sets the app interface. This is useful when the Model is created
 // before the App is fully initialised.
-func (m *Model) SetApp(a app.App) { m.app = a }
+func (m *Model) SetApp(a app.App) {
+	m.app = a
+	if a != nil {
+		m.headerHealth = a.HeaderHealth()
+	}
+}
 
 // SetSize updates the terminal dimensions.
 func (m *Model) SetSize(w, h int) {

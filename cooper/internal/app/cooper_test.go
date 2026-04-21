@@ -1344,11 +1344,93 @@ func TestCooperApp_ContainerStats(t *testing.T) {
 		t.Logf("container stat: name=%s cpu=%s mem=%s", s.Name, s.CPUPercent, s.MemUsage)
 		if s.Name == docker.ProxyContainerName() {
 			found = true
+			if s.Status != "Running" {
+				t.Fatalf("proxy status = %q, want Running", s.Status)
+			}
+			if s.TmpUsage != "--" {
+				t.Fatalf("proxy tmp usage = %q, want --", s.TmpUsage)
+			}
 		}
 	}
 	if !found {
 		t.Error("ContainerStats() did not include the proxy container")
 	}
+}
+
+func TestCooperApp_HeaderHealth(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	waitForProxyProcessPorts(t, 5*time.Second, cfg.BridgePort)
+	health := app.HeaderHealth()
+	if !health.Proxy {
+		t.Fatal("HeaderHealth().Proxy = false, want true")
+	}
+	if !health.Socat {
+		t.Fatal("HeaderHealth().Socat = false, want true")
+	}
+	if !health.Bridge {
+		t.Fatal("HeaderHealth().Bridge = false, want true")
+	}
+}
+
+func TestCooperApp_ContainerStatsIncludesShellCountAndTmpUsage(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoBarrelImage(t)
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
+	defer app.Stop()
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", barrelName).Run() })
+
+	marker, err := docker.CreateShellSessionMarker(cooperDir, barrelName, "stats")
+	if err != nil {
+		t.Fatalf("CreateShellSessionMarker() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = docker.RemoveShellSessionMarker(marker.HostPath) })
+
+	if _, err := barrelExec(barrelName, "printf container-stats > /tmp/cooper-container-stats.txt"); err != nil {
+		t.Fatalf("write /tmp file in barrel: %v", err)
+	}
+
+	stats, err := app.ContainerStats()
+	if err != nil {
+		t.Fatalf("ContainerStats() failed: %v", err)
+	}
+
+	for _, s := range stats {
+		if s.Name != barrelName {
+			continue
+		}
+		if s.Status != "Running" {
+			t.Fatalf("barrel status = %q, want Running", s.Status)
+		}
+		if s.ShellCount != 1 {
+			t.Fatalf("barrel shell count = %d, want 1", s.ShellCount)
+		}
+		if s.TmpUsage == "--" || s.TmpUsage == "0B" {
+			t.Fatalf("barrel tmp usage = %q, want non-zero value", s.TmpUsage)
+		}
+		return
+	}
+	t.Fatalf("could not find barrel %s in stats: %#v", barrelName, stats)
 }
 
 // =====================================================================

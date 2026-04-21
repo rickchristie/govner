@@ -14,6 +14,7 @@ import (
 type ACLRequestMsg = events.ACLRequestMsg
 type AnimTickMsg = events.AnimTickMsg
 type ContainerStatsMsg = events.ContainerStatsMsg
+type HeaderHealthMsg = events.HeaderHealthMsg
 type TickMsg = events.TickMsg
 type ShutdownCompleteMsg = events.ShutdownCompleteMsg
 
@@ -97,5 +98,19 @@ func pollStats(a app.App, interval time.Duration) tea.Cmd {
 			return events.ContainerStatsMsg{}
 		}
 		return events.ContainerStatsMsg{Stats: stats}
+	}
+}
+
+// pollHeaderHealth returns a tea.Cmd that sleeps for interval, then collects
+// the header health badges via the App and returns them as a HeaderHealthMsg.
+func pollHeaderHealth(a app.App, interval time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		if interval > 0 {
+			time.Sleep(interval)
+		}
+		if a == nil {
+			return events.HeaderHealthMsg{}
+		}
+		return events.HeaderHealthMsg{Health: a.HeaderHealth()}
 	}
 }

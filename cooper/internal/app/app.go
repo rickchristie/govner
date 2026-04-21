@@ -46,6 +46,7 @@ type App interface {
 	RestartContainer(name string) error
 	ListContainers() ([]ContainerInfo, error)
 	IsProxyRunning() bool
+	HeaderHealth() HeaderHealth
 
 	// Port forwarding (live reload)
 	UpdatePortForwards(rules []config.PortForwardRule) error
@@ -77,8 +78,11 @@ const ContainerProxy = "cooper-proxy"
 // internally so the TUI never imports the docker package.
 type ContainerStat struct {
 	Name       string
+	Status     string
+	ShellCount int
 	CPUPercent string
 	MemUsage   string
+	TmpUsage   string
 }
 
 // ContainerInfo holds identification and status for a container.
@@ -87,4 +91,12 @@ type ContainerInfo struct {
 	Name         string
 	Status       string
 	WorkspaceDir string
+}
+
+// HeaderHealth captures the lightweight runtime health badges shown in the TUI
+// header.
+type HeaderHealth struct {
+	Proxy  bool
+	Socat  bool
+	Bridge bool
 }

@@ -20,6 +20,8 @@ type TestApp struct {
 	bridgeCh   chan ExecutionLog
 	squidLogCh chan string
 	proxyUp    bool
+	socatUp    bool
+	bridgeUp   bool
 }
 
 // NewTestApp creates a TestApp with the given config and mock channels.
@@ -32,6 +34,8 @@ func NewTestApp(cfg *config.Config, aclCh chan ACLRequest, bridgeCh chan Executi
 		bridgeCh:   bridgeCh,
 		squidLogCh: make(chan string, 1024),
 		proxyUp:    true,
+		socatUp:    true,
+		bridgeUp:   true,
 	}
 }
 
@@ -52,6 +56,9 @@ func (t *TestApp) StopContainer(_ string) error             { return nil }
 func (t *TestApp) RestartContainer(_ string) error          { return nil }
 func (t *TestApp) ListContainers() ([]ContainerInfo, error) { return nil, nil }
 func (t *TestApp) IsProxyRunning() bool                     { return t.proxyUp }
+func (t *TestApp) HeaderHealth() HeaderHealth {
+	return HeaderHealth{Proxy: t.proxyUp, Socat: t.socatUp, Bridge: t.bridgeUp}
+}
 
 func (t *TestApp) UpdatePortForwards(_ []config.PortForwardRule) error { return nil }
 func (t *TestApp) UpdateBridgeRoutes(_ []config.BridgeRoute) error     { return nil }

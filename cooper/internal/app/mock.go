@@ -35,6 +35,7 @@ type MockApp struct {
 	StopContainerErr    error
 	RestartContainerErr error
 	ProxyRunning        bool
+	HeaderHealthVal     HeaderHealth
 
 	// Clipboard controllable return values.
 	CaptureClipboardResult *clipboard.ClipboardEvent
@@ -75,13 +76,14 @@ type SettingsUpdate struct {
 // NewMockApp creates a MockApp with buffered channels and sensible defaults.
 func NewMockApp(cfg *config.Config, cooperDir string) *MockApp {
 	return &MockApp{
-		cfg:          cfg,
-		cooperDir:    cooperDir,
-		aclRequests:  make(chan ACLRequest, 256),
-		aclDecisions: make(chan DecisionEvent, 256),
-		bridgeLogs:   make(chan ExecutionLog, 256),
-		squidLogs:    make(chan string, 1024),
-		ProxyRunning: true,
+		cfg:             cfg,
+		cooperDir:       cooperDir,
+		aclRequests:     make(chan ACLRequest, 256),
+		aclDecisions:    make(chan DecisionEvent, 256),
+		bridgeLogs:      make(chan ExecutionLog, 256),
+		squidLogs:       make(chan string, 1024),
+		ProxyRunning:    true,
+		HeaderHealthVal: HeaderHealth{Proxy: true, Socat: true, Bridge: true},
 	}
 }
 
@@ -186,6 +188,10 @@ func (m *MockApp) ListContainers() ([]ContainerInfo, error) {
 
 func (m *MockApp) IsProxyRunning() bool {
 	return m.ProxyRunning
+}
+
+func (m *MockApp) HeaderHealth() HeaderHealth {
+	return m.HeaderHealthVal
 }
 
 // ----- Port forwarding -----

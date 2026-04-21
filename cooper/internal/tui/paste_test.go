@@ -14,6 +14,8 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/tui/bridgeui"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
+	containerui "github.com/rickchristie/govner/cooper/internal/tui/containers"
+	"github.com/rickchristie/govner/cooper/internal/tui/events"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
@@ -305,5 +307,56 @@ func TestExecuteModalConfirm_ExitMarksExpectedExit(t *testing.T) {
 	}
 	if !model.ExitExpected() {
 		t.Fatal("expected explicit exit flow to mark the model as exiting")
+	}
+}
+
+func TestHandleKey_ContainersStopShowsConfirmModalAndExecutesOnConfirm(t *testing.T) {
+	mockApp := cooperapp.NewMockApp(&config.Config{}, t.TempDir())
+	model := NewModel(mockApp)
+	model.SetContainersModel(containerui.New(mockApp))
+
+	if _, cmd := model.Update(events.ContainerStatsMsg{Stats: []cooperapp.ContainerStat{{
+		Name:       "barrel-demo-claude",
+		Status:     "Running",
+		ShellCount: 1,
+		CPUPercent: "1%",
+		MemUsage:   "10MiB / 1GiB",
+		TmpUsage:   "12KB",
+	}}}); cmd != nil {
+		_ = cmd
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	root := updated.(*Model)
+	request := cmd()
+	updated, _ = root.Update(request)
+	root = updated.(*Model)
+
+	if root.modal == nil {
+		t.Fatal("expected stop confirmation modal")
+	}
+	if root.modal.ModalType != theme.ModalStopContainer {
+		t.Fatalf("modal type = %v, want ModalStopContainer", root.modal.ModalType)
+	}
+	if !strings.Contains(root.modal.Body, "barrel-demo-claude") {
+		t.Fatalf("modal body = %q, want container name", root.modal.Body)
+	}
+
+	updated, cmd = root.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	root = updated.(*Model)
+	confirm := cmd()
+	updated, cmd = root.Update(confirm)
+	root = updated.(*Model)
+	updated, _ = root.Update(cmd())
+	root = updated.(*Model)
+
+	if len(mockApp.StoppedContainers) != 1 || mockApp.StoppedContainers[0] != "barrel-demo-claude" {
+		t.Fatalf("stopped containers = %#v", mockApp.StoppedContainers)
+	}
+	if root.modal != nil {
+		t.Fatal("expected modal to be dismissed after confirmation")
+	}
+	if root.pendingContainerAction != "" || root.pendingContainerName != "" {
+		t.Fatal("expected pending container modal state to be cleared")
 	}
 }

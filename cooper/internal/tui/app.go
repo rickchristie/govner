@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/rickchristie/govner/cooper/internal/app"
+	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/tui/about"
 	"github.com/rickchristie/govner/cooper/internal/tui/bridgeui"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
@@ -58,6 +59,7 @@ func (m *Model) Init() tea.Cmd {
 
 		// Kick off the initial docker stats poll.
 		cmds = append(cmds, pollStats(m.app, 5*time.Second))
+		cmds = append(cmds, pollHeaderHealth(m.app, 0))
 	}
 
 	return tea.Batch(cmds...)
@@ -189,6 +191,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			pollCmd = pollStats(m.app, theme.UITickInterval)
 		}
 		return m, tea.Batch(cmd, pollCmd)
+
+	case events.HeaderHealthMsg:
+		m.headerHealth = msg.Health
+		var pollCmd tea.Cmd
+		if m.app != nil {
+			pollCmd = pollHeaderHealth(m.app, theme.UITickInterval)
+		}
+		return m, pollCmd
 
 	case bridgeui.RoutesChangedMsg:
 		// Persist route changes and hot-swap on the bridge server via the App.
@@ -328,6 +338,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clipboardSnapshot = nil
 		return m, nil
 
+	case events.ContainerActionRequestMsg:
+		m.showContainerActionModal(msg.Action, msg.Name)
+		return m, nil
+
 	case about.RunUpdateMsg:
 		modal := components.NewModal(
 			theme.ModalUpdateInfo,
@@ -363,9 +377,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.executeModalConfirm(modal)
 			}
 			// Cancel focused — dismiss modal.
+			m.clearPendingContainerModal()
 			m.modal = nil
 			return m, nil
 		case "esc":
+			m.clearPendingContainerModal()
 			m.modal = nil
 			return m, nil
 		case "up", "down", "left", "right":
@@ -430,6 +446,34 @@ func (m *Model) showExitModal() {
 		"Cancel",
 	)
 	m.modal = &modal
+}
+
+func (m *Model) showContainerActionModal(action, name string) {
+	var modalType theme.ModalType
+	var title, body, confirm string
+	switch action {
+	case "stop":
+		modalType = theme.ModalStopContainer
+		title = "Stop Container"
+		body = fmt.Sprintf("Stop and remove this barrel?\n\n  %s", name)
+		confirm = "Stop"
+	case "restart":
+		modalType = theme.ModalRestartContainer
+		title = "Restart Container"
+		body = fmt.Sprintf("Restart this barrel now?\n\n  %s", name)
+		confirm = "Restart"
+	default:
+		return
+	}
+	m.pendingContainerAction = action
+	m.pendingContainerName = name
+	modal := components.NewModal(modalType, title, body, confirm, "Cancel")
+	m.modal = &modal
+}
+
+func (m *Model) clearPendingContainerModal() {
+	m.pendingContainerAction = ""
+	m.pendingContainerName = ""
 }
 
 // isTextInputActive returns true when the active sub-model is in a text
@@ -663,6 +707,16 @@ func (m *Model) executeModalConfirm(modal *components.Modal) (tea.Model, tea.Cmd
 			m.onQuit()
 		}
 		return m, tea.Quit
+	case theme.ModalStopContainer, theme.ModalRestartContainer:
+		action := m.pendingContainerAction
+		name := m.pendingContainerName
+		m.clearPendingContainerModal()
+		if action == "" || name == "" {
+			return m, nil
+		}
+		return m, func() tea.Msg {
+			return events.ContainerActionConfirmMsg{Action: action, Name: name}
+		}
 	}
 	return m, nil
 }
@@ -814,20 +868,20 @@ func (m *Model) contentHeight() int {
 	return h
 }
 
-// headerBar renders: 🥃 Cooper  barrel-proof  🛡️ Proxy ✓  <clipboard status>
+// headerBar renders the brand, runtime health badges, and clipboard status.
 func (m *Model) headerBar(width int) string {
 	brand := theme.BrandStyle.Render(theme.BarrelEmoji + " Cooper")
-	tagline := theme.TaglineStyle.Render("barrel-proof")
-
-	// Proxy status -- check via the App interface.
-	var proxyStatus string
-	if m.app != nil && m.app.IsProxyRunning() {
-		proxyStatus = theme.StatusRunningStyle.Render(theme.IconShield + "  Proxy " + theme.IconCheck)
-	} else {
-		proxyStatus = theme.StatusStoppedStyle.Render(theme.IconShield + "  Proxy " + theme.IconCross)
+	leftParts := []string{
+		brand,
+		renderHeaderHealthBadge(theme.IconShield, "Proxy", m.headerHealth.Proxy),
 	}
-
-	leftParts := []string{brand, tagline, proxyStatus}
+	if warning := m.headerMismatchSegment(); warning != "" {
+		leftParts = append(leftParts, warning)
+	}
+	leftParts = append(leftParts,
+		renderHeaderHealthBadge("", "Socat", m.headerHealth.Socat),
+		renderHeaderHealthBadge(theme.IconPlug, "Bridge", m.headerHealth.Bridge),
+	)
 	left := strings.Join(leftParts, "  ")
 
 	// Clipboard status segment on the right side.
@@ -843,6 +897,65 @@ func (m *Model) headerBar(width int) string {
 	// Pad or truncate to terminal width.
 	rendered := theme.HeaderBarStyle.Width(width).Render(row)
 	return rendered
+}
+
+func renderHeaderHealthBadge(icon, label string, healthy bool) string {
+	prefix := strings.TrimSpace(icon + " " + label)
+	text := fmt.Sprintf("%s %s", prefix, theme.IconCross)
+	style := theme.StatusStoppedStyle
+	if healthy {
+		text = fmt.Sprintf("%s %s", prefix, theme.IconCheck)
+		style = theme.StatusRunningStyle
+	}
+	return style.Render(text)
+}
+
+func (m *Model) headerMismatchSegment() string {
+	if m.app == nil {
+		return ""
+	}
+	count := topLevelToolMismatchCount(m.app.Config(), m.app.StartupWarnings())
+	if count == 0 {
+		return ""
+	}
+	label := "tool mismatch"
+	if count > 1 {
+		label = fmt.Sprintf("%d tool mismatches", count)
+	}
+	return lipgloss.NewStyle().Background(theme.ColorCopper).Foreground(theme.ColorVoid).Padding(0, 1).Render(theme.IconWarn + " " + label)
+}
+
+func topLevelToolMismatchCount(cfg *config.Config, warnings []string) int {
+	if cfg == nil || len(warnings) == 0 {
+		return 0
+	}
+	allowed := make(map[string]struct{}, len(cfg.ProgrammingTools)+len(cfg.AITools))
+	for _, tool := range cfg.ProgrammingTools {
+		if tool.Enabled && tool.Mode == config.ModeMirror {
+			allowed[tool.Name] = struct{}{}
+		}
+	}
+	for _, tool := range cfg.AITools {
+		if tool.Enabled && tool.Mode == config.ModeMirror {
+			allowed[tool.Name] = struct{}{}
+		}
+	}
+	count := 0
+	for _, warning := range warnings {
+		name, _, ok := strings.Cut(warning, ":")
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if _, ok := allowed[name]; !ok {
+			continue
+		}
+		if !strings.Contains(warning, "container=") || !strings.Contains(warning, "expected=") {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 // clipboardHeaderSegment renders the clipboard status for the header bar.
@@ -986,11 +1099,13 @@ func (m *Model) animTickCmd() tea.Cmd {
 // ----- Public entry point -----
 
 // NewProgram creates a BubbleTea program with the alternate screen enabled.
+// Mouse capture stays disabled so terminals can use normal drag selection for
+// logs and tables inside cooper up.
 // The caller should invoke p.Run() to start the event loop. Having access
 // to the *tea.Program before Run blocks allows external goroutines (e.g.
 // the shutdown callback) to send messages via p.Send().
 func NewProgram(m *Model) *tea.Program {
-	return tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	return tea.NewProgram(m, tea.WithAltScreen())
 }
 
 // Run creates and runs a BubbleTea program. This is a convenience wrapper

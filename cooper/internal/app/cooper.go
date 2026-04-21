@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/bridge"
@@ -48,7 +50,15 @@ type CooperApp struct {
 	// Squid access log tailer.
 	squidTailer *squidlog.Tailer
 
+	tmpUsageMu    sync.Mutex
+	tmpUsageCache map[string]tmpUsageSnapshot
+
 	startupWarnings []string
+}
+
+type tmpUsageSnapshot struct {
+	Value      string
+	MeasuredAt time.Time
 }
 
 // NewCooperApp creates a new CooperApp with the given configuration.
@@ -69,6 +79,7 @@ func NewCooperApp(cfg *config.Config, cooperDir string) *CooperApp {
 		aclFwd:           make(chan proxy.ACLRequest, 256),
 		decisionFwd:      make(chan proxy.DecisionEvent, 1024),
 		bridgeFwd:        make(chan bridge.ExecutionLog, 256),
+		tmpUsageCache:    make(map[string]tmpUsageSnapshot),
 	}
 }
 
@@ -405,22 +416,99 @@ func (a *CooperApp) PendingRequests() []*PendingRequest {
 
 // ----- Container management -----
 
-// ContainerStats returns CPU and memory statistics for all running
+// ContainerStats returns resource and session statistics for all running
 // cooper containers (proxy + barrels).
 func (a *CooperApp) ContainerStats() ([]ContainerStat, error) {
-	dockerStats, err := docker.AllContainerStats()
+	var stats []ContainerStat
+
+	proxyRunning, err := docker.IsProxyRunning()
 	if err != nil {
 		return nil, err
 	}
-	stats := make([]ContainerStat, len(dockerStats))
-	for i, ds := range dockerStats {
-		stats[i] = ContainerStat{
-			Name:       ds.Name,
-			CPUPercent: ds.CPUPercent,
-			MemUsage:   ds.MemUsage,
+	if proxyRunning {
+		proxyStats, err := docker.ContainerStats(docker.ProxyContainerName())
+		if err == nil {
+			stats = append(stats, ContainerStat{
+				Name:       proxyStats.Name,
+				Status:     "Running",
+				ShellCount: 0,
+				CPUPercent: proxyStats.CPUPercent,
+				MemUsage:   proxyStats.MemUsage,
+				TmpUsage:   "--",
+			})
 		}
 	}
+
+	barrels, err := docker.ListBarrels()
+	if err != nil {
+		return nil, err
+	}
+	for _, barrel := range barrels {
+		barrelStats, err := docker.ContainerStats(barrel.Name)
+		if err != nil {
+			continue
+		}
+		shellCount, err := docker.CountActiveShellSessions(a.cooperDir, barrel.Name)
+		if err != nil {
+			shellCount = 0
+		}
+		stats = append(stats, ContainerStat{
+			Name:       barrelStats.Name,
+			Status:     "Running",
+			ShellCount: shellCount,
+			CPUPercent: barrelStats.CPUPercent,
+			MemUsage:   barrelStats.MemUsage,
+			TmpUsage:   a.cachedBarrelTmpUsage(barrel.Name),
+		})
+	}
+
 	return stats, nil
+}
+
+func (a *CooperApp) cachedBarrelTmpUsage(containerName string) string {
+	const refreshInterval = 5 * time.Second
+
+	a.tmpUsageMu.Lock()
+	if snapshot, ok := a.tmpUsageCache[containerName]; ok && time.Since(snapshot.MeasuredAt) < refreshInterval {
+		value := snapshot.Value
+		a.tmpUsageMu.Unlock()
+		return value
+	}
+	a.tmpUsageMu.Unlock()
+
+	bytes, err := docker.DirSizeBytes(docker.BarrelTmpDir(a.cooperDir, containerName))
+	value := "--"
+	if err == nil {
+		value = humanizeBytes(bytes)
+	}
+
+	a.tmpUsageMu.Lock()
+	a.tmpUsageCache[containerName] = tmpUsageSnapshot{Value: value, MeasuredAt: time.Now()}
+	a.tmpUsageMu.Unlock()
+	return value
+}
+
+func humanizeBytes(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%dB", size)
+	}
+	div, exp := int64(unit), 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	value := float64(size) / float64(div)
+	if value >= 10 {
+		return fmt.Sprintf("%.0f%cB", value, "KMGTPE"[exp])
+	}
+	return fmt.Sprintf("%.1f%cB", value, "KMGTPE"[exp])
+}
+
+func (a *CooperApp) clearTmpUsageCache(containerName string) {
+	a.tmpUsageMu.Lock()
+	defer a.tmpUsageMu.Unlock()
+	delete(a.tmpUsageCache, containerName)
 }
 
 // StopContainer stops and removes a barrel container by name.
@@ -428,6 +516,7 @@ func (a *CooperApp) StopContainer(name string) error {
 	if err := docker.StopBarrel(name); err != nil {
 		return err
 	}
+	a.clearTmpUsageCache(name)
 	a.revokeClipboardToken(name)
 	return nil
 }
@@ -437,6 +526,7 @@ func (a *CooperApp) RestartContainer(name string) error {
 	if err := docker.RestartBarrel(name); err != nil {
 		return err
 	}
+	a.clearTmpUsageCache(name)
 	return a.rotateClipboardToken(name)
 }
 
@@ -464,6 +554,27 @@ func (a *CooperApp) IsProxyRunning() bool {
 		return false
 	}
 	return running
+}
+
+// HeaderHealth returns the current runtime health badges for the TUI header.
+func (a *CooperApp) HeaderHealth() HeaderHealth {
+	proxyHealthy := a.IsProxyRunning()
+	return HeaderHealth{
+		Proxy:  proxyHealthy,
+		Socat:  proxyHealthy && docker.IsProxySocatHealthy(a.cfg.BridgePort),
+		Bridge: a.isBridgeHealthy(),
+	}
+}
+
+func (a *CooperApp) isBridgeHealthy() bool {
+	client := &http.Client{Timeout: 250 * time.Millisecond}
+	url := fmt.Sprintf("http://127.0.0.1:%d/health", a.cfg.BridgePort)
+	resp, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 // ----- Port forwarding -----

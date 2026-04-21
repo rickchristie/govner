@@ -23,6 +23,25 @@ type ContainerStatsMsg struct {
 	Stats []app.ContainerStat
 }
 
+// HeaderHealthMsg carries the latest runtime health badges for the header.
+type HeaderHealthMsg struct {
+	Health app.HeaderHealth
+}
+
+// ContainerActionRequestMsg asks the root model to show a confirmation modal
+// before a container stop/restart action runs.
+type ContainerActionRequestMsg struct {
+	Action string
+	Name   string
+}
+
+// ContainerActionConfirmMsg tells the containers screen to execute a confirmed
+// stop/restart action.
+type ContainerActionConfirmMsg struct {
+	Action string
+	Name   string
+}
+
 // TickMsg is sent every UITickInterval (1 s) for general UI refresh
 // (timestamps, stats, etc.).
 type TickMsg struct{}

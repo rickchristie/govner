@@ -882,6 +882,17 @@ func runCLI(cmd *cobra.Command, args []string) error {
 	}
 
 	interactive := cliOneShot == ""
+	if interactive {
+		shellMarker, err := docker.CreateShellSessionMarker(cooperDir, containerName, sessionName)
+		if err != nil {
+			return fmt.Errorf("create shell session marker: %w", err)
+		}
+		defer func() {
+			if removeErr := docker.RemoveShellSessionMarker(shellMarker.HostPath); removeErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: %v\n", removeErr)
+			}
+		}()
+	}
 	if err := docker.ExecBarrel(containerName, execCmd, envArgs, interactive); err != nil {
 		return fmt.Errorf("exec barrel: %w", err)
 	}
