@@ -34,6 +34,7 @@ type CooperApp struct {
 	hostRelay        *docker.HostRelay
 	clipboardManager *clipboard.Manager
 	clipboardReader  clipboard.Reader
+	clipboardWriter  clipboard.Writer
 
 	aclLogger    *logging.Logger
 	bridgeLogger *logging.Logger
@@ -62,6 +63,7 @@ func NewCooperApp(cfg *config.Config, cooperDir string) *CooperApp {
 		cooperDir:        cooperDir,
 		clipboardManager: mgr,
 		clipboardReader:  clipboard.NewHostReader(os.Getenv),
+		clipboardWriter:  clipboard.NewHostWriter(os.Getenv),
 		aclLogger:        logging.NewLogger(logDir, "acl", 10*1024*1024, 10),
 		bridgeLogger:     logging.NewLogger(logDir, "bridge", 10*1024*1024, 10),
 		aclFwd:           make(chan proxy.ACLRequest, 256),
@@ -147,7 +149,7 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 	a.bridgeServer = bridge.NewBridgeServer(a.cfg.BridgeRoutes, a.cfg.BridgePort, gatewayIPs)
 	// Install clipboard handler on the bridge before starting.
 	if a.clipboardManager != nil {
-		clipHandler := clipboard.NewHandler(a.clipboardManager)
+		clipHandler := clipboard.NewHandler(a.clipboardManager, a.clipboardWriter)
 		a.bridgeServer.SetClipboardHandler(clipHandler)
 	}
 	if err := a.bridgeServer.Start(); err != nil {
@@ -586,7 +588,7 @@ func (a *CooperApp) Adopt(aclListener *proxy.ACLListener, bridgeServer *bridge.B
 	// this app's clipboard manager (which may have been replaced by
 	// AdoptClipboard before this call).
 	if a.clipboardManager != nil && a.bridgeServer != nil {
-		clipHandler := clipboard.NewHandler(a.clipboardManager)
+		clipHandler := clipboard.NewHandler(a.clipboardManager, a.clipboardWriter)
 		a.bridgeServer.SetClipboardHandler(clipHandler)
 	}
 
@@ -594,12 +596,13 @@ func (a *CooperApp) Adopt(aclListener *proxy.ACLListener, bridgeServer *bridge.B
 	a.loadPersistedBridgeRoutes()
 }
 
-// AdoptClipboard replaces the internal clipboard manager and reader with
+// AdoptClipboard replaces the internal clipboard manager, reader, and writer with
 // pre-created instances. This is used by main.go's startup path which
 // creates these early so the bridge can be wired before the app exists.
-func (a *CooperApp) AdoptClipboard(mgr *clipboard.Manager, reader clipboard.Reader) {
+func (a *CooperApp) AdoptClipboard(mgr *clipboard.Manager, reader clipboard.Reader, writer clipboard.Writer) {
 	a.clipboardManager = mgr
 	a.clipboardReader = reader
+	a.clipboardWriter = writer
 }
 
 // ACLListener returns the underlying ACL listener for direct access by
@@ -754,6 +757,12 @@ func (a *CooperApp) ClipboardManager() *clipboard.Manager {
 // clipboard HTTP bridge without depending on host clipboard tooling.
 func (a *CooperApp) DisableClipboardReader() {
 	a.clipboardReader = nil
+}
+
+// SetClipboardWriter replaces the host clipboard writer. Tests use this to
+// verify bridge writes without touching the real host clipboard.
+func (a *CooperApp) SetClipboardWriter(writer clipboard.Writer) {
+	a.clipboardWriter = writer
 }
 
 // ----- Internal helpers -----

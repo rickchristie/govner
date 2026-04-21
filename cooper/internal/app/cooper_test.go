@@ -1359,9 +1359,13 @@ func TestCooperApp_ContainerStats(t *testing.T) {
 
 // skipIfNoBarrelImage verifies the shared barrel image exists for default test runs.
 func skipIfNoBarrelImage(t *testing.T) {
+	skipIfNoToolImage(t, "claude")
+}
+
+func skipIfNoToolImage(t *testing.T, toolName string) {
 	t.Helper()
 	docker.SetImagePrefix(testImagePrefix)
-	imageName := docker.GetImageCLI("claude")
+	imageName := docker.GetImageCLI(toolName)
 	exists, err := docker.ImageExists(imageName)
 	if err != nil {
 		t.Fatalf("cannot check barrel image %s: %v", imageName, err)
@@ -1369,6 +1373,33 @@ func skipIfNoBarrelImage(t *testing.T) {
 	if !exists {
 		t.Fatalf("barrel image %s not found after test bootstrap", imageName)
 	}
+}
+
+type recordingClipboardWriter struct {
+	mu    sync.Mutex
+	texts []string
+	err   error
+}
+
+func (w *recordingClipboardWriter) WriteText(_ context.Context, text []byte) error {
+	if w.err != nil {
+		return w.err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.texts = append(w.texts, string(append([]byte(nil), text...)))
+	return nil
+}
+
+func (w *recordingClipboardWriter) contains(text string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, candidate := range w.texts {
+		if candidate == text {
+			return true
+		}
+	}
+	return false
 }
 
 // barrelExec runs a command inside a barrel container and returns combined output.
@@ -3120,6 +3151,66 @@ func TestCooperApp_ClipboardTTLExpiry(t *testing.T) {
 	}
 	if typeResp["state"] != "empty" {
 		t.Errorf("after expiry: state = %v, want %q", typeResp["state"], "empty")
+	}
+}
+
+func TestCooperApp_OpenCodeClipboardWritesReachHostWriter(t *testing.T) {
+	skipIfNoDocker(t)
+	skipIfNoProxyImage(t)
+	skipIfNoToolImage(t, "opencode")
+	docker.SetImagePrefix(testImagePrefix)
+
+	cooperDir, cfg := setupCooperDir(t)
+	t.Cleanup(func() { cleanupDocker(t) })
+
+	app := NewCooperApp(cfg, cooperDir)
+	app.DisableClipboardReader()
+	writer := &recordingClipboardWriter{}
+	app.SetClipboardWriter(writer)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := app.Start(ctx, nil); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer app.Stop()
+
+	workspaceDir := t.TempDir()
+	barrelName := docker.BarrelContainerName(workspaceDir, "opencode")
+	writeTestToken(t, cooperDir, barrelName)
+	t.Cleanup(func() { _ = clipboard.RemoveTokenFile(cooperDir, barrelName) })
+	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "opencode"); err != nil {
+		t.Fatalf("StartBarrel(opencode) failed: %v", err)
+	}
+	t.Cleanup(func() { _ = docker.StopBarrel(barrelName) })
+	waitForContainer(t, barrelName, 15*time.Second)
+
+	waitForCondition(t, "opencode xclip clipboard write", 20*time.Second, 500*time.Millisecond, func(_ int) (bool, string, error) {
+		if _, err := barrelExec(barrelName, "printf opencode-xclip | xclip -selection clipboard"); err != nil {
+			return false, err.Error(), nil
+		}
+		if writer.contains("opencode-xclip") {
+			return true, "xclip write captured", nil
+		}
+		return false, "writer did not capture xclip text yet", nil
+	})
+
+	if _, err := barrelExec(barrelName, "printf opencode-xsel | xsel --clipboard --input"); err != nil {
+		t.Fatalf("xsel clipboard write failed: %v", err)
+	}
+	waitForCondition(t, "opencode xsel clipboard write", 10*time.Second, 250*time.Millisecond, func(_ int) (bool, string, error) {
+		if writer.contains("opencode-xsel") {
+			return true, "xsel write captured", nil
+		}
+		return false, "writer did not capture xsel text yet", nil
+	})
+
+	procs, err := barrelExec(barrelName, `ps -ef | grep -E "xsel|xclip" | grep -v grep || true`)
+	if err != nil {
+		t.Fatalf("inspect clipboard helper processes: %v", err)
+	}
+	if strings.Contains(procs, "xsel --clipboard --input") {
+		t.Fatalf("xsel helper should not be left running after shim write:\n%s", procs)
 	}
 }
 

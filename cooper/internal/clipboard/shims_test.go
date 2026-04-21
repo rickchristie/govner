@@ -43,6 +43,14 @@ func TestXclipShimUsesBinarySafeFetch(t *testing.T) {
 	assertContains(t, script, `rm -f "$tmpfile"`, "xclip shim should clean up tmpfile")
 }
 
+func TestXclipShimContainsTextWriteForwarding(t *testing.T) {
+	script := XclipShim("/usr/bin/xclip")
+	assertContains(t, script, "/clipboard/text", "xclip shim should post clipboard writes to /clipboard/text")
+	assertContains(t, script, "_cooper_xclip_is_clipboard_write", "xclip shim should detect clipboard writes")
+	assertContains(t, script, "_cooper_clip_post_text_file", "xclip shim should use shared text post helper")
+	assertContains(t, script, "--data-binary", "xclip shim should post raw clipboard bytes")
+}
+
 // TestWlPasteShimValidBash verifies the generated wl-paste shim is syntactically valid bash.
 func TestWlPasteShimValidBash(t *testing.T) {
 	script := WlPasteShim("/usr/bin/wl-paste")
@@ -81,6 +89,14 @@ func TestXselShimContainsFallback(t *testing.T) {
 	script := XselShim("/usr/bin/xsel")
 	assertContains(t, script, `exec "$REAL_BINARY" "$@"`, "xsel shim should fall back to real binary")
 	assertContains(t, script, `REAL_BINARY="/usr/bin/xsel"`, "xsel shim should reference the real binary path")
+}
+
+func TestXselShimContainsTextWriteForwarding(t *testing.T) {
+	script := XselShim("/usr/bin/xsel")
+	assertContains(t, script, "/clipboard/text", "xsel shim should post clipboard writes to /clipboard/text")
+	assertContains(t, script, "_cooper_xsel_is_clipboard_write", "xsel shim should detect clipboard writes")
+	assertContains(t, script, "/usr/bin/xclip -selection clipboard", "xsel shim should mirror text into the local X11 clipboard")
+	assertContains(t, script, "--data-binary", "xsel shim should post raw clipboard bytes")
 }
 
 // TestAllShimsReferenceTokenFile ensures all shims read the token from the file,

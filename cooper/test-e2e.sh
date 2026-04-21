@@ -2019,7 +2019,7 @@ func main() {
 	cooperDir := os.Getenv("COOPER_DIR")
 	mgr := clipboard.NewManager(5*time.Minute, 20*1024*1024)
 	mgr.SetCooperDir(cooperDir)
-	handler := clipboard.NewHandler(mgr)
+	handler := clipboard.NewHandler(mgr, nil)
 	gatewayIPs, err := docker.BridgeGatewayIPs()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bridge gateway IPs: %v\n", err)

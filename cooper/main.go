@@ -388,6 +388,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	clipMgr := clipboard.NewManager(ttl, cfg.ClipboardMaxBytes)
 	clipMgr.SetCooperDir(cooperDir)
 	clipReader := clipboard.NewHostReader(os.Getenv)
+	clipWriter := clipboard.NewHostWriter(os.Getenv)
 
 	// Pre-check: verify host clipboard prerequisites.
 	// Refuse to start if missing — matches CooperApp.Start() contract.
@@ -453,7 +454,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 		bridgeServer = bridge.NewBridgeServer(cfg.BridgeRoutes, cfg.BridgePort, gatewayIPs)
 		// Install clipboard handler so /clipboard/* endpoints work.
-		clipHandler := clipboard.NewHandler(clipMgr)
+		clipHandler := clipboard.NewHandler(clipMgr, clipWriter)
 		bridgeServer.SetClipboardHandler(clipHandler)
 		if err := bridgeServer.Start(); err != nil {
 			ul.LogStep(3, "Start bridge", err)
@@ -580,7 +581,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	defer alertPlayer.Close()
 
 	cooperApp := app.NewCooperApp(cfg, cooperDir)
-	cooperApp.AdoptClipboard(clipMgr, clipReader)
+	cooperApp.AdoptClipboard(clipMgr, clipReader, clipWriter)
 	cooperApp.Adopt(aclListener, bridgeServer, hostRelay, startupWarnings)
 
 	// Transition to the main TUI.

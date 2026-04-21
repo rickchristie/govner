@@ -229,7 +229,7 @@ func (ctx *ProofContext) phaseStartup() {
 	ttl := time.Duration(ctx.Cfg.ClipboardTTLSecs) * time.Second
 	clipMgr := clipboard.NewManager(ttl, ctx.Cfg.ClipboardMaxBytes)
 	clipMgr.SetCooperDir(ctx.CooperDir)
-	clipHandler := clipboard.NewHandler(clipMgr)
+	clipHandler := clipboard.NewHandler(clipMgr, clipboard.NewHostWriter(os.Getenv))
 	ctx.bridgeServer.SetClipboardHandler(clipHandler)
 	if err := ctx.bridgeServer.Start(); err != nil {
 		ctx.fail("Start bridge", err.Error())

@@ -1,12 +1,28 @@
 package clipboard
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+type recordingTextWriter struct {
+	texts [][]byte
+	err   error
+}
+
+func (w *recordingTextWriter) WriteText(_ context.Context, text []byte) error {
+	if w.err != nil {
+		return w.err
+	}
+	w.texts = append(w.texts, append([]byte(nil), text...))
+	return nil
+}
 
 func TestIsReservedPath(t *testing.T) {
 	tests := []struct {
@@ -53,13 +69,25 @@ func TestSanitizeBridgeRoutes(t *testing.T) {
 
 func setupTestManager(t *testing.T) *Manager {
 	t.Helper()
-	m := NewManager(5*time.Minute, 20*1024*1024)
-	return m
+	return NewManager(5*time.Minute, 20*1024*1024)
+}
+
+func registerEligibleToken(t *testing.T, m *Manager) string {
+	t.Helper()
+	if err := m.RegisterBarrel(BarrelSession{
+		ContainerName: "barrel-test",
+		ToolName:      "claude",
+		ClipboardMode: "shim",
+		Eligible:      true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return m.ActiveSessions()[0].Token
 }
 
 func TestHandleNonClipboardPath(t *testing.T) {
 	m := setupTestManager(t)
-	h := NewHandler(m)
+	h := NewHandler(m, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -72,7 +100,7 @@ func TestHandleNonClipboardPath(t *testing.T) {
 
 func TestHandleNoAuth(t *testing.T) {
 	m := setupTestManager(t)
-	h := NewHandler(m)
+	h := NewHandler(m, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/clipboard/type", nil)
 	w := httptest.NewRecorder()
@@ -88,7 +116,7 @@ func TestHandleNoAuth(t *testing.T) {
 
 func TestHandleInvalidToken(t *testing.T) {
 	m := setupTestManager(t)
-	h := NewHandler(m)
+	h := NewHandler(m, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/clipboard/type", nil)
 	req.Header.Set("Authorization", "Bearer invalid-token-xyz")
@@ -105,20 +133,8 @@ func TestHandleInvalidToken(t *testing.T) {
 
 func TestHandleTypeEmpty(t *testing.T) {
 	m := setupTestManager(t)
-	h := NewHandler(m)
-
-	// Register a barrel to get a valid token.
-	session := BarrelSession{
-		ContainerName: "barrel-test",
-		ToolName:      "claude",
-		ClipboardMode: "shim",
-		Eligible:      true,
-	}
-	if err := m.RegisterBarrel(session); err != nil {
-		t.Fatal(err)
-	}
-	sessions := m.ActiveSessions()
-	token := sessions[0].Token
+	h := NewHandler(m, nil)
+	token := registerEligibleToken(t, m)
 
 	req := httptest.NewRequest(http.MethodGet, "/clipboard/type", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -141,9 +157,8 @@ func TestHandleTypeEmpty(t *testing.T) {
 
 func TestHandleTypeStaged(t *testing.T) {
 	m := setupTestManager(t)
-	h := NewHandler(m)
+	h := NewHandler(m, nil)
 
-	// Stage an image.
 	obj := ClipboardObject{
 		Kind:    ClipboardKindImage,
 		MIME:    "image/jpeg",
@@ -156,18 +171,7 @@ func TestHandleTypeStaged(t *testing.T) {
 	if _, err := m.Stage(obj, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
-
-	// Register barrel.
-	session := BarrelSession{
-		ContainerName: "barrel-test",
-		ToolName:      "claude",
-		ClipboardMode: "shim",
-		Eligible:      true,
-	}
-	if err := m.RegisterBarrel(session); err != nil {
-		t.Fatal(err)
-	}
-	token := m.ActiveSessions()[0].Token
+	token := registerEligibleToken(t, m)
 
 	req := httptest.NewRequest(http.MethodGet, "/clipboard/type", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -196,18 +200,8 @@ func TestHandleTypeStaged(t *testing.T) {
 
 func TestHandleImageEmpty(t *testing.T) {
 	m := setupTestManager(t)
-	h := NewHandler(m)
-
-	session := BarrelSession{
-		ContainerName: "barrel-test",
-		ToolName:      "claude",
-		ClipboardMode: "shim",
-		Eligible:      true,
-	}
-	if err := m.RegisterBarrel(session); err != nil {
-		t.Fatal(err)
-	}
-	token := m.ActiveSessions()[0].Token
+	h := NewHandler(m, nil)
+	token := registerEligibleToken(t, m)
 
 	req := httptest.NewRequest(http.MethodGet, "/clipboard/image", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -222,7 +216,7 @@ func TestHandleImageEmpty(t *testing.T) {
 
 func TestHandleImageStaged(t *testing.T) {
 	m := setupTestManager(t)
-	h := NewHandler(m)
+	h := NewHandler(m, nil)
 
 	pngBytes := []byte("fake-png-data-for-test")
 	obj := ClipboardObject{
@@ -237,17 +231,7 @@ func TestHandleImageStaged(t *testing.T) {
 	if _, err := m.Stage(obj, 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
-
-	session := BarrelSession{
-		ContainerName: "barrel-test",
-		ToolName:      "claude",
-		ClipboardMode: "shim",
-		Eligible:      true,
-	}
-	if err := m.RegisterBarrel(session); err != nil {
-		t.Fatal(err)
-	}
-	token := m.ActiveSessions()[0].Token
+	token := registerEligibleToken(t, m)
 
 	req := httptest.NewRequest(http.MethodGet, "/clipboard/image", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -274,15 +258,14 @@ func TestHandleImageStaged(t *testing.T) {
 
 func TestHandleIneligibleBarrel(t *testing.T) {
 	m := setupTestManager(t)
-	h := NewHandler(m)
+	h := NewHandler(m, nil)
 
-	session := BarrelSession{
+	if err := m.RegisterBarrel(BarrelSession{
 		ContainerName: "barrel-off",
 		ToolName:      "custom",
 		ClipboardMode: "off",
 		Eligible:      false,
-	}
-	if err := m.RegisterBarrel(session); err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 	token := m.ActiveSessions()[0].Token
@@ -300,18 +283,8 @@ func TestHandleIneligibleBarrel(t *testing.T) {
 
 func TestHandleUnknownClipboardEndpoint(t *testing.T) {
 	m := setupTestManager(t)
-	h := NewHandler(m)
-
-	session := BarrelSession{
-		ContainerName: "barrel-test",
-		ToolName:      "claude",
-		ClipboardMode: "shim",
-		Eligible:      true,
-	}
-	if err := m.RegisterBarrel(session); err != nil {
-		t.Fatal(err)
-	}
-	token := m.ActiveSessions()[0].Token
+	h := NewHandler(m, nil)
+	token := registerEligibleToken(t, m)
 
 	req := httptest.NewRequest(http.MethodGet, "/clipboard/unknown", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -321,5 +294,84 @@ func TestHandleUnknownClipboardEndpoint(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandleTextSuccess(t *testing.T) {
+	m := setupTestManager(t)
+	writer := &recordingTextWriter{}
+	h := NewHandler(m, writer)
+	token := registerEligibleToken(t, m)
+
+	req := httptest.NewRequest(http.MethodPost, "/clipboard/text", bytes.NewBufferString("barrel-copy"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+
+	h.Handle(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+	if len(writer.texts) != 1 {
+		t.Fatalf("expected 1 clipboard write, got %d", len(writer.texts))
+	}
+	if got := string(writer.texts[0]); got != "barrel-copy" {
+		t.Fatalf("recorded text = %q, want %q", got, "barrel-copy")
+	}
+}
+
+func TestHandleTextInvalidToken(t *testing.T) {
+	m := setupTestManager(t)
+	writer := &recordingTextWriter{}
+	h := NewHandler(m, writer)
+
+	req := httptest.NewRequest(http.MethodPost, "/clipboard/text", bytes.NewBufferString("barrel-copy"))
+	req.Header.Set("Authorization", "Bearer invalid-token")
+	w := httptest.NewRecorder()
+
+	h.Handle(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	if len(writer.texts) != 0 {
+		t.Fatalf("writer should not be called for invalid token, got %d writes", len(writer.texts))
+	}
+}
+
+func TestHandleTextWriterError(t *testing.T) {
+	m := setupTestManager(t)
+	writer := &recordingTextWriter{err: errors.New("host clipboard unavailable")}
+	h := NewHandler(m, writer)
+	token := registerEligibleToken(t, m)
+
+	req := httptest.NewRequest(http.MethodPost, "/clipboard/text", bytes.NewBufferString("barrel-copy"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+
+	h.Handle(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
+func TestHandleTextTooLarge(t *testing.T) {
+	m := NewManager(5*time.Minute, 4)
+	writer := &recordingTextWriter{}
+	h := NewHandler(m, writer)
+	token := registerEligibleToken(t, m)
+
+	req := httptest.NewRequest(http.MethodPost, "/clipboard/text", bytes.NewBufferString("oversized"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+
+	h.Handle(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", w.Code)
+	}
+	if len(writer.texts) != 0 {
+		t.Fatalf("writer should not be called for oversized payload, got %d writes", len(writer.texts))
 	}
 }

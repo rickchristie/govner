@@ -1,7 +1,10 @@
 package clipboard
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -33,11 +36,12 @@ type typeResponse struct {
 // to be mounted on the existing bridge server, sharing the same port.
 type Handler struct {
 	manager *Manager
+	writer  Writer
 }
 
 // NewHandler creates a clipboard HTTP handler backed by the given manager.
-func NewHandler(manager *Manager) *Handler {
-	return &Handler{manager: manager}
+func NewHandler(manager *Manager, writer Writer) *Handler {
+	return &Handler{manager: manager, writer: writer}
 }
 
 // ServeHTTP dispatches clipboard requests. Returns false if the path
@@ -71,6 +75,8 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) bool {
 		h.handleType(w)
 	case path == "/clipboard/image" && r.Method == http.MethodGet:
 		h.handleImage(w)
+	case path == "/clipboard/text" && r.Method == http.MethodPost:
+		h.handleText(w, r)
 	default:
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
@@ -141,6 +147,45 @@ func (h *Handler) handleImage(w http.ResponseWriter) {
 	w.Header().Set("X-Cooper-Clipboard-Id", snap.ID)
 	w.WriteHeader(http.StatusOK)
 	w.Write(variant.Bytes)
+}
+
+// handleText forwards clipboard text writes from a barrel to the host clipboard.
+func (h *Handler) handleText(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+
+	if h.writer == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "host clipboard writer unavailable"})
+		return
+	}
+
+	_, maxBytes := h.manager.policy()
+	body := http.MaxBytesReader(w, r.Body, int64(maxBytes))
+	defer body.Close()
+
+	text, err := io.ReadAll(body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			json.NewEncoder(w).Encode(map[string]string{"error": "clipboard text exceeds configured size limit"})
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "failed to read clipboard text payload"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	if err := h.writer.WriteText(ctx, text); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // SanitizeRoutes removes any user-defined routes that collide with the

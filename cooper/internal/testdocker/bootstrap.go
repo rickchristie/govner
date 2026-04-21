@@ -499,6 +499,7 @@ func buildFingerprint(root string) (string, error) {
 	h := sha256.New()
 	paths := []string{
 		filepath.Join(root, ".testfiles", "config-pinned.json"),
+		filepath.Join(root, "internal", "clipboard"),
 		filepath.Join(root, "internal", "config"),
 		filepath.Join(root, "internal", "templates"),
 		filepath.Join(root, "internal", "aclsrc"),
@@ -619,6 +620,7 @@ func sharedBuiltToolNames() []sharedToolSpec {
 	return []sharedToolSpec{
 		{Name: "claude"},
 		{Name: "codex"},
+		{Name: "opencode"},
 	}
 }
 

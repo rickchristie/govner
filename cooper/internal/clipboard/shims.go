@@ -31,6 +31,22 @@ _cooper_clip_fetch() {
     rm -f "$tmpfile"
     return 1
 }
+
+_cooper_clip_post_text_file() {
+    local text_file="$1"
+    [ -f "$text_file" ] || return 1
+    local token
+    token=$(cat "${COOPER_CLIPBOARD_TOKEN_FILE}" 2>/dev/null) || return 1
+    [ -n "$token" ] || return 1
+    local bridge="${COOPER_CLIPBOARD_BRIDGE_URL}"
+    [ -n "$bridge" ] || return 1
+    curl -fsS --max-time 5 \
+        -X POST \
+        -H "Authorization: Bearer ${token}" \
+        -H "Content-Type: text/plain; charset=utf-8" \
+        --data-binary "@${text_file}" \
+        "${bridge}/clipboard/text" >/dev/null
+}
 `
 
 // XclipShim returns a complete bash script that intercepts clipboard read
@@ -55,8 +71,70 @@ if [ "${COOPER_CLIPBOARD_ENABLED}" != "1" ]; then
     exec "$REAL_BINARY" "$@"
 fi
 %s
+_cooper_xclip_has_output_flag() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            -o|-out|--output)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+_cooper_xclip_selection_is_clipboard() {
+    local arg
+    while [ $# -gt 0 ]; do
+        arg="$1"
+        case "$arg" in
+            -selection|-sel)
+                shift
+                case "$1" in
+                    clipboard|clip|c)
+                        return 0
+                        ;;
+                esac
+                ;;
+            -selection=clipboard|-selection=clip|-selection=c|-sel=clipboard|-sel=clip|-sel=c)
+                return 0
+                ;;
+        esac
+        shift
+    done
+    return 1
+}
+
+_cooper_xclip_is_clipboard_write() {
+    _cooper_xclip_has_output_flag "$@" && return 1
+    _cooper_xclip_selection_is_clipboard "$@"
+}
+
+_cooper_xclip_forward_text_write() {
+    local tmpfile
+    tmpfile=$(mktemp) || return 1
+    if ! cat > "$tmpfile"; then
+        rm -f "$tmpfile"
+        return 1
+    fi
+    if ! _cooper_clip_post_text_file "$tmpfile"; then
+        rm -f "$tmpfile"
+        return 1
+    fi
+    "$REAL_BINARY" "$@" < "$tmpfile" >/dev/null 2>&1 || true
+    rm -f "$tmpfile"
+    return 0
+}
+
 # Normalize arguments into a single string for matching.
 args="$*"
+
+if _cooper_xclip_is_clipboard_write "$@"; then
+    if _cooper_xclip_forward_text_write "$@"; then
+        exit 0
+    fi
+    exit 1
+fi
 
 # Pattern: xclip -selection clipboard -t TARGETS -o
 # AI tools call this to discover available clipboard types.
@@ -114,6 +192,67 @@ if [ "${COOPER_CLIPBOARD_ENABLED}" != "1" ]; then
     exec "$REAL_BINARY" "$@"
 fi
 %s
+_cooper_xsel_is_clipboard_write() {
+    local arg short_flags
+    local has_clipboard=0
+    local has_output=0
+    local has_input=0
+
+    for arg in "$@"; do
+        case "$arg" in
+            --clipboard)
+                has_clipboard=1
+                ;;
+            --output)
+                has_output=1
+                ;;
+            --input)
+                has_input=1
+                ;;
+            -*)
+                short_flags="${arg#-}"
+                case "$short_flags" in
+                    *b*) has_clipboard=1 ;;
+                esac
+                case "$short_flags" in
+                    *o*) has_output=1 ;;
+                esac
+                case "$short_flags" in
+                    *i*) has_input=1 ;;
+                esac
+                ;;
+        esac
+    done
+
+    [ "$has_clipboard" = "1" ] || return 1
+    [ "$has_output" = "0" ] || return 1
+    [ "$has_input" = "1" ] || return 0
+    return 0
+}
+
+_cooper_xsel_forward_text_write() {
+    local tmpfile
+    tmpfile=$(mktemp) || return 1
+    if ! cat > "$tmpfile"; then
+        rm -f "$tmpfile"
+        return 1
+    fi
+    if ! _cooper_clip_post_text_file "$tmpfile"; then
+        rm -f "$tmpfile"
+        return 1
+    fi
+    /usr/bin/xclip -selection clipboard < "$tmpfile" >/dev/null 2>&1 || true
+    rm -f "$tmpfile"
+    return 0
+}
+
+if _cooper_xsel_is_clipboard_write "$@"; then
+    if _cooper_xsel_forward_text_write "$@"; then
+        exit 0
+    fi
+    exit 1
+fi
+
 # Pattern: xsel --clipboard --output (simple clipboard read)
 # If an image is staged, return it; otherwise fall back to real xsel.
 case "$*" in
