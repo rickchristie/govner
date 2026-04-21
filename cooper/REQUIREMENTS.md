@@ -1,6 +1,5 @@
-Read through /sandb and thoroughly understand what it does - completely.
-Currently sandb is tough to set-up, we need to copy paste the folder directly on each repository.
-Then please read through /pgflock and notice the difference:
+Cooper is the successor to the old `sandb` prototype. `sandb` is obsolete and no longer lives in this repository.
+The original direction was to replace that copy-paste sandbox workflow with something closer to `/pgflock`:
   - pgflock has command line to control dockers.
   - pgflock builds Dockerfile based on configuration.
   - pgflock builds once and then can be run over and over again.
@@ -794,7 +793,7 @@ Internet:
   - Forwards from internal-network-reachable address to host services
 - User-configured ports + bridge port are both auto-generated in entrypoint templates from config
 - This two-hop model is the cost of true network isolation — it replaces the simpler single-hop socat
-  that sandb uses (where CLI connects directly to `host.docker.internal`)
+  that the legacy prototype used (where CLI connected directly to `host.docker.internal`)
 
 ## How Each Feature Uses the Network
 
