@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -1490,6 +1491,74 @@ func barrelExec(containerName string, cmd string) (string, error) {
 	return string(out), err
 }
 
+func websocketUpgradeCurlCommand(url, proxyURL string) string {
+	parts := []string{
+		"curl --http1.1 -k -sS -i --connect-timeout 2 --max-time 5",
+		"-H 'Connection: Upgrade'",
+		"-H 'Upgrade: websocket'",
+		"-H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=='",
+		"-H 'Sec-WebSocket-Version: 13'",
+	}
+	if proxyURL != "" {
+		parts = append(parts, "-x "+proxyURL)
+	}
+	parts = append(parts, url)
+	return strings.Join(parts, " ")
+}
+
+func assertWebSocketUpgradeSucceeded(t *testing.T, output string) {
+	t.Helper()
+	lower := strings.ToLower(output)
+	if !strings.Contains(output, "101 Switching Protocols") {
+		t.Fatalf("expected HTTP 101 Switching Protocols, got:\n%s", output)
+	}
+	if !strings.Contains(lower, "upgrade: websocket") {
+		t.Fatalf("expected Upgrade: websocket response header, got:\n%s", output)
+	}
+	if !strings.Contains(lower, "connection: upgrade") {
+		t.Fatalf("expected Connection: Upgrade response header, got:\n%s", output)
+	}
+}
+
+func requestHasWebSocketUpgrade(request string) bool {
+	hasConnectionUpgrade := false
+	hasUpgradeWebSocket := false
+	for _, line := range strings.Split(request, "\n") {
+		line = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(line, "\r")))
+		if strings.HasPrefix(line, "connection:") && strings.Contains(line, "upgrade") {
+			hasConnectionUpgrade = true
+		}
+		if line == "upgrade: websocket" {
+			hasUpgradeWebSocket = true
+		}
+	}
+	return hasConnectionUpgrade && hasUpgradeWebSocket
+}
+
+func servePortForwardTestConnection(conn net.Conn, fallbackMessage string) {
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	reader := bufio.NewReader(conn)
+	var request strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			_, _ = conn.Write([]byte(fallbackMessage + "\n"))
+			return
+		}
+		request.WriteString(line)
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+	}
+
+	if requestHasWebSocketUpgrade(request.String()) {
+		_, _ = conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
+		return
+	}
+	_, _ = conn.Write([]byte(fallbackMessage + "\n"))
+}
+
 // startAppAndBarrel is a helper that starts the full Cooper app (proxy + ACL +
 // bridge) and a barrel container. It returns the barrel container name.
 // The caller's t.Cleanup handles removing the barrel and Docker resources.
@@ -1670,6 +1739,19 @@ func TestCooperApp_ProxyRuntimeScenarios(t *testing.T) {
 		}
 	})
 
+	t.Run("WhitelistedDomainWebSocketUpgrade", func(t *testing.T) {
+		out, err := barrelExec(barrelName,
+			websocketUpgradeCurlCommand(
+				fmt.Sprintf("https://%s/ws", proxyAllowedTestDomain),
+				fmt.Sprintf("http://%s:%d", docker.ProxyHost(), cfg.ProxyPort),
+			),
+		)
+		if err != nil && !strings.Contains(out, "101 Switching Protocols") {
+			t.Fatalf("websocket upgrade request through proxy failed: %v\noutput: %s", err, out)
+		}
+		assertWebSocketUpgradeSucceeded(t, out)
+	})
+
 	t.Run("DirectEgressBlocked", func(t *testing.T) {
 		out, err := barrelExec(barrelName,
 			fmt.Sprintf("curl --resolve %s:443:%s --noproxy '*' --connect-timeout 2 --max-time 4 -s -o /dev/null -w '%%{http_code}' https://%s 2>&1",
@@ -1724,15 +1806,16 @@ func TestCooperApp_SocatPortForwarding(t *testing.T) {
 	}
 	t.Cleanup(func() { listener.Close() })
 
-	// Accept connections in a goroutine and write the test message.
+	// Accept connections in a goroutine. Raw TCP probes get a simple message;
+	// HTTP WebSocket upgrade requests get a 101 so the socat relay is tested as
+	// a transparent bidirectional TCP path, not just as a line-oriented pipe.
 	go func() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
 				return // listener closed
 			}
-			conn.Write([]byte(testMessage + "\n"))
-			conn.Close()
+			go servePortForwardTestConnection(conn, testMessage)
 		}
 	}()
 
@@ -1779,6 +1862,13 @@ func TestCooperApp_SocatPortForwarding(t *testing.T) {
 
 		return false, fmt.Sprintf("primary=%q err=%v fallback=%q err=%v", trimmed, err, trimmed2, err2), nil
 	})
+
+	out, err := barrelExec(barrelName,
+		websocketUpgradeCurlCommand(fmt.Sprintf("http://localhost:%d/ws", testPort), ""))
+	if err != nil && !strings.Contains(out, "101 Switching Protocols") {
+		t.Fatalf("websocket upgrade request through socat port forward failed: %v\noutput: %s", err, out)
+	}
+	assertWebSocketUpgradeSucceeded(t, out)
 }
 
 // =====================================================================

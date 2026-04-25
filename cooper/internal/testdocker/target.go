@@ -169,6 +169,28 @@ openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
   -keyout /tmp/target.key \
   -out /tmp/target.crt \
   -config /tmp/openssl.cnf >/tmp/target-cert.log 2>&1
-exec openssl s_server -quiet -accept 443 -cert /tmp/target.crt -key /tmp/target.key -www
+cat >/tmp/target-handler.sh <<'EOF'
+#!/usr/bin/env bash
+set -eu
+
+request_file=$(mktemp)
+trap 'rm -f "$request_file"' EXIT
+
+while IFS= read -r line; do
+  line="${line%%$'\r'}"
+  printf '%%s\n' "$line" >> "$request_file"
+  [ -z "$line" ] && break
+done
+
+if grep -qi '^Upgrade:[[:space:]]*websocket[[:space:]]*$' "$request_file" && \
+   grep -qi '^Connection:.*upgrade' "$request_file"; then
+  printf 'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n'
+else
+  printf 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nok'
+fi
+EOF
+chmod +x /tmp/target-handler.sh
+cat /tmp/target.crt /tmp/target.key > /tmp/target.pem
+exec socat OPENSSL-LISTEN:443,reuseaddr,fork,cert=/tmp/target.pem,key=/tmp/target.key,verify=0 SYSTEM:/tmp/target-handler.sh
 `, domains[0], sanEntries.String())
 }

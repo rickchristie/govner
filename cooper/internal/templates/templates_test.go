@@ -752,6 +752,10 @@ func TestRenderEntrypoint(t *testing.T) {
 	// Should still have OpenCode config setup
 	assertContains(t, result, "opencode.json")
 
+	// Dependencies install inside barrels using Cooper-managed caches, so the
+	// banner must not tell users to install dependencies on the host.
+	assertNotContains(t, result, "Install deps on the host")
+
 	// Should read rules from socat-rules.json config file
 	assertContains(t, result, "socat-rules.json")
 	assertContains(t, result, "start_socat_from_config")
@@ -1092,6 +1096,10 @@ func TestRenderSquidConf(t *testing.T) {
 	// Should have streaming-friendly timeouts
 	assertContains(t, result, "read_timeout 120 minutes")
 	assertContains(t, result, "client_lifetime 1 day")
+
+	// Should preserve WebSocket transports while denying arbitrary upgrades.
+	assertContains(t, result, "http_upgrade_request_protocols websocket allow all")
+	assertContains(t, result, "http_upgrade_request_protocols OTHER deny all")
 
 	// dns_v4_first removed in Squid 6 -- verify the directive is NOT active.
 	assertNotContains(t, result, "dns_v4_first on")

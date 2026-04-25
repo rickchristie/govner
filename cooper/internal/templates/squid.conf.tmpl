@@ -31,6 +31,13 @@ request_timeout 5 minutes
 quick_abort_min 0 KB
 quick_abort_max 0 KB
 
+# Preserve WebSocket upgrades after SSL bump. Squid's default is to drop every
+# Upgrade offer, which turns Codex's wss:// Responses transport into a plain GET
+# that chatgpt.com rejects with 405. Only websocket upgrades are allowed; CONNECT
+# and domain ACLs above still decide whether the connection may exist at all.
+http_upgrade_request_protocols websocket allow all
+http_upgrade_request_protocols OTHER deny all
+
 # Define allowed ports
 acl SSL_ports port 443
 acl Safe_ports port 443
