@@ -236,6 +236,12 @@ func TestCollectUpdatePlan(t *testing.T) {
 	})
 }
 
+func TestUpCommandSilencesUsageForRuntimeErrors(t *testing.T) {
+	if !upCmd.SilenceUsage {
+		t.Fatal("cooper up runtime failures should not print command usage")
+	}
+}
+
 func TestCheckToolVersions_IncludesImplicitToolMismatches(t *testing.T) {
 	prevLatest := config.LatestVersionResolver
 	prevGopls := config.GoplsLatestResolver

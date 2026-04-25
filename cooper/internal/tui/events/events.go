@@ -28,6 +28,13 @@ type HeaderHealthMsg struct {
 	Health app.HeaderHealth
 }
 
+// ExternalSignalMsg records an OS signal delivered to the TUI process. The
+// root model handles this as an unexpected exit so callers can log the actual
+// reason instead of Bubble Tea's generic quiet quit path.
+type ExternalSignalMsg struct {
+	Signal string
+}
+
 // ContainerActionRequestMsg asks the root model to show a confirmation modal
 // before a container stop/restart action runs.
 type ContainerActionRequestMsg struct {

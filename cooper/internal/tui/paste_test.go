@@ -310,6 +310,25 @@ func TestExecuteModalConfirm_ExitMarksExpectedExit(t *testing.T) {
 	}
 }
 
+func TestUpdate_ExternalSignalMarksUnexpectedExitReason(t *testing.T) {
+	model := NewModel(nil)
+
+	updated, cmd := model.Update(events.ExternalSignalMsg{Signal: "terminated"})
+	finalModel := updated.(*Model)
+	if finalModel.ExitExpected() {
+		t.Fatal("external signals should not be treated as user-confirmed exits")
+	}
+	if !strings.Contains(finalModel.ExitReason(), "terminated") {
+		t.Fatalf("expected signal in exit reason, got %q", finalModel.ExitReason())
+	}
+	if cmd == nil {
+		t.Fatal("expected quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("expected tea.QuitMsg from external signal command")
+	}
+}
+
 func TestHandleKey_ContainersStopShowsConfirmModalAndExecutesOnConfirm(t *testing.T) {
 	mockApp := cooperapp.NewMockApp(&config.Config{}, t.TempDir())
 	model := NewModel(mockApp)

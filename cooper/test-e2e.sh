@@ -393,8 +393,12 @@ else
     SECCOMP_PATH=""
 fi
 
-# Create host directories that the barrel expects.
-HOME_DIR="$(eval echo ~)"
+# Create isolated host-side auth/config directories that the barrel expects.
+# Using the real home directory makes the release gate depend on whatever AI
+# CLI versions are already installed on the developer machine; for example,
+# mounting ~/.opencode can hide the pinned opencode binary baked into the image.
+HOME_DIR="${CONFIG_DIR}/home"
+mkdir -p "$HOME_DIR"
 
 # Cooper-managed language cache directories (under CONFIG_DIR/cache/).
 mkdir -p "${CONFIG_DIR}/cache/go-mod" 2>/dev/null || true

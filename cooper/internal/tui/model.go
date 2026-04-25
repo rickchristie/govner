@@ -74,6 +74,7 @@ type Model struct {
 	shuttingDown  bool
 	shutdownModel *loading.Model
 	exitExpected  bool
+	exitReason    string
 
 	// Callbacks.
 	onShutdown func()
@@ -166,6 +167,11 @@ func (m *Model) SetOnQuit(fn func()) { m.onQuit = fn }
 // quit or shutdown path. Callers can use this to distinguish a normal TUI exit
 // from an unexpected program termination.
 func (m *Model) ExitExpected() bool { return m.exitExpected }
+
+// ExitReason describes why the TUI asked Bubble Tea to quit when the exit was
+// not user-initiated. It is intentionally kept in the root model so main.go can
+// log the reason without the TUI importing logging or OS-signal packages.
+func (m *Model) ExitReason() string { return m.exitReason }
 
 // activeSubModel returns the SubModel for the currently active tab,
 // or nil if the tab has not been wired yet.

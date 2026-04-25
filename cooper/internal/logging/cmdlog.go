@@ -34,6 +34,17 @@ func (c *CmdLogger) LogStep(step int, name string, err error) {
 	}
 }
 
+// LogEvent writes a non-step lifecycle event. This is used for long-running
+// commands such as "cooper up", where startup can complete successfully but
+// the command may later fail because the TUI receives an external signal.
+func (c *CmdLogger) LogEvent(name string, err error) {
+	if err != nil {
+		c.l.Log(fmt.Sprintf("command=%s event=%q status=error err=%v", c.command, name, err))
+	} else {
+		c.l.Log(fmt.Sprintf("command=%s event=%q status=ok", c.command, name))
+	}
+}
+
 // LogDone writes a final log entry. If err is nil, the command completed
 // successfully; otherwise the error is recorded.
 func (c *CmdLogger) LogDone(err error) {

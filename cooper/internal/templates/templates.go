@@ -264,11 +264,16 @@ func renderInstallCommands(toolName, version string) (string, error) {
 		}
 		return "RUN npm install -g @openai/codex", nil
 	case "opencode":
-		mkdirCmd := "RUN mkdir -p /home/user/.config/opencode"
+		// The upstream installer places the binary under ~/.opencode/bin, but
+		// Cooper bind-mounts ~/.opencode at runtime for OpenCode state/auth. Copy
+		// the image's pinned binary into ~/.local/bin so the runtime mount cannot
+		// hide it or replace it with a different host-installed version.
+		postInstallCmd := `RUN mkdir -p /home/user/.config/opencode /home/user/.local/bin && \
+    cp /home/user/.opencode/bin/opencode /home/user/.local/bin/opencode`
 		if version != "" {
-			return fmt.Sprintf("RUN curl -fsSL https://opencode.ai/install | bash -s -- --version %s\n%s", version, mkdirCmd), nil
+			return fmt.Sprintf("RUN curl -fsSL https://opencode.ai/install | bash -s -- --version %s\n%s", version, postInstallCmd), nil
 		}
-		return fmt.Sprintf("RUN curl -fsSL https://opencode.ai/install | bash\n%s", mkdirCmd), nil
+		return fmt.Sprintf("RUN curl -fsSL https://opencode.ai/install | bash\n%s", postInstallCmd), nil
 	default:
 		return "", fmt.Errorf("unknown tool: %s", toolName)
 	}

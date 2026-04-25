@@ -83,6 +83,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tabBar.Width = msg.Width
 		return m, nil
 
+	case events.ExternalSignalMsg:
+		m.exitReason = fmt.Sprintf("received OS signal %s", msg.Signal)
+		return m, tea.Quit
+
 	// ---- Keyboard input ----
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -1104,8 +1108,12 @@ func (m *Model) animTickCmd() tea.Cmd {
 // The caller should invoke p.Run() to start the event loop. Having access
 // to the *tea.Program before Run blocks allows external goroutines (e.g.
 // the shutdown callback) to send messages via p.Send().
-func NewProgram(m *Model) *tea.Program {
-	return tea.NewProgram(m, tea.WithAltScreen())
+// Additional options are appended after the default alt-screen option so
+// command entrypoints can own process-level concerns such as signal handling.
+func NewProgram(m *Model, opts ...tea.ProgramOption) *tea.Program {
+	programOpts := []tea.ProgramOption{tea.WithAltScreen()}
+	programOpts = append(programOpts, opts...)
+	return tea.NewProgram(m, programOpts...)
 }
 
 // Run creates and runs a BubbleTea program. This is a convenience wrapper

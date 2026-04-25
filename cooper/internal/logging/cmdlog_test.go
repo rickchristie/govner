@@ -54,6 +54,23 @@ func TestCmdLogger_LogStepError(t *testing.T) {
 	}
 }
 
+func TestCmdLogger_LogEvent(t *testing.T) {
+	dir := t.TempDir()
+	cl := NewCmdLogger(dir, "up")
+	defer cl.Close()
+
+	cl.LogEvent("main TUI started", nil)
+	cl.LogEvent("main TUI exited", errors.New("received OS signal terminated"))
+
+	data := readLog(t, dir, "up.log")
+	if !strings.Contains(data, `command=up event="main TUI started" status=ok`) {
+		t.Errorf("missing event ok entry, got:\n%s", data)
+	}
+	if !strings.Contains(data, `command=up event="main TUI exited" status=error err=received OS signal terminated`) {
+		t.Errorf("missing event error entry, got:\n%s", data)
+	}
+}
+
 func TestCmdLogger_LogDoneSuccess(t *testing.T) {
 	dir := t.TempDir()
 	cl := NewCmdLogger(dir, "configure")

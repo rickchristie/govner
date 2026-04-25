@@ -15,6 +15,7 @@ type ACLRequestMsg = events.ACLRequestMsg
 type AnimTickMsg = events.AnimTickMsg
 type ContainerStatsMsg = events.ContainerStatsMsg
 type HeaderHealthMsg = events.HeaderHealthMsg
+type ExternalSignalMsg = events.ExternalSignalMsg
 type TickMsg = events.TickMsg
 type ShutdownCompleteMsg = events.ShutdownCompleteMsg
 

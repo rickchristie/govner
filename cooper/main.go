@@ -7,9 +7,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -85,10 +87,11 @@ var buildCmd = &cobra.Command{
 }
 
 var upCmd = &cobra.Command{
-	Use:   "up",
-	Short: "Start proxy and open control panel TUI",
-	Long:  `Starts the proxy container, execution bridge, and opens the control panel TUI.`,
-	RunE:  runUp,
+	Use:          "up",
+	Short:        "Start proxy and open control panel TUI",
+	Long:         `Starts the proxy container, execution bridge, and opens the control panel TUI.`,
+	SilenceUsage: true,
+	RunE:         runUp,
 }
 
 var updateCmd = &cobra.Command{
@@ -541,7 +544,6 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 		// Step 7: Ready.
 		ul.LogStep(7, "Ready", nil)
-		ul.LogDone(nil)
 		p.Send(loading.StepCompleteMsg{Index: 7})
 	}()
 
@@ -635,8 +637,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 	mainModel.SetAboutModel(aboutModel)
 
 	// Create the main TUI program so we can reference it in the shutdown
-	// callback for sending ShutdownCompleteMsg.
-	mainProgram := tui.NewProgram(mainModel)
+	// callback for sending ShutdownCompleteMsg. Cooper handles OS signals here
+	// instead of letting Bubble Tea translate SIGTERM into a generic QuitMsg;
+	// that preserves the concrete reason in ~/.cooper/logs/up.log.
+	mainProgram := tui.NewProgram(mainModel, tea.WithoutSignalHandler())
+	stopSignalForwarder := forwardMainTUISignals(mainProgram)
+	defer stopSignalForwarder()
 
 	// Wire the shutdown callback: when the user confirms exit, run shutdown
 	// steps in a goroutine, sending progress messages to drive the loading screen.
@@ -653,14 +659,52 @@ func runUp(cmd *cobra.Command, args []string) error {
 	})
 
 	// Run the main TUI.
+	ul.LogEvent("main TUI started", nil)
 	if _, err := mainProgram.Run(); err != nil {
-		return fmt.Errorf("TUI: %w", err)
+		runErr := fmt.Errorf("TUI: %w", err)
+		ul.LogEvent("main TUI exited", runErr)
+		if stopErr := cooperApp.Stop(); stopErr != nil {
+			runErr = fmt.Errorf("%w; cleanup: %v", runErr, stopErr)
+		}
+		ul.LogDone(runErr)
+		return runErr
 	}
 	if !mainModel.ExitExpected() {
-		return fmt.Errorf("TUI exited unexpectedly without a user quit request; terminal input may have been closed or reset")
+		reason := mainModel.ExitReason()
+		if reason == "" {
+			reason = "Bubble Tea quit without a Cooper exit request"
+		}
+		runErr := fmt.Errorf("TUI exited unexpectedly: %s", reason)
+		ul.LogEvent("main TUI exited", runErr)
+		if stopErr := cooperApp.Stop(); stopErr != nil {
+			runErr = fmt.Errorf("%w; cleanup: %v", runErr, stopErr)
+		}
+		ul.LogDone(runErr)
+		return runErr
 	}
+	ul.LogEvent("main TUI exited", nil)
+	ul.LogDone(nil)
 
 	return nil
+}
+
+func forwardMainTUISignals(p *tea.Program) func() {
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+
+	go func() {
+		select {
+		case sig := <-sigCh:
+			p.Send(events.ExternalSignalMsg{Signal: sig.String()})
+		case <-done:
+		}
+	}()
+
+	return func() {
+		signal.Stop(sigCh)
+		close(done)
+	}
 }
 
 // cleanupServices stops the ACL listener and bridge server if they were started.

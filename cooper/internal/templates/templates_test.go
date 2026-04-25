@@ -691,6 +691,7 @@ func TestRenderCLIToolDockerfile_OpenCodeVersionPinned(t *testing.T) {
 	}
 
 	assertContains(t, result, "--version 1.3.7")
+	assertContains(t, result, "cp /home/user/.opencode/bin/opencode /home/user/.local/bin/opencode")
 }
 
 func TestRenderCLIToolDockerfile_UnknownTool(t *testing.T) {
