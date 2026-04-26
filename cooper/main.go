@@ -63,6 +63,7 @@ Quick Start:
   cooper configure        Run interactive configuration wizard
   cooper build            Build proxy and CLI container images
   cooper up               Start proxy and open control panel TUI
+  cooper down             Stop the Cooper runtime after an interrupted TUI
   cooper cli              Open a CLI container for the current workspace
 
 Management:
@@ -92,6 +93,14 @@ var upCmd = &cobra.Command{
 	Long:         `Starts the proxy container, execution bridge, and opens the control panel TUI.`,
 	SilenceUsage: true,
 	RunE:         runUp,
+}
+
+var downCmd = &cobra.Command{
+	Use:          "down",
+	Short:        "Stop Cooper runtime resources",
+	Long:         `Stops a running cooper up process, removes runtime containers and networks, and clears transient runtime state without deleting images or configuration.`,
+	SilenceUsage: true,
+	RunE:         runDown,
 }
 
 var updateCmd = &cobra.Command{
@@ -182,6 +191,7 @@ func init() {
 	rootCmd.AddCommand(configureCmd)
 	rootCmd.AddCommand(buildCmd)
 	rootCmd.AddCommand(upCmd)
+	rootCmd.AddCommand(downCmd)
 	rootCmd.AddCommand(updateCmd)
 	rootCmd.AddCommand(cliCmd)
 	rootCmd.AddCommand(proofCmd)
@@ -354,7 +364,21 @@ func discoverCustomImageNames(cliDir string) ([]string, error) {
 // ---------- cooper up ----------
 
 func runUp(cmd *cobra.Command, args []string) error {
-	cfg, cooperDir, err := loadConfig()
+	cooperDir, err := resolveCooperDir()
+	if err != nil {
+		return err
+	}
+	runtimeLock, err := acquireUpLock(cooperDir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := runtimeLock.Release(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: release cooper up lock: %v\n", err)
+		}
+	}()
+
+	cfg, _, err := loadConfig()
 	if err != nil {
 		return err
 	}
@@ -363,6 +387,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 	ul := logging.NewCmdLogger(logDir, "up")
 	defer ul.Close()
 	ul.LogStart()
+	if err := ensureNoRunningRuntimeBeforeUp(); err != nil {
+		ul.LogDone(err)
+		return err
+	}
 
 	if err := docker.ResetBarrelTmpRoot(cooperDir); err != nil {
 		err = fmt.Errorf("reset barrel tmp root: %w", err)

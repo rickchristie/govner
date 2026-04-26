@@ -3,11 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -52,6 +56,7 @@ func withCommandGlobals(t *testing.T, cooperDir string) {
 
 	prevConfigDir := configDir
 	prevImagePrefix := imagePrefix
+	prevRuntimeNamespace := docker.RuntimeNamespace()
 	prevCliOneShot := cliOneShot
 
 	configDir = cooperDir
@@ -66,6 +71,7 @@ func withCommandGlobals(t *testing.T, cooperDir string) {
 		imagePrefix = prevImagePrefix
 		cliOneShot = prevCliOneShot
 		docker.SetImagePrefix(prevImagePrefix)
+		docker.SetRuntimeNamespace(prevRuntimeNamespace)
 	})
 }
 
@@ -240,6 +246,146 @@ func TestUpCommandSilencesUsageForRuntimeErrors(t *testing.T) {
 	if !upCmd.SilenceUsage {
 		t.Fatal("cooper up runtime failures should not print command usage")
 	}
+}
+
+func TestDownCommandSilencesUsageForRuntimeErrors(t *testing.T) {
+	if !downCmd.SilenceUsage {
+		t.Fatal("cooper down runtime failures should not print command usage")
+	}
+}
+
+func TestAcquireUpLockRefusesSecondOwner(t *testing.T) {
+	cooperDir := t.TempDir()
+	lock, err := acquireUpLock(cooperDir)
+	if err != nil {
+		t.Fatalf("acquire first up lock: %v", err)
+	}
+	defer lock.Release()
+
+	secondLock, err := acquireUpLock(cooperDir)
+	if err == nil {
+		secondLock.Release()
+		t.Fatal("expected second up lock acquisition to fail")
+	}
+	var runningErr *upAlreadyRunningError
+	if !errors.As(err, &runningErr) {
+		t.Fatalf("expected upAlreadyRunningError, got %T: %v", err, err)
+	}
+	if runningErr.PID != os.Getpid() {
+		t.Fatalf("running PID = %d, want current pid %d", runningErr.PID, os.Getpid())
+	}
+}
+
+func TestAcquireUpLockAllowsAfterRelease(t *testing.T) {
+	cooperDir := t.TempDir()
+	lock, err := acquireUpLock(cooperDir)
+	if err != nil {
+		t.Fatalf("acquire up lock: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("release up lock: %v", err)
+	}
+
+	lock, err = acquireUpLock(cooperDir)
+	if err != nil {
+		t.Fatalf("reacquire up lock after release: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("release reacquired up lock: %v", err)
+	}
+}
+
+func TestStopRunningUpSignalsActiveLockOwner(t *testing.T) {
+	cooperDir := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=TestHelperUpLockHolder")
+	cmd.Env = append(os.Environ(),
+		"COOPER_TEST_UP_LOCK_HOLDER=1",
+		"COOPER_TEST_UP_LOCK_DIR="+cooperDir,
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start lock holder helper: %v", err)
+	}
+	waited := false
+	t.Cleanup(func() {
+		if waited {
+			return
+		}
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	waitForUpLockHolder(t, cooperDir, cmd.Process.Pid)
+
+	var out bytes.Buffer
+	lock, err := stopRunningUp(cooperDir, &out)
+	if err != nil {
+		t.Fatalf("stopRunningUp() failed: %v", err)
+	}
+	if !strings.Contains(out.String(), fmt.Sprintf("Stopping cooper up process %d", cmd.Process.Pid)) {
+		t.Fatalf("expected process stop message, got %q", out.String())
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("expected lock holder to exit cleanly after SIGTERM: %v", err)
+	}
+	waited = true
+	if err := lock.Release(); err != nil {
+		t.Fatalf("release down-held up lock: %v", err)
+	}
+
+	lock, err = acquireUpLock(cooperDir)
+	if err != nil {
+		t.Fatalf("expected up lock to be available after stopRunningUp: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("release available up lock: %v", err)
+	}
+}
+
+func TestHelperUpLockHolder(t *testing.T) {
+	if os.Getenv("COOPER_TEST_UP_LOCK_HOLDER") != "1" {
+		return
+	}
+	lock, err := acquireUpLock(os.Getenv("COOPER_TEST_UP_LOCK_DIR"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	defer lock.Release()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM)
+	<-sigCh
+}
+
+func waitForUpLockHolder(t *testing.T, cooperDir string, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(upLockPath(cooperDir))
+		if err == nil && strings.Contains(string(data), fmt.Sprintf("pid=%d", pid)) && upLockIsBusy(t, cooperDir) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for helper pid %d to hold up lock", pid)
+}
+
+func upLockIsBusy(t *testing.T, cooperDir string) bool {
+	t.Helper()
+	file, err := os.OpenFile(upLockPath(cooperDir), os.O_RDWR, 0o600)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	if err := tryLockUpFile(file); err == nil {
+		if unlockErr := unlockUpFile(file); unlockErr != nil {
+			t.Fatalf("unlock probe up lock: %v", unlockErr)
+		}
+		return false
+	} else if isLockBusy(err) {
+		return true
+	}
+	t.Fatalf("probe up lock: %v", err)
+	return false
 }
 
 func TestCheckToolVersions_IncludesImplicitToolMismatches(t *testing.T) {
@@ -593,6 +739,91 @@ func TestRunCleanupRemovesRuntimeArtifacts(t *testing.T) {
 		if exists {
 			t.Fatalf("network %s still exists after cleanup", networkName)
 		}
+	}
+}
+
+func TestRunDownRemovesRuntimeArtifactsWithoutRemovingConfigOrImages(t *testing.T) {
+	driver := setupCommandDriver(t, nil)
+	withCommandGlobals(t, driver.CooperDir())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := driver.Start(ctx); err != nil {
+		t.Fatalf("start cooper runtime: %v", err)
+	}
+
+	barrel, err := driver.StartBarrel("claude")
+	if err != nil {
+		t.Fatalf("start barrel: %v", err)
+	}
+	tokenPath := clipboard.TokenFilePath(driver.CooperDir(), barrel.Name)
+	if _, err := os.Stat(tokenPath); err != nil {
+		t.Fatalf("expected token file before down: %v", err)
+	}
+	if err := ensureNoRunningRuntimeBeforeUp(); err == nil || !strings.Contains(err.Error(), "run 'cooper down'") {
+		t.Fatalf("expected active runtime guard before down, got %v", err)
+	}
+
+	_, stderr, err := captureCommandIO(t, "", func() error {
+		return runDown(nil, nil)
+	})
+	if err != nil {
+		t.Fatalf("runDown() failed: %v", err)
+	}
+	if !strings.Contains(stderr, "Cooper runtime stopped.") {
+		t.Fatalf("expected down completion message, got %q", stderr)
+	}
+
+	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+		t.Fatalf("expected token file %s to be removed, err=%v", tokenPath, err)
+	}
+
+	barrelRunning, err := docker.IsBarrelRunning(barrel.Name)
+	if err != nil {
+		t.Fatalf("check barrel after down: %v", err)
+	}
+	if barrelRunning {
+		t.Fatalf("barrel %s still running after down", barrel.Name)
+	}
+
+	proxyRunning, err := docker.IsProxyRunning()
+	if err != nil {
+		t.Fatalf("check proxy after down: %v", err)
+	}
+	if proxyRunning {
+		t.Fatal("proxy still running after down")
+	}
+	if err := ensureNoRunningRuntimeBeforeUp(); err != nil {
+		t.Fatalf("expected active runtime guard to pass after down: %v", err)
+	}
+
+	for _, networkName := range []string{docker.InternalNetworkName(), docker.ExternalNetworkName()} {
+		exists, err := docker.NetworkExists(networkName)
+		if err != nil {
+			t.Fatalf("check network %s after down: %v", networkName, err)
+		}
+		if exists {
+			t.Fatalf("network %s still exists after down", networkName)
+		}
+	}
+
+	for _, imageName := range []string{
+		docker.GetImageProxy(),
+		docker.GetImageBase(),
+		docker.GetImageCLI("claude"),
+	} {
+		exists, err := docker.ImageExists(imageName)
+		if err != nil {
+			t.Fatalf("check image %s after down: %v", imageName, err)
+		}
+		if !exists {
+			t.Fatalf("image %s was removed by down", imageName)
+		}
+	}
+
+	configPath := filepath.Join(driver.CooperDir(), "config.json")
+	if _, err := os.Stat(configPath); err != nil {
+		t.Fatalf("expected config.json to remain after down: %v", err)
 	}
 }
 
