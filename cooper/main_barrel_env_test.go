@@ -188,6 +188,37 @@ func TestRunCLIWarningsDoNotBlockSessionAndProtectedValuesWin(t *testing.T) {
 	}
 }
 
+func TestRunCLIForwardsTerminalSessionEnv(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("COLORTERM", "truecolor")
+	t.Setenv("TERM_PROGRAM", "WezTerm")
+	t.Setenv("TERM_PROGRAM_VERSION", "20240203")
+	t.Setenv("COLORFGBG", "15;0")
+	t.Setenv("LC_TERMINAL", "iTerm2")
+	t.Setenv("LC_TERMINAL_VERSION", "3.5")
+	t.Setenv("TERM_SESSION_ID", "w0t0p0")
+	t.Setenv("WEZTERM_PANE", "8")
+	t.Setenv("KITTY_WINDOW_ID", "3")
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("FORCE_COLOR", "3")
+	t.Setenv("FORCE_HYPERLINK", "1")
+	t.Setenv("CLICOLOR", "1")
+	t.Setenv("CLICOLOR_FORCE", "1")
+	t.Setenv("NODE_DISABLE_COLORS", "1")
+
+	_, _ = setupCLIBarrelEnvTest(t, nil)
+
+	cliOneShot = `printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|' "${TERM-}" "${COLORTERM-}" "${TERM_PROGRAM-}" "${TERM_PROGRAM_VERSION-}" "${COLORFGBG-}" "${LC_TERMINAL-}" "${LC_TERMINAL_VERSION-}" "${TERM_SESSION_ID-}" "${WEZTERM_PANE-}" "${KITTY_WINDOW_ID-}"; if [[ -v NO_COLOR ]]; then printf 'set:%s' "$NO_COLOR"; else printf unset; fi; printf '|%s|%s|%s|%s|%s' "${FORCE_COLOR-}" "${FORCE_HYPERLINK-}" "${CLICOLOR-}" "${CLICOLOR_FORCE-}" "${NODE_DISABLE_COLORS-}"`
+	stdout, _, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	if err != nil {
+		t.Fatalf("runCLI() failed: %v", err)
+	}
+	const expected = "xterm-256color|truecolor|WezTerm|20240203|15;0|iTerm2|3.5|w0t0p0|8|3|set:|3|1|1|1|1"
+	if got := stripTerminalTitleEscapes(stdout); got != expected {
+		t.Fatalf("stdout = %q, want %q", got, expected)
+	}
+}
+
 func TestRunCLIProtectedTokenEnvWinsOverBadConfig(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-real")
 	_, _ = setupCLIBarrelEnvTest(t, func(cfg *config.Config) {

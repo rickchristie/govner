@@ -240,10 +240,10 @@ func TestLoadCachedTokens_MissingFile(t *testing.T) {
 
 func TestCLAUDECODE_NotForwarded(t *testing.T) {
 	// CLAUDECODE must never appear in forwarded env vars.
-	// Verify it is not in the vsCodeEnvVars list.
-	for _, name := range vsCodeEnvVars {
-		if name == "CLAUDECODE" {
-			t.Error("CLAUDECODE must not be in vsCodeEnvVars -- " +
+	// Verify it is not in the forwarded session env list.
+	for _, variable := range forwardedSessionEnvVars {
+		if variable.Name == "CLAUDECODE" {
+			t.Error("CLAUDECODE must not be in forwardedSessionEnvVars -- " +
 				"forwarding it causes 'nested session' errors in the container")
 		}
 	}
@@ -299,11 +299,9 @@ func TestEmptyToolList(t *testing.T) {
 		t.Fatalf("ResolveTokens: %v", err)
 	}
 
-	// With no tools and no VS Code env vars set, should be empty.
-	// Clear all VS Code env vars to be safe.
-	for _, name := range vsCodeEnvVars {
-		t.Setenv(name, "")
-	}
+	// With no tools and no forwarded session env vars set, should be empty.
+	// Clear them to be safe.
+	unsetForwardedSessionEnvVars(t)
 
 	results, err = ResolveTokens("/tmp/test-workspace", t.TempDir(), []string{})
 	if err != nil {
@@ -316,10 +314,8 @@ func TestEmptyToolList(t *testing.T) {
 }
 
 func TestEmptyToolList_NilSlice(t *testing.T) {
-	// Clear VS Code env vars.
-	for _, name := range vsCodeEnvVars {
-		t.Setenv(name, "")
-	}
+	// Clear forwarded session env vars.
+	unsetForwardedSessionEnvVars(t)
 
 	results, err := ResolveTokens("/tmp/test-workspace", t.TempDir(), nil)
 	if err != nil {
@@ -332,10 +328,8 @@ func TestEmptyToolList_NilSlice(t *testing.T) {
 }
 
 func TestClaudeTool_NoTokenNeeded(t *testing.T) {
-	// Clear VS Code env vars so only tool tokens matter.
-	for _, name := range vsCodeEnvVars {
-		t.Setenv(name, "")
-	}
+	// Clear forwarded session env vars so only tool tokens matter.
+	unsetForwardedSessionEnvVars(t)
 
 	results, err := ResolveTokens("/tmp/test-workspace", t.TempDir(), []string{"claude"})
 	if err != nil {
@@ -347,14 +341,12 @@ func TestClaudeTool_NoTokenNeeded(t *testing.T) {
 	}
 }
 
-func TestVSCodeEnvVars_Forwarded(t *testing.T) {
+func TestForwardedSessionEnvVars_Forwarded(t *testing.T) {
+	unsetForwardedSessionEnvVars(t)
 	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("COLORTERM", "truecolor")
 	t.Setenv("TERM_PROGRAM", "vscode")
 	t.Setenv("CLAUDE_CODE_SSE_PORT", "12345")
-	// Clear others to avoid interference.
-	t.Setenv("TERM_PROGRAM_VERSION", "")
-	t.Setenv("CLAUDE_CODE_ENTRYPOINT", "")
-	t.Setenv("ENABLE_IDE_INTEGRATION", "")
 
 	results, err := ResolveTokens("/tmp/test-workspace", t.TempDir(), []string{})
 	if err != nil {
@@ -371,6 +363,13 @@ func TestVSCodeEnvVars_Forwarded(t *testing.T) {
 	found = findToken(results, "TERM_PROGRAM")
 	if found == nil {
 		t.Error("expected TERM_PROGRAM in results")
+	}
+
+	found = findToken(results, "COLORTERM")
+	if found == nil {
+		t.Error("expected COLORTERM in results")
+	} else if found.Value != "truecolor" {
+		t.Errorf("COLORTERM value %q, want %q", found.Value, "truecolor")
 	}
 
 	found = findToken(results, "CLAUDE_CODE_SSE_PORT")
@@ -415,10 +414,8 @@ func TestDeduplication(t *testing.T) {
 	// If two tools need the same token, it should appear only once.
 	t.Setenv("GH_TOKEN", "ghp-dedup")
 
-	// Clear VS Code env vars.
-	for _, name := range vsCodeEnvVars {
-		t.Setenv(name, "")
-	}
+	// Clear forwarded session env vars.
+	unsetForwardedSessionEnvVars(t)
 
 	results, err := ResolveTokens("/tmp/test-workspace", t.TempDir(), []string{"copilot", "copilot"})
 	if err != nil {
@@ -437,10 +434,8 @@ func TestDeduplication(t *testing.T) {
 }
 
 func TestUnknownTool_Ignored(t *testing.T) {
-	// Clear VS Code env vars.
-	for _, name := range vsCodeEnvVars {
-		t.Setenv(name, "")
-	}
+	// Clear forwarded session env vars.
+	unsetForwardedSessionEnvVars(t)
 
 	results, err := ResolveTokens("/tmp/test-workspace", t.TempDir(), []string{"unknown-tool"})
 	if err != nil {
@@ -462,45 +457,97 @@ func findToken(results []TokenResult, name string) *TokenResult {
 	return nil
 }
 
+func unsetForwardedSessionEnvVars(t *testing.T) {
+	t.Helper()
+	for _, variable := range forwardedSessionEnvVars {
+		unsetEnvForTest(t, variable.Name)
+	}
+}
+
+func unsetEnvForTest(t *testing.T, name string) {
+	t.Helper()
+	original, hadOriginal := os.LookupEnv(name)
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatalf("Unsetenv(%q) failed: %v", name, err)
+	}
+	t.Cleanup(func() {
+		if hadOriginal {
+			if err := os.Setenv(name, original); err != nil {
+				t.Errorf("restore %s: %v", name, err)
+			}
+			return
+		}
+		if err := os.Unsetenv(name); err != nil {
+			t.Errorf("restore unset %s: %v", name, err)
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
-// VS Code env var forwarding list completeness
+// Forwarded session env var list completeness
 // ---------------------------------------------------------------------------
 
-func TestVSCodeEnvVars_ExpectedList(t *testing.T) {
-	// Ensure all expected VS Code integration env vars are in the forwarding list.
+func TestForwardedSessionEnvVars_ExpectedList(t *testing.T) {
+	// Ensure all expected terminal and IDE integration env vars are forwarded.
 	expected := map[string]bool{
 		"TERM":                   true,
+		"COLORTERM":              true,
 		"TERM_PROGRAM":           true,
 		"TERM_PROGRAM_VERSION":   true,
+		"COLORFGBG":              true,
+		"LC_TERMINAL":            true,
+		"LC_TERMINAL_VERSION":    true,
+		"TERM_SESSION_ID":        true,
+		"ITERM_PROFILE":          true,
+		"ITERM_SESSION_ID":       true,
+		"VTE_VERSION":            true,
+		"KONSOLE_VERSION":        true,
+		"KONSOLE_PROFILE_NAME":   true,
+		"WT_SESSION":             true,
+		"WT_PROFILE_ID":          true,
+		"KITTY_WINDOW_ID":        true,
+		"WEZTERM_PANE":           true,
+		"TERMINAL_EMULATOR":      true,
+		"DOMTERM":                true,
+		"TERMINOLOGY":            true,
+		"NO_COLOR":               true,
+		"FORCE_COLOR":            true,
+		"FORCE_HYPERLINK":        true,
+		"CLICOLOR":               true,
+		"CLICOLOR_FORCE":         true,
+		"NODE_DISABLE_COLORS":    true,
 		"CLAUDE_CODE_SSE_PORT":   true,
 		"CLAUDE_CODE_ENTRYPOINT": true,
 		"ENABLE_IDE_INTEGRATION": true,
 	}
 
-	for _, name := range vsCodeEnvVars {
+	for _, variable := range forwardedSessionEnvVars {
+		name := variable.Name
 		if !expected[name] {
-			t.Errorf("unexpected env var in vsCodeEnvVars: %q", name)
+			t.Errorf("unexpected env var in forwardedSessionEnvVars: %q", name)
 		}
 		delete(expected, name)
 	}
 	for name := range expected {
-		t.Errorf("missing expected env var in vsCodeEnvVars: %q", name)
+		t.Errorf("missing expected env var in forwardedSessionEnvVars: %q", name)
 	}
 }
 
-func TestVSCodeEnvVars_NoDuplicates(t *testing.T) {
+func TestForwardedSessionEnvVars_NoDuplicates(t *testing.T) {
 	seen := make(map[string]bool)
-	for _, name := range vsCodeEnvVars {
+	for _, variable := range forwardedSessionEnvVars {
+		name := variable.Name
 		if seen[name] {
-			t.Errorf("duplicate env var in vsCodeEnvVars: %q", name)
+			t.Errorf("duplicate env var in forwardedSessionEnvVars: %q", name)
 		}
 		seen[name] = true
 	}
 }
 
-func TestVSCodeEnvVars_AllForwardedWhenSet(t *testing.T) {
-	// Set all VS Code env vars and verify they all appear in results.
-	for _, name := range vsCodeEnvVars {
+func TestForwardedSessionEnvVars_AllForwardedWhenSet(t *testing.T) {
+	// Set all forwarded session env vars and verify they all appear in results.
+	for _, variable := range forwardedSessionEnvVars {
+		name := variable.Name
 		t.Setenv(name, "test-value-"+name)
 	}
 
@@ -509,7 +556,8 @@ func TestVSCodeEnvVars_AllForwardedWhenSet(t *testing.T) {
 		t.Fatalf("ResolveTokens: %v", err)
 	}
 
-	for _, name := range vsCodeEnvVars {
+	for _, variable := range forwardedSessionEnvVars {
+		name := variable.Name
 		found := findToken(results, name)
 		if found == nil {
 			t.Errorf("expected %s in results when set", name)
@@ -525,22 +573,38 @@ func TestVSCodeEnvVars_AllForwardedWhenSet(t *testing.T) {
 	}
 }
 
-func TestVSCodeEnvVars_NotForwardedWhenEmpty(t *testing.T) {
-	// Clear all VS Code env vars.
-	for _, name := range vsCodeEnvVars {
-		t.Setenv(name, "")
-	}
+func TestForwardedSessionEnvVars_NotForwardedWhenUnset(t *testing.T) {
+	unsetForwardedSessionEnvVars(t)
 
 	results, err := ResolveTokens("/tmp/test-workspace", t.TempDir(), []string{})
 	if err != nil {
 		t.Fatalf("ResolveTokens: %v", err)
 	}
 
-	for _, name := range vsCodeEnvVars {
+	for _, variable := range forwardedSessionEnvVars {
+		name := variable.Name
 		found := findToken(results, name)
 		if found != nil {
-			t.Errorf("expected %s NOT in results when empty, but found with value %q", name, found.Value)
+			t.Errorf("expected %s NOT in results when unset, but found with value %q", name, found.Value)
 		}
+	}
+}
+
+func TestForwardedSessionEnvVars_PreservesEmptyColorPolicyPresence(t *testing.T) {
+	unsetForwardedSessionEnvVars(t)
+	t.Setenv("NO_COLOR", "")
+
+	results, err := ResolveTokens("/tmp/test-workspace", t.TempDir(), []string{})
+	if err != nil {
+		t.Fatalf("ResolveTokens: %v", err)
+	}
+
+	found := findToken(results, "NO_COLOR")
+	if found == nil {
+		t.Fatal("expected NO_COLOR in results when present with empty value")
+	}
+	if found.Value != "" {
+		t.Errorf("NO_COLOR value %q, want empty string", found.Value)
 	}
 }
 
@@ -631,10 +695,8 @@ func TestResolveToken_MultipleToolsSameToken(t *testing.T) {
 	// When copilot is listed twice, GH_TOKEN should only appear once.
 	t.Setenv("GH_TOKEN", "ghp-shared")
 
-	// Clear VS Code env vars.
-	for _, name := range vsCodeEnvVars {
-		t.Setenv(name, "")
-	}
+	// Clear forwarded session env vars.
+	unsetForwardedSessionEnvVars(t)
 
 	results, err := ResolveTokens("/tmp/dedup-test", t.TempDir(), []string{"copilot", "copilot"})
 	if err != nil {

@@ -62,15 +62,47 @@ func copilotTokenFile() (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-// vsCodeEnvVars are environment variables forwarded when set, for VS Code
-// integration support.
-var vsCodeEnvVars = []string{
-	"TERM",
-	"TERM_PROGRAM",
-	"TERM_PROGRAM_VERSION",
-	"CLAUDE_CODE_SSE_PORT",
-	"CLAUDE_CODE_ENTRYPOINT",
-	"ENABLE_IDE_INTEGRATION",
+type forwardedSessionEnvVar struct {
+	Name          string
+	PreserveEmpty bool
+}
+
+// forwardedSessionEnvVars are host terminal, color-policy, hyperlink-policy,
+// and IDE metadata forwarded when set. Docker's exec TTY preserves the byte
+// stream, but not the host process env that many CLIs use to choose truecolor,
+// dark/light palette, hyperlink behavior, and IDE integration behavior. Keep
+// this list to metadata/policy values; do not forward host socket/path vars such
+// as KITTY_LISTEN_ON, WEZTERM_EXECUTABLE, or TMUX into the container.
+var forwardedSessionEnvVars = []forwardedSessionEnvVar{
+	{Name: "TERM"},
+	{Name: "COLORTERM"},
+	{Name: "TERM_PROGRAM"},
+	{Name: "TERM_PROGRAM_VERSION"},
+	{Name: "COLORFGBG"},
+	{Name: "LC_TERMINAL"},
+	{Name: "LC_TERMINAL_VERSION"},
+	{Name: "TERM_SESSION_ID"},
+	{Name: "ITERM_PROFILE"},
+	{Name: "ITERM_SESSION_ID"},
+	{Name: "VTE_VERSION"},
+	{Name: "KONSOLE_VERSION"},
+	{Name: "KONSOLE_PROFILE_NAME"},
+	{Name: "WT_SESSION"},
+	{Name: "WT_PROFILE_ID"},
+	{Name: "KITTY_WINDOW_ID"},
+	{Name: "WEZTERM_PANE"},
+	{Name: "TERMINAL_EMULATOR"},
+	{Name: "DOMTERM"},
+	{Name: "TERMINOLOGY"},
+	{Name: "NO_COLOR", PreserveEmpty: true},
+	{Name: "FORCE_COLOR", PreserveEmpty: true},
+	{Name: "FORCE_HYPERLINK", PreserveEmpty: true},
+	{Name: "CLICOLOR"},
+	{Name: "CLICOLOR_FORCE", PreserveEmpty: true},
+	{Name: "NODE_DISABLE_COLORS", PreserveEmpty: true},
+	{Name: "CLAUDE_CODE_SSE_PORT"},
+	{Name: "CLAUDE_CODE_ENTRYPOINT"},
+	{Name: "ENABLE_IDE_INTEGRATION"},
 }
 
 // CLAUDECODE env var is explicitly NOT forwarded. Claude Code sets CLAUDECODE=1
@@ -105,7 +137,7 @@ func WorkspaceHash(path string) string {
 //  4. File source (e.g. ~/.copilot/.gh_token for copilot)
 //
 // If resolved from login shell, the value is cached for next time.
-// VS Code integration env vars are always included when set.
+// Terminal color-policy/metadata and IDE env vars are always included when set.
 func ResolveTokens(workspacePath, cooperDir string, enabledTools []string) ([]TokenResult, error) {
 	wsHash := WorkspaceHash(workspacePath)
 	cached, _ := LoadCachedTokens(cooperDir, wsHash)
@@ -146,15 +178,17 @@ func ResolveTokens(workspacePath, cooperDir string, enabledTools []string) ([]To
 		}
 	}
 
-	// Always forward VS Code integration env vars when set.
-	for _, name := range vsCodeEnvVars {
-		if val := os.Getenv(name); val != "" {
-			results = append(results, TokenResult{
-				Name:   name,
-				Value:  val,
-				Source: "env",
-			})
+	// Always forward terminal and IDE integration env vars when set.
+	for _, variable := range forwardedSessionEnvVars {
+		val, ok := os.LookupEnv(variable.Name)
+		if !ok || (val == "" && !variable.PreserveEmpty) {
+			continue
 		}
+		results = append(results, TokenResult{
+			Name:   variable.Name,
+			Value:  val,
+			Source: "env",
+		})
 	}
 
 	return results, nil

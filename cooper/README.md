@@ -256,8 +256,8 @@ EMPTY=
 
 - Scope is global: the values live in `~/.cooper/config.json` and apply to all barrels, tools, and workspaces.
 - Runtime-only: changes apply on the next `cooper cli` session. No `cooper build` is needed.
-- Precedence is safe: Cooper loads user env first, then restores protected runtime env such as `HTTP_PROXY`, `PATH`, `TZ`, `DISPLAY`, token env, IDE integration env, and `COOPER_*` names.
-- Protected names cannot be configured, including `HTTP_PROXY`, `PATH`, `TZ`, `OPENAI_API_KEY`, and any `COOPER_*` variable.
+- Precedence is safe: Cooper loads user env first, then restores protected runtime env such as `HTTP_PROXY`, `PATH`, `TZ`, `DISPLAY`, token env, terminal color/hyperlink policy and metadata env, IDE env, and `COOPER_*` names.
+- Protected names cannot be configured, including `HTTP_PROXY`, `PATH`, `TZ`, `TERM`, `COLORTERM`, `NO_COLOR`, `FORCE_COLOR`, `OPENAI_API_KEY`, and any `COOPER_*` variable.
 - Values are stored in plain text in `~/.cooper/config.json`. This is not a secret store.
 
 ### Execution Bridge

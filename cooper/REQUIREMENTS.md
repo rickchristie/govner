@@ -399,7 +399,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - Claude Code: auth handled via mounted `~/.claude` and `~/.claude.json` (no env var needed)
       - GitHub Copilot CLI: `GH_TOKEN` or `GITHUB_TOKEN` env var, or `~/.copilot/.gh_token` file
       - OpenAI Codex CLI: `OPENAI_API_KEY` env var
-    - VS Code integration env vars forwarded when available: `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `CLAUDE_CODE_SSE_PORT`.
+    - Terminal and IDE integration env vars forwarded when available: terminal identity/capability (`TERM`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LC_TERMINAL`, `LC_TERMINAL_VERSION`, `TERM_SESSION_ID`, `ITERM_PROFILE`, `ITERM_SESSION_ID`, `VTE_VERSION`, `KONSOLE_VERSION`, `KONSOLE_PROFILE_NAME`, `WT_SESSION`, `WT_PROFILE_ID`, `KITTY_WINDOW_ID`, `WEZTERM_PANE`, `TERMINAL_EMULATOR`, `DOMTERM`, `TERMINOLOGY`), terminal palette hint (`COLORFGBG`), color/hyperlink policy (`NO_COLOR`, `FORCE_COLOR`, `FORCE_HYPERLINK`, `CLICOLOR`, `CLICOLOR_FORCE`, `NODE_DISABLE_COLORS`), and IDE integration (`CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_ENTRYPOINT`, `ENABLE_IDE_INTEGRATION`).
     - `CLAUDECODE` env var is NOT forwarded (prevents "nested session" error — container is an isolated sandbox, not a nested session).
   - Security Settings:
     - `--cap-drop=ALL` — drop all Linux capabilities

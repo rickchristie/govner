@@ -58,13 +58,26 @@ func TestProtectedRuntimeEnvNamesDedupesAndPreservesStableOrder(t *testing.T) {
 	if strings.Join(first, "\n") != strings.Join(second, "\n") {
 		t.Fatalf("ProtectedRuntimeEnvNames() order is not stable\nfirst=%v\nsecond=%v", first, second)
 	}
-	joined := strings.Join(first, "\n")
-	if !strings.Contains(joined, "HTTP_PROXY") || !strings.Contains(joined, "OPENAI_API_KEY") || !strings.Contains(joined, "TERM") || !strings.Contains(joined, "TZ") {
+	if !containsName(first, "HTTP_PROXY") || !containsName(first, "OPENAI_API_KEY") || !containsName(first, "TERM") || !containsName(first, "TZ") {
 		t.Fatalf("ProtectedRuntimeEnvNames() = %v, want static names plus extras", first)
 	}
-	if strings.Count(joined, "OPENAI_API_KEY") != 1 || strings.Count(joined, "TERM") != 1 {
+	if countName(first, "OPENAI_API_KEY") != 1 || countName(first, "TERM") != 1 {
 		t.Fatalf("ProtectedRuntimeEnvNames() should de-duplicate extras, got %v", first)
 	}
+}
+
+func containsName(names []string, target string) bool {
+	return countName(names, target) > 0
+}
+
+func countName(names []string, target string) int {
+	count := 0
+	for _, name := range names {
+		if name == target {
+			count++
+		}
+	}
+	return count
 }
 
 func TestBuildExecWrapperCommandInteractiveShape(t *testing.T) {

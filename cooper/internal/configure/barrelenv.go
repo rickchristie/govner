@@ -185,7 +185,7 @@ func (m *barrelEnvModel) view(width, height int) string {
 	content += infoBox(
 		" Applies globally to every cooper cli session. User env loads first, then\n"+
 			" Cooper restores protected runtime values like proxy, display, PATH,\n"+
-			" token, and IDE integration env.\n\n"+
+			" token, terminal color/hyperlink policy and metadata, and IDE env.\n\n"+
 			" Values are stored in plain text in ~/.cooper/config.json. Invalid or\n"+
 			" protected hand-edited rows stay visible here so you can fix or delete\n"+
 			" them. Changes apply on the next cooper cli session; no rebuild needed.",
