@@ -12,7 +12,13 @@ Govner is a collection of Go development tools.
   **Always investigate to find root cause**, if unable to find evidence, state why and clarify it's a hypothesis.
 - **ALWAYS write proper documentation**, write *why* it was done this way, and *how* only if it's not obvious.
   Write for a human or yourself when they revisit this code in the future, what is important for them so they work faster and with less mistakes?
-- **Cooper test suites:** when validating `cooper`, run `go test ./... > /tmp/cooper-go-test.txt 2>&1` and `timeout 90m ./test-e2e.sh > /tmp/cooper-e2e.txt 2>&1` from `cooper/`; use targeted package tests while iterating, but finish with both full suites.
+- **Cooper test suites:** when validating `cooper`, run
+  `go test -C ./cooper ./... > /tmp/cooper-go-test.txt 2>&1` and
+  `timeout 90m ./cooper/test-e2e.sh > /tmp/cooper-e2e.txt 2>&1` from the
+  repository root; use targeted package tests while iterating, but finish with
+  both full suites. Keep `cooper` visible in the command rather than relying on
+  an execution tool's hidden `workdir`, because Codex's permission-hook payload
+  does not currently include that per-command directory.
 
 # TUI Code Architecture Standard
 

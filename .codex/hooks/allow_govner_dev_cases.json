@@ -1,0 +1,646 @@
+[
+  {
+    "id": "cooper-e2e-canonical",
+    "command": "timeout 90m ./test-e2e.sh > /tmp/cooper-e2e.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "The required namespaced Cooper end-to-end release gate is repo-owned and fully logged under /tmp."
+  },
+  {
+    "id": "cooper-e2e-root-path",
+    "command": "timeout 90m ./cooper/test-e2e.sh > /tmp/cooper-e2e-root.txt 2>&1",
+    "expected": true,
+    "why": "The same release gate is safe when invoked from the repository root."
+  },
+  {
+    "id": "cooper-e2e-explicit-cd",
+    "command": "cd cooper && timeout 90m ./test-e2e.sh > /tmp/cooper-e2e-cd.txt 2>&1",
+    "expected": true,
+    "why": "An explicit in-command directory change lets the hook resolve the reviewed script without relying on hidden tool metadata."
+  },
+  {
+    "id": "cooper-e2e-shell-exit-capture",
+    "command": "bash -lc 'timeout 90m ./test-e2e.sh > /tmp/cooper-e2e-shell.txt 2>&1; printf \"%s\\n\" $? > /tmp/cooper-e2e-shell.exit'",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "Codex commonly wraps the logged release gate and records its exit status under /tmp."
+  },
+  {
+    "id": "cooper-e2e-xtrace",
+    "command": "bash -lc 'GOCACHE=/tmp/go-build-cache bash -x ./test-e2e.sh > /tmp/cooper-e2e-xtrace.txt 2>&1; printf \"%s\\n\" $? > /tmp/cooper-e2e-xtrace.exit'",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "Shell tracing is a diagnostic mode of the same reviewed test script and all output remains under /tmp."
+  },
+  {
+    "id": "cooper-e2e-clean",
+    "command": "./test-e2e.sh clean > /tmp/cooper-e2e-clean.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "The script's cleanup mode is explicitly namespaced to its own test resources."
+  },
+  {
+    "id": "cooper-docker-build-all",
+    "command": "timeout 90m ./test-docker-build.sh all > /tmp/cooper-docker-build.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "The repo-owned Docker build test uses test-prefixed images and bounded modes."
+  },
+  {
+    "id": "go-test-full-suite",
+    "command": "go test ./... > /tmp/cooper-go-test.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "Repo-local Go tests are the required Cooper verification gate and output is fully captured."
+  },
+  {
+    "id": "go-test-cd-wrapper",
+    "command": "bash -lc 'cd cooper && GOCACHE=/tmp/go-build-cache go test ./internal/app ./internal/docker -count=1 > /tmp/cooper-targeted.txt 2>&1; printf \"%s\\n\" $? > /tmp/cooper-targeted.exit'",
+    "expected": true,
+    "why": "A reviewed repository subdirectory, safe Go cache, targeted packages, and /tmp logs form a common approval request."
+  },
+  {
+    "id": "go-test-absolute-c",
+    "command": "GOCACHE=/tmp/go-build-cache /usr/bin/time -p go test -C {REPO_ROOT}/cooper ./... -count=1 > /tmp/cooper-timed.txt 2>&1",
+    "expected": true,
+    "why": "Go's -C target stays inside Govner and the timing wrapper does not widen execution."
+  },
+  {
+    "id": "go-test-targeted-regex",
+    "command": "go test ./internal/app -run 'TestCooperApp_(StartStop|BarrelReachesProxy)$' -count=1 -v -json -timeout=8m > /tmp/cooper-targeted.json 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "Quoted test-name patterns and bounded Go test flags are recurring focused verification."
+  },
+  {
+    "id": "go-test-status-tail-wrapper",
+    "command": "bash -lc 'mkdir -p /tmp/go-build-cache && GOCACHE=/tmp/go-build-cache go test ./internal/app > /tmp/cooper-status.txt 2>&1; status=$?; echo $status > /tmp/cooper-status.exit; tail -n 120 /tmp/cooper-status.txt; exit $status'",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "The wrapper only creates /tmp cache state, captures the test status, and reads its /tmp log."
+  },
+  {
+    "id": "go-test-separate-logs",
+    "command": "go test ./internal/config > /tmp/cooper-config.out 2> /tmp/cooper-config.err",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "Separate stdout and stderr files still satisfy the complete /tmp logging invariant."
+  },
+  {
+    "id": "go-test-script-pty",
+    "command": "script -eq -c \"go test -C {REPO_ROOT}/cooper ./... -count=1\" /tmp/cooper-go-test-script.log",
+    "expected": true,
+    "why": "script(1) supplies a PTY while its /tmp transcript captures the reviewed inner test."
+  },
+  {
+    "id": "go-vet",
+    "command": "go vet ./... > /tmp/cooper-go-vet.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "Go vet is repo-local verification with complete output capture."
+  },
+  {
+    "id": "go-build-tmp-binary",
+    "command": "go build -o /tmp/cooper-build-check ./ > /tmp/cooper-build.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "A build-only verification may write its binary and logs under /tmp."
+  },
+  {
+    "id": "go-test-compile-tmp-binary",
+    "command": "go test -c -o /tmp/cooper-app.test ./internal/app > /tmp/cooper-test-compile.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "Compile-only test verification is safe when the generated binary and logs stay under /tmp."
+  },
+  {
+    "id": "test-driver-clipboard",
+    "command": "GOCACHE=/tmp/go-build-cache go run ./cmd/cooper-test-driver --scenario clipboard-smoke > /tmp/cooper-testdriver.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "The repo-owned driver provides the reviewed namespaced runtime smoke path."
+  },
+  {
+    "id": "test-driver-barrel-env",
+    "command": "go run ./cmd/cooper-test-driver --scenario barrel-env-smoke --keep --timeout 2m > /tmp/cooper-barrel-env.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "The driver's known barrel environment scenario and bounded options are safe."
+  },
+  {
+    "id": "docker-ps-read",
+    "command": "docker ps -a --filter name=cooper --format '{{.Names}} {{.Status}}' > /tmp/cooper-docker-ps.txt 2>&1",
+    "expected": true,
+    "why": "Container listing with a format/filter is read-only and does not expose container environment."
+  },
+  {
+    "id": "docker-images-filter-pipe",
+    "command": "bash -lc 'docker images --format \"{{.Repository}} {{.Tag}}\" | rg \"^cooper-gotest-\" > /tmp/cooper-images.txt || true && cat /tmp/cooper-images.txt'",
+    "expected": true,
+    "why": "Filtering read-only image metadata and reading the /tmp result is a safe diagnostic."
+  },
+  {
+    "id": "docker-image-inspect",
+    "command": "docker image inspect cooper-cli-opencode:latest cooper-cli-codex:latest > /tmp/cooper-images.json 2>&1",
+    "expected": true,
+    "why": "Image metadata inspection is read-only and restricted to Cooper-prefixed images."
+  },
+  {
+    "id": "docker-network-list",
+    "command": "docker network ls --format '{{.Name}}' > /tmp/cooper-networks.txt 2>&1",
+    "expected": true,
+    "why": "Docker network listing is read-only metadata inspection."
+  },
+  {
+    "id": "docker-network-inspect",
+    "command": "docker network inspect cooper-internal cooper-external > /tmp/cooper-networks.json 2>&1",
+    "expected": true,
+    "why": "Network metadata inspection is read-only and restricted to Cooper-prefixed resources."
+  },
+  {
+    "id": "process-probe-filtered",
+    "command": "ps -ef | rg 'go test|cooper|docker' > /tmp/cooper-processes.txt 2>&1",
+    "expected": true,
+    "why": "Process output is restricted to known Cooper development terms and captured under /tmp."
+  },
+  {
+    "id": "pgrep-filtered",
+    "command": "pgrep -af 'go test|cooper' > /tmp/cooper-pgrep.txt 2>&1",
+    "expected": true,
+    "why": "The bounded pgrep pattern only targets known Cooper development processes."
+  },
+  {
+    "id": "lsof-bridge",
+    "command": "lsof -iTCP:4343 -sTCP:LISTEN > /tmp/cooper-lsof.txt 2>&1",
+    "expected": true,
+    "why": "The fixed Cooper bridge port probe is read-only."
+  },
+  {
+    "id": "lsof-test-lock",
+    "command": "lsof /tmp/cooper-gotest.lock > /tmp/cooper-lock-holder.txt 2>&1",
+    "expected": true,
+    "why": "Inspecting the known shared test lock is read-only."
+  },
+  {
+    "id": "ps-known-pids",
+    "command": "ps -fp 1234,5678 > /tmp/cooper-pids.txt 2>&1",
+    "expected": true,
+    "why": "A numeric PID-only process query is bounded and read-only."
+  },
+  {
+    "id": "read-workspace",
+    "command": "sed -n '1,120p' cooper/test-e2e.sh > /tmp/cooper-e2e-head.txt 2>&1",
+    "expected": true,
+    "why": "Read-only inspection is scoped to the Govner workspace."
+  },
+  {
+    "id": "read-rg-workspace",
+    "command": "rg -n 'PermissionRequest' .codex-new/hooks > /tmp/govner-hook-rg.txt 2>&1",
+    "expected": true,
+    "why": "Repository search and /tmp output are read-only."
+  },
+  {
+    "id": "read-rg-current-directory",
+    "command": "rg -n 'TestCooperApp_'",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": true,
+    "why": "Ripgrep without a path searches only the trusted current repository directory."
+  },
+  {
+    "id": "read-find-pattern",
+    "command": "find cooper/internal -maxdepth 2 -type f -name '*.go' > /tmp/cooper-go-files.txt 2>&1",
+    "expected": true,
+    "why": "The find root is inside Govner and its quoted name pattern is non-executing."
+  },
+  {
+    "id": "read-tmp-log",
+    "command": "tail -n 120 /tmp/cooper-go-test.txt",
+    "expected": true,
+    "why": "Reading a bounded /tmp test log is safe."
+  },
+  {
+    "id": "read-pwd-date",
+    "command": "bash -lc 'pwd; date; printf \"%s\\n\" $? > /tmp/govner-pwd-date.exit'",
+    "expected": true,
+    "why": "Current-directory and clock inspection have no side effects."
+  },
+  {
+    "id": "read-sort-tmp",
+    "command": "sort /tmp/govner-values.txt > /tmp/govner-values-sorted.txt",
+    "expected": true,
+    "why": "Both the sort input and output remain under /tmp."
+  },
+  {
+    "id": "deny-e2e-no-log",
+    "command": "timeout 90m ./test-e2e.sh",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Heavy tests must preserve complete output under /tmp per Govner's repository contract."
+  },
+  {
+    "id": "deny-e2e-hidden-workdir",
+    "command": "timeout 90m ./test-e2e.sh > /tmp/cooper-e2e.txt 2>&1",
+    "cwd": "{REPO_ROOT}",
+    "expected": false,
+    "why": "The payload cwd resolves this bare path outside Cooper; a shell tool's omitted per-call workdir cannot be trusted or inferred."
+  },
+  {
+    "id": "deny-e2e-partial-log",
+    "command": "timeout 90m ./test-e2e.sh > /tmp/cooper-e2e.txt",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Capturing stdout alone can lose the diagnostic stderr stream."
+  },
+  {
+    "id": "deny-e2e-workspace-log",
+    "command": "./test-e2e.sh > e2e.log 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Escalated test output must not create arbitrary workspace files."
+  },
+  {
+    "id": "deny-e2e-timeout-too-long",
+    "command": "timeout 91m ./test-e2e.sh > /tmp/cooper-e2e.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "The standard release-gate timeout is capped at 90 minutes."
+  },
+  {
+    "id": "deny-e2e-unknown-arg",
+    "command": "./test-e2e.sh production > /tmp/cooper-e2e.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Only the script's documented normal and clean modes are reviewed."
+  },
+  {
+    "id": "deny-unknown-script",
+    "command": "./scripts/release-cooper.sh > /tmp/release-cooper.txt 2>&1",
+    "expected": false,
+    "why": "Release scripts mutate version control and published artifacts and need explicit approval."
+  },
+  {
+    "id": "deny-background-test",
+    "command": "go test ./... > /tmp/cooper-go-test.txt 2>&1 &",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Background execution conflicts with Govner's requirement to finish and verify tasks."
+  },
+  {
+    "id": "deny-go-test-no-log",
+    "command": "go test ./...",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Go test output must be captured under /tmp."
+  },
+  {
+    "id": "deny-go-test-external-package",
+    "command": "go test github.com/example/project > /tmp/external-test.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "External module paths can trigger network downloads and are outside the repository boundary."
+  },
+  {
+    "id": "deny-go-test-exec",
+    "command": "go test -exec=/tmp/custom-runner ./... > /tmp/cooper-go-test.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "The -exec flag can replace normal test execution with an arbitrary command."
+  },
+  {
+    "id": "deny-go-test-overlay",
+    "command": "go test -overlay=/tmp/overlay.json ./... > /tmp/cooper-go-test.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "An overlay can substitute unreviewed source files."
+  },
+  {
+    "id": "deny-go-test-c-outside-repo",
+    "command": "go test -C /tmp ./... > /tmp/cooper-go-test.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Go's working directory must stay inside Govner."
+  },
+  {
+    "id": "deny-go-test-workspace-profile",
+    "command": "go test -coverprofile=cooper/cover.out ./... > /tmp/cooper-go-test.txt 2>&1",
+    "expected": false,
+    "why": "Generated profiles must stay under /tmp."
+  },
+  {
+    "id": "deny-go-build-default-output",
+    "command": "go build ./ > /tmp/cooper-build.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "A default Go build writes its binary into the workspace."
+  },
+  {
+    "id": "deny-go-build-workspace-output",
+    "command": "go build -o ./cooper ./ > /tmp/cooper-build.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Build-only verification may not overwrite a workspace binary."
+  },
+  {
+    "id": "deny-go-get",
+    "command": "go get github.com/rickchristie/tui-driver@latest > /tmp/go-get.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Dependency downloads and module changes require explicit approval."
+  },
+  {
+    "id": "deny-go-mod",
+    "command": "go mod tidy > /tmp/go-mod.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Go module mutation and possible downloads are outside the automatic test policy."
+  },
+  {
+    "id": "deny-go-install",
+    "command": "go install example.com/tool@latest > /tmp/go-install.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Installing external executables is a supply-chain and host mutation action."
+  },
+  {
+    "id": "deny-go-run-scratch",
+    "command": "go run ./tmpmanual > /tmp/cooper-manual.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Arbitrary scratch programs have not been reviewed as a stable test boundary."
+  },
+  {
+    "id": "deny-test-driver-unknown-scenario",
+    "command": "go run ./cmd/cooper-test-driver --scenario production > /tmp/cooper-driver.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Only scenarios implemented and reviewed by the repo-owned driver are allowed."
+  },
+  {
+    "id": "deny-test-driver-long-timeout",
+    "command": "go run ./cmd/cooper-test-driver --scenario clipboard-smoke --timeout 30m > /tmp/cooper-driver.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Manual driver scenarios have a ten-minute upper bound."
+  },
+  {
+    "id": "deny-remote-goproxy",
+    "command": "GOPROXY=https://proxy.golang.org go test ./... > /tmp/cooper-go-test.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "An explicit remote dependency source turns verification into a network request."
+  },
+  {
+    "id": "deny-workspace-gocache",
+    "command": "GOCACHE=./.cache go test ./... > /tmp/cooper-go-test.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Explicit cache overrides must stay under /tmp."
+  },
+  {
+    "id": "deny-docker-run",
+    "command": "docker run --rm cooper-cli-codex:latest true > /tmp/docker-run.txt 2>&1",
+    "expected": false,
+    "why": "Direct docker run can add mounts, host access, or network behavior and needs separate review."
+  },
+  {
+    "id": "deny-docker-exec",
+    "command": "docker exec barrel-project-codex env > /tmp/docker-env.txt 2>&1",
+    "expected": false,
+    "why": "Live-container execution can expose credentials and mutate a user session."
+  },
+  {
+    "id": "deny-docker-container-inspect",
+    "command": "docker inspect cooper-proxy > /tmp/cooper-proxy.json 2>&1",
+    "expected": false,
+    "why": "Container inspection can expose live environment, mounts, and secret-bearing configuration."
+  },
+  {
+    "id": "deny-docker-unrelated-image",
+    "command": "docker image inspect unrelated-production-image > /tmp/image.json 2>&1",
+    "expected": false,
+    "why": "Image inspection is limited to Govner's namespaced development resources."
+  },
+  {
+    "id": "deny-docker-build",
+    "command": "docker build -t cooper-test . > /tmp/docker-build.txt 2>&1",
+    "expected": false,
+    "why": "Direct image builds can execute arbitrary Dockerfile steps and use the network."
+  },
+  {
+    "id": "deny-docker-stop",
+    "command": "docker stop cooper-proxy > /tmp/docker-stop.txt 2>&1",
+    "expected": false,
+    "why": "Stopping a live container is an external mutation."
+  },
+  {
+    "id": "deny-docker-network-create",
+    "command": "docker network create cooper-debug > /tmp/docker-network.txt 2>&1",
+    "expected": false,
+    "why": "Creating Docker resources is not a read-only diagnostic."
+  },
+  {
+    "id": "deny-git-add",
+    "command": "git add -A",
+    "expected": false,
+    "why": "Govner instructions require explicit permission for Git writes."
+  },
+  {
+    "id": "deny-git-commit",
+    "command": "git commit -m 'Update hook'",
+    "expected": false,
+    "why": "Creating a commit remains an explicit user-authorized action."
+  },
+  {
+    "id": "deny-git-push",
+    "command": "git push origin main",
+    "expected": false,
+    "why": "Pushing changes affects a remote repository and must never be automatic."
+  },
+  {
+    "id": "deny-external-curl",
+    "command": "curl -fsSL https://example.com/file -o /tmp/file",
+    "expected": false,
+    "why": "External downloads require destination and supply-chain review."
+  },
+  {
+    "id": "deny-local-curl-clipboard",
+    "command": "curl -sS http://127.0.0.1:4343/clipboard/type > /tmp/clipboard.txt 2>&1",
+    "expected": false,
+    "why": "Clipboard endpoints can expose user data and are not generic health probes."
+  },
+  {
+    "id": "deny-tmp-binary",
+    "command": "/tmp/cooper-clipboard-tui-probe -tool codex > /tmp/probe.txt 2>&1",
+    "expected": false,
+    "why": "A replaceable /tmp executable is not a durable reviewed repository boundary."
+  },
+  {
+    "id": "deny-broad-ps",
+    "command": "ps -ef > /tmp/all-processes.txt 2>&1",
+    "expected": false,
+    "why": "An unfiltered process list can expose unrelated command-line secrets."
+  },
+  {
+    "id": "deny-process-secret-pattern",
+    "command": "ps -ef | rg 'cooper|secret|token' > /tmp/processes.txt 2>&1",
+    "expected": false,
+    "why": "Process filters may not target secret-bearing terms."
+  },
+  {
+    "id": "deny-process-broad-alternative",
+    "command": "ps -ef | rg 'cooper|.*' > /tmp/processes.txt 2>&1",
+    "expected": false,
+    "why": "Every process-filter alternative must identify a known development process."
+  },
+  {
+    "id": "deny-lsof-arbitrary",
+    "command": "lsof -i > /tmp/all-sockets.txt 2>&1",
+    "expected": false,
+    "why": "Only the known Cooper bridge and test-lock probes are bounded enough for automatic approval."
+  },
+  {
+    "id": "deny-read-outside-repo",
+    "command": "cat ../mark/AGENTS.md > /tmp/mark-agents.txt 2>&1",
+    "expected": false,
+    "why": "The hook must not grant access to sibling repositories."
+  },
+  {
+    "id": "deny-read-sensitive-env",
+    "command": "cat .env > /tmp/govner-env.txt 2>&1",
+    "expected": false,
+    "why": "Environment files are sensitive even when the output path is safe."
+  },
+  {
+    "id": "deny-read-ssh",
+    "command": "cat ~/.ssh/config > /tmp/ssh-config.txt 2>&1",
+    "expected": false,
+    "why": "SSH material is always outside the automatic policy."
+  },
+  {
+    "id": "deny-read-glob",
+    "command": "cat cooper/internal/*.go > /tmp/cooper-go.txt 2>&1",
+    "expected": false,
+    "why": "Unexpanded shell globs can select files the hook did not inspect."
+  },
+  {
+    "id": "deny-find-exec",
+    "command": "find cooper -type f -exec sh -c 'echo x' \\;",
+    "expected": false,
+    "why": "find execution actions are not read-only."
+  },
+  {
+    "id": "deny-find-delete",
+    "command": "find cooper -type f -delete",
+    "expected": false,
+    "why": "find delete is destructive."
+  },
+  {
+    "id": "deny-sed-in-place",
+    "command": "sed -i 's/a/b/' AGENTS.md",
+    "expected": false,
+    "why": "In-place editing is not read-only inspection."
+  },
+  {
+    "id": "deny-tail-follow",
+    "command": "tail -f /tmp/cooper-go-test.txt",
+    "expected": false,
+    "why": "An unbounded follow can block indefinitely."
+  },
+  {
+    "id": "deny-rg-preprocessor",
+    "command": "rg --pre 'sh -c id' pattern cooper",
+    "expected": false,
+    "why": "Ripgrep preprocessors execute arbitrary commands."
+  },
+  {
+    "id": "deny-date-set",
+    "command": "date -s '2026-01-01'",
+    "expected": false,
+    "why": "Changing the host clock is not read-only."
+  },
+  {
+    "id": "deny-sort-workspace-output",
+    "command": "sort -o cooper/sorted.txt /tmp/input.txt",
+    "expected": false,
+    "why": "sort output flags may not write into the workspace."
+  },
+  {
+    "id": "deny-command-substitution",
+    "command": "go test $(printf './...') > /tmp/cooper-go-test.txt 2>&1",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Command substitution can synthesize unreviewed arguments."
+  },
+  {
+    "id": "deny-parameter-expansion",
+    "command": "cat \"$HOME/.ssh/config\" > /tmp/ssh-config.txt 2>&1",
+    "expected": false,
+    "why": "Parameter expansion can hide a path from policy inspection."
+  },
+  {
+    "id": "deny-ansi-c-newline",
+    "command": "bash -lc 'go test ./... >/tmp/test 2>&1'$'\\n''git push origin main'",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "ANSI-C quoting can synthesize command separators after inspection."
+  },
+  {
+    "id": "deny-newline-followup",
+    "command": "bash -lc 'go test ./... > /tmp/cooper-go-test.txt 2>&1\\ngit push origin main'",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Every newline-separated statement must be independently allowed."
+  },
+  {
+    "id": "deny-arbitrary-pipe",
+    "command": "go test ./... | tee /tmp/cooper-go-test.txt",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Only narrowly reviewed read-only pipelines are accepted."
+  },
+  {
+    "id": "deny-heredoc",
+    "command": "cat > /tmp/config.json <<'EOF'\\n{}\\nEOF",
+    "expected": false,
+    "why": "Heredocs introduce shell grammar outside the policy parser."
+  },
+  {
+    "id": "deny-script-workspace-transcript",
+    "command": "script -eq -c \"go test -C {REPO_ROOT}/cooper ./...\" cooper/test.log",
+    "expected": false,
+    "why": "PTY transcripts must stay under /tmp."
+  },
+  {
+    "id": "deny-script-arbitrary-command",
+    "command": "script -eq -c \"docker run --rm alpine true\" /tmp/docker.log",
+    "expected": false,
+    "why": "script(1) does not make an otherwise denied inner command safe."
+  },
+  {
+    "id": "deny-script-input-log",
+    "command": "script --log-in /tmp/input.log -c \"go test -C {REPO_ROOT}/cooper ./...\" /tmp/test.log",
+    "expected": false,
+    "why": "Input logging can capture sensitive terminal data."
+  },
+  {
+    "id": "deny-safe-then-git",
+    "command": "bash -lc 'go test ./... > /tmp/cooper-go-test.txt 2>&1; git push origin main'",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "One safe statement must not hide a remote Git mutation."
+  },
+  {
+    "id": "deny-or-git",
+    "command": "go test ./... > /tmp/cooper-go-test.txt 2>&1 || git push origin main",
+    "cwd": "{REPO_ROOT}/cooper",
+    "expected": false,
+    "why": "Only an exact trailing 'or true' status fallback is accepted."
+  },
+  {
+    "id": "deny-cwd-outside-repo",
+    "command": "pwd",
+    "cwd": "/tmp",
+    "expected": false,
+    "why": "The project hook must not authorize commands from an unrelated working directory."
+  }
+]

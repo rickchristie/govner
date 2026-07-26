@@ -25,3 +25,16 @@ cooper/.e2e-*-config/
 cooper/.tmp/
 
 .scratch/
+
+# Codex project configuration and permission policy are shared. Keep generated
+# Codex state local while allowing the reviewed hook implementation to clone
+# with the repository.
+.codex/*
+!.codex/
+!.codex/config.toml
+!.codex/hooks/
+!.codex/hooks/README.md
+!.codex/hooks/APPROVAL_AUDIT.md
+!.codex/hooks/allow_govner_dev.py
+!.codex/hooks/allow_govner_dev_cases.json
+!.codex/hooks/allow_govner_dev_test.py

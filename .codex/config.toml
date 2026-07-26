@@ -1,0 +1,17 @@
+# Project-local Codex configuration.
+#
+# Govner's recurring development approvals need more context than literal
+# prefix rules can express safely. The PermissionRequest hook validates the
+# complete shell command, including wrappers, paths, and output redirections.
+
+[features]
+hooks = true
+
+[[hooks.PermissionRequest]]
+matcher = "^Bash$"
+
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = '/usr/bin/python3 "$(git rev-parse --show-toplevel)/.codex/hooks/allow_govner_dev.py"'
+timeout = 5
+statusMessage = "Checking Govner development command"
