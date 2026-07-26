@@ -1701,6 +1701,92 @@ func TestCooperApp_ProxyRuntimeScenarios(t *testing.T) {
 		}
 	})
 
+	t.Run("SessionDomainAutoApproval", func(t *testing.T) {
+		curlCommand := fmt.Sprintf(
+			"curl -k -s -o /dev/null -w '%%{http_code}' --connect-timeout 2 --max-time 8 -x http://%s:%d https://%s",
+			docker.ProxyHost(), cfg.ProxyPort, proxyBlockedTestDomain,
+		)
+		type curlResult struct {
+			output string
+			err    error
+		}
+
+		firstResult := make(chan curlResult, 1)
+		go func() {
+			output, err := barrelExec(barrelName, curlCommand)
+			firstResult <- curlResult{output: output, err: err}
+		}()
+
+		var firstRequest ACLRequest
+		select {
+		case firstRequest = <-app.ACLRequests():
+			if firstRequest.Domain != proxyBlockedTestDomain {
+				t.Fatalf("session candidate domain = %q, want %q", firstRequest.Domain, proxyBlockedTestDomain)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for initial session-domain review")
+		}
+		normalized, err := app.AllowDomainForSession(firstRequest.Domain)
+		if err != nil {
+			t.Fatalf("AllowDomainForSession failed: %v", err)
+		}
+		if normalized != proxyBlockedTestDomain {
+			t.Fatalf("normalized domain = %q, want %q", normalized, proxyBlockedTestDomain)
+		}
+
+		select {
+		case result := <-firstResult:
+			if result.err != nil {
+				t.Fatalf("first session-approved curl failed: %v\noutput: %s", result.err, result.output)
+			}
+			if status := strings.TrimSpace(result.output); status == "403" || status == "000" {
+				t.Fatalf("first session-approved curl status = %q", status)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for first session-approved curl")
+		}
+		select {
+		case event := <-app.ACLDecisions():
+			if event.Decision != DecisionAllow || event.Reason != "session" || !event.Prompted {
+				t.Fatalf("first session decision = (%v, %q, prompted=%t)",
+					event.Decision, event.Reason, event.Prompted)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for first session decision")
+		}
+
+		// A fresh connection to the same exact hostname must pass without
+		// producing another permission request, while remaining auditable.
+		output, err := barrelExec(barrelName, curlCommand)
+		if err != nil {
+			t.Fatalf("automatic session curl failed: %v\noutput: %s", err, output)
+		}
+		if status := strings.TrimSpace(output); status == "403" || status == "000" {
+			t.Fatalf("automatic session curl status = %q", status)
+		}
+		select {
+		case request := <-app.ACLRequests():
+			t.Fatalf("automatic session request unexpectedly required review: %+v", request)
+		case <-time.After(250 * time.Millisecond):
+		}
+		select {
+		case event := <-app.ACLDecisions():
+			if event.Decision != DecisionAllow || event.Reason != "session" || event.Prompted {
+				t.Fatalf("automatic session decision = (%v, %q, prompted=%t)",
+					event.Decision, event.Reason, event.Prompted)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for automatic session decision")
+		}
+
+		if !app.RevokeDomainForSession(proxyBlockedTestDomain) {
+			t.Fatal("failed to revoke session domain")
+		}
+		if app.IsDomainAllowedForSession(proxyBlockedTestDomain) {
+			t.Fatal("revoked session domain remained active")
+		}
+	})
+
 	t.Run("BlockedDomainDenied", func(t *testing.T) {
 		out, err := barrelExec(barrelName,
 			fmt.Sprintf("curl -k -s -o /dev/null -w '%%{http_code}' --connect-timeout 2 --max-time 4 -x http://%s:%d https://%s",

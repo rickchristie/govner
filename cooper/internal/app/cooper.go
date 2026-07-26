@@ -414,6 +414,35 @@ func (a *CooperApp) PendingRequests() []*PendingRequest {
 	return nil
 }
 
+// AllowDomainForSession enables exact-hostname automatic approval for the
+// lifetime of this cooper up ACL listener. It never mutates persistent config
+// or reloads Squid.
+func (a *CooperApp) AllowDomainForSession(domain string) (string, error) {
+	if a.aclListener == nil {
+		return "", fmt.Errorf("ACL listener is not running")
+	}
+	return a.aclListener.AllowDomainForSession(domain)
+}
+
+// RevokeDomainForSession returns an exact hostname to manual review.
+func (a *CooperApp) RevokeDomainForSession(domain string) bool {
+	return a.aclListener != nil && a.aclListener.RevokeDomainForSession(domain)
+}
+
+// IsDomainAllowedForSession reports whether an exact hostname is automatically
+// approved by the current cooper up instance.
+func (a *CooperApp) IsDomainAllowedForSession(domain string) bool {
+	return a.aclListener != nil && a.aclListener.IsDomainAllowedForSession(domain)
+}
+
+// SessionAllowedDomains returns a stable snapshot for presentation.
+func (a *CooperApp) SessionAllowedDomains() []string {
+	if a.aclListener == nil {
+		return nil
+	}
+	return a.aclListener.SessionAllowedDomains()
+}
+
 // ----- Container management -----
 
 // ContainerStats returns resource and session statistics for all running

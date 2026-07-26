@@ -28,7 +28,7 @@ const (
 // HistoryEntry is a single resolved request shown in the history list.
 type HistoryEntry struct {
 	Request         app.ACLRequest
-	Decision        string // "timeout", "denied", "whitelist", "approved"
+	Decision        string // "timeout", "denied", "whitelist", "approved", "session"
 	ResponseStatus  int    // HTTP status code (only meaningful for Allowed)
 	ResponseHeaders string // raw response headers (only meaningful for Allowed)
 	Timestamp       time.Time

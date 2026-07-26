@@ -118,6 +118,71 @@ func TestACLRequestTriggersAlertOutsideMonitorTab(t *testing.T) {
 	}
 }
 
+func TestQueuedSessionAllowedRequestDoesNotPromptOrAlert(t *testing.T) {
+	player := &fakeAlertPlayer{enabled: true}
+	recorder := &alertRecordingSubModel{}
+	mockApp := app.NewMockApp(&config.Config{}, t.TempDir())
+	if _, err := mockApp.AllowDomainForSession("api.example.com"); err != nil {
+		t.Fatalf("AllowDomainForSession failed: %v", err)
+	}
+	// The root always re-arms the channel listener. Seed its next value so the
+	// returned command can be executed without blocking this unit test.
+	mockApp.InjectACLRequest(app.ACLRequest{ID: "next", Domain: "other.example.com"})
+
+	m := NewModel(mockApp)
+	m.SetAlertPlayer(player)
+	m.SetProxyMonModel(recorder)
+	_, cmd := m.Update(events.ACLRequestMsg{Request: app.ACLRequest{
+		ID: "stale", Domain: "API.EXAMPLE.COM.", Timestamp: time.Now(),
+	}})
+	messages := runCmdAndBatchSubcommands(t, cmd)
+
+	if player.count != 0 {
+		t.Fatalf("session-allowed queued request played %d alerts, want 0", player.count)
+	}
+	if len(recorder.messages) != 0 {
+		t.Fatalf("session-allowed queued request reached monitor: %#v", recorder.messages)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("re-armed listener returned %d messages, want 1", len(messages))
+	}
+}
+
+func TestSessionDecisionBeforeRequestSuppressesPromptAfterRevoke(t *testing.T) {
+	player := &fakeAlertPlayer{enabled: true}
+	recorder := &alertRecordingSubModel{}
+	mockApp := app.NewMockApp(&config.Config{}, t.TempDir())
+	if _, err := mockApp.AllowDomainForSession("api.example.com"); err != nil {
+		t.Fatalf("AllowDomainForSession failed: %v", err)
+	}
+
+	m := NewModel(mockApp)
+	m.SetAlertPlayer(player)
+	m.SetProxyMonModel(recorder)
+	request := app.ACLRequest{
+		ID: "resolved-first", Domain: "api.example.com", Timestamp: time.Now(),
+	}
+	_, _ = m.Update(events.ACLDecisionMsg{Event: app.DecisionEvent{
+		Request: request, Decision: app.DecisionAllow, Reason: "session", Prompted: true,
+	}})
+
+	if !mockApp.RevokeDomainForSession(request.Domain) {
+		t.Fatal("failed to revoke test session domain")
+	}
+	recorder.messages = nil
+	_, _ = m.Update(events.ACLRequestMsg{Request: request})
+
+	if player.count != 0 {
+		t.Fatalf("out-of-order resolved request played %d alerts, want 0", player.count)
+	}
+	if len(recorder.messages) != 0 {
+		t.Fatalf("out-of-order resolved request reached monitor: %#v", recorder.messages)
+	}
+	if len(m.resolvedPromptedACLRequests) != 0 {
+		t.Fatal("resolved-request pairing state was not consumed")
+	}
+}
+
 func TestACLDecisionDoesNotTriggerAlert(t *testing.T) {
 	player := &fakeAlertPlayer{}
 	m := NewModel(nil)

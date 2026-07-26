@@ -277,17 +277,25 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
         exist yet while pending): full URL, HTTP method, request headers, destination domain, which container sent it, timestamp.
       - User can press 'a' or Enter to allow, 'd' to deny, 'A' to approve all pending requests.
         If timer runs out, the request is denied automatically.
-      - Each approval applies to that single request. If the same domain is requested again, it appears as a new pending request.
+      - By default each approval applies to that single request. If the same domain is requested again, it appears as a new pending request.
         The HTTP client sees its connection hanging while waiting for approval; on deny/timeout, Squid returns a 403.
+      - User can press `w` on a selected request and confirm **Allow for This Session**. This adds only the normalized exact
+        hostname (never a wildcard, parent domain, IP literal, or port) to an in-memory set owned by the current ACL listener.
+        It applies to all barrels connected to this `cooper up` proxy, approves same-domain requests already pending, and
+        automatically approves future exact-host matches without another alert or prompt.
+      - Session access never edits `config.json` or Squid's persistent whitelist and requires no proxy reload. It is displayed
+        in a dedicated Monitor rail, can be inspected and revoked with `s`, is recorded in Allowed history with type `session`,
+        and is discarded when the current `cooper up` ACL listener stops. Redirects and subdomains remain independently blocked.
       - This allows user to make real-time decisions, when the AI needs to do research for example.
-      - Cooper purposefully doesn't have "Always allow this request" option, it forces user to verify and think for every single request to be secure.
+      - Cooper purposefully has no persistent "Always allow" action in the Monitor. Persistent trust remains an explicit
+        `cooper configure` change; the Monitor offers only visible, exact-host, revocable session access.
     - **Blocked** tab:
       - Shows history of blocked requests, including which container sent it.
       - User can navigate up and down the history, select request to view more details.
       - Detail view shows: full URL, method, request headers, domain, container, timestamp, reason (timeout/manual deny).
       - Blocked history viewer is capped at max N lines (See: Runtime Settings).
     - **Allowed** tab:
-      - Shows history of allowed requests (both whitelist and manually allowed), including which container sent it.
+      - Shows history of allowed requests (whitelist, manual, and session), including which container sent it.
       - User can navigate up and down the history, select request to view more details.
       - Detail view shows request data plus response data (status code, response headers) captured after the request completed.
       - Allowed history viewer is capped at max N lines (See: Runtime Settings).

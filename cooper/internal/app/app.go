@@ -39,6 +39,10 @@ type App interface {
 	ApproveRequest(id string)
 	DenyRequest(id string)
 	PendingRequests() []*PendingRequest
+	AllowDomainForSession(domain string) (string, error)
+	RevokeDomainForSession(domain string) bool
+	IsDomainAllowedForSession(domain string) bool
+	SessionAllowedDomains() []string
 
 	// Container management
 	ContainerStats() ([]ContainerStat, error)

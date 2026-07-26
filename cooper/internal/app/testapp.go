@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"sort"
+	"sync"
 
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
@@ -22,20 +24,24 @@ type TestApp struct {
 	proxyUp    bool
 	socatUp    bool
 	bridgeUp   bool
+
+	sessionMu      sync.Mutex
+	sessionDomains map[string]struct{}
 }
 
 // NewTestApp creates a TestApp with the given config and mock channels.
 // The caller populates the channels with test data as needed.
 func NewTestApp(cfg *config.Config, aclCh chan ACLRequest, bridgeCh chan ExecutionLog) *TestApp {
 	return &TestApp{
-		cfg:        cfg,
-		aclCh:      aclCh,
-		decisionCh: make(chan DecisionEvent),
-		bridgeCh:   bridgeCh,
-		squidLogCh: make(chan string, 1024),
-		proxyUp:    true,
-		socatUp:    true,
-		bridgeUp:   true,
+		cfg:            cfg,
+		aclCh:          aclCh,
+		decisionCh:     make(chan DecisionEvent),
+		bridgeCh:       bridgeCh,
+		squidLogCh:     make(chan string, 1024),
+		proxyUp:        true,
+		socatUp:        true,
+		bridgeUp:       true,
+		sessionDomains: make(map[string]struct{}),
 	}
 }
 
@@ -50,6 +56,39 @@ func (t *TestApp) SquidLogs() <-chan string           { return t.squidLogCh }
 func (t *TestApp) ApproveRequest(_ string)            {}
 func (t *TestApp) DenyRequest(_ string)               {}
 func (t *TestApp) PendingRequests() []*PendingRequest { return nil }
+func (t *TestApp) AllowDomainForSession(domain string) (string, error) {
+	t.sessionMu.Lock()
+	defer t.sessionMu.Unlock()
+	normalized := normalizeSessionDomainForTestApp(domain)
+	t.sessionDomains[normalized] = struct{}{}
+	return normalized, nil
+}
+func (t *TestApp) RevokeDomainForSession(domain string) bool {
+	t.sessionMu.Lock()
+	defer t.sessionMu.Unlock()
+	normalized := normalizeSessionDomainForTestApp(domain)
+	if _, ok := t.sessionDomains[normalized]; !ok {
+		return false
+	}
+	delete(t.sessionDomains, normalized)
+	return true
+}
+func (t *TestApp) IsDomainAllowedForSession(domain string) bool {
+	t.sessionMu.Lock()
+	defer t.sessionMu.Unlock()
+	_, ok := t.sessionDomains[normalizeSessionDomainForTestApp(domain)]
+	return ok
+}
+func (t *TestApp) SessionAllowedDomains() []string {
+	t.sessionMu.Lock()
+	defer t.sessionMu.Unlock()
+	domains := make([]string, 0, len(t.sessionDomains))
+	for domain := range t.sessionDomains {
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+	return domains
+}
 
 func (t *TestApp) ContainerStats() ([]ContainerStat, error) { return nil, nil }
 func (t *TestApp) StopContainer(_ string) error             { return nil }

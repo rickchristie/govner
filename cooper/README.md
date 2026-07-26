@@ -12,7 +12,7 @@ AI coding assistants need broad system access to be useful -- but that access is
 
 - **No internet escape** -- Containers run on a Docker `--internal` network with no gateway. Even raw sockets and `curl --noproxy '*'` can't get out. The [Security Model](#security-model) enforces this at the Linux networking layer -- there is simply no route.
 - **See every HTTPS request** -- SSL bump decrypts TLS traffic so the [Proxy Monitor](#tui-control-panel) shows complete URLs, methods, and headers -- not just domain names.
-- **Approve requests in real time** -- Non-whitelisted requests appear in the [TUI Control Panel](#tui-control-panel) with a countdown timer and a short host-side alert phrase. Approve, deny, or let them timeout. One request at a time, no "always allow".
+- **Approve requests in real time** -- Non-whitelisted requests appear in the [TUI Control Panel](#tui-control-panel) with a countdown timer and a short host-side alert phrase. Approve or deny once, or explicitly allow one exact hostname until the current `cooper up` exits.
 - **Access local host ports** -- Forward PostgreSQL, Redis, dev servers, or any host service into barrels through [Port Forwarding](#port-forwarding). Uses a two-hop socat relay so containers reach host services without any internet access.
 - **Run scripts on host** -- Let AI tools trigger deploy, restart, or test scripts through the [Execution Bridge](#execution-bridge) -- a controlled HTTP API that returns stdout/stderr without giving shell access to your machine.
 - **Copy-paste images** -- Paste screenshots and images into AI tools running inside containers with the [Clipboard Bridge](#clipboard-bridge). Press `c` in the TUI to stage your clipboard -- AI tools inside barrels see it as a normal paste. Time-limited, per-barrel authenticated.
@@ -174,7 +174,7 @@ The control panel (`cooper up`) is the nerve center. It has these tabs:
 | Tab | What it does |
 |-----|-------------|
 | **Containers** | Live CPU/memory stats for all barrels and proxy. Stop/restart containers |
-| **Monitor** | Real-time pending requests to non-whitelisted domains. Approve/deny with countdown |
+| **Monitor** | Real-time pending requests with countdown. Approve/deny once, or allow an exact hostname for this `cooper up` session |
 | **Blocked** | History of denied requests with full details |
 | **Allowed** | History of approved requests with response status codes and headers |
 | **Bridge Logs** | Execution bridge invocations -- route, script, status, duration, stdout/stderr |
@@ -230,9 +230,9 @@ All traffic is blocked by default except:
 - AI provider API domains for enabled tools (anthropic.com, openai.com, etc.)
 - `raw.githubusercontent.com` (read-only, safe)
 
-Package registries (npm, PyPI, Go proxy, crates.io) are **blocked by default** to prevent supply-chain attacks where an AI could be tricked into downloading malicious packages or exfiltrating data through registry requests. You can whitelist specific registries if needed, or approve individual requests through the TUI monitor.
+Package registries (npm, PyPI, Go proxy, crates.io) are **blocked by default** to prevent supply-chain attacks where an AI could be tricked into downloading malicious packages or exfiltrating data through registry requests. You can whitelist specific registries if needed, approve an individual request, or press `w` on a pending request to allow only that exact hostname until the current `cooper up` exits.
 
-Add trusted domains through `cooper configure` (company APIs, staging servers, metrics dashboards). For everything else, approve requests one at a time through the TUI monitor.
+Persistent trusted domains still belong in `cooper configure` (company APIs, staging servers, metrics dashboards). Session access is held only in memory, applies to every barrel attached to that Cooper proxy, remains visible and revocable under `s` in the Monitor tab, and is cleared without editing proxy settings when Cooper exits.
 
 ### Port Forwarding
 

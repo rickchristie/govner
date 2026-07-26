@@ -47,6 +47,7 @@ const (
 	ModalRestartContainer
 	ModalUpdateInfo
 	ModalReloadSocat
+	ModalSessionAllowDomain
 )
 
 // TabInfo holds display metadata for a tab.
@@ -96,23 +97,23 @@ const (
 // ----- Unicode constants -- Status icons -----
 
 const (
-	IconCheck      = "\u2713" // ✓
-	IconCross      = "\u2717" // ✗
-	IconWarn       = "\u26A0" // ⚠
-	IconArrowRight = "\u25B6" // ▶
-	IconArrowDown  = "\u25BC" // ▼
-	IconArrowUp    = "\u25B2" // ▲
-	IconDot        = "\u25CF" // ●
-	IconDotEmpty   = "\u25CB" // ○
-	IconBlock      = "\u2588" // █
-	IconBlockHalf  = "\u2593" // ▓
-	IconShade      = "\u2591" // ░
-	IconLock       = "\U0001F512" // 🔒
-	IconUnlock     = "\U0001F513" // 🔓
+	IconCheck      = "\u2713"           // ✓
+	IconCross      = "\u2717"           // ✗
+	IconWarn       = "\u26A0"           // ⚠
+	IconArrowRight = "\u25B6"           // ▶
+	IconArrowDown  = "\u25BC"           // ▼
+	IconArrowUp    = "\u25B2"           // ▲
+	IconDot        = "\u25CF"           // ●
+	IconDotEmpty   = "\u25CB"           // ○
+	IconBlock      = "\u2588"           // █
+	IconBlockHalf  = "\u2593"           // ▓
+	IconShade      = "\u2591"           // ░
+	IconLock       = "\U0001F512"       // 🔒
+	IconUnlock     = "\U0001F513"       // 🔓
 	IconShield     = "\U0001F6E1\uFE0F" // 🛡️
-	IconPlug       = "\U0001F50C" // 🔌
-	IconGear       = "\u2699" // ⚙
-	IconTimer      = "\u23F1" // ⏱
+	IconPlug       = "\U0001F50C"       // 🔌
+	IconGear       = "\u2699"           // ⚙
+	IconTimer      = "\u23F1"           // ⏱
 )
 
 // ----- Unicode constants -- Box drawing -----

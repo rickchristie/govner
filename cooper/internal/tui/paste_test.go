@@ -178,6 +178,45 @@ func (m *recordingSubModel) Update(msg tea.Msg) (theme.SubModel, tea.Cmd) {
 
 func (m *recordingSubModel) View(_, _ int) string { return "" }
 
+type modalRecordingSubModel struct {
+	recordingSubModel
+	active bool
+}
+
+func (m *modalRecordingSubModel) ModalActive() bool { return m.active }
+func (m *modalRecordingSubModel) Update(msg tea.Msg) (theme.SubModel, tea.Cmd) {
+	m.messages = append(m.messages, msg)
+	return m, nil
+}
+
+func TestHandleKey_ScreenModalOwnsGlobalKeys(t *testing.T) {
+	mockApp := cooperapp.NewMockApp(&config.Config{}, t.TempDir())
+	recorder := &modalRecordingSubModel{active: true}
+	model := NewModel(mockApp)
+	model.SetProxyMonModel(recorder)
+	model.SetActiveTab(theme.TabMonitor)
+
+	initialTab := model.activeTab
+	_, cmd := model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if cmd != nil {
+		t.Fatal("screen modal q key unexpectedly returned a root command")
+	}
+	if model.modal != nil {
+		t.Fatal("screen modal q key opened the root exit modal")
+	}
+	if len(recorder.messages) != 1 {
+		t.Fatalf("screen modal received %d messages, want 1", len(recorder.messages))
+	}
+
+	_, _ = model.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	if model.activeTab != initialTab {
+		t.Fatal("Tab escaped a screen-local modal")
+	}
+	if len(recorder.messages) != 2 {
+		t.Fatalf("screen modal received %d messages after Tab, want 2", len(recorder.messages))
+	}
+}
+
 func TestHandleKey_PasteStagesResolvedFilePath(t *testing.T) {
 	dir := t.TempDir()
 	tmpFile := filepath.Join(dir, "dragged image.png")

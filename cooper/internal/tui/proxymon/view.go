@@ -172,6 +172,160 @@ func renderRequestDetail(pr *proxy.PendingRequest, width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
+// renderWithSessionAccess adds the session-only access rail and owns local
+// modal presentation. The underlying monitor remains visible but dimmed so
+// confirmation and management dialogs stay anchored to the current request.
+func (m *Model) renderWithSessionAccess(base string, width, height int) string {
+	rail := renderSessionAccessRail(m, width)
+	divider := theme.DividerStyle.Render(repeatToWidth(theme.BorderH, width))
+	content := rail + "\n" + divider + "\n" + base
+	if m.dialog == sessionDialogNone {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	background := strings.Join(lines, "\n")
+
+	var modal string
+	switch m.dialog {
+	case sessionDialogAllow:
+		if m.allowModal != nil {
+			modal = m.allowModal.View(width, height)
+		}
+	case sessionDialogManage:
+		modal = m.renderSessionManagerModal(width, height)
+	}
+	return lipgloss.Place(width, height, lipgloss.Left, lipgloss.Top,
+		components.DimContent(background)) + "\r" + modal
+}
+
+func renderSessionAccessRail(m *Model, width int) string {
+	title := theme.PaneLabelStyle.Render(theme.IconShield + " SESSION ACCESS")
+	var status string
+	switch {
+	case m.sessionError != "":
+		status = theme.ErrorStyle.Render(theme.IconWarn + " " + m.sessionError)
+	case m.sessionMessage != "":
+		status = theme.ProofStyle.Render(theme.IconCheck+" ") +
+			theme.DetailValueStyle.Render(m.sessionMessage)
+	case len(m.sessionDomains) == 0:
+		status = theme.DimStyle.Render("None") + "  " +
+			theme.HelpDescStyle.Render("["+theme.HelpKeyStyle.Render("w")+" allow selected exact host]")
+	default:
+		count := fmt.Sprintf("%d exact host", len(m.sessionDomains))
+		if len(m.sessionDomains) != 1 {
+			count += "s"
+		}
+		preview := strings.Join(m.sessionDomains, "  ·  ")
+		status = theme.StatusRunningStyle.Bold(true).Render(count) + "  " +
+			theme.DomainStyle.Render(preview)
+	}
+
+	suffix := theme.HelpDescStyle.Render(
+		"[" + theme.HelpKeyStyle.Render("s") + " manage]  ·  cleared on exit",
+	)
+	line := " " + title + "  " + status
+	gap := width - lipgloss.Width(line) - lipgloss.Width(suffix) - 1
+	if gap > 1 {
+		line += strings.Repeat(" ", gap) + suffix
+	} else {
+		line += "  " + suffix
+	}
+	return lipgloss.NewStyle().MaxWidth(width).Width(width).Render(line)
+}
+
+func (m *Model) renderSessionManagerModal(width, height int) string {
+	boxWidth := min(68, width-8)
+	if boxWidth < 36 {
+		boxWidth = 36
+	}
+	innerWidth := boxWidth - 6
+
+	title := lipgloss.NewStyle().
+		Foreground(theme.ColorParchment).
+		Bold(true).
+		Width(innerWidth).
+		Align(lipgloss.Center).
+		Render(theme.IconShield + " Session Access")
+	subtitle := lipgloss.NewStyle().
+		Foreground(theme.ColorDusty).
+		Width(innerWidth).
+		Align(lipgloss.Center).
+		Render("Exact hostnames automatically approved for every barrel\nuntil this Cooper instance exits.")
+	divider := theme.ModalDividerStyle.Width(innerWidth).
+		Render(strings.Repeat(theme.BorderH, max(1, innerWidth-4)))
+
+	listHeight := min(8, max(3, height-14))
+	list := m.sessionList
+	list.Width = innerWidth
+	list.Height = listHeight
+	list.ClampScroll()
+
+	var listView string
+	if len(m.sessionDomains) == 0 {
+		empty := theme.EmptyStateStyle.Render(
+			"No active session access.\n\nApprove a pending request with [w].",
+		)
+		listView = lipgloss.Place(innerWidth, listHeight,
+			lipgloss.Center, lipgloss.Center, empty)
+	} else {
+		listView = list.View(func(item components.ListItem, selected bool, rowWidth int) string {
+			domain, _ := item.Data.(string)
+			arrow := "  "
+			style := theme.RowNormalStyle
+			if selected {
+				arrow = theme.SelectionArrowStyle.Render(theme.IconArrowRight) + " "
+				style = theme.RowSelectedStyle
+			}
+			badge := theme.ProofStyle.Render("exact")
+			left := arrow + theme.DomainStyle.Render(domain)
+			gap := rowWidth - lipgloss.Width(left) - lipgloss.Width(badge)
+			if gap < 1 {
+				gap = 1
+			}
+			return style.Width(rowWidth).Render(left + strings.Repeat(" ", gap) + badge)
+		})
+	}
+
+	help := lipgloss.NewStyle().
+		Foreground(theme.ColorDusty).
+		Width(innerWidth).
+		Align(lipgloss.Center).
+		Render("[" + theme.HelpKeyStyle.Render("↑↓") + " Navigate]   [" +
+			theme.HelpKeyStyle.Render("r") + " Revoke]   [" +
+			theme.HelpKeyStyle.Render("Esc") + " Close]")
+
+	inner := lipgloss.JoinVertical(lipgloss.Center,
+		"",
+		title,
+		"",
+		subtitle,
+		"",
+		divider,
+		"",
+		listView,
+		"",
+		divider,
+		"",
+		help,
+		"",
+	)
+	box := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(theme.ColorAmber).
+		Background(theme.ColorOakDark).
+		Padding(0, 2).
+		Width(boxWidth).
+		Render(inner)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+}
+
 // pendingEmptyState renders the empty state for the left pane.
 func pendingEmptyState(width, height int) string {
 	icon := lipgloss.NewStyle().Foreground(theme.ColorProof).Render(theme.IconCheck)

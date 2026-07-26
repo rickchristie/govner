@@ -113,10 +113,10 @@ func (m *Model) renderColumnHeader(width int) string {
 		tbl = tableutil.NewTable("TIME", "DOMAIN", "SOURCE", "METHOD", "REASON")
 	}
 	tbl.SetHeaderStyle(theme.ColorDusty, true)
-	tbl.SetMinWidth(0, 10)  // TIME
-	tbl.SetMinWidth(1, 26)  // DOMAIN
-	tbl.SetMinWidth(2, 16)  // SOURCE
-	tbl.SetMinWidth(3, 7)   // METHOD
+	tbl.SetMinWidth(0, 10) // TIME
+	tbl.SetMinWidth(1, 26) // DOMAIN
+	tbl.SetMinWidth(2, 16) // SOURCE
+	tbl.SetMinWidth(3, 7)  // METHOD
 	return theme.ColumnHeaderStyle.Width(width).Render(" " + tbl.RenderHeader())
 }
 
@@ -228,6 +228,8 @@ func (m *Model) renderType(decision string) string {
 		return theme.ProofStyle.Render("whitelist")
 	case "approved":
 		return lipgloss.NewStyle().Foreground(theme.ColorAmber).Render("approved")
+	case "session":
+		return lipgloss.NewStyle().Foreground(theme.ColorVerdigris).Bold(true).Render("session")
 	default:
 		return theme.DimStyle.Render(decision)
 	}

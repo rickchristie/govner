@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
@@ -36,6 +38,7 @@ type MockApp struct {
 	RestartContainerErr error
 	ProxyRunning        bool
 	HeaderHealthVal     HeaderHealth
+	SessionAllowErr     error
 
 	// Clipboard controllable return values.
 	CaptureClipboardResult *clipboard.ClipboardEvent
@@ -47,6 +50,8 @@ type MockApp struct {
 	// Recorded calls for assertions.
 	ApprovedIDs         []string
 	DeniedIDs           []string
+	SessionAllowedCalls []string
+	SessionRevokedCalls []string
 	StoppedContainers   []string
 	RestartedContainers []string
 	UpdatedPortForwards []config.PortForwardRule
@@ -60,6 +65,7 @@ type MockApp struct {
 
 	startupWarnings []string
 	pendingRequests []*PendingRequest
+	sessionDomains  map[string]struct{}
 }
 
 // SettingsUpdate records a call to UpdateSettings.
@@ -84,6 +90,7 @@ func NewMockApp(cfg *config.Config, cooperDir string) *MockApp {
 		squidLogs:       make(chan string, 1024),
 		ProxyRunning:    true,
 		HeaderHealthVal: HeaderHealth{Proxy: true, Socat: true, Bridge: true},
+		sessionDomains:  make(map[string]struct{}),
 	}
 }
 
@@ -155,11 +162,57 @@ func (m *MockApp) PendingRequests() []*PendingRequest {
 	return m.pendingRequests
 }
 
+func (m *MockApp) AllowDomainForSession(domain string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.SessionAllowedCalls = append(m.SessionAllowedCalls, domain)
+	if m.SessionAllowErr != nil {
+		return "", m.SessionAllowErr
+	}
+	normalized := normalizeSessionDomainForTestApp(domain)
+	m.sessionDomains[normalized] = struct{}{}
+	return normalized, nil
+}
+
+func (m *MockApp) RevokeDomainForSession(domain string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.SessionRevokedCalls = append(m.SessionRevokedCalls, domain)
+	normalized := normalizeSessionDomainForTestApp(domain)
+	if _, ok := m.sessionDomains[normalized]; !ok {
+		return false
+	}
+	delete(m.sessionDomains, normalized)
+	return true
+}
+
+func (m *MockApp) IsDomainAllowedForSession(domain string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.sessionDomains[normalizeSessionDomainForTestApp(domain)]
+	return ok
+}
+
+func (m *MockApp) SessionAllowedDomains() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	domains := make([]string, 0, len(m.sessionDomains))
+	for domain := range m.sessionDomains {
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+	return domains
+}
+
 // SetPendingRequests sets the list returned by PendingRequests.
 func (m *MockApp) SetPendingRequests(prs []*PendingRequest) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pendingRequests = prs
+}
+
+func normalizeSessionDomainForTestApp(domain string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
 }
 
 // ----- Container management -----

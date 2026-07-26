@@ -114,6 +114,229 @@ func TestApproveFlow(t *testing.T) {
 	}
 }
 
+func TestSessionDomainAutoApprovesExactHostnameAndAudits(t *testing.T) {
+	sockPath := tempSocketPath(t)
+	listener := NewACLListener(sockPath, 5*time.Second)
+	if err := listener.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer listener.Stop()
+
+	firstResult := make(chan string, 1)
+	firstErr := make(chan error, 1)
+	go func() {
+		response, err := sendRequest(sockPath, "Api.Example.com. 443 10.0.0.2")
+		firstResult <- response
+		firstErr <- err
+	}()
+
+	var first ACLRequest
+	select {
+	case first = <-listener.RequestChan():
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first manual review request")
+	}
+
+	normalized, err := listener.AllowDomainForSession(first.Domain)
+	if err != nil {
+		t.Fatalf("AllowDomainForSession failed: %v", err)
+	}
+	if normalized != "api.example.com" {
+		t.Fatalf("normalized domain = %q, want %q", normalized, "api.example.com")
+	}
+	if err := <-firstErr; err != nil {
+		t.Fatalf("first sendRequest failed: %v", err)
+	}
+	if response := <-firstResult; response != "OK" {
+		t.Fatalf("first response = %q, want OK", response)
+	}
+
+	select {
+	case event := <-listener.DecisionChan():
+		if event.Reason != "session" || event.Decision != DecisionAllow || !event.Prompted {
+			t.Fatalf("first decision = (%v, %q, prompted=%t), want (allow, session, true)",
+				event.Decision, event.Reason, event.Prompted)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first session decision event")
+	}
+
+	// Case and a DNS trailing dot normalize to the same exact hostname.
+	response, err := sendRequest(sockPath, "API.EXAMPLE.COM. 443 10.0.0.3")
+	if err != nil {
+		t.Fatalf("automatic sendRequest failed: %v", err)
+	}
+	if response != "OK" {
+		t.Fatalf("automatic response = %q, want OK", response)
+	}
+	select {
+	case request := <-listener.RequestChan():
+		t.Fatalf("automatically allowed request unexpectedly required review: %+v", request)
+	case <-time.After(150 * time.Millisecond):
+	}
+	select {
+	case event := <-listener.DecisionChan():
+		if event.Reason != "session" || event.Request.Domain != "API.EXAMPLE.COM." || event.Prompted {
+			t.Fatalf("automatic decision event = %+v", event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for automatic session decision event")
+	}
+
+	// Exact means exact: a subdomain still requires an independent decision.
+	subdomainResult := make(chan string, 1)
+	go func() {
+		response, _ := sendRequest(sockPath, "child.api.example.com 443 10.0.0.4")
+		subdomainResult <- response
+	}()
+	select {
+	case request := <-listener.RequestChan():
+		if request.Domain != "child.api.example.com" {
+			t.Fatalf("review domain = %q, want child.api.example.com", request.Domain)
+		}
+		listener.Deny(request.ID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("exact session allowance incorrectly covered a subdomain")
+	}
+	if response := <-subdomainResult; response != "ERR" {
+		t.Fatalf("subdomain response = %q, want ERR", response)
+	}
+}
+
+func TestSessionDomainAllowanceResolvesAllAlreadyPendingRequests(t *testing.T) {
+	sockPath := tempSocketPath(t)
+	listener := NewACLListener(sockPath, 5*time.Second)
+	if err := listener.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer listener.Stop()
+
+	const requestCount = 4
+	responses := make(chan string, requestCount)
+	for i := 0; i < requestCount; i++ {
+		go func(source int) {
+			response, _ := sendRequest(sockPath, fmt.Sprintf(
+				"burst.example.com 443 10.0.0.%d", source+10,
+			))
+			responses <- response
+		}(i)
+	}
+
+	for i := 0; i < requestCount; i++ {
+		select {
+		case request := <-listener.RequestChan():
+			if request.Domain != "burst.example.com" {
+				t.Fatalf("pending domain = %q, want burst.example.com", request.Domain)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("received only %d/%d pending requests", i, requestCount)
+		}
+	}
+
+	if _, err := listener.AllowDomainForSession("burst.example.com"); err != nil {
+		t.Fatalf("AllowDomainForSession failed: %v", err)
+	}
+	for i := 0; i < requestCount; i++ {
+		select {
+		case response := <-responses:
+			if response != "OK" {
+				t.Fatalf("response %d = %q, want OK", i, response)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for response %d", i)
+		}
+	}
+	for i := 0; i < requestCount; i++ {
+		select {
+		case event := <-listener.DecisionChan():
+			if event.Decision != DecisionAllow || event.Reason != "session" || !event.Prompted {
+				t.Fatalf("decision %d = (%v, %q, prompted=%t), want (allow, session, true)",
+					i, event.Decision, event.Reason, event.Prompted)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for decision event %d", i)
+		}
+	}
+}
+
+func TestSessionDomainRevokeAndStopClearState(t *testing.T) {
+	sockPath := tempSocketPath(t)
+	listener := NewACLListener(sockPath, 5*time.Second)
+	if err := listener.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	for _, domain := range []string{"z.example.com", "a.example.com"} {
+		if _, err := listener.AllowDomainForSession(domain); err != nil {
+			t.Fatalf("allow %s: %v", domain, err)
+		}
+	}
+	if got := listener.SessionAllowedDomains(); !equalStrings(got, []string{"a.example.com", "z.example.com"}) {
+		t.Fatalf("session domains = %v, want sorted exact domains", got)
+	}
+	if !listener.RevokeDomainForSession("A.EXAMPLE.COM.") {
+		t.Fatal("expected normalized revoke to remove a.example.com")
+	}
+	if listener.IsDomainAllowedForSession("a.example.com") {
+		t.Fatal("revoked domain remained session-allowed")
+	}
+
+	result := make(chan string, 1)
+	go func() {
+		response, _ := sendRequest(sockPath, "a.example.com 443 10.0.0.8")
+		result <- response
+	}()
+	select {
+	case request := <-listener.RequestChan():
+		listener.Deny(request.ID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("revoked domain did not return to manual review")
+	}
+	if response := <-result; response != "ERR" {
+		t.Fatalf("revoked-domain response = %q, want ERR", response)
+	}
+
+	if err := listener.Stop(); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	if got := listener.SessionAllowedDomains(); len(got) != 0 {
+		t.Fatalf("session domains after Stop = %v, want empty", got)
+	}
+	if _, err := listener.AllowDomainForSession("after-stop.example.com"); err == nil {
+		t.Fatal("AllowDomainForSession succeeded after Stop")
+	}
+	if got := listener.SessionAllowedDomains(); len(got) != 0 {
+		t.Fatalf("post-Stop allow repopulated session domains: %v", got)
+	}
+}
+
+func TestSessionDomainValidationRejectsBroaderOrNonDNSInputs(t *testing.T) {
+	listener := NewACLListener(tempSocketPath(t), time.Second)
+	for _, domain := range []string{
+		"",
+		"*.example.com",
+		".example.com",
+		"example.com/path",
+		"example.com:443",
+		"127.0.0.1",
+		"127.1",
+		"2130706433",
+		"[::1]",
+		"-edge.example.com",
+		"edge-.example.com",
+		"example..com",
+	} {
+		t.Run(domain, func(t *testing.T) {
+			if _, err := listener.AllowDomainForSession(domain); err == nil {
+				t.Fatalf("AllowDomainForSession(%q) succeeded, want validation error", domain)
+			}
+		})
+	}
+	if got := listener.SessionAllowedDomains(); len(got) != 0 {
+		t.Fatalf("invalid inputs changed session domains: %v", got)
+	}
+}
+
 func TestDenyFlow(t *testing.T) {
 	sockPath := tempSocketPath(t)
 
@@ -148,6 +371,18 @@ func TestDenyFlow(t *testing.T) {
 	if blocked[0].Domain != "evil.com" {
 		t.Errorf("blocked domain mismatch: got %s", blocked[0].Domain)
 	}
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestTimeoutFailClosed(t *testing.T) {

@@ -105,10 +105,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ---- Channel events ----
 	case events.ACLRequestMsg:
+		// Request and decision streams are independent. A same-domain session
+		// decision may reach Bubble Tea before its already-published request.
+		// Consume that pair here even if the user revoked the domain meanwhile.
+		if _, alreadyResolved := m.resolvedPromptedACLRequests[msg.Request.ID]; alreadyResolved {
+			delete(m.resolvedPromptedACLRequests, msg.Request.ID)
+			if m.app != nil {
+				if ch := m.app.ACLRequests(); ch != nil {
+					return m, listenACL(ch)
+				}
+			}
+			return m, nil
+		}
+		m.seenPromptedACLRequests[msg.Request.ID] = struct{}{}
+
 		// ACL events always go to the proxy monitor regardless of active tab.
 		// The host-side alert also fires here in the root shell, not in the
 		// proxymon sub-model, so every request that actually reached manual
 		// approval can alert even while the user is on another tab.
+		//
+		// A same-domain request may already be queued here when session access
+		// is enabled. The listener has resolved it, so suppress the stale prompt
+		// and alert while continuing to drain the request stream.
+		if m.app != nil && m.app.IsDomainAllowedForSession(msg.Request.Domain) {
+			if ch := m.app.ACLRequests(); ch != nil {
+				return m, listenACL(ch)
+			}
+			return m, nil
+		}
 		var cmd tea.Cmd
 		if m.proxyMonModel != nil {
 			var sm SubModel
@@ -125,10 +149,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, listenCmd, playProxyAlertCmd(m.alertPlayer))
 
 	case events.ACLDecisionMsg:
+		if msg.Event.Prompted {
+			if _, requestSeen := m.seenPromptedACLRequests[msg.Event.Request.ID]; requestSeen {
+				delete(m.seenPromptedACLRequests, msg.Event.Request.ID)
+			} else {
+				m.resolvedPromptedACLRequests[msg.Event.Request.ID] = struct{}{}
+			}
+		}
+
+		// A decision can resolve another same-domain request while it is still
+		// visible in the monitor. Route the fact there as well as to history.
+		var monitorCmd tea.Cmd
+		if m.proxyMonModel != nil {
+			var sm SubModel
+			sm, monitorCmd = m.proxyMonModel.Update(msg)
+			m.proxyMonModel = sm
+		}
+
 		// Route decision to the appropriate history tab.
 		entry := history.HistoryEntry{
 			Request:   msg.Event.Request,
-			Decision:  msg.Event.Reason, // "approved", "denied", "timeout"
+			Decision:  msg.Event.Reason, // "approved", "session", "denied", "timeout"
 			Timestamp: msg.Event.Request.Timestamp,
 		}
 		if msg.Event.Decision == app.DecisionAllow {
@@ -151,7 +192,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				listenCmd = listenACLDecisions(ch)
 			}
 		}
-		return m, listenCmd
+		return m, tea.Batch(monitorCmd, listenCmd)
 
 	case events.BridgeLogMsg:
 		var cmd tea.Cmd
@@ -394,6 +435,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		// Swallow all other keys while modal is up.
 		return m, nil
+	}
+
+	// Screen-local modals own the keyboard before global quit, tab, or
+	// clipboard shortcuts. This keeps infrastructure-specific dialog state in
+	// its screen while preserving the root shell's explicit routing.
+	if active := m.activeSubModel(); active != nil {
+		if owner, ok := active.(interface{ ModalActive() bool }); ok && owner.ModalActive() {
+			cmd := m.forwardToActive(msg)
+			return m, cmd
+		}
 	}
 
 	editingText := m.isTextInputActive()
@@ -1038,7 +1089,9 @@ func (m *Model) helpBar(width int) string {
 	case theme.TabMonitor:
 		bindings = append(bindings,
 			HelpBinding{Key: "a", Desc: "Approve"},
+			HelpBinding{Key: "w", Desc: "Allow session"},
 			HelpBinding{Key: "d", Desc: "Deny"},
+			HelpBinding{Key: "s", Desc: "Session access"},
 		)
 	case theme.TabContainers:
 		bindings = append(bindings,

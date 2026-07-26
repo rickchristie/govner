@@ -70,6 +70,12 @@ type Model struct {
 	headerHealth       app.HeaderHealth
 	alertPlayer        AlertPlayer
 
+	// ACL requests and decisions arrive on separate channels. Track their
+	// pairing so a session-resolved decision that wins the scheduling race
+	// cannot be followed by a stale permission prompt.
+	seenPromptedACLRequests     map[string]struct{}
+	resolvedPromptedACLRequests map[string]struct{}
+
 	// Shutdown state.
 	shuttingDown  bool
 	shutdownModel *loading.Model
@@ -90,10 +96,12 @@ func NewModel(a app.App) *Model {
 		health = a.HeaderHealth()
 	}
 	return &Model{
-		app:          a,
-		activeTab:    theme.TabContainers,
-		tabBar:       tb,
-		headerHealth: health,
+		app:                         a,
+		activeTab:                   theme.TabContainers,
+		tabBar:                      tb,
+		headerHealth:                health,
+		seenPromptedACLRequests:     make(map[string]struct{}),
+		resolvedPromptedACLRequests: make(map[string]struct{}),
 	}
 }
 
@@ -103,6 +111,8 @@ func NewModel(a app.App) *Model {
 // before the App is fully initialised.
 func (m *Model) SetApp(a app.App) {
 	m.app = a
+	clear(m.seenPromptedACLRequests)
+	clear(m.resolvedPromptedACLRequests)
 	if a != nil {
 		m.headerHealth = a.HeaderHealth()
 	}
