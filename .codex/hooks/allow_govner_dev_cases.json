@@ -47,11 +47,53 @@
     "why": "The repo-owned Docker build test uses test-prefixed images and bounded modes."
   },
   {
+    "id": "cooper-docker-build-clean",
+    "command": "./cooper/test-docker-build.sh clean > /tmp/cooper-test-docker-build-clean-1.txt 2>&1",
+    "expected": true,
+    "why": "Cleanup removes only test-mirror, test-latest, and test-pinned containers, images, and gitignored fixture directories."
+  },
+  {
+    "id": "cooper-docker-build-default",
+    "command": "./cooper/test-docker-build.sh > /tmp/cooper-docker-build-default.txt 2>&1",
+    "expected": true,
+    "why": "The script's default mode is the reviewed all-mode Docker build gate."
+  },
+  {
+    "id": "cooper-docker-build-mirror",
+    "command": "./cooper/test-docker-build.sh mirror > /tmp/cooper-docker-build-mirror.txt 2>&1",
+    "expected": true,
+    "why": "The mirror mode uses only the script's isolated test-mirror resources."
+  },
+  {
+    "id": "cooper-docker-build-latest",
+    "command": "./cooper/test-docker-build.sh latest > /tmp/cooper-docker-build-latest.txt 2>&1",
+    "expected": true,
+    "why": "The latest mode uses only the script's isolated test-latest resources."
+  },
+  {
+    "id": "cooper-docker-build-pinned",
+    "command": "./cooper/test-docker-build.sh pinned > /tmp/cooper-docker-build-pinned.txt 2>&1",
+    "expected": true,
+    "why": "The pinned mode uses only the script's isolated test-pinned resources."
+  },
+  {
     "id": "go-test-full-suite",
     "command": "go test ./... > /tmp/cooper-go-test.txt 2>&1",
     "cwd": "{REPO_ROOT}/cooper",
     "expected": true,
     "why": "Repo-local Go tests are the required Cooper verification gate and output is fully captured."
+  },
+  {
+    "id": "go-test-gowt-full-suite",
+    "command": "go test -C ./gowt ./... > /tmp/gowt-go-test.txt 2>&1",
+    "expected": true,
+    "why": "The Gowt module's complete Go test suite is repo-local and fully logged."
+  },
+  {
+    "id": "go-test-pgflock-full-suite",
+    "command": "go test -C ./pgflock ./... > /tmp/pgflock-go-test.txt 2>&1",
+    "expected": true,
+    "why": "The pgflock module's complete Go test suite is repo-local and fully logged."
   },
   {
     "id": "go-test-cd-wrapper",
@@ -105,6 +147,31 @@
     "cwd": "{REPO_ROOT}/cooper",
     "expected": true,
     "why": "A build-only verification may write its binary and logs under /tmp."
+  },
+  {
+    "id": "go-build-cooper-dev-binary",
+    "command": "go build -C ./cooper -o ./cooper . > /tmp/cooper-build.txt 2>&1",
+    "expected": true,
+    "why": "Cooper's conventional development binary is gitignored and the exact repo module and logs are visible."
+  },
+  {
+    "id": "go-build-gowt-dev-binary",
+    "command": "go build -C ./gowt -o ./gowt . > /tmp/gowt-build.txt 2>&1",
+    "expected": true,
+    "why": "Gowt's conventional development binary is gitignored and the exact repo module and logs are visible."
+  },
+  {
+    "id": "go-build-pgflock-dev-binary",
+    "command": "go build -C ./pgflock -o ./pgflock . > /tmp/pgflock-build.txt 2>&1",
+    "expected": true,
+    "why": "pgflock's conventional development binary is gitignored and the exact repo module and logs are visible."
+  },
+  {
+    "id": "go-build-pgflock-vscode-shape",
+    "command": "go build -o {REPO_ROOT}/pgflock/pgflock {REPO_ROOT}/pgflock > /tmp/pgflock-build.txt 2>&1",
+    "cwd": "{REPO_ROOT}/pgflock",
+    "expected": true,
+    "why": "The absolute-path form used by the repository's VS Code build task remains exact and fully logged."
   },
   {
     "id": "go-test-compile-tmp-binary",
@@ -273,10 +340,106 @@
     "why": "Only the script's documented normal and clean modes are reviewed."
   },
   {
-    "id": "deny-unknown-script",
-    "command": "./scripts/release-cooper.sh > /tmp/release-cooper.txt 2>&1",
+    "id": "release-cooper-preview",
+    "command": "./scripts/release-cooper.sh > /tmp/cooper-release-preview.txt 2>&1",
+    "expected": true,
+    "why": "The Cooper release generator reads version/history, writes a private tag-message file under /tmp, and prints reviewed release commands."
+  },
+  {
+    "id": "release-gowt-preview",
+    "command": "./scripts/release-gowt.sh > /tmp/gowt-release-preview.txt 2>&1",
+    "expected": true,
+    "why": "The Gowt release generator reads version/history, writes a private tag-message file under /tmp, and prints reviewed release commands."
+  },
+  {
+    "id": "release-pgflock-preview",
+    "command": "./scripts/release-pgflock.sh > /tmp/pgflock-release-preview.txt 2>&1",
+    "expected": true,
+    "why": "The pgflock release generator reads version/history, writes a private tag-message file under /tmp, and prints reviewed release commands."
+  },
+  {
+    "id": "release-cooper-dist-mkdir",
+    "command": "mkdir -p ./dist/cooper/v{COOPER_VERSION}",
+    "expected": true,
+    "why": "The only worktree directory created directly by a release is Cooper's current-version artifact directory."
+  },
+  {
+    "id": "release-cooper-build-linux-amd64",
+    "command": "GOOS=linux GOARCH=amd64 go build -C ./cooper -o {REPO_ROOT}/dist/cooper/v{COOPER_VERSION}/cooper-linux-amd64 . > /tmp/cooper-release-linux-amd64.txt 2>&1",
+    "expected": true,
+    "why": "The Linux artifact target, module, current version, platform, and diagnostic log exactly match release-cooper.sh."
+  },
+  {
+    "id": "release-cooper-build-darwin-arm64",
+    "command": "GOOS=darwin GOARCH=arm64 go build -C ./cooper -o {REPO_ROOT}/dist/cooper/v{COOPER_VERSION}/cooper-darwin-arm64 . > /tmp/cooper-release-darwin-arm64.txt 2>&1",
+    "expected": true,
+    "why": "The Apple Silicon artifact target, module, current version, platform, and diagnostic log exactly match release-cooper.sh."
+  },
+  {
+    "id": "release-cooper-build-darwin-amd64",
+    "command": "GOOS=darwin GOARCH=amd64 go build -C ./cooper -o {REPO_ROOT}/dist/cooper/v{COOPER_VERSION}/cooper-darwin-amd64 . > /tmp/cooper-release-darwin-amd64.txt 2>&1",
+    "expected": true,
+    "why": "The Intel macOS artifact target, module, current version, platform, and diagnostic log exactly match release-cooper.sh."
+  },
+  {
+    "id": "release-cooper-tag",
+    "command": "git tag -a cooper/v{COOPER_VERSION} -m \"cooper {COOPER_VERSION}\"",
+    "expected": true,
+    "why": "Annotated release tags are restricted to the current semver declared by a known Govner project."
+  },
+  {
+    "id": "release-gowt-tag",
+    "command": "git tag -a gowt/v{GOWT_VERSION} -m \"gowt {GOWT_VERSION}\"",
+    "expected": true,
+    "why": "Annotated release tags are restricted to the current semver declared by a known Govner project."
+  },
+  {
+    "id": "release-pgflock-tag",
+    "command": "git tag -a pgflock/v{PGFLOCK_VERSION} -m \"pgflock {PGFLOCK_VERSION}\"",
+    "expected": true,
+    "why": "Annotated release tags are restricted to the current semver declared by a known Govner project."
+  },
+  {
+    "id": "release-cooper-push-tag",
+    "command": "git push origin cooper/v{COOPER_VERSION}",
+    "expected": true,
+    "why": "The requested Git push policy includes the exact current Cooper release tag on origin."
+  },
+  {
+    "id": "release-cooper-module-index",
+    "command": "GOPROXY=https://proxy.golang.org go list -m github.com/rickchristie/govner/cooper@v{COOPER_VERSION} > /tmp/cooper-release-index.txt 2>&1",
+    "expected": true,
+    "why": "Go proxy indexing is restricted to a known Govner module at its current declared release version."
+  },
+  {
+    "id": "release-gowt-module-index",
+    "command": "GOPROXY=https://proxy.golang.org go list -m github.com/rickchristie/govner/gowt@v{GOWT_VERSION} > /tmp/gowt-release-index.txt 2>&1",
+    "expected": true,
+    "why": "Go proxy indexing is restricted to a known Govner module at its current declared release version."
+  },
+  {
+    "id": "release-pgflock-module-index",
+    "command": "GOPROXY=https://proxy.golang.org go list -m github.com/rickchristie/govner/pgflock@v{PGFLOCK_VERSION} > /tmp/pgflock-release-index.txt 2>&1",
+    "expected": true,
+    "why": "Go proxy indexing is restricted to a known Govner module at its current declared release version."
+  },
+  {
+    "id": "deny-release-preview-argument",
+    "command": "./scripts/release-cooper.sh --force > /tmp/cooper-release-preview.txt 2>&1",
     "expected": false,
-    "why": "Release scripts mutate version control and published artifacts and need explicit approval."
+    "why": "Release generators currently define no arguments, so a future unreviewed mode must fail closed."
+  },
+  {
+    "id": "deny-release-preview-no-log",
+    "command": "./scripts/release-cooper.sh",
+    "expected": false,
+    "why": "Release preview output must be retained under /tmp; the hook supplies canonical retry guidance."
+  },
+  {
+    "id": "deny-maintenance-convert-agents",
+    "command": "./scripts/convert-agents.sh > /tmp/convert-agents.txt 2>&1",
+    "expected": false,
+    "why": "The maintenance utility overwrites tracked AGENTS.md files and is not a build, test, or release workflow."
   },
   {
     "id": "deny-background-test",
@@ -334,11 +497,77 @@
     "why": "A default Go build writes its binary into the workspace."
   },
   {
-    "id": "deny-go-build-workspace-output",
-    "command": "go build -o ./cooper ./ > /tmp/cooper-build.txt 2>&1",
+    "id": "deny-go-build-unreviewed-workspace-output",
+    "command": "go build -o ./custom-binary ./ > /tmp/cooper-build.txt 2>&1",
     "cwd": "{REPO_ROOT}/cooper",
     "expected": false,
-    "why": "Build-only verification may not overwrite a workspace binary."
+    "why": "Only the three conventional gitignored development-binary paths may be written inside the workspace."
+  },
+  {
+    "id": "deny-go-build-dev-binary-source-mismatch",
+    "command": "go build -C ./gowt -o ../cooper/cooper . > /tmp/cooper-build.txt 2>&1",
+    "expected": false,
+    "why": "A development binary may only be built from its matching project module."
+  },
+  {
+    "id": "deny-go-build-dev-binary-no-log",
+    "command": "go build -C ./cooper -o ./cooper .",
+    "expected": false,
+    "why": "Even conventional development builds must preserve complete diagnostics under /tmp."
+  },
+  {
+    "id": "deny-release-build-wrong-version",
+    "command": "GOOS=linux GOARCH=amd64 go build -C ./cooper -o {REPO_ROOT}/dist/cooper/v999.0.0/cooper-linux-amd64 . > /tmp/cooper-release-linux-amd64.txt 2>&1",
+    "expected": false,
+    "why": "Release artifacts may only target the version currently declared by Cooper."
+  },
+  {
+    "id": "deny-release-build-platform-mismatch",
+    "command": "GOOS=darwin GOARCH=arm64 go build -C ./cooper -o {REPO_ROOT}/dist/cooper/v{COOPER_VERSION}/cooper-linux-amd64 . > /tmp/cooper-release-linux-amd64.txt 2>&1",
+    "expected": false,
+    "why": "The artifact filename must match the reviewed GOOS and GOARCH pair."
+  },
+  {
+    "id": "deny-release-build-wrong-project",
+    "command": "GOOS=linux GOARCH=amd64 go build -C ./gowt -o {REPO_ROOT}/dist/cooper/v{COOPER_VERSION}/cooper-linux-amd64 . > /tmp/cooper-release-linux-amd64.txt 2>&1",
+    "expected": false,
+    "why": "Cooper release artifacts must be built from the Cooper module."
+  },
+  {
+    "id": "deny-release-build-no-log",
+    "command": "GOOS=linux GOARCH=amd64 go build -C ./cooper -o {REPO_ROOT}/dist/cooper/v{COOPER_VERSION}/cooper-linux-amd64 .",
+    "expected": false,
+    "why": "Release build diagnostics must capture stdout and stderr under /tmp."
+  },
+  {
+    "id": "deny-release-mkdir-wrong-version",
+    "command": "mkdir -p ./dist/cooper/v999.0.0",
+    "expected": false,
+    "why": "The only release directory exception is Cooper's current declared version."
+  },
+  {
+    "id": "deny-release-index-wrong-version",
+    "command": "GOPROXY=https://proxy.golang.org go list -m github.com/rickchristie/govner/cooper@v999.0.0 > /tmp/cooper-release-index.txt 2>&1",
+    "expected": false,
+    "why": "Go proxy indexing is restricted to the project's current declared version."
+  },
+  {
+    "id": "deny-release-index-external-module",
+    "command": "GOPROXY=https://proxy.golang.org go list -m example.com/project@v1.0.0 > /tmp/release-index.txt 2>&1",
+    "expected": false,
+    "why": "The release network exception is restricted to Govner's three known module paths."
+  },
+  {
+    "id": "deny-release-index-other-proxy",
+    "command": "GOPROXY=https://example.com go list -m github.com/rickchristie/govner/cooper@v{COOPER_VERSION} > /tmp/cooper-release-index.txt 2>&1",
+    "expected": false,
+    "why": "The release network exception permits only the official Go module proxy."
+  },
+  {
+    "id": "deny-release-index-no-log",
+    "command": "GOPROXY=https://proxy.golang.org go list -m github.com/rickchristie/govner/cooper@v{COOPER_VERSION}",
+    "expected": false,
+    "why": "Go proxy indexing output must be retained under /tmp."
   },
   {
     "id": "deny-go-get",
@@ -439,22 +668,184 @@
     "why": "Creating Docker resources is not a read-only diagnostic."
   },
   {
-    "id": "deny-git-add",
+    "id": "git-add-all",
     "command": "git add -A",
-    "expected": false,
-    "why": "Govner instructions require explicit permission for Git writes."
+    "expected": true,
+    "why": "The user explicitly requested repo-scoped git add auto-approval."
   },
   {
-    "id": "deny-git-commit",
+    "id": "git-add-paths",
+    "command": "git add AGENTS.md .codex/config.toml",
+    "expected": true,
+    "why": "Literal pathspecs are resolved inside Govner and sensitive or forced ignored paths remain denied."
+  },
+  {
+    "id": "git-commit-message",
     "command": "git commit -m 'Update hook'",
-    "expected": false,
-    "why": "Creating a commit remains an explicit user-authorized action."
+    "expected": true,
+    "why": "The user explicitly requested non-interactive git commit auto-approval."
   },
   {
-    "id": "deny-git-push",
+    "id": "git-commit-all-message",
+    "command": "git commit -am 'Update tracked files'",
+    "expected": true,
+    "why": "Tracked-file staging plus a non-interactive message is a reviewed commit form."
+  },
+  {
+    "id": "git-commit-amend-no-edit",
+    "command": "git commit --amend --no-edit",
+    "expected": true,
+    "why": "Amending locally without launching an editor is included in the requested commit policy; force-pushing remains denied."
+  },
+  {
+    "id": "git-fetch-origin-main",
+    "command": "git fetch origin main",
+    "expected": true,
+    "why": "The user explicitly requested fetches from Govner's origin remote."
+  },
+  {
+    "id": "git-fetch-default",
+    "command": "git fetch",
+    "expected": true,
+    "why": "A default fetch uses the repository's existing configured remote and cannot add a new remote through this policy."
+  },
+  {
+    "id": "git-fetch-origin-tags",
+    "command": "git fetch --prune --tags origin",
+    "expected": true,
+    "why": "Pruning and fetching tag metadata from origin are reviewed release preparation operations."
+  },
+  {
+    "id": "git-push-origin-main",
     "command": "git push origin main",
+    "expected": true,
+    "why": "The user explicitly requested non-force pushes to Govner's origin remote."
+  },
+  {
+    "id": "git-push-default",
+    "command": "git push",
+    "expected": true,
+    "why": "A default push uses an existing configured upstream; Git configuration changes are not auto-approved."
+  },
+  {
+    "id": "git-push-upstream-feature",
+    "command": "git push --set-upstream origin feature/auto-approve",
+    "expected": true,
+    "why": "A normal branch push to origin is included; destructive refspecs and force options remain denied."
+  },
+  {
+    "id": "git-add-commit-push-workflow",
+    "command": "git add .codex/hooks/allow_govner_dev.py && git commit -m 'Update hook' && git push origin main",
+    "expected": true,
+    "why": "A compound request is approved only because every stage independently matches the requested safe Git policy."
+  },
+  {
+    "id": "deny-git-add-force",
+    "command": "git add --force .env",
     "expected": false,
-    "why": "Pushing changes affects a remote repository and must never be automatic."
+    "why": "Forced staging can bypass ignore protections and expose sensitive files."
+  },
+  {
+    "id": "deny-git-add-outside-repo",
+    "command": "git add ../mark/README.md",
+    "expected": false,
+    "why": "Git pathspecs must resolve inside Govner."
+  },
+  {
+    "id": "deny-git-add-pathspec-file",
+    "command": "git add --pathspec-from-file=/tmp/paths",
+    "expected": false,
+    "why": "Indirect pathspec files hide staged targets from policy inspection."
+  },
+  {
+    "id": "deny-git-commit-editor",
+    "command": "git commit",
+    "expected": false,
+    "why": "Auto-approved commits must provide a message, safe message file, fixup target, or amend --no-edit form."
+  },
+  {
+    "id": "deny-git-commit-sensitive-message-file",
+    "command": "git commit -F ~/.ssh/id_ed25519",
+    "expected": false,
+    "why": "Commit message files may not read sensitive paths."
+  },
+  {
+    "id": "deny-git-fetch-url",
+    "command": "git fetch https://example.com/repository.git main",
+    "expected": false,
+    "why": "Fetches are limited to the configured origin remote, not arbitrary URLs."
+  },
+  {
+    "id": "deny-git-fetch-upload-pack",
+    "command": "git fetch --upload-pack=/tmp/helper origin main",
+    "expected": false,
+    "why": "A custom upload-pack can execute an arbitrary program."
+  },
+  {
+    "id": "deny-git-push-force",
+    "command": "git push --force origin main",
+    "expected": false,
+    "why": "Force pushes remain destructive and outside normal push auto-approval."
+  },
+  {
+    "id": "deny-git-workflow-force-push",
+    "command": "git add .codex/hooks/allow_govner_dev.py && git commit -m 'Update hook' && git push --force origin main",
+    "expected": false,
+    "why": "One destructive stage rejects the complete compound Git workflow."
+  },
+  {
+    "id": "deny-git-push-force-with-lease",
+    "command": "git push --force-with-lease origin main",
+    "expected": false,
+    "why": "Force-with-lease still rewrites the remote ref and remains manual."
+  },
+  {
+    "id": "deny-git-push-delete",
+    "command": "git push --delete origin main",
+    "expected": false,
+    "why": "Deleting remote refs remains manual."
+  },
+  {
+    "id": "deny-git-push-refspec",
+    "command": "git push origin HEAD:main",
+    "expected": false,
+    "why": "Explicit destination refspecs can overwrite a different remote ref and remain manual."
+  },
+  {
+    "id": "deny-git-push-other-remote",
+    "command": "git push upstream main",
+    "expected": false,
+    "why": "Explicit pushes are limited to origin."
+  },
+  {
+    "id": "deny-git-tag-force",
+    "command": "git tag -f cooper/v{COOPER_VERSION}",
+    "expected": false,
+    "why": "Replacing an existing release tag remains destructive."
+  },
+  {
+    "id": "deny-git-tag-wrong-version",
+    "command": "git tag -a cooper/v999.0.0 -m 'wrong release'",
+    "expected": false,
+    "why": "Release tags must match the project's current declared semver."
+  },
+  {
+    "id": "deny-git-tag-wrong-message-project",
+    "command": "git tag -a cooper/v{COOPER_VERSION} -F /tmp/gowt-release-tag-message.Ab12Cd",
+    "expected": false,
+    "why": "A generated release tag can read only the matching project's private tag-message file."
+  },
+  {
+    "id": "deny-git-tag-predictable-message-file",
+    "command": "git tag -a cooper/v{COOPER_VERSION} -F /tmp/cooper-release-tag-message.txt",
+    "expected": false,
+    "why": "Predictable /tmp tag-message paths are rejected to avoid symlink-prone release workflows."
+  },
+  {
+    "id": "deny-git-tag-message-file-and-inline",
+    "command": "git tag -a cooper/v{COOPER_VERSION} -F /tmp/cooper-release-tag-message.Ab12Cd -m duplicate",
+    "expected": false,
+    "why": "Generated release tags use exactly one reviewed message source."
   },
   {
     "id": "deny-external-curl",
@@ -585,11 +976,11 @@
     "why": "ANSI-C quoting can synthesize command separators after inspection."
   },
   {
-    "id": "deny-newline-followup",
-    "command": "bash -lc 'go test ./... > /tmp/cooper-go-test.txt 2>&1\\ngit push origin main'",
+    "id": "go-test-then-git-push-newline",
+    "command": "bash -lc 'go test ./... > /tmp/cooper-go-test.txt 2>&1\ngit push origin main'",
     "cwd": "{REPO_ROOT}/cooper",
-    "expected": false,
-    "why": "Every newline-separated statement must be independently allowed."
+    "expected": true,
+    "why": "Every newline-separated statement is independently validated and both the test and requested normal push are allowed."
   },
   {
     "id": "deny-arbitrary-pipe",
@@ -623,11 +1014,11 @@
     "why": "Input logging can capture sensitive terminal data."
   },
   {
-    "id": "deny-safe-then-git",
+    "id": "go-test-then-git-push",
     "command": "bash -lc 'go test ./... > /tmp/cooper-go-test.txt 2>&1; git push origin main'",
     "cwd": "{REPO_ROOT}/cooper",
-    "expected": false,
-    "why": "One safe statement must not hide a remote Git mutation."
+    "expected": true,
+    "why": "The compound remains safe because every statement independently matches the requested test or normal-push policy."
   },
   {
     "id": "deny-or-git",

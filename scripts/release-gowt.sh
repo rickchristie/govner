@@ -64,6 +64,8 @@ TAG_MESSAGE="gowt $VERSION
 Changes since ${PREV_TAG:-"initial"}:
 
 $CHANGELOG"
+TAG_MESSAGE_FILE=$(mktemp "/tmp/gowt-release-tag-message.XXXXXX")
+printf '%s\n' "$TAG_MESSAGE" > "$TAG_MESSAGE_FILE"
 
 echo "========================================"
 echo "  Tag Message Preview"
@@ -77,13 +79,17 @@ echo "  Commands to create and push release"
 echo "========================================"
 echo ""
 echo "# Step 1: Create the annotated tag:"
-echo "git tag -a \"$TAG_NAME\" -m \"$TAG_MESSAGE\""
+# Keep the multiline message in a private /tmp file. Embedding it in a command
+# would require Bash's $'...' syntax, which the permission hook deliberately
+# rejects because it is difficult to validate safely. mktemp also avoids
+# following a pre-created symlink at a predictable path.
+printf 'git tag -a %q -F %q\n' "$TAG_NAME" "$TAG_MESSAGE_FILE"
 echo ""
 echo "# Step 2: Push the tag to remote:"
-echo "git push origin \"$TAG_NAME\""
+printf 'git push origin %q\n' "$TAG_NAME"
 echo ""
 echo "# Step 3: Trigger Go proxy to index the new version:"
-echo "GOPROXY=https://proxy.golang.org go list -m github.com/rickchristie/govner/gowt@v$VERSION"
+echo "GOPROXY=https://proxy.golang.org go list -m github.com/rickchristie/govner/gowt@v$VERSION > /tmp/gowt-release-index.txt 2>&1"
 echo ""
 echo "# After indexing, users can install with:"
 echo "# go install github.com/rickchristie/govner/gowt@latest"

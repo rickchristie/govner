@@ -2,15 +2,17 @@
 """Auto-approve narrowly scoped Govner development commands.
 
 The policy is intentionally syntactic. It recognizes the command shapes used
-by Govner's test workflow, validates every shell statement and path, and emits
-an allow decision only when the whole request is understood. Recognized tests
-with a formatting-only defect are denied with a canonical retry command;
-unknown syntax falls back to Codex's normal approval prompt.
+by Govner's build, test, release, and requested Git workflows, validates every
+shell statement and path, and emits an allow decision only when the whole
+request is understood. Recognized workflows with a formatting-only defect are
+denied with a canonical retry command; unknown syntax falls back to Codex's
+normal approval prompt.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -21,19 +23,111 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 COOPER_ROOT = REPO_ROOT / "cooper"
 TMP_ROOT = Path("/tmp")
 MAX_TIMEOUT_SECONDS = 90 * 60
+PROJECT_ROOTS = {
+    "cooper": COOPER_ROOT,
+    "gowt": REPO_ROOT / "gowt",
+    "pgflock": REPO_ROOT / "pgflock",
+}
+PROJECT_MODULES = {
+    project: f"github.com/rickchristie/govner/{project}"
+    for project in PROJECT_ROOTS
+}
+PROJECT_DEV_BINARIES = {
+    project: root / project
+    for project, root in PROJECT_ROOTS.items()
+}
+SEMVER_RE = re.compile(
+    r"^[0-9]+\.[0-9]+\.[0-9]+"
+    r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+    r"(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$"
+)
 
 COOPER_TEST_SCRIPTS = {
     (COOPER_ROOT / "test-e2e.sh").resolve(): {(), ("clean",)},
     (COOPER_ROOT / "test-docker-build.sh").resolve(): {
         (),
         ("all",),
+        ("clean",),
         ("latest",),
         ("mirror",),
         ("pinned",),
     },
 }
+RELEASE_SCRIPTS = {
+    (REPO_ROOT / f"scripts/release-{project}.sh").resolve(): project
+    for project in PROJECT_ROOTS
+}
+MANUALLY_REVIEWED_SCRIPTS = {
+    (COOPER_ROOT / "internal/templates/doctor.sh").resolve(),
+    (REPO_ROOT / "scripts/convert-agents.sh").resolve(),
+}
+COOPER_RELEASE_TARGETS = {
+    ("darwin", "amd64"),
+    ("darwin", "arm64"),
+    ("linux", "amd64"),
+}
 COOPER_TEST_DRIVER = (COOPER_ROOT / "cmd/cooper-test-driver").resolve()
 TEST_DRIVER_SCENARIOS = {"barrel-env-smoke", "clipboard-smoke"}
+
+GIT_ADD_BOOL_OPTIONS = {
+    "--all",
+    "--dry-run",
+    "--ignore-errors",
+    "--no-all",
+    "--update",
+    "--verbose",
+    "-A",
+    "-n",
+    "-u",
+    "-v",
+}
+GIT_COMMIT_BOOL_OPTIONS = {
+    "--all",
+    "--allow-empty",
+    "--allow-empty-message",
+    "--amend",
+    "--dry-run",
+    "--no-edit",
+    "--no-post-rewrite",
+    "--no-verify",
+    "--quiet",
+    "--reset-author",
+    "--signoff",
+    "--verbose",
+    "-a",
+    "-q",
+    "-s",
+    "-v",
+}
+GIT_FETCH_BOOL_OPTIONS = {
+    "--dry-run",
+    "--no-recurse-submodules",
+    "--no-tags",
+    "--prune",
+    "--prune-tags",
+    "--quiet",
+    "--tags",
+    "--verbose",
+    "-p",
+    "-q",
+    "-t",
+    "-v",
+}
+GIT_PUSH_BOOL_OPTIONS = {
+    "--atomic",
+    "--dry-run",
+    "--follow-tags",
+    "--no-verify",
+    "--porcelain",
+    "--quiet",
+    "--set-upstream",
+    "--verbose",
+    "-n",
+    "-q",
+    "-u",
+    "-v",
+}
+GIT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
 READ_ONLY_COMMANDS = {
     "cat",
@@ -215,6 +309,8 @@ def main() -> int:
         return 0
 
     message = canonical_test_guidance(command, cwd=cwd)
+    if not message:
+        message = canonical_release_guidance(command, cwd=cwd)
     if message:
         emit_permission_decision("deny", message=message)
 
@@ -311,6 +407,50 @@ def canonical_test_guidance(
     if canonical_go is not None:
         return canonical_retry_message(canonical_go)
     return None
+
+
+def canonical_release_guidance(
+    command: str,
+    *,
+    cwd: str | Path | None = None,
+) -> str | None:
+    """Guide an otherwise exact release preview to the required /tmp log."""
+
+    current_cwd = normalize_cwd(cwd)
+    if current_cwd is None or has_shell_wrapped_ansi_c_quote(command):
+        return None
+    script = unwrap_shell(command)
+    if (
+        script is None
+        or has_command_substitution(script)
+        or len(split_shell_statements(script)) != 1
+        or contains_unquoted(script, "&&")
+        or contains_unquoted(script, "||")
+        or contains_unquoted(script, "|")
+        or find_background_amp(script) >= 0
+        or has_forbidden_parameter_expansion(script)
+    ):
+        return None
+
+    parsed = clean_guidance_tokens(script.strip(), current_cwd)
+    if parsed is None:
+        return None
+    tokens, _, _ = parsed
+    tokens = normalize_tokens(tokens, current_cwd)
+    release = resolve_release_script(tokens, current_cwd)
+    if release is None:
+        return None
+
+    script_path, project = release
+    relative = script_path.relative_to(REPO_ROOT).as_posix()
+    canonical = (
+        f"./{relative} > /tmp/{project}-release-preview.txt 2>&1"
+    )
+    return (
+        "Govner rejected this noncanonical release preview; the script did not "
+        "run. Do not ask the user to approve this form. Retry immediately from "
+        f"the Govner repository root with: {canonical}"
+    )
 
 
 def clean_guidance_tokens(
@@ -718,22 +858,34 @@ def is_allowed_simple_command(
     parsed = clean_tokens(statement, cwd)
     if parsed is None:
         return False
-    tokens, stdout_tmp, stderr_tmp = parsed
-    tokens = normalize_tokens(tokens, cwd)
+    raw_tokens, stdout_tmp, stderr_tmp = parsed
+    complete_capture = output_captured or (stdout_tmp and stderr_tmp)
+
+    if (
+        is_release_go_build(raw_tokens, cwd, complete_capture)
+        or is_release_module_index(raw_tokens, cwd, complete_capture)
+    ):
+        return True
+
+    tokens = normalize_tokens(raw_tokens, cwd)
     if not tokens:
         return False
 
-    complete_capture = output_captured or (stdout_tmp and stderr_tmp)
     return (
         is_repo_test_script(tokens, cwd, complete_capture)
         or is_interpreter_test_script(tokens, cwd, complete_capture)
+        or is_repo_release_script(tokens, cwd, complete_capture)
+        or is_interpreter_release_script(tokens, cwd, complete_capture)
         or is_script_pty_wrapper(tokens, cwd)
+        or is_project_dev_build(tokens, cwd, complete_capture)
         or is_go_command(tokens, cwd, complete_capture)
+        or is_git_command(tokens, cwd)
         or is_docker_read_command(tokens)
         or is_lsof_probe(tokens)
         or is_direct_ps_probe(tokens)
         or is_pgrep_probe(tokens)
         or is_tmp_mkdir(tokens)
+        or is_release_mkdir(tokens, cwd)
         or is_read_only_command(tokens, cwd)
     )
 
@@ -932,6 +1084,46 @@ def is_interpreter_test_script(tokens: list[str], cwd: Path, complete_capture: b
     return tuple(tokens[index + 1 :]) in COOPER_TEST_SCRIPTS[script]
 
 
+def is_repo_release_script(tokens: list[str], cwd: Path, complete_capture: bool) -> bool:
+    return (
+        complete_capture
+        and bool(tokens)
+        and tokens[0] not in {"bash", "/bin/bash", "sh", "/bin/sh"}
+        and resolve_release_script(tokens, cwd) is not None
+    )
+
+
+def is_interpreter_release_script(
+    tokens: list[str],
+    cwd: Path,
+    complete_capture: bool,
+) -> bool:
+    return (
+        complete_capture
+        and bool(tokens)
+        and tokens[0] in {"bash", "/bin/bash", "sh", "/bin/sh"}
+        and resolve_release_script(tokens, cwd) is not None
+    )
+
+
+def resolve_release_script(tokens: list[str], cwd: Path) -> tuple[Path, str] | None:
+    if not tokens:
+        return None
+
+    index = 0
+    if tokens[0] in {"bash", "/bin/bash", "sh", "/bin/sh"}:
+        index = 1
+        if index < len(tokens) and tokens[index] == "-x":
+            index += 1
+        if index >= len(tokens):
+            return None
+
+    script = resolve_command_path(tokens[index], cwd)
+    if script not in RELEASE_SCRIPTS or len(tokens) != index + 1:
+        return None
+    return script, RELEASE_SCRIPTS[script]
+
+
 def is_script_pty_wrapper(tokens: list[str], cwd: Path) -> bool:
     parsed = parse_script_pty_wrapper(tokens)
     if parsed is None:
@@ -994,6 +1186,235 @@ def parse_script_pty_wrapper(tokens: list[str]) -> tuple[str, str] | None:
     if not command or not transcript:
         return None
     return command, transcript
+
+
+def normalize_release_tokens(
+    tokens: list[str],
+    cwd: Path,
+    *,
+    allow_remote_proxy: bool,
+) -> tuple[list[str], dict[str, str]] | None:
+    """Normalize wrappers while retaining release-relevant environment values."""
+
+    current = list(tokens)
+    environment: dict[str, str] = {}
+    for _ in range(12):
+        previous = list(current)
+        current = strip_time(current)
+        current = strip_timeout(current)
+        if not current:
+            return None
+
+        start = 1 if current[0] == "env" else 0
+        index = start
+        while index < len(current) and is_env_assignment(current[index]):
+            name, _, value = current[index].partition("=")
+            valid = (
+                (name == "GOOS" and value in {"darwin", "linux"})
+                or (name == "GOARCH" and value in {"amd64", "arm64"})
+                or (
+                    allow_remote_proxy
+                    and name == "GOPROXY"
+                    and value == "https://proxy.golang.org"
+                )
+                or is_allowed_env(current[index], cwd)
+            )
+            if not valid or (name in environment and environment[name] != value):
+                return None
+            environment[name] = value
+            index += 1
+
+        if index > start:
+            current = current[index:]
+        elif start:
+            return None
+        if current == previous:
+            return current, environment
+    return None
+
+
+def is_release_go_build(tokens: list[str], cwd: Path, complete_capture: bool) -> bool:
+    if not complete_capture:
+        return False
+    normalized = normalize_release_tokens(
+        tokens,
+        cwd,
+        allow_remote_proxy=False,
+    )
+    if normalized is None:
+        return False
+    command, environment = normalized
+    if len(command) < 3 or command[:2] != ["go", "build"]:
+        return False
+
+    target = (environment.get("GOOS"), environment.get("GOARCH"))
+    if target not in COOPER_RELEASE_TARGETS:
+        return False
+
+    build_cwd = cwd
+    output = ""
+    packages: list[str] = []
+    index = 2
+    while index < len(command):
+        token = command[index]
+        option, attached = split_option(token)
+        if option == "-C":
+            value, consumed = option_value(command, index, attached)
+            next_cwd = (
+                resolve_safe_path(value, build_cwd, allow_tmp=False)
+                if value
+                else None
+            )
+            if next_cwd is None:
+                return False
+            build_cwd = next_cwd
+            index += consumed
+            continue
+        if option == "-o":
+            value, consumed = option_value(command, index, attached)
+            if value is None or output:
+                return False
+            output = value
+            index += consumed
+            continue
+        if token == "-trimpath":
+            index += 1
+            continue
+        if token.startswith("-"):
+            return False
+        packages.append(token)
+        index += 1
+
+    version = project_version("cooper")
+    if (
+        version is None
+        or build_cwd != COOPER_ROOT
+        or packages not in (["."], ["./"])
+        or not output
+    ):
+        return False
+    resolved_output = resolve_safe_path(output, build_cwd, allow_tmp=False)
+    expected = (
+        REPO_ROOT
+        / "dist"
+        / "cooper"
+        / f"v{version}"
+        / f"cooper-{target[0]}-{target[1]}"
+    )
+    return resolved_output == expected
+
+
+def is_release_module_index(
+    tokens: list[str],
+    cwd: Path,
+    complete_capture: bool,
+) -> bool:
+    if not complete_capture:
+        return False
+    normalized = normalize_release_tokens(
+        tokens,
+        cwd,
+        allow_remote_proxy=True,
+    )
+    if normalized is None:
+        return False
+    command, environment = normalized
+    if environment.get("GOPROXY") != "https://proxy.golang.org":
+        return False
+    if any(name not in {"GOPROXY", "GOTOOLCHAIN"} for name in environment):
+        return False
+    if len(command) != 4 or command[:3] != ["go", "list", "-m"]:
+        return False
+
+    module_version = command[3]
+    for project, module in PROJECT_MODULES.items():
+        version = project_version(project)
+        if version is not None and module_version == f"{module}@v{version}":
+            return True
+    return False
+
+
+def is_project_dev_build(
+    tokens: list[str],
+    cwd: Path,
+    complete_capture: bool,
+) -> bool:
+    """Allow only each module's conventional gitignored development binary."""
+
+    if not complete_capture or len(tokens) < 3 or tokens[:2] != ["go", "build"]:
+        return False
+
+    build_cwd = cwd
+    output = ""
+    packages: list[str] = []
+    index = 2
+    while index < len(tokens):
+        token = tokens[index]
+        option, attached = split_option(token)
+        if option == "-C":
+            value, consumed = option_value(tokens, index, attached)
+            next_cwd = (
+                resolve_safe_path(value, build_cwd, allow_tmp=False)
+                if value
+                else None
+            )
+            if next_cwd is None:
+                return False
+            build_cwd = next_cwd
+            index += consumed
+            continue
+        if option == "-o":
+            value, consumed = option_value(tokens, index, attached)
+            if value is None or output:
+                return False
+            output = value
+            index += consumed
+            continue
+        if token == "-trimpath":
+            index += 1
+            continue
+        if token.startswith("-"):
+            return False
+        packages.append(token)
+        index += 1
+
+    if not output or len(packages) != 1:
+        return False
+    resolved_output = resolve_safe_path(output, build_cwd, allow_tmp=False)
+    package = packages[0]
+    resolved_package = (
+        build_cwd
+        if package in {".", "./"}
+        else resolve_safe_path(package, build_cwd, allow_tmp=False)
+    )
+    return any(
+        resolved_output == PROJECT_DEV_BINARIES[project]
+        and resolved_package == project_root
+        for project, project_root in PROJECT_ROOTS.items()
+    )
+
+
+def project_version(project: str) -> str | None:
+    root = PROJECT_ROOTS.get(project)
+    if root is None:
+        return None
+    try:
+        source = (root / "meta/version.go").read_text()
+    except (OSError, UnicodeError):
+        return None
+    match = re.search(r'\bVersion\s*=\s*"([^"]+)"', source)
+    if match is None or SEMVER_RE.fullmatch(match.group(1)) is None:
+        return None
+    return match.group(1)
+
+
+def project_release_tag(project: str) -> str | None:
+    version = project_version(project)
+    return f"{project}/v{version}" if version is not None else None
+
+
+def is_current_release_tag(value: str) -> bool:
+    return any(value == project_release_tag(project) for project in PROJECT_ROOTS)
 
 
 def is_go_command(tokens: list[str], cwd: Path, complete_capture: bool) -> bool:
@@ -1126,6 +1547,326 @@ def is_safe_go_package(value: str, cwd: Path) -> bool:
     if not value.startswith(("./", "../", "/")):
         return False
     return resolve_safe_path(value, cwd, allow_tmp=False) is not None
+
+
+def is_git_command(tokens: list[str], cwd: Path) -> bool:
+    parsed = split_git_command(tokens, cwd)
+    if parsed is None:
+        return False
+    command, args, git_cwd = parsed
+    if command == "add":
+        return is_git_add(args, git_cwd)
+    if command == "commit":
+        return is_git_commit(args, git_cwd)
+    if command == "fetch":
+        return is_git_fetch(args)
+    if command == "push":
+        return is_git_push(args)
+    if command == "tag":
+        return is_git_tag(args)
+    return False
+
+
+def split_git_command(tokens: list[str], cwd: Path) -> tuple[str, list[str], Path] | None:
+    if len(tokens) < 2 or tokens[0] != "git":
+        return None
+
+    git_cwd = cwd
+    index = 1
+    while index < len(tokens) and tokens[index] == "-C":
+        if index + 1 >= len(tokens):
+            return None
+        next_cwd = resolve_safe_path(tokens[index + 1], git_cwd, allow_tmp=False)
+        if next_cwd is None:
+            return None
+        git_cwd = next_cwd
+        index += 2
+    if index >= len(tokens):
+        return None
+    return tokens[index], tokens[index + 1 :], git_cwd
+
+
+def is_git_add(args: list[str], cwd: Path) -> bool:
+    if not args:
+        return False
+
+    saw_scope = False
+    paths_only = False
+    for token in args:
+        if token == "--" and not paths_only:
+            paths_only = True
+            continue
+        if not paths_only and token in GIT_ADD_BOOL_OPTIONS:
+            saw_scope = True
+            continue
+        if not paths_only and token in {"--intent-to-add", "--renormalize", "-N"}:
+            saw_scope = True
+            continue
+        if not paths_only and token.startswith("--chmod="):
+            if token not in {"--chmod=+x", "--chmod=-x"}:
+                return False
+            continue
+        if not paths_only and token.startswith("-"):
+            return False
+        if not is_safe_git_pathspec(token, cwd):
+            return False
+        saw_scope = True
+    return saw_scope
+
+
+def is_git_commit(args: list[str], cwd: Path) -> bool:
+    if not args:
+        return False
+
+    saw_message = False
+    saw_amend = False
+    saw_no_edit = False
+    paths_only = False
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--" and not paths_only:
+            paths_only = True
+            index += 1
+            continue
+        if paths_only:
+            if not is_safe_git_pathspec(token, cwd):
+                return False
+            index += 1
+            continue
+        if token in GIT_COMMIT_BOOL_OPTIONS:
+            saw_amend = saw_amend or token == "--amend"
+            saw_no_edit = saw_no_edit or token == "--no-edit"
+            index += 1
+            continue
+        if token in {"-m", "--message"}:
+            if index + 1 >= len(args):
+                return False
+            saw_message = True
+            index += 2
+            continue
+        if token.startswith("--message=") or (token.startswith("-m") and token != "-m"):
+            saw_message = True
+            index += 1
+            continue
+        if token == "-am":
+            if index + 1 >= len(args):
+                return False
+            saw_message = True
+            index += 2
+            continue
+        if token in {"-F", "--file"}:
+            if index + 1 >= len(args) or not is_safe_git_message_file(args[index + 1], cwd):
+                return False
+            saw_message = True
+            index += 2
+            continue
+        if token.startswith("--file="):
+            if not is_safe_git_message_file(token.split("=", 1)[1], cwd):
+                return False
+            saw_message = True
+            index += 1
+            continue
+        if token.startswith(("--fixup=", "--squash=")):
+            if not is_safe_git_ref(token.split("=", 1)[1]):
+                return False
+            saw_message = True
+            index += 1
+            continue
+        if token.startswith("--cleanup="):
+            if token.split("=", 1)[1] not in {
+                "default",
+                "scissors",
+                "strip",
+                "verbatim",
+                "whitespace",
+            }:
+                return False
+            index += 1
+            continue
+        if token.startswith("-"):
+            return False
+        if not is_safe_git_pathspec(token, cwd):
+            return False
+        index += 1
+
+    return saw_message or (saw_amend and saw_no_edit)
+
+
+def is_git_fetch(args: list[str]) -> bool:
+    positionals: list[str] = []
+    for token in args:
+        if token == "--":
+            continue
+        if token in GIT_FETCH_BOOL_OPTIONS or token == "--recurse-submodules=no":
+            continue
+        if token.startswith("-"):
+            return False
+        positionals.append(token)
+
+    if not positionals:
+        return True
+    if positionals[0] != "origin":
+        return False
+    if len(positionals) >= 2 and positionals[1] == "tag":
+        return len(positionals) == 3 and is_current_release_tag(positionals[2])
+    return all(is_safe_git_ref(ref) for ref in positionals[1:])
+
+
+def is_git_push(args: list[str]) -> bool:
+    positionals: list[str] = []
+    for token in args:
+        if token == "--":
+            continue
+        if token in GIT_PUSH_BOOL_OPTIONS:
+            continue
+        if token.startswith("-"):
+            return False
+        positionals.append(token)
+
+    # A bare push uses the already configured upstream. Repository policy does
+    # not auto-approve git config changes, so this cannot silently add a new
+    # remote through another approved Git operation.
+    if not positionals:
+        return True
+    if positionals[0] != "origin":
+        return False
+    return all(is_safe_git_ref(ref) for ref in positionals[1:])
+
+
+def is_git_tag(args: list[str]) -> bool:
+    if not args:
+        return True
+    if args[0] in {"-l", "--list"}:
+        allowed_patterns = {
+            f"{project}/v*"
+            for project in PROJECT_ROOTS
+        }
+        for token in args[1:]:
+            if token == "--sort=-version:refname":
+                continue
+            if token not in allowed_patterns and not is_safe_git_ref(token):
+                return False
+        return True
+
+    annotated = False
+    saw_message = False
+    message_file = ""
+    tag = ""
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in {"-a", "--annotate"}:
+            annotated = True
+            index += 1
+            continue
+        if token in {"-m", "--message"}:
+            if index + 1 >= len(args):
+                return False
+            saw_message = True
+            index += 2
+            continue
+        if token.startswith("--message=") or (token.startswith("-m") and token != "-m"):
+            saw_message = True
+            index += 1
+            continue
+        if token in {"-F", "--file"}:
+            if index + 1 >= len(args) or message_file:
+                return False
+            message_file = args[index + 1]
+            index += 2
+            continue
+        if token.startswith("--file="):
+            if message_file:
+                return False
+            message_file = token.split("=", 1)[1]
+            index += 1
+            continue
+        if token.startswith("-") or tag:
+            return False
+        tag = token
+        index += 1
+    if not annotated or not is_current_release_tag(tag):
+        return False
+    if message_file:
+        if saw_message:
+            return False
+        project = tag.split("/", 1)[0]
+        return is_release_tag_message_file(project, message_file)
+    return saw_message
+
+
+def is_release_tag_message_file(project: str, value: str) -> bool:
+    """Validate the private annotation generated by a release preview."""
+
+    path = Path(value)
+    if (
+        not path.is_absolute()
+        or path.parent != TMP_ROOT
+        or re.fullmatch(
+            rf"{re.escape(project)}-release-tag-message\.[A-Za-z0-9]{{6}}",
+            path.name,
+        )
+        is None
+    ):
+        return False
+
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        metadata = path.stat()
+        if (
+            metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o077
+            or metadata.st_size > 64 * 1024
+        ):
+            return False
+        content = path.read_text()
+    except (OSError, UnicodeError):
+        return False
+
+    version = project_version(project)
+    return (
+        version is not None
+        and content.startswith(
+            f"{project} {version}\n\nChanges since "
+        )
+        and content.endswith("\n")
+        and "\x00" not in content
+    )
+
+
+def is_safe_git_pathspec(value: str, cwd: Path) -> bool:
+    if (
+        not value
+        or value.startswith(":")
+        or has_sensitive_path_mention(value)
+        or has_any_url_scheme(value)
+        or has_shell_expansion(value)
+    ):
+        return False
+    return resolve_safe_path(value, cwd, allow_tmp=False) is not None
+
+
+def is_safe_git_message_file(value: str, cwd: Path) -> bool:
+    if value == "-" or has_sensitive_path_mention(value) or has_shell_expansion(value):
+        return False
+    return resolve_safe_path(value, cwd) is not None
+
+
+def is_safe_git_ref(value: str) -> bool:
+    if value == "HEAD":
+        return True
+    if (
+        GIT_REF_RE.fullmatch(value) is None
+        or value.startswith((".", "/", "-"))
+        or value.endswith((".", "/", ".lock"))
+        or ".." in value
+        or "@{" in value
+        or any(part in {"", ".", ".."} for part in value.split("/"))
+    ):
+        return False
+    return True
 
 
 def is_docker_read_command(tokens: list[str]) -> bool:
@@ -1310,6 +2051,17 @@ def is_tmp_mkdir(tokens: list[str]) -> bool:
         and tokens[:2] == ["mkdir", "-p"]
         and all(is_safe_tmp_output(path) for path in tokens[2:])
     )
+
+
+def is_release_mkdir(tokens: list[str], cwd: Path) -> bool:
+    if len(tokens) != 3 or tokens[:2] != ["mkdir", "-p"]:
+        return False
+    version = project_version("cooper")
+    if version is None:
+        return False
+    target = resolve_safe_path(tokens[2], cwd, allow_tmp=False)
+    expected = REPO_ROOT / "dist" / "cooper" / f"v{version}"
+    return target == expected
 
 
 def is_read_only_command(tokens: list[str], cwd: Path) -> bool:

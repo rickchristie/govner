@@ -19,6 +19,25 @@ Govner is a collection of Go development tools.
   both full suites. Keep `cooper` visible in the command rather than relying on
   an execution tool's hidden `workdir`, because Codex's permission-hook payload
   does not currently include that per-command directory.
+- **Cooper Docker-build gate:** run
+  `timeout 90m ./cooper/test-docker-build.sh all > /tmp/cooper-docker-build.txt 2>&1`.
+  Its reviewed modes are `mirror`, `latest`, `pinned`, `all`, and `clean`.
+  Cleanup-only runs use
+  `./cooper/test-docker-build.sh clean > /tmp/cooper-docker-build-clean.txt 2>&1`.
+- **Other Go modules:** validate Gowt with
+  `go test -C ./gowt ./... > /tmp/gowt-go-test.txt 2>&1` and pgflock with
+  `go test -C ./pgflock ./... > /tmp/pgflock-go-test.txt 2>&1`.
+- **Project builds:** use the exact gitignored development binaries with full
+  logs: `go build -C ./cooper -o ./cooper . > /tmp/cooper-build.txt 2>&1`,
+  `go build -C ./gowt -o ./gowt . > /tmp/gowt-build.txt 2>&1`, or
+  `go build -C ./pgflock -o ./pgflock . > /tmp/pgflock-build.txt 2>&1`.
+- **Release previews:** from the repository root, run the matching
+  `./scripts/release-{cooper,gowt,pgflock}.sh` script with stdout and stderr
+  redirected to `/tmp/<project>-release-preview.txt`. Execute only the
+  shell-quoted commands printed by that script; they are aligned with the
+  repository permission hook and the version declared in `<project>/meta/version.go`.
+  Keep the private `/tmp/<project>-release-tag-message.*` file created by the
+  preview until its printed `git tag -F` step has completed.
 
 # TUI Code Architecture Standard
 
