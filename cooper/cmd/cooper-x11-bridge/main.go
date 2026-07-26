@@ -8,6 +8,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -19,7 +20,6 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -35,6 +35,19 @@ const maxDirectSize = 256 * 1024
 // incrChunkSize is the size of each chunk sent during INCR transfers.
 const incrChunkSize = 64 * 1024
 
+// incrIdleTimeout bounds how long an abandoned request may retain image data.
+// Clipboard consumers can disappear at any point in the X11 handshake, so an
+// INCR transfer must not remain globally active forever.
+const incrIdleTimeout = 5 * time.Second
+
+// incrSweepInterval controls abandoned-transfer cleanup. Transfer progress is
+// event-driven; this ticker is only for bounded resource reclamation.
+const incrSweepInterval = 250 * time.Millisecond
+
+// maxActiveINCRTransfers limits retained clipboard copies if a client creates
+// requestor windows without completing or closing them.
+const maxActiveINCRTransfers = 8
+
 // httpTimeout is the timeout for HTTP requests to the bridge service.
 const httpTimeout = 5 * time.Second
 
@@ -47,12 +60,149 @@ type atoms struct {
 	imagePNG  xproto.Atom
 }
 
-// incrTransfer tracks an ongoing INCR (incremental) selection transfer.
-type incrTransfer struct {
+type incrTransferKey struct {
 	requestor xproto.Window
 	property  xproto.Atom
-	data      []byte
-	offset    int
+}
+
+// incrTransfer tracks one incremental selection transfer. finalChunkSent is
+// intentionally separate from offset: ICCCM requires the owner to wait for the
+// requestor to delete the final data chunk before writing the zero-length
+// terminator.
+type incrTransfer struct {
+	data           []byte
+	offset         int
+	finalChunkSent bool
+	lastActivity   time.Time
+}
+
+type incrStep struct {
+	data       []byte
+	terminator bool
+}
+
+// incrTransferSet is owned exclusively by the X11 event loop. X11 requestors
+// choose both their window and transfer property, so that pair is the transfer
+// identity. Tracking a set rather than one global transfer prevents an
+// abandoned paste from blocking every later large-image request.
+type incrTransferSet struct {
+	active      map[incrTransferKey]*incrTransfer
+	idleTimeout time.Duration
+	maxActive   int
+}
+
+func newINCRTransferSet(idleTimeout time.Duration, maxActive int) *incrTransferSet {
+	return &incrTransferSet{
+		active:      make(map[incrTransferKey]*incrTransfer),
+		idleTimeout: idleTimeout,
+		maxActive:   maxActive,
+	}
+}
+
+// start registers a transfer. A request that reuses its own window/property
+// replaces the older attempt, while unrelated requests are bounded by
+// maxActive. It returns whether an older same-key transfer was replaced and
+// whether the new transfer was accepted.
+func (s *incrTransferSet) start(key incrTransferKey, data []byte, now time.Time) (bool, bool) {
+	_, replaced := s.active[key]
+	if !replaced && s.maxActive > 0 && len(s.active) >= s.maxActive {
+		return false, false
+	}
+
+	s.active[key] = &incrTransfer{
+		data:         data,
+		lastActivity: now,
+	}
+	return replaced, true
+}
+
+func (s *incrTransferSet) cancel(key incrTransferKey) bool {
+	if _, ok := s.active[key]; !ok {
+		return false
+	}
+	delete(s.active, key)
+	return true
+}
+
+// next acknowledges a requestor property deletion. Data chunks and the
+// terminator are separate steps so the final chunk remains readable until the
+// requestor explicitly deletes it.
+func (s *incrTransferSet) next(key incrTransferKey, now time.Time) (incrStep, bool) {
+	transfer, ok := s.active[key]
+	if !ok {
+		return incrStep{}, false
+	}
+	transfer.lastActivity = now
+
+	if transfer.finalChunkSent {
+		delete(s.active, key)
+		return incrStep{terminator: true}, true
+	}
+
+	end := transfer.offset + incrChunkSize
+	if end > len(transfer.data) {
+		end = len(transfer.data)
+	}
+	data := transfer.data[transfer.offset:end]
+	transfer.offset = end
+	transfer.finalChunkSent = transfer.offset == len(transfer.data)
+	return incrStep{data: data}, true
+}
+
+func (s *incrTransferSet) expire(now time.Time) int {
+	if s.idleTimeout <= 0 {
+		return 0
+	}
+
+	expired := 0
+	for key, transfer := range s.active {
+		if now.Sub(transfer.lastActivity) < s.idleTimeout {
+			continue
+		}
+		delete(s.active, key)
+		expired++
+	}
+	return expired
+}
+
+func (s *incrTransferSet) removeWindow(window xproto.Window) int {
+	removed := 0
+	for key := range s.active {
+		if key.requestor != window {
+			continue
+		}
+		delete(s.active, key)
+		removed++
+	}
+	return removed
+}
+
+type xEventResult struct {
+	event xgb.Event
+	err   xgb.Error
+}
+
+// pumpXEvents turns xgb's blocking event wait into a channel the main loop can
+// select alongside signals and cleanup ticks. xgb already serializes wire
+// reads internally, so this removes the old 10 ms polling delay without adding
+// another X11 reader.
+func pumpXEvents(ctx context.Context, conn *xgb.Conn) <-chan xEventResult {
+	results := make(chan xEventResult, 128)
+	go func() {
+		defer close(results)
+		for {
+			event, xerr := conn.WaitForEvent()
+			if event == nil && xerr == nil {
+				return
+			}
+			select {
+			case results <- xEventResult{event: event, err: xerr}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return results
 }
 
 func main() {
@@ -99,7 +249,11 @@ func main() {
 		netConn.Close()
 		log.Fatalf("x11-bridge: X11 handshake: %v", err)
 	}
-	defer conn.Close()
+	eventCtx, stopEventPump := context.WithCancel(context.Background())
+	defer func() {
+		stopEventPump()
+		conn.Close()
+	}()
 
 	setup := xproto.Setup(conn)
 	screen := setup.DefaultScreen(conn)
@@ -117,7 +271,7 @@ func main() {
 		screen.Root,
 		0, 0, // x, y
 		1, 1, // width, height
-		0,                         // border width
+		0, // border width
 		xproto.WindowClassCopyFromParent,
 		screen.RootVisual,
 		xproto.CwEventMask,
@@ -143,78 +297,110 @@ func main() {
 	// Set up graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sigCh)
 
 	// HTTP client for bridge requests.
 	httpClient := &http.Client{Timeout: httpTimeout}
 
-	// INCR transfer state (only one at a time).
-	var (
-		activeINCR *incrTransfer
-		incrMu     sync.Mutex
-	)
+	transfers := newINCRTransferSet(incrIdleTimeout, maxActiveINCRTransfers)
+	xEvents := pumpXEvents(eventCtx, conn)
+	sweepTicker := time.NewTicker(incrSweepInterval)
+	defer sweepTicker.Stop()
 
 	// Event loop.
 	log.Printf("x11-bridge: event loop started")
 	for {
-		// Check for shutdown signal without blocking.
 		select {
 		case sig := <-sigCh:
 			log.Printf("x11-bridge: received %v, shutting down", sig)
 			return
-		default:
-		}
 
-		ev, xerr := conn.PollForEvent()
-		if xerr != nil {
-			// X11 errors are often non-fatal (e.g., BadWindow from
-			// a requestor that closed). Log and continue.
-			log.Printf("x11-bridge: X11 error: %v", xerr)
-		}
-		if ev == nil {
-			// No event available. Sleep briefly to avoid busy-spinning,
-			// then check for signals again.
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-
-		switch e := ev.(type) {
-		case xproto.SelectionRequestEvent:
-			handleSelectionRequest(conn, e, a, ownershipTime, httpClient, *bridgeURL, *tokenFile, &activeINCR, &incrMu)
-
-		case xproto.SelectionClearEvent:
-			// Another application took CLIPBOARD ownership. Reclaim it.
-			log.Printf("x11-bridge: lost CLIPBOARD ownership, reclaiming")
-			var reclaimErr error
-			ownershipTime, reclaimErr = claimClipboard(conn, wid, a.clipboard)
-			if reclaimErr != nil {
-				log.Printf("x11-bridge: reclaim clipboard failed: %v", reclaimErr)
+		case result, ok := <-xEvents:
+			if !ok {
+				log.Printf("x11-bridge: X11 connection closed, shutting down")
+				return
+			}
+			if result.err != nil {
+				// X11 errors can be caused by requestors disappearing between
+				// an event and a property write. DestroyNotify and idle
+				// expiry reclaim their transfer state.
+				log.Printf("x11-bridge: X11 error: %v", result.err)
+				continue
 			}
 
-		case xproto.PropertyNotifyEvent:
-			if e.State == xproto.PropertyDelete {
-				incrMu.Lock()
-				if activeINCR != nil && e.Window == activeINCR.requestor && e.Atom == activeINCR.property {
-					writeNextINCRChunk(conn, activeINCR, a.imagePNG)
-					if activeINCR.offset >= len(activeINCR.data) {
-						// Transfer complete: write zero-length property.
-						xproto.ChangeProperty(
-							conn,
-							xproto.PropModeReplace,
-							activeINCR.requestor,
-							activeINCR.property,
-							a.imagePNG,
-							8,
-							0,
-							nil,
-						)
-						activeINCR = nil
-						log.Printf("x11-bridge: INCR transfer complete")
-					}
+			switch e := result.event.(type) {
+			case xproto.SelectionRequestEvent:
+				handleSelectionRequest(conn, e, a, ownershipTime, httpClient, *bridgeURL, *tokenFile, transfers)
+
+			case xproto.SelectionClearEvent:
+				// Another application took CLIPBOARD ownership. Reclaim it.
+				log.Printf("x11-bridge: lost CLIPBOARD ownership, reclaiming")
+				var reclaimErr error
+				ownershipTime, reclaimErr = claimClipboard(conn, wid, a.clipboard)
+				if reclaimErr != nil {
+					log.Printf("x11-bridge: reclaim clipboard failed: %v", reclaimErr)
 				}
-				incrMu.Unlock()
+
+			case xproto.PropertyNotifyEvent:
+				if e.State == xproto.PropertyDelete {
+					handleINCRPropertyDelete(conn, e, a.imagePNG, transfers)
+				}
+
+			case xproto.DestroyNotifyEvent:
+				if removed := transfers.removeWindow(e.Window); removed > 0 {
+					log.Printf("x11-bridge: discarded %d INCR transfer(s) for closed requestor", removed)
+				}
+			}
+
+		case now := <-sweepTicker.C:
+			if expired := transfers.expire(now); expired > 0 {
+				log.Printf("x11-bridge: expired %d abandoned INCR transfer(s)", expired)
 			}
 		}
 	}
+}
+
+func handleINCRPropertyDelete(
+	conn *xgb.Conn,
+	event xproto.PropertyNotifyEvent,
+	imagePNGAtom xproto.Atom,
+	transfers *incrTransferSet,
+) {
+	key := incrTransferKey{requestor: event.Window, property: event.Atom}
+	step, ok := transfers.next(key, time.Now())
+	if !ok {
+		return
+	}
+
+	if step.terminator {
+		xproto.ChangeProperty(
+			conn,
+			xproto.PropModeReplace,
+			key.requestor,
+			key.property,
+			imagePNGAtom,
+			8,
+			0,
+			nil,
+		)
+		log.Printf("x11-bridge: INCR transfer complete")
+		return
+	}
+
+	// ICCCM calls for appending each data chunk after the requestor deletes
+	// the previous property. The request is intentionally unchecked: a
+	// round-trip here can exceed clipboard consumers' very short per-chunk
+	// deadlines. Asynchronous X11 errors still arrive through the event pump.
+	xproto.ChangeProperty(
+		conn,
+		xproto.PropModeAppend,
+		key.requestor,
+		key.property,
+		imagePNGAtom,
+		8,
+		uint32(len(step.data)),
+		step.data,
+	)
 }
 
 // internAtoms interns all X11 atoms needed by the bridge.
@@ -273,8 +459,7 @@ func handleSelectionRequest(
 	ownershipTime xproto.Timestamp,
 	client *http.Client,
 	bridgeURL, tokenFile string,
-	activeINCR **incrTransfer,
-	incrMu *sync.Mutex,
+	transfers *incrTransferSet,
 ) {
 	switch ev.Target {
 	case a.targets:
@@ -285,7 +470,7 @@ func handleSelectionRequest(
 			binary.LittleEndian.PutUint32(buf[i*4:], uint32(atom))
 		}
 
-		xproto.ChangeProperty(
+		if err := xproto.ChangePropertyChecked(
 			conn,
 			xproto.PropModeReplace,
 			ev.Requestor,
@@ -294,15 +479,21 @@ func handleSelectionRequest(
 			32,
 			uint32(len(targetList)),
 			buf,
-		)
-		sendSelectionNotify(conn, ev, ev.Property)
+		).Check(); err != nil {
+			log.Printf("x11-bridge: write TARGETS response: %v", err)
+			refuseRequest(conn, ev)
+			return
+		}
+		if err := sendSelectionNotify(conn, ev, ev.Property); err != nil {
+			log.Printf("x11-bridge: notify TARGETS response: %v", err)
+		}
 
 	case a.timestamp:
 		// Respond with ownership timestamp.
 		buf := make([]byte, 4)
 		binary.LittleEndian.PutUint32(buf, uint32(ownershipTime))
 
-		xproto.ChangeProperty(
+		if err := xproto.ChangePropertyChecked(
 			conn,
 			xproto.PropModeReplace,
 			ev.Requestor,
@@ -311,8 +502,14 @@ func handleSelectionRequest(
 			32,
 			1,
 			buf,
-		)
-		sendSelectionNotify(conn, ev, ev.Property)
+		).Check(); err != nil {
+			log.Printf("x11-bridge: write TIMESTAMP response: %v", err)
+			refuseRequest(conn, ev)
+			return
+		}
+		if err := sendSelectionNotify(conn, ev, ev.Property); err != nil {
+			log.Printf("x11-bridge: notify TIMESTAMP response: %v", err)
+		}
 
 	case a.imagePNG:
 		// Fetch image from bridge and serve it.
@@ -328,9 +525,11 @@ func handleSelectionRequest(
 			return
 		}
 
+		key := incrTransferKey{requestor: ev.Requestor, property: ev.Property}
 		if len(data) <= maxDirectSize {
+			transfers.cancel(key)
 			// Direct transfer.
-			xproto.ChangeProperty(
+			if err := xproto.ChangePropertyChecked(
 				conn,
 				xproto.PropModeReplace,
 				ev.Requestor,
@@ -339,31 +538,46 @@ func handleSelectionRequest(
 				8,
 				uint32(len(data)),
 				data,
-			)
-			sendSelectionNotify(conn, ev, ev.Property)
+			).Check(); err != nil {
+				log.Printf("x11-bridge: write direct image response: %v", err)
+				refuseRequest(conn, ev)
+				return
+			}
+			if err := sendSelectionNotify(conn, ev, ev.Property); err != nil {
+				log.Printf("x11-bridge: notify direct image response: %v", err)
+			}
 		} else {
 			// INCR transfer for large images.
-			incrMu.Lock()
-			if *activeINCR != nil {
-				// Already have an active INCR transfer. Reject this one.
-				incrMu.Unlock()
-				log.Printf("x11-bridge: rejecting image request, INCR transfer in progress")
+			replaced, accepted := transfers.start(key, data, time.Now())
+			if !accepted {
+				log.Printf("x11-bridge: rejecting image request, too many INCR transfers")
+				refuseRequest(conn, ev)
+				return
+			}
+			if replaced {
+				log.Printf("x11-bridge: replaced previous INCR transfer for requestor")
+			}
+
+			// Subscribe before publishing the INCR property. Intra-connection
+			// request ordering then guarantees the requestor cannot acknowledge
+			// the property before we are listening for its deletion.
+			eventMask := uint32(xproto.EventMaskPropertyChange | xproto.EventMaskStructureNotify)
+			if err := xproto.ChangeWindowAttributesChecked(
+				conn,
+				ev.Requestor,
+				xproto.CwEventMask,
+				[]uint32{eventMask},
+			).Check(); err != nil {
+				transfers.cancel(key)
+				log.Printf("x11-bridge: subscribe to INCR requestor: %v", err)
 				refuseRequest(conn, ev)
 				return
 			}
 
-			*activeINCR = &incrTransfer{
-				requestor: ev.Requestor,
-				property:  ev.Property,
-				data:      data,
-				offset:    0,
-			}
-			incrMu.Unlock()
-
 			// Write INCR atom with data size to signal incremental transfer.
 			sizeBuf := make([]byte, 4)
 			binary.LittleEndian.PutUint32(sizeBuf, uint32(len(data)))
-			xproto.ChangeProperty(
+			if err := xproto.ChangePropertyChecked(
 				conn,
 				xproto.PropModeReplace,
 				ev.Requestor,
@@ -372,19 +586,18 @@ func handleSelectionRequest(
 				32,
 				1,
 				sizeBuf,
-			)
+			).Check(); err != nil {
+				transfers.cancel(key)
+				log.Printf("x11-bridge: write INCR response: %v", err)
+				refuseRequest(conn, ev)
+				return
+			}
 
-			// Subscribe to property changes on the requestor window so
-			// we get notified when the requestor deletes the property
-			// (signaling readiness for the next chunk).
-			xproto.ChangeWindowAttributes(
-				conn,
-				ev.Requestor,
-				xproto.CwEventMask,
-				[]uint32{xproto.EventMaskPropertyChange},
-			)
-
-			sendSelectionNotify(conn, ev, ev.Property)
+			if err := sendSelectionNotify(conn, ev, ev.Property); err != nil {
+				transfers.cancel(key)
+				log.Printf("x11-bridge: notify INCR response: %v", err)
+				return
+			}
 			log.Printf("x11-bridge: started INCR transfer (%d bytes)", len(data))
 		}
 
@@ -394,30 +607,9 @@ func handleSelectionRequest(
 	}
 }
 
-// writeNextINCRChunk writes the next chunk of data for an INCR transfer.
-func writeNextINCRChunk(conn *xgb.Conn, transfer *incrTransfer, imagePNGAtom xproto.Atom) {
-	end := transfer.offset + incrChunkSize
-	if end > len(transfer.data) {
-		end = len(transfer.data)
-	}
-	chunk := transfer.data[transfer.offset:end]
-	transfer.offset = end
-
-	xproto.ChangeProperty(
-		conn,
-		xproto.PropModeReplace,
-		transfer.requestor,
-		transfer.property,
-		imagePNGAtom,
-		8,
-		uint32(len(chunk)),
-		chunk,
-	)
-}
-
 // sendSelectionNotify sends a SelectionNotify event to the requestor,
 // indicating the transfer property.
-func sendSelectionNotify(conn *xgb.Conn, ev xproto.SelectionRequestEvent, property xproto.Atom) {
+func sendSelectionNotify(conn *xgb.Conn, ev xproto.SelectionRequestEvent, property xproto.Atom) error {
 	notify := xproto.SelectionNotifyEvent{
 		Time:      ev.Time,
 		Requestor: ev.Requestor,
@@ -425,20 +617,21 @@ func sendSelectionNotify(conn *xgb.Conn, ev xproto.SelectionRequestEvent, proper
 		Target:    ev.Target,
 		Property:  property,
 	}
-	xproto.SendEvent(conn, false, ev.Requestor, xproto.EventMaskNoEvent, string(notify.Bytes()))
+	return xproto.SendEventChecked(
+		conn,
+		false,
+		ev.Requestor,
+		xproto.EventMaskNoEvent,
+		string(notify.Bytes()),
+	).Check()
 }
 
 // refuseRequest sends a SelectionNotify with property=None, which tells
 // the requestor that the selection conversion failed.
 func refuseRequest(conn *xgb.Conn, ev xproto.SelectionRequestEvent) {
-	notify := xproto.SelectionNotifyEvent{
-		Time:      ev.Time,
-		Requestor: ev.Requestor,
-		Selection: ev.Selection,
-		Target:    ev.Target,
-		Property:  xproto.AtomNone,
+	if err := sendSelectionNotify(conn, ev, xproto.AtomNone); err != nil {
+		log.Printf("x11-bridge: refuse selection request: %v", err)
 	}
-	xproto.SendEvent(conn, false, ev.Requestor, xproto.EventMaskNoEvent, string(notify.Bytes()))
 }
 
 // fetchImage retrieves the staged clipboard image from the bridge service.

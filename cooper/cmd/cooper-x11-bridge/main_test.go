@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -49,9 +50,9 @@ func skipIfNoXvfb(t *testing.T) {
 	}
 }
 
-// startXvfb starts an Xvfb server on the given display number, creates an
-// Xauthority file with a cookie, and registers cleanup. Returns the path
-// to the Xauthority file.
+// startXvfb starts an Xvfb server matching the container runtime: requestors
+// can use the Unix socket, while cooper-x11-bridge connects over authenticated
+// loopback TCP with the raw cookie.
 func startXvfb(t *testing.T, display int) string {
 	t.Helper()
 
@@ -71,7 +72,7 @@ func startXvfb(t *testing.T, display int) string {
 	cmd := exec.Command("Xvfb", fmt.Sprintf(":%d", display),
 		"-screen", "0", "1024x768x24",
 		"-auth", xauthFile,
-		"-nolisten", "tcp",
+		"-listen", "tcp",
 	)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("failed to start Xvfb on display :%d: %v", display, err)
@@ -81,16 +82,22 @@ func startXvfb(t *testing.T, display int) string {
 		cmd.Wait()
 	})
 
-	// Wait for the X server socket to appear.
+	// Wait for both transports. Merely observing the Unix socket is not enough
+	// because the bridge uses TCP.
 	socketPath := fmt.Sprintf("/tmp/.X11-unix/X%d", display)
+	tcpAddress := fmt.Sprintf("127.0.0.1:%d", 6000+display)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(socketPath); err == nil {
-			return xauthFile
+			conn, dialErr := net.DialTimeout("tcp", tcpAddress, 100*time.Millisecond)
+			if dialErr == nil {
+				conn.Close()
+				return xauthFile
+			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("Xvfb did not create socket %s within timeout", socketPath)
+	t.Fatalf("Xvfb did not make Unix socket %s and TCP address %s ready", socketPath, tcpAddress)
 	return ""
 }
 
@@ -188,19 +195,28 @@ func buildBridge(t *testing.T) string {
 	return binPath
 }
 
-// cooperRoot returns the root directory of the cooper module.
+// cooperRoot derives the module root from this source file so integration
+// tests work in CI and disposable containers, not only the original checkout.
 func cooperRoot() string {
-	return "/home/ricky/Personal/govner/cooper"
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		return ""
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
 }
 
 // startBridge starts the cooper-x11-bridge binary as a subprocess and returns
 // the exec.Cmd. The process is killed on test cleanup.
 func startBridge(t *testing.T, binPath string, display int, xauthFile, bridgeURL, tokenFile string) *exec.Cmd {
 	t.Helper()
+	cookieFile := filepath.Join(filepath.Dir(xauthFile), ".cooper-clipboard-cookie")
+	if err := os.WriteFile(cookieFile, []byte("deadbeefdeadbeefdeadbeefdeadbeef"), 0o600); err != nil {
+		t.Fatalf("write raw X11 cookie: %v", err)
+	}
 
 	cmd := exec.Command(binPath,
-		"--display", fmt.Sprintf(":%d", display),
-		"--xauthority", xauthFile,
+		"--display", fmt.Sprintf("127.0.0.1:%d", display),
+		"--cookie-file", cookieFile,
 		"--bridge-url", bridgeURL,
 		"--token-file", tokenFile,
 	)
@@ -326,6 +342,27 @@ func requestSelectionViaXgb(
 	timeout time.Duration,
 ) (data []byte, propType xproto.Atom, format byte) {
 	t.Helper()
+	return requestSelectionViaXgbWithChunkTimeout(
+		t,
+		conn,
+		clipboardAtom,
+		targetAtom,
+		timeout,
+		10*time.Second,
+	)
+}
+
+// requestSelectionViaXgbWithChunkTimeout mirrors clipboard consumers that
+// impose a short deadline between INCR chunks. Codex's arboard backend uses a
+// 10 ms deadline, which the bridge must meet without polling delays.
+func requestSelectionViaXgbWithChunkTimeout(
+	t *testing.T,
+	conn *xgb.Conn,
+	clipboardAtom, targetAtom xproto.Atom,
+	timeout time.Duration,
+	chunkTimeout time.Duration,
+) (data []byte, propType xproto.Atom, format byte) {
+	t.Helper()
 
 	setup := xproto.Setup(conn)
 	screen := setup.DefaultScreen(conn)
@@ -374,7 +411,7 @@ func requestSelectionViaXgb(
 		}
 
 		// Read the property.
-		return readPropertyFull(t, conn, wid, notify.Property)
+		return readPropertyFullWithChunkTimeout(t, conn, wid, notify.Property, chunkTimeout)
 	}
 	t.Fatalf("timed out waiting for SelectionNotify")
 	return nil, 0, 0
@@ -384,6 +421,17 @@ func requestSelectionViaXgb(
 // transfers. For INCR transfers, it reads chunks until a zero-length property
 // is written.
 func readPropertyFull(t *testing.T, conn *xgb.Conn, wid xproto.Window, prop xproto.Atom) (data []byte, propType xproto.Atom, format byte) {
+	t.Helper()
+	return readPropertyFullWithChunkTimeout(t, conn, wid, prop, 10*time.Second)
+}
+
+func readPropertyFullWithChunkTimeout(
+	t *testing.T,
+	conn *xgb.Conn,
+	wid xproto.Window,
+	prop xproto.Atom,
+	chunkTimeout time.Duration,
+) (data []byte, propType xproto.Atom, format byte) {
 	t.Helper()
 
 	incrAtom := internAtom(t, conn, "INCR")
@@ -409,11 +457,13 @@ func readPropertyFull(t *testing.T, conn *xgb.Conn, wid xproto.Window, prop xpro
 		_ = totalSize
 
 		var allData []byte
-		deadline := time.Now().Add(10 * time.Second)
+		// arboard permits several seconds for the owner to start an image
+		// conversion, then applies chunkTimeout after every data segment.
+		deadline := time.Now().Add(4 * time.Second)
 		for time.Now().Before(deadline) {
 			ev, _ := conn.PollForEvent()
 			if ev == nil {
-				time.Sleep(10 * time.Millisecond)
+				time.Sleep(250 * time.Microsecond)
 				continue
 			}
 			pn, ok := ev.(xproto.PropertyNotifyEvent)
@@ -439,6 +489,7 @@ func readPropertyFull(t *testing.T, conn *xgb.Conn, wid xproto.Window, prop xpro
 			allData = append(allData, chunkReply.Value...)
 			propType = chunkReply.Type
 			format = byte(chunkReply.Format)
+			deadline = time.Now().Add(chunkTimeout)
 		}
 		t.Fatalf("timed out waiting for INCR transfer to complete")
 		return nil, 0, 0
@@ -446,6 +497,75 @@ func readPropertyFull(t *testing.T, conn *xgb.Conn, wid xproto.Window, prop xpro
 
 	// Direct transfer.
 	return reply.Value, reply.Type, byte(reply.Format)
+}
+
+// beginUnacknowledgedINCR starts a large selection request and deliberately
+// leaves the initial INCR property in place. It models a clipboard consumer
+// that times out or crashes before acknowledging the transfer.
+func beginUnacknowledgedINCR(
+	t *testing.T,
+	conn *xgb.Conn,
+	clipboardAtom, targetAtom xproto.Atom,
+	timeout time.Duration,
+) {
+	t.Helper()
+
+	setup := xproto.Setup(conn)
+	screen := setup.DefaultScreen(conn)
+	wid, err := xproto.NewWindowId(conn)
+	if err != nil {
+		t.Fatalf("allocate abandoned requestor window: %v", err)
+	}
+	if err := xproto.CreateWindowChecked(
+		conn,
+		screen.RootDepth,
+		wid,
+		screen.Root,
+		0, 0, 1, 1, 0,
+		xproto.WindowClassCopyFromParent,
+		screen.RootVisual,
+		xproto.CwEventMask,
+		[]uint32{xproto.EventMaskPropertyChange},
+	).Check(); err != nil {
+		t.Fatalf("create abandoned requestor window: %v", err)
+	}
+
+	property := internAtom(t, conn, "XSEL_ABANDONED")
+	xproto.ConvertSelection(conn, wid, clipboardAtom, targetAtom, property, xproto.TimeCurrentTime)
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		event, _ := conn.PollForEvent()
+		if event == nil {
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		notify, ok := event.(xproto.SelectionNotifyEvent)
+		if !ok {
+			continue
+		}
+		if notify.Property == xproto.AtomNone {
+			t.Fatal("abandoned INCR request was refused")
+		}
+
+		reply, err := xproto.GetProperty(
+			conn,
+			false,
+			wid,
+			notify.Property,
+			xproto.GetPropertyTypeAny,
+			0,
+			1<<20,
+		).Reply()
+		if err != nil {
+			t.Fatalf("read abandoned INCR property: %v", err)
+		}
+		if reply.Type != internAtom(t, conn, "INCR") {
+			t.Fatalf("abandoned property type = %d, want INCR", reply.Type)
+		}
+		return
+	}
+	t.Fatal("timed out waiting for abandoned INCR SelectionNotify")
 }
 
 // --------------------------------------------------------------------------
@@ -606,13 +726,60 @@ func TestX11Bridge_LargeImageINCR(t *testing.T) {
 	clipboardAtom := internAtom(t, conn, "CLIPBOARD")
 	imagePNGAtom := internAtom(t, conn, "image/png")
 
-	data, _, _ := requestSelectionViaXgb(t, conn, clipboardAtom, imagePNGAtom, 15*time.Second)
+	data, _, _ := requestSelectionViaXgbWithChunkTimeout(
+		t,
+		conn,
+		clipboardAtom,
+		imagePNGAtom,
+		15*time.Second,
+		10*time.Millisecond,
+	)
 	if data == nil {
 		t.Fatal("image/png request was refused (expected INCR transfer)")
 	}
 
 	if !bytes.Equal(data, testPNG) {
 		t.Errorf("INCR transfer data mismatch: got %d bytes, want %d bytes", len(data), len(testPNG))
+	}
+}
+
+// TestX11Bridge_AbandonedLargeRequestDoesNotBlockNextPaste verifies that one
+// client can abandon an INCR handshake without poisoning large-image paste for
+// every other requestor.
+func TestX11Bridge_AbandonedLargeRequestDoesNotBlockNextPaste(t *testing.T) {
+	skipIfNoXvfb(t)
+
+	display := uniqueDisplay()
+	xauthFile := startXvfb(t, display)
+	testPNG := generateTestPNG(t, 400*1024)
+	if len(testPNG) <= maxDirectSize {
+		t.Fatalf("test PNG is %d bytes, need >%d to trigger INCR", len(testPNG), maxDirectSize)
+	}
+
+	bridgeURL, _ := startMockBridge(t, testPNG)
+	tokenFile := writeTokenFile(t, "test-token-secret")
+	binPath := buildBridge(t)
+	startBridge(t, binPath, display, xauthFile, bridgeURL, tokenFile)
+
+	firstConn := connectX11(t, display, xauthFile)
+	defer firstConn.Close()
+	clipboardAtom := internAtom(t, firstConn, "CLIPBOARD")
+	imagePNGAtom := internAtom(t, firstConn, "image/png")
+	beginUnacknowledgedINCR(t, firstConn, clipboardAtom, imagePNGAtom, 5*time.Second)
+
+	secondConn := connectX11(t, display, xauthFile)
+	defer secondConn.Close()
+	secondClipboardAtom := internAtom(t, secondConn, "CLIPBOARD")
+	secondImagePNGAtom := internAtom(t, secondConn, "image/png")
+	data, _, _ := requestSelectionViaXgb(
+		t,
+		secondConn,
+		secondClipboardAtom,
+		secondImagePNGAtom,
+		10*time.Second,
+	)
+	if !bytes.Equal(data, testPNG) {
+		t.Fatalf("second paste received %d bytes, want %d", len(data), len(testPNG))
 	}
 }
 

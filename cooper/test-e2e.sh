@@ -2008,9 +2008,13 @@ cat > "${E2E_BRIDGE_DIR}/main.go" <<BRIDGEGO
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	"image/png"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -2023,6 +2027,33 @@ func main() {
 	cooperDir := os.Getenv("COOPER_DIR")
 	mgr := clipboard.NewManager(5*time.Minute, 20*1024*1024)
 	mgr.SetCooperDir(cooperDir)
+	imageBytes, err := testPNG()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "generate clipboard image: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err := mgr.Stage(clipboard.ClipboardObject{
+		Kind:    clipboard.ClipboardKindImage,
+		MIME:    "image/png",
+		Raw:     imageBytes,
+		RawSize: int64(len(imageBytes)),
+		Variants: map[string]clipboard.ClipboardVariant{
+			"image/png": {
+				MIME:  "image/png",
+				Bytes: imageBytes,
+				Size:  int64(len(imageBytes)),
+			},
+		},
+	}, 0); err != nil {
+		fmt.Fprintf(os.Stderr, "stage clipboard image: %v\n", err)
+		os.Exit(1)
+	}
+	// Keep the exact fixture on disk so the shell test can compare the bytes
+	// returned through both clipboard transports, not merely their MIME type.
+	if err := os.WriteFile(filepath.Join(cooperDir, "e2e-clipboard.png"), imageBytes, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "write clipboard fixture: %v\n", err)
+		os.Exit(1)
+	}
 	handler := clipboard.NewHandler(mgr, nil)
 	gatewayIPs, err := docker.BridgeGatewayIPs()
 	if err != nil {
@@ -2035,16 +2066,198 @@ func main() {
 		fmt.Fprintf(os.Stderr, "bridge start: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("bridge ready")
+	fmt.Printf("bridge ready image_bytes=%d\n", len(imageBytes))
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
 	<-ch
+}
+
+// testPNG deliberately exceeds the X11 direct-property threshold. OpenCode
+// reads it through Cooper's xclip shim, while Codex must complete the native
+// X11 INCR handshake before either TUI can display its image attachment.
+func testPNG() ([]byte, error) {
+	img := image.NewNRGBA(image.Rect(0, 0, 512, 512))
+	state := uint32(0x6d2b79f5)
+	for pixel := 0; pixel < len(img.Pix); pixel += 4 {
+		state ^= state << 13
+		state ^= state >> 17
+		state ^= state << 5
+		img.Pix[pixel] = byte(state)
+		img.Pix[pixel+1] = byte(state >> 8)
+		img.Pix[pixel+2] = byte(state >> 16)
+		img.Pix[pixel+3] = 0xff
+	}
+
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		return nil, err
+	}
+	if encoded.Len() <= 256*1024 {
+		return nil, fmt.Errorf("fixture is %d bytes; expected an INCR-sized PNG", encoded.Len())
+	}
+	return encoded.Bytes(), nil
 }
 BRIDGEGO
 
 info "Building e2e bridge helper..."
 E2E_BRIDGE_BIN="${CONFIG_DIR}/e2e-bridge-server"
 go build -o "$E2E_BRIDGE_BIN" "${E2E_BRIDGE_DIR}/main.go" 2>&1 || { fail "e2e bridge build failed"; }
+
+# Build a PTY-backed driver for the real OpenCode and Codex TUIs. A raw pipe
+# is insufficient for modern TUIs because both query terminal capabilities
+# before accepting keys; tui-driver supplies those replies and lets the test
+# assert the rendered image attachment instead of only probing helper binaries.
+E2E_TUI_DRIVER_DIR="${CONFIG_DIR}/e2e-tui-driver"
+E2E_TUI_DRIVER_BIN="${CONFIG_DIR}/e2e-tui-driver-bin"
+mkdir -p "$E2E_TUI_DRIVER_DIR"
+cat > "${E2E_TUI_DRIVER_DIR}/go.mod" <<'TUIDRIVERMOD'
+module cooper-clipboard-tui-driver
+
+go 1.24.0
+
+require github.com/rickchristie/tui-driver v0.2.0
+TUIDRIVERMOD
+cat > "${E2E_TUI_DRIVER_DIR}/go.sum" <<'TUIDRIVERSUM'
+github.com/rickchristie/tui-driver v0.2.0 h1:8yDYZYEy1oUkLHC53uuvCu+GFLkFr+biHO4HwlhubfY=
+github.com/rickchristie/tui-driver v0.2.0/go.mod h1:5yBHpEE3cRc+gRTGIsFj14+CbgoAKT4BGFLUUFuLwkk=
+TUIDRIVERSUM
+cat > "${E2E_TUI_DRIVER_DIR}/main.go" <<'TUIDRIVERGO'
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	tuidriver "github.com/rickchristie/tui-driver"
+)
+
+func main() {
+	container := flag.String("container", "", "Docker container to drive")
+	tool := flag.String("tool", "", "CLI tool: opencode or codex")
+	flag.Parse()
+
+	var command string
+	switch *tool {
+	case "opencode":
+		// The upstream installer writes under ~/.opencode, but Cooper copies
+		// the executable to ~/.local/bin because ~/.opencode is an auth/state
+		// bind mount at runtime.
+		command = "exec /home/user/.local/bin/opencode"
+	case "codex":
+		command = "exec /home/user/.npm-global/bin/codex -C /tmp"
+	default:
+		fmt.Fprintf(os.Stderr, "unsupported tool %q\n", *tool)
+		os.Exit(2)
+	}
+	if *container == "" {
+		fmt.Fprintln(os.Stderr, "-container is required")
+		os.Exit(2)
+	}
+
+	sessionCtx, cancelSession := context.WithCancel(context.Background())
+	defer cancelSession()
+	session, err := tuidriver.Start(sessionCtx, tuidriver.ProcessSpec{
+		Path: "docker",
+		Args: []string{"exec", "-it", *container, "bash", "-c", command},
+	}, tuidriver.Options{Width: 120, Height: 30})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "start %s: %v\n", *tool, err)
+		os.Exit(1)
+	}
+	defer session.Close()
+
+	isReady := func(snapshot tuidriver.Snapshot) bool {
+		screen := snapshot.String()
+		if *tool == "codex" {
+			return strings.Contains(screen, "OpenAI Codex") &&
+				strings.Contains(screen, "model:") &&
+				!strings.Contains(screen, "loading") &&
+				!strings.Contains(screen, "Do you trust the contents")
+		}
+		return strings.Contains(screen, "Ask anything")
+	}
+	wait := func(timeout time.Duration, predicate func(tuidriver.Snapshot) bool) error {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		return session.WaitUntil(ctx, predicate)
+	}
+
+	// Codex can show workspace-trust and model-migration screens in either
+	// order. Consume only these known local startup prompts; the driver never
+	// submits a model prompt, so the fake E2E API key cannot incur usage.
+	startupPrompt := func(screen string) string {
+		switch {
+		case strings.Contains(screen, "Do you trust the contents"):
+			return "Do you trust the contents"
+		case strings.Contains(screen, "Choose how you'd like Codex to proceed"):
+			return "Choose how you'd like Codex to proceed"
+		default:
+			return ""
+		}
+	}
+	for attempts := 0; attempts < 4 && !isReady(session.Snapshot()); attempts++ {
+		if err := wait(30*time.Second, func(snapshot tuidriver.Snapshot) bool {
+			return isReady(snapshot) || startupPrompt(snapshot.String()) != ""
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "%s did not start: %v\n%s\n", *tool, err, session.Snapshot().String())
+			os.Exit(1)
+		}
+		if isReady(session.Snapshot()) {
+			break
+		}
+		prompt := startupPrompt(session.Snapshot().String())
+		if err := session.SendKey(tuidriver.KeyEnter); err != nil {
+			fmt.Fprintf(os.Stderr, "accept %s startup prompt %q: %v\n", *tool, prompt, err)
+			os.Exit(1)
+		}
+		if err := wait(30*time.Second, func(snapshot tuidriver.Snapshot) bool {
+			return isReady(snapshot) || !strings.Contains(snapshot.String(), prompt)
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "%s startup prompt %q did not close: %v\n%s\n", *tool, prompt, err, session.Snapshot().String())
+			os.Exit(1)
+		}
+	}
+	if !isReady(session.Snapshot()) {
+		fmt.Fprintf(os.Stderr, "%s did not reach its prompt after startup screens\n%s\n", *tool, session.Snapshot().String())
+		os.Exit(1)
+	}
+
+	if err := session.SendKey(tuidriver.KeyCtrlV); err != nil {
+		fmt.Fprintf(os.Stderr, "send Ctrl-V to %s: %v\n", *tool, err)
+		os.Exit(1)
+	}
+	if err := wait(20*time.Second, func(snapshot tuidriver.Snapshot) bool {
+		screen := snapshot.String()
+		return strings.Contains(screen, "Image 1") ||
+			strings.Contains(screen, "Image #1") ||
+			strings.Contains(screen, "Failed to paste image")
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "%s did not handle the clipboard image: %v\n%s\n", *tool, err, session.Snapshot().String())
+		os.Exit(1)
+	}
+
+	screen := session.Snapshot().String()
+	if strings.Contains(screen, "Failed to paste image") {
+		fmt.Fprintf(os.Stderr, "%s rejected the clipboard image:\n%s\n", *tool, screen)
+		os.Exit(1)
+	}
+	fmt.Printf("%s attached clipboard image\n", *tool)
+}
+TUIDRIVERGO
+
+if (
+    cd "$E2E_TUI_DRIVER_DIR"
+    GOCACHE="${CONFIG_DIR}/cache/e2e-tui-driver-go-build" GOWORK=off \
+        go build -o "$E2E_TUI_DRIVER_BIN" .
+); then
+    pass "E2E clipboard TUI driver built"
+else
+    fail "E2E clipboard TUI driver build failed"
+fi
 
 # Kill any existing listener on the selected bridge port (leftover from a prior cooper up).
 existing_pid=$(lsof -ti tcp:${BRIDGE_PORT} 2>/dev/null || true)
@@ -2074,57 +2287,111 @@ else
     kill "$E2E_BRIDGE_PID" 2>/dev/null || true
 fi
 
-# Generate a clipboard token for the claude barrel.
-mkdir -p "${CONFIG_DIR}/tokens"
-TOKEN=$(head -c 32 /dev/urandom | xxd -p | tr -d '\n')
-echo -n "$TOKEN" > "${CONFIG_DIR}/tokens/${BARREL_CLAUDE}"
-chmod 600 "${CONFIG_DIR}/tokens/${BARREL_CLAUDE}"
-pass "Clipboard token file created"
-
-# Restart the claude barrel WITH clipboard env vars and mounts.
-info "Starting claude barrel with clipboard bridge config..."
-read -ra CLAUDE_AUTH_MOUNTS <<< "$(auth_mounts_for claude)"
-CLIPBOARD_EXTRA_MOUNTS=(
-    "-v" "${CONFIG_DIR}/tokens/${BARREL_CLAUDE}:/etc/cooper/clipboard-token:ro"
-    "-v" "${CONFIG_DIR}/base/shims:/etc/cooper/shims:ro"
-)
-CLIPBOARD_EXTRA_ENVS=(
-    "-e" "COOPER_CLIPBOARD_MODE=shim"
-)
-build_barrel_run_args "$ACTIVE_BARREL" "$ACTIVE_IMAGE" CLAUDE_AUTH_MOUNTS CLIPBOARD_EXTRA_MOUNTS CLIPBOARD_EXTRA_ENVS
-docker "${BARREL_ARGS[@]}" >/dev/null 2>&1
-
-# Wait for it.
-barrel_running=false
-for i in $(seq 1 10); do
-    state=$(docker inspect --format '{{.State.Running}}' "$ACTIVE_BARREL" 2>/dev/null || echo "false")
-    if [ "$state" = "true" ]; then
-        barrel_running=true
-        break
+if [ -s "${CONFIG_DIR}/e2e-clipboard.png" ]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+        EXPECTED_CLIPBOARD_SHA=$(sha256sum "${CONFIG_DIR}/e2e-clipboard.png" | awk '{print $1}')
+    else
+        EXPECTED_CLIPBOARD_SHA=$(shasum -a 256 "${CONFIG_DIR}/e2e-clipboard.png" | awk '{print $1}')
     fi
-    sleep 1
-done
-if [ "$barrel_running" = "true" ]; then
-    pass "Claude barrel started with clipboard bridge config"
 else
-    fail "Claude barrel did not start for clipboard tests"
-    docker logs "$ACTIVE_BARREL" 2>&1 | tail -20 | while IFS= read -r line; do info "  $line"; done
+    EXPECTED_CLIPBOARD_SHA=""
+    fail "E2E bridge did not create the staged PNG fixture"
 fi
 
-# Redefine barrel_exec for the new barrel.
+# Phase 14 starts several tool barrels against the same staged image. Each gets
+# a distinct disk token because the bridge authenticates the token by
+# inspecting the matching live container and its declared clipboard mode.
 barrel_exec() {
     docker exec "$ACTIVE_BARREL" bash -c "$1" 2>&1
 }
 
-# Wait for entrypoint to finish setup (socat, Xvfb, shims).
-# Shim installation is the LAST step in the entrypoint, so we poll for the
-# xclip shim file to confirm the entire entrypoint has completed.
-for _i in $(seq 1 20); do
-    if barrel_exec 'test -x /home/user/.local/bin/xclip' >/dev/null 2>&1; then
-        break
+start_clipboard_barrel() {
+    local tool=$1
+    local mode=$2
+
+    ACTIVE_TOOL="$tool"
+    ACTIVE_BARREL="$(barrel_name_for "$tool")"
+    ACTIVE_IMAGE="$(image_name_for "$tool")"
+
+    mkdir -p "${CONFIG_DIR}/tokens"
+    TOKEN=$(head -c 32 /dev/urandom | xxd -p | tr -d '\n')
+    echo -n "$TOKEN" > "${CONFIG_DIR}/tokens/${ACTIVE_BARREL}"
+    chmod 600 "${CONFIG_DIR}/tokens/${ACTIVE_BARREL}"
+
+    CLIPBOARD_AUTH_MOUNTS=()
+    read -ra CLIPBOARD_AUTH_MOUNTS <<< "$(auth_mounts_for "$tool")"
+    CLIPBOARD_EXTRA_MOUNTS=(
+        "-v" "${CONFIG_DIR}/tokens/${ACTIVE_BARREL}:/etc/cooper/clipboard-token:ro"
+    )
+    if [ "$mode" = "shim" ]; then
+        CLIPBOARD_EXTRA_MOUNTS+=(
+            "-v" "${CONFIG_DIR}/base/shims:/etc/cooper/shims:ro"
+        )
     fi
-    sleep 0.5
-done
+    CLIPBOARD_EXTRA_ENVS=(
+        "-e" "COOPER_CLIPBOARD_MODE=${mode}"
+    )
+
+    info "Starting ${tool} barrel in clipboard ${mode} mode..."
+    build_barrel_run_args \
+        "$ACTIVE_BARREL" \
+        "$ACTIVE_IMAGE" \
+        CLIPBOARD_AUTH_MOUNTS \
+        CLIPBOARD_EXTRA_MOUNTS \
+        CLIPBOARD_EXTRA_ENVS
+    docker "${BARREL_ARGS[@]}" >/dev/null 2>&1
+
+    local barrel_running=false
+    for _i in $(seq 1 10); do
+        state=$(docker inspect --format '{{.State.Running}}' "$ACTIVE_BARREL" 2>/dev/null || echo "false")
+        if [ "$state" = "true" ]; then
+            barrel_running=true
+            break
+        fi
+        sleep 1
+    done
+    if [ "$barrel_running" != "true" ]; then
+        fail "${tool}: barrel did not start for clipboard tests"
+        docker logs "$ACTIVE_BARREL" 2>&1 | tail -20 | while IFS= read -r line; do info "  $line"; done
+        return 1
+    fi
+
+    # Shim installation and the X11 bridge are the final mode-specific
+    # entrypoint steps. Waiting for them avoids racing the real CLI paste.
+    local clipboard_ready=false
+    for _i in $(seq 1 30); do
+        if [ "$mode" = "shim" ]; then
+            if barrel_exec 'test -x /home/user/.local/bin/xclip' >/dev/null 2>&1; then
+                clipboard_ready=true
+                break
+            fi
+        # /tmp is a persistent per-barrel cache, so a prior event-loop log is
+        # not proof that the restarted X server is ready. Exercise a real X11
+        # requestor and require the staged MIME target before proceeding.
+        elif barrel_exec \
+            'timeout 2 /usr/bin/xclip -selection clipboard -t TARGETS -o 2>/dev/null | grep -q "image/png"' \
+            >/dev/null 2>&1; then
+            clipboard_ready=true
+            break
+        fi
+        sleep 0.5
+    done
+    if [ "$clipboard_ready" != "true" ]; then
+        fail "${tool}: clipboard ${mode} runtime did not become ready"
+        docker logs "$ACTIVE_BARREL" 2>&1 | tail -20 | while IFS= read -r line; do info "  $line"; done
+        return 1
+    fi
+
+    pass "${tool}: barrel started in clipboard ${mode} mode"
+}
+
+stop_clipboard_barrel() {
+    if [ -n "${ACTIVE_BARREL:-}" ]; then
+        docker rm -f "$ACTIVE_BARREL" 2>/dev/null || true
+    fi
+}
+
+start_clipboard_barrel "claude" "shim" || exit 1
 
 # ---- Test 1: Clipboard env vars present in barrel ----
 info "Checking clipboard env vars..."
@@ -2233,23 +2500,26 @@ fi
 # ---- Test 7: xclip shim intercepts TARGETS request ----
 info "Checking shim TARGETS interception..."
 
-# The xclip shim in ~/.local/bin should intercept -selection clipboard -t TARGETS -o
-# and return "image/png" when the bridge has a staged image (or at least not crash).
+# The xclip shim in ~/.local/bin should intercept the TARGETS query and expose
+# the staged PNG without consulting the otherwise empty X11 clipboard.
 targets_output=$(barrel_exec '/home/user/.local/bin/xclip -selection clipboard -t TARGETS -o 2>/dev/null || true')
-if [ -n "$targets_output" ]; then
-    pass "xclip shim handles TARGETS request (output: ${targets_output})"
+if echo "$targets_output" | grep -q "image/png"; then
+    pass "xclip shim advertises staged image/png"
 else
-    # Shim may return empty if bridge is unreachable, which is expected in e2e
-    # (bridge server is not running). Just verify the shim didn't crash.
-    shim_exit=$(barrel_exec '/home/user/.local/bin/xclip -selection clipboard -t TARGETS -o 2>&1; echo "exit:$?"' | grep 'exit:' | head -1)
-    info "xclip shim TARGETS returned empty (bridge not running) — exit: ${shim_exit}"
-    pass "xclip shim handles TARGETS without crashing"
+    fail "xclip shim TARGETS response missing image/png: ${targets_output}"
+fi
+
+claude_image_sha=$(barrel_exec \
+    '/home/user/.local/bin/xclip -selection clipboard -t image/png -o | sha256sum | awk "{print \$1}"')
+if [ -n "$EXPECTED_CLIPBOARD_SHA" ] && [ "$claude_image_sha" = "$EXPECTED_CLIPBOARD_SHA" ]; then
+    pass "Claude shim returned the staged PNG byte-for-byte"
+else
+    fail "Claude shim image checksum mismatch (got ${claude_image_sha:-empty})"
 fi
 
 # ---- Test 8: Clipboard bridge endpoint authentication ----
-# NOTE: These tests exercise the socat tunnel to the configured bridge port. If the bridge
-# server is not running on the host (it's started by `cooper up`), the curl
-# calls will get connection-refused. We test connectivity and auth separately.
+# These requests traverse the same socat tunnel that the clipboard shims and
+# native X11 bridge use inside real barrels.
 info "Checking clipboard bridge connectivity..."
 
 # First check if the bridge port is reachable at all (socat tunnel).
@@ -2257,7 +2527,7 @@ bridge_reachable=$(barrel_exec "curl -sf -o /dev/null -w '%{http_code}' -m 3 'ht
 if echo "$bridge_reachable" | grep -q "200"; then
     pass "Bridge server reachable on port ${BRIDGE_PORT}"
 
-    # Test with valid token — should get 200 (empty clipboard).
+    # Test with valid token — should get the staged large image metadata.
     http_code=$(barrel_exec "curl -sf -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer ${TOKEN}' 'http://127.0.0.1:${BRIDGE_PORT}/clipboard/type' 2>/dev/null || echo '000'")
     if [ "$http_code" = "200" ]; then
         pass "GET /clipboard/type with valid token returns HTTP 200"
@@ -2265,10 +2535,13 @@ if echo "$bridge_reachable" | grep -q "200"; then
         fail "GET /clipboard/type with valid token returned HTTP ${http_code} (expected 200)"
     fi
 
-    # Test response body contains "empty" state.
+    # The fixture must remain above the direct X11 property threshold so the
+    # later Codex TUI check is a regression test for the INCR path.
     type_resp=$(barrel_exec "curl -sf -H 'Authorization: Bearer ${TOKEN}' 'http://127.0.0.1:${BRIDGE_PORT}/clipboard/type' 2>/dev/null || echo '{}'")
-    if echo "$type_resp" | grep -q '"empty"'; then
-        pass "GET /clipboard/type returns state=empty when nothing staged"
+    if echo "$type_resp" | jq -e \
+        '.state == "staged" and .kind == "image" and .mime == "image/png" and .size > 262144' \
+        >/dev/null 2>&1; then
+        pass "GET /clipboard/type reports an INCR-sized staged PNG"
     else
         fail "GET /clipboard/type unexpected response: ${type_resp}"
     fi
@@ -2292,9 +2565,71 @@ else
     fail "Bridge server not reachable on port ${BRIDGE_PORT} (e2e bridge should be running)"
 fi
 
-# Stop the active barrel and bridge server.
-info "Stopping active barrel..."
-docker rm -f "$ACTIVE_BARREL" 2>/dev/null || true
+# ---- Test 9: OpenCode consumes the staged image through its real TUI ----
+stop_clipboard_barrel
+start_clipboard_barrel "opencode" "shim" || exit 1
+
+opencode_image_sha=$(barrel_exec \
+    '/home/user/.local/bin/xclip -selection clipboard -t image/png -o | sha256sum | awk "{print \$1}"')
+if [ -n "$EXPECTED_CLIPBOARD_SHA" ] && [ "$opencode_image_sha" = "$EXPECTED_CLIPBOARD_SHA" ]; then
+    pass "OpenCode shim returned the staged PNG byte-for-byte"
+else
+    fail "OpenCode shim image checksum mismatch (got ${opencode_image_sha:-empty})"
+fi
+
+if "$E2E_TUI_DRIVER_BIN" \
+    -container "$ACTIVE_BARREL" \
+    -tool opencode \
+    > /tmp/cooper-e2e-opencode-clipboard-tui.txt 2>&1; then
+    pass "OpenCode TUI attached the staged clipboard image with Ctrl-V"
+else
+    fail "OpenCode TUI did not attach the staged clipboard image"
+    tail -40 /tmp/cooper-e2e-opencode-clipboard-tui.txt | while IFS= read -r line; do info "  $line"; done
+fi
+
+# ---- Test 10: Codex consumes the large image through native X11 INCR ----
+stop_clipboard_barrel
+start_clipboard_barrel "codex" "x11" || exit 1
+
+codex_image_sha=$(barrel_exec \
+    'timeout 20 /usr/bin/xclip -selection clipboard -t image/png -o | sha256sum | awk "{print \$1}"')
+if [ -n "$EXPECTED_CLIPBOARD_SHA" ] && [ "$codex_image_sha" = "$EXPECTED_CLIPBOARD_SHA" ]; then
+    pass "Codex X11 bridge returned the INCR-sized PNG byte-for-byte"
+else
+    fail "Codex X11 bridge image checksum mismatch (got ${codex_image_sha:-empty})"
+fi
+
+# Seed only the isolated E2E auth mount. The TUI never submits a prompt, so
+# this fake key merely bypasses the login screen and cannot incur API usage.
+if barrel_exec \
+    'printf "sk-e2e-clipboard-sanity\n" | /home/user/.npm-global/bin/codex login --with-api-key >/tmp/e2e-codex-login.log 2>&1'; then
+    info "Codex E2E login state prepared"
+else
+    fail "Codex E2E login setup failed"
+fi
+
+if "$E2E_TUI_DRIVER_BIN" \
+    -container "$ACTIVE_BARREL" \
+    -tool codex \
+    > /tmp/cooper-e2e-codex-clipboard-tui.txt 2>&1; then
+    pass "Codex TUI attached the staged clipboard image with Ctrl-V"
+else
+    fail "Codex TUI did not attach the staged clipboard image"
+    tail -40 /tmp/cooper-e2e-codex-clipboard-tui.txt | while IFS= read -r line; do info "  $line"; done
+fi
+
+codex_incr_completions=$(barrel_exec \
+    'grep -c "INCR transfer complete" /tmp/x11-bridge.log 2>/dev/null || true' |
+    tr -d '[:space:]')
+if [ "${codex_incr_completions:-0}" -ge 2 ] 2>/dev/null; then
+    pass "Codex CLI completed its native X11 INCR transfer"
+else
+    fail "Codex CLI INCR completion was not observed (count=${codex_incr_completions:-0})"
+fi
+
+# Stop the final clipboard barrel and bridge server.
+info "Stopping active clipboard barrel..."
+stop_clipboard_barrel
 info "Stopping e2e bridge server..."
 if [ -n "${E2E_BRIDGE_PID:-}" ]; then
     kill "$E2E_BRIDGE_PID" 2>/dev/null || true
