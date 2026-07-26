@@ -196,7 +196,14 @@ func (m *saveModel) view(width, height int) string {
 
 	content += actionBox.Render(inner) + "\n"
 
-	footer := " " + helpBar("[Enter Build]", "[c Clean Build]", "[s Save]", "[Esc Cancel]")
+	footer := " " + helpBar(
+		"["+theme.IconArrowUp+theme.IconArrowDown+" Scroll]",
+		"[PgUp/PgDn]",
+		"[Enter Build]",
+		"[c Clean]",
+		"[s Save]",
+		"[Esc]",
+	)
 
 	ly := newLayout(header, content, footer, width, height)
 	ly.scrollOffset = m.scrollOffset

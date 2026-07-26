@@ -1,15 +1,16 @@
 package configure
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/rickchristie/govner/cooper/internal/app"
+	"github.com/rickchristie/govner/cooper/internal/buildflow"
 	"github.com/rickchristie/govner/cooper/internal/config"
 )
 
@@ -47,17 +48,20 @@ func TestExecuteRequestedActionSaveOnlyReportsAllSaveSteps(t *testing.T) {
 	}
 
 	var reported []int
-	warnings, err := executeRequestedAction(ca, config.DefaultConfig(), saveModel{saveRequested: true}, io.Discard, func(step int, stepErr error) {
+	warnings, prepared, err := executeRequestedPreparation(ca, config.DefaultConfig(), saveModel{saveRequested: true}, func(step int, stepErr error) {
 		if stepErr != nil {
 			t.Fatalf("step %d returned unexpected error: %v", step, stepErr)
 		}
 		reported = append(reported, step)
 	})
 	if err != nil {
-		t.Fatalf("executeRequestedAction() failed: %v", err)
+		t.Fatalf("executeRequestedPreparation() failed: %v", err)
 	}
 	if len(warnings) != 0 {
 		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+	if prepared != nil {
+		t.Fatal("save-only operation unexpectedly prepared a Docker build")
 	}
 
 	wantReported := make([]int, len(app.SaveStepNames()))
@@ -72,44 +76,24 @@ func TestExecuteRequestedActionSaveOnlyReportsAllSaveSteps(t *testing.T) {
 	}
 }
 
-func TestRequestedStepNamesSaveAndBuildIncludesBuildPlan(t *testing.T) {
-	cooperDir := t.TempDir()
-	customDir := filepath.Join(cooperDir, "cli", "custom-tool")
-	if err := os.MkdirAll(customDir, 0755); err != nil {
-		t.Fatalf("MkdirAll(customDir) failed: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(customDir, "Dockerfile"), []byte("FROM scratch\n"), 0644); err != nil {
-		t.Fatalf("WriteFile(Dockerfile) failed: %v", err)
-	}
-
-	cfg := config.DefaultConfig()
-	cfg.AITools = []config.ToolConfig{{Name: "claude", Enabled: true}}
-
-	steps, err := requestedStepNames(saveModel{saveRequested: true, buildRequested: true}, cfg, cooperDir)
-	if err != nil {
-		t.Fatalf("requestedStepNames() failed: %v", err)
-	}
-
+func TestRequestedPreparationStepsEndBeforeDockerBuild(t *testing.T) {
+	steps := requestedPreparationStepNames(saveModel{saveRequested: true, buildRequested: true})
 	saveSteps := app.SaveStepNames()
 	if len(steps) <= len(saveSteps) {
-		t.Fatalf("expected build steps after save steps, got %v", steps)
+		t.Fatalf("expected preparation steps after save steps, got %v", steps)
+	}
+	if want := len(saveSteps) + len(buildflow.StagingStepNames()); len(steps) != want {
+		t.Fatalf("loading steps = %d, want %d without duplicated preparation work: %v", len(steps), want, steps)
 	}
 	if !reflect.DeepEqual(steps[:len(saveSteps)], saveSteps) {
 		t.Fatalf("save step prefix = %v, want %v", steps[:len(saveSteps)], saveSteps)
 	}
-	if !containsStep(steps, "Building claude image...") {
-		t.Fatalf("expected claude build step in %v", steps)
+	if got := steps[len(steps)-1]; got != "Staging CA files..." {
+		t.Fatalf("last loading step = %q, want %q", got, "Staging CA files...")
 	}
-	if !containsStep(steps, "Building custom image custom-tool...") {
-		t.Fatalf("expected custom image build step in %v", steps)
-	}
-}
-
-func containsStep(steps []string, want string) bool {
 	for _, step := range steps {
-		if step == want {
-			return true
+		if strings.HasPrefix(step, "Building ") {
+			t.Fatalf("Docker step %q must not appear on the preparation loading screen", step)
 		}
 	}
-	return false
 }

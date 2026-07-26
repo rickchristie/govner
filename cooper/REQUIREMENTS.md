@@ -65,6 +65,17 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
 
 - `cooper configure` sets-up all required files in the machine:
   - If already configured, this command still runs and allows user to change the configuration.
+  - Every full-screen Cooper view uses a fixed header and fixed footer. The main
+    body consumes exactly the remaining terminal rows and must never push the
+    footer off-screen. Overflowing bodies are reachable by mouse wheel and
+    up/down keyboard navigation; selectable bodies automatically keep their
+    current row visible.
+  - Save & Build completes validation, filesystem preparation, template
+    generation, ACL helper generation, and CA staging at 100% before any Docker
+    command begins. It then switches to a fixed-frame Docker feedback screen
+    that streams combined stdout/stderr, supports mouse and keyboard scrolling,
+    auto-follows until the user scrolls, and preserves failure output for
+    inspection.
   - Cooper detects that Docker Engine is installed and is the appropriate version.
   - Creates `~/.cooper` folder to contain all cooper files.
   - Generates a Cooper CA certificate (`~/.cooper/ca/cooper-ca.pem`) for TLS interception (SSL bump),
@@ -955,7 +966,9 @@ cooper/
 │   │   ├── portfwdscreen.go         # Port Forwarding screen UI
 │   │   ├── proxy.go                 # Proxy/Bridge port setup
 │   │   ├── save.go                  # Save & Build options screen
-│   │   ├── layout.go                # TUI layout helpers
+│   │   ├── operation.go             # Save/preparation/build phase orchestration
+│   │   ├── build_feedback.go        # Live, scrollable Docker stdout/stderr screen
+│   │   ├── layout.go                # Configure adapter around the shared fixed frame
 │   │   ├── layout_test.go
 │   │   ├── modal.go                 # Configure modal dialogs
 │   │   ├── textinput.go             # Text input component for configure
@@ -1091,6 +1104,7 @@ cooper/
 │       │   └── events.go            # Shared event/message definitions across TUI packages
 │       │
 │       └── components/              # Shared UI components
+│           ├── frame.go             # Fixed header/footer with an exact-height body
 │           ├── modal.go             # Confirmation dialogs (exit, restart)
 │           ├── tabs.go              # Tab bar navigation
 │           ├── timer.go             # Countdown timer bars with color gradient

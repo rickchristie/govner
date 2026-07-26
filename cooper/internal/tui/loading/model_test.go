@@ -1,10 +1,14 @@
 package loading
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
 func TestNewWithOptionsUsesCustomConfigureFlowSettings(t *testing.T) {
@@ -46,5 +50,41 @@ func TestCustomProgressTargetsDefaultToEvenDistribution(t *testing.T) {
 	updated, _ = updated.completeStep(2)
 	if updated.targetProg != 1.0 {
 		t.Fatalf("targetProg after final step = %v, want 1.0", updated.targetProg)
+	}
+}
+
+func TestLoadingScreenKeepsFixedFrameAndScrollsOverflowingSteps(t *testing.T) {
+	var steps []LoadingStep
+	for i := range 20 {
+		steps = append(steps, LoadingStep{Name: fmt.Sprintf("step %02d", i)})
+	}
+	m := NewWithOptions(Options{
+		Steps:           steps,
+		RunningSubtitle: "applying configuration...",
+		AllowCancel:     false,
+	})
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 70, Height: 10})
+
+	rendered := m.View(m.Width, m.Height)
+	lines := strings.Split(rendered, "\n")
+	if len(lines) != m.Height {
+		t.Fatalf("rendered height = %d, want %d:\n%s", len(lines), m.Height, ansi.Strip(rendered))
+	}
+	if !strings.Contains(ansi.Strip(strings.Join(lines[:4], "\n")), "applying configuration...") {
+		t.Fatalf("fixed header missing subtitle:\n%s", ansi.Strip(rendered))
+	}
+	if !strings.Contains(ansi.Strip(lines[len(lines)-1]), theme.BarrelEmoji) {
+		t.Fatalf("fixed footer missing barrel: %q", ansi.Strip(lines[len(lines)-1]))
+	}
+
+	before := m.viewport.ScrollOffset
+	m, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	if m.viewport.ScrollOffset <= before {
+		t.Fatalf("mouse wheel offset = %d, want > %d", m.viewport.ScrollOffset, before)
+	}
+	afterMouse := m.viewport.ScrollOffset
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if m.viewport.ScrollOffset <= afterMouse {
+		t.Fatalf("down key offset = %d, want > %d", m.viewport.ScrollOffset, afterMouse)
 	}
 }

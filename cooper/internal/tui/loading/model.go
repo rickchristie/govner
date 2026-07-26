@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/rickchristie/govner/cooper/internal/tui/components"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
@@ -97,6 +98,7 @@ type Model struct {
 	doneSubtitle    string
 	errorSubtitle   string
 	allowCancel     bool
+	viewport        components.ScrollableContent
 }
 
 // New creates a loading model. If shutdown is true, the shutdown step
@@ -144,7 +146,7 @@ func NewWithOptions(opts Options) Model {
 	if len(progressTable) != len(steps) {
 		progressTable = evenProgressTargets(len(steps))
 	}
-	return Model{
+	m := Model{
 		Steps:           steps,
 		IsShutdown:      opts.Shutdown,
 		progressTable:   progressTable,
@@ -154,6 +156,8 @@ func NewWithOptions(opts Options) Model {
 		allowCancel:     opts.AllowCancel,
 		lastAnimTick:    time.Now(),
 	}
+	m.syncViewport()
+	return m
 }
 
 // ----- Messages -----
@@ -203,7 +207,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.Done = true
 		return m, nil
 
+	case tea.MouseMsg:
+		m.viewport.HandleMouse(msg, m.bodyHeight())
+		return m, nil
+
 	case tea.KeyMsg:
+		if m.viewport.HandleKey(msg, m.bodyHeight()) {
+			return m, nil
+		}
 		return m.handleKey(msg)
 	}
 
@@ -219,66 +230,28 @@ func (m Model) View(width, height int) string {
 		m.Height = height
 	}
 
-	var lines []string
-
-	// Barrel roll animation.
 	frames := theme.BarrelRollFrames()
 	frame := frames[m.barrelFrame%len(frames)]
 	barrelLine := lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(frame)
-	lines = append(lines, "")
-	lines = append(lines, barrelLine)
-	lines = append(lines, "")
-
-	// Title: c o o p e r
 	title := theme.TitleStyle.Render("c o o p e r")
-	lines = append(lines, title)
-	lines = append(lines, "")
-
-	// Subtitle varies by state.
 	subtitle := m.subtitle()
 	subtitleStyle := lipgloss.NewStyle().Foreground(theme.ColorDusty)
-	lines = append(lines, subtitleStyle.Render(subtitle))
-	lines = append(lines, "")
-
-	// Progress bar.
-	lines = append(lines, m.progressBar())
-	lines = append(lines, "")
-
-	// Step list.
-	for _, step := range m.Steps {
-		lines = append(lines, m.renderStep(step))
+	header := centerLine(barrelLine, m.Width) + "\n" +
+		centerLine(title, m.Width) + "\n" +
+		centerLine(subtitleStyle.Render(subtitle), m.Width) + "\n" +
+		centerLine(m.progressBar(), m.Width)
+	footer := centerLine(m.helpLine(), m.Width)
+	fixed := components.FixedFrame{
+		Header: header,
+		Footer: footer,
+		Width:  m.Width,
+		Height: m.Height,
 	}
-	lines = append(lines, "")
 
-	// Help bar.
-	lines = append(lines, m.helpLine())
-	lines = append(lines, "")
-
-	// Center the content block.
-	content := strings.Join(lines, "\n")
-	contentWidth := maxLineWidth(lines)
-
-	// Horizontal centering: pad each line.
-	centeredLines := make([]string, len(lines))
-	for i, line := range lines {
-		lw := lipgloss.Width(line)
-		pad := (m.Width - lw) / 2
-		if pad < 0 {
-			pad = 0
-		}
-		centeredLines[i] = strings.Repeat(" ", pad) + line
-	}
-	content = strings.Join(centeredLines, "\n")
-
-	// Vertical centering.
-	contentHeight := strings.Count(content, "\n") + 1
-	topPad := (m.Height - contentHeight) / 2
-	if topPad < 0 {
-		topPad = 0
-	}
-	_ = contentWidth // used for centering calculation above
-
-	return strings.Repeat("\n", topPad) + content
+	viewport := m.viewport
+	viewport.SetContent(m.stepContent(m.Width))
+	body := viewport.View(m.Width, fixed.BodyHeight())
+	return fixed.View(body)
 }
 
 // ----- SubModel adapter -----
@@ -457,6 +430,7 @@ func (m Model) completeStep(idx int) (Model, tea.Cmd) {
 	if next >= len(m.Steps) {
 		m.targetProg = 1.0
 	}
+	m.syncViewport()
 
 	return m, nil
 }
@@ -472,6 +446,7 @@ func (m Model) failStep(idx int, err error) (Model, tea.Cmd) {
 		m.errorMsg = err.Error()
 	}
 	m.HasError = true
+	m.syncViewport()
 	return m, nil
 }
 
@@ -542,6 +517,43 @@ func maxLineWidth(lines []string) int {
 		}
 	}
 	return max
+}
+
+func (m *Model) syncViewport() {
+	m.viewport.SetContent(m.stepContent(0))
+}
+
+func (m Model) stepContent(width int) string {
+	lines := make([]string, 0, len(m.Steps))
+	for _, step := range m.Steps {
+		rendered := m.renderStep(step)
+		for _, line := range strings.Split(rendered, "\n") {
+			lines = append(lines, centerLine(line, width))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) bodyHeight() int {
+	frame := components.FixedFrame{
+		Header: "\n\n\n",
+		Footer: " ",
+		Width:  m.Width,
+		Height: m.Height,
+	}
+	return frame.BodyHeight()
+}
+
+func centerLine(line string, width int) string {
+	if width <= 0 {
+		return line
+	}
+	lineWidth := lipgloss.Width(line)
+	pad := (width - lineWidth) / 2
+	if pad < 0 {
+		pad = 0
+	}
+	return strings.Repeat(" ", pad) + line
 }
 
 func cloneSteps(steps []LoadingStep) []LoadingStep {

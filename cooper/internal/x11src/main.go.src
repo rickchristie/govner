@@ -234,7 +234,7 @@ func main() {
 		log.Fatalf("x11-bridge: parse display: %v", err)
 	}
 	tcpPort := 6000 + displayNum
-	tcpAddr := fmt.Sprintf("%s:%d", displayHost, tcpPort)
+	tcpAddr := net.JoinHostPort(displayHost, strconv.Itoa(tcpPort))
 
 	// Connect to X server via TCP with explicit cookie authentication.
 	// We use NewConnNetWithCookieHex instead of NewConn/XAUTHORITY because
@@ -692,6 +692,9 @@ func parseDisplay(display string) (host string, num int, err error) {
 	host = display[:idx]
 	if host == "" {
 		host = "127.0.0.1"
+	} else {
+		host = strings.TrimPrefix(host, "[")
+		host = strings.TrimSuffix(host, "]")
 	}
 	num, err = strconv.Atoi(display[idx+1:])
 	if err != nil {

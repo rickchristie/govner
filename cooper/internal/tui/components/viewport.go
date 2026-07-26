@@ -33,9 +33,22 @@ type ScrollableContent struct {
 
 // SetContent splits rendered content into lines for viewport display.
 func (v *ScrollableContent) SetContent(content string) {
+	if content == "" {
+		v.lines = nil
+		v.totalLines = 0
+		v.ScrollOffset = 0
+		return
+	}
 	v.lines = strings.Split(content, "\n")
 	v.totalLines = len(v.lines)
 	v.clampScroll(0) // ensure offset is valid
+}
+
+// AppendLine appends one logical line. Embedded newlines are split so callers
+// can safely forward output from writers that occasionally batch records.
+func (v *ScrollableContent) AppendLine(line string) {
+	v.lines = append(v.lines, strings.Split(line, "\n")...)
+	v.totalLines = len(v.lines)
 }
 
 // View renders the visible portion of content with a scrollbar.
@@ -44,6 +57,7 @@ func (v *ScrollableContent) View(width, height int) string {
 	if height <= 0 {
 		return ""
 	}
+	v.clampScroll(height)
 
 	needsScroll := v.totalLines > height
 	contentWidth := width
@@ -162,15 +176,36 @@ func (v *ScrollableContent) EnsureLineVisible(line, height int) {
 	v.clampScroll(height)
 }
 
+// ScrollToBottom moves the viewport to the newest content.
+func (v *ScrollableContent) ScrollToBottom(height int) {
+	v.ScrollOffset = v.MaxScrollOffset(height)
+}
+
+// AtBottom reports whether the newest content is visible.
+func (v *ScrollableContent) AtBottom(height int) bool {
+	return v.ScrollOffset >= v.MaxScrollOffset(height)
+}
+
+// MaxScrollOffset returns the largest valid offset for the given viewport.
+func (v *ScrollableContent) MaxScrollOffset(height int) int {
+	maxOffset := v.totalLines - height
+	if maxOffset < 0 {
+		return 0
+	}
+	return maxOffset
+}
+
+// TotalLines returns the number of logical content lines.
+func (v *ScrollableContent) TotalLines() int {
+	return v.totalLines
+}
+
 // clampScroll ensures ScrollOffset is within valid bounds.
 func (v *ScrollableContent) clampScroll(height int) {
 	if v.ScrollOffset < 0 {
 		v.ScrollOffset = 0
 	}
-	maxOffset := v.totalLines - height
-	if maxOffset < 0 {
-		maxOffset = 0
-	}
+	maxOffset := v.MaxScrollOffset(height)
 	if v.ScrollOffset > maxOffset {
 		v.ScrollOffset = maxOffset
 	}

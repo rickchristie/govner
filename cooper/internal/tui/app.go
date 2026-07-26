@@ -890,8 +890,16 @@ func (m *Model) View() string {
 		)
 	}
 
-	// Pad content to fill available height.
+	// Constrain content to the body before padding it. Sub-models own their
+	// scroll state, but the root shell remains the final guard that prevents an
+	// oversized child from moving the global footer off-screen.
 	contentLines := strings.Split(tabContent, "\n")
+	if len(contentLines) > contentHeight {
+		contentLines = contentLines[:contentHeight]
+	}
+	for i, line := range contentLines {
+		contentLines[i] = lipgloss.NewStyle().MaxWidth(m.width).Render(line)
+	}
 	for len(contentLines) < contentHeight {
 		contentLines = append(contentLines, "")
 	}
@@ -1155,16 +1163,17 @@ func (m *Model) animTickCmd() tea.Cmd {
 
 // ----- Public entry point -----
 
-// NewProgram creates a BubbleTea program with the alternate screen enabled.
-// Mouse capture stays disabled so terminals can use normal drag selection for
-// logs and tables inside cooper up.
+// NewProgram creates a BubbleTea program with the alternate screen and mouse
+// wheel events enabled. Cooper's screen contract requires every overflowing
+// body to be reachable by both keyboard and mouse; terminals can still use
+// their modifier key (commonly Shift) for native text selection.
 // The caller should invoke p.Run() to start the event loop. Having access
 // to the *tea.Program before Run blocks allows external goroutines (e.g.
 // the shutdown callback) to send messages via p.Send().
 // Additional options are appended after the default alt-screen option so
 // command entrypoints can own process-level concerns such as signal handling.
 func NewProgram(m *Model, opts ...tea.ProgramOption) *tea.Program {
-	programOpts := []tea.ProgramOption{tea.WithAltScreen()}
+	programOpts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}
 	programOpts = append(programOpts, opts...)
 	return tea.NewProgram(m, programOpts...)
 }

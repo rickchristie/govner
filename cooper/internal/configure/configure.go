@@ -163,7 +163,7 @@ func Run(ca *app.ConfigureApp) (RunResult, error) {
 	existing := ca.IsExisting()
 
 	m := newModel(cfg, cooperDir, ca, existing)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := newConfigureProgram(m)
 	finalModel, err := p.Run()
 	if err != nil {
 		return RunResult{}, fmt.Errorf("configure wizard: %w", err)
@@ -198,6 +198,12 @@ func Run(ca *app.ConfigureApp) (RunResult, error) {
 	}
 
 	return result, nil
+}
+
+func newConfigureProgram(m tea.Model, opts ...tea.ProgramOption) *tea.Program {
+	programOpts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}
+	programOpts = append(programOpts, opts...)
+	return tea.NewProgram(m, programOpts...)
 }
 
 func newModel(cfg *config.Config, cooperDir string, ca *app.ConfigureApp, existing bool) *model {
@@ -567,8 +573,11 @@ const (
 )
 
 type welcomeModel struct {
-	cursor int
-	items  []welcomeItem
+	cursor         int
+	items          []welcomeItem
+	scrollOffset   int
+	lastMaxScroll  int
+	lastBodyHeight int
 }
 
 type welcomeItem struct {
@@ -592,15 +601,30 @@ func newWelcomeModel(existing bool) welcomeModel {
 
 func (w *welcomeModel) update(msg tea.Msg) welcomeResult {
 	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		handleMouseScroll(msg, &w.scrollOffset, w.lastMaxScroll)
+		return welcomeNone
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "up", "k":
 			if w.cursor > 0 {
 				w.cursor--
+				w.ensureCursorVisible()
 			}
 		case "down", "j":
 			if w.cursor < len(w.items)-1 {
 				w.cursor++
+				w.ensureCursorVisible()
+			}
+		case "pgup", "ctrl+u":
+			w.scrollOffset -= max(1, w.lastBodyHeight/2)
+			if w.scrollOffset < 0 {
+				w.scrollOffset = 0
+			}
+		case "pgdown", "ctrl+d":
+			w.scrollOffset += max(1, w.lastBodyHeight/2)
+			if w.scrollOffset > w.lastMaxScroll {
+				w.scrollOffset = w.lastMaxScroll
 			}
 		case "enter":
 			return welcomeSelect
@@ -640,11 +664,9 @@ func (w *welcomeModel) view(width, height int, existing bool) string {
 	selectedBg := lipgloss.NewStyle().Background(theme.ColorOakMid)
 	arrow := lipgloss.NewStyle().Foreground(theme.ColorAmber).Bold(true)
 
-	var s string
-	s += "\n\n"
-	s += center(theme.BarrelEmoji, width) + "\n\n"
-	s += center(titleAmber.Render("c o o p e r")+"  "+titleLinen.Render("c o n f i g u r e"), width) + "\n\n"
-	s += center(tagline.Render("Barrel-proof containers for undiluted AI."), width) + "\n\n\n"
+	header := center(theme.BarrelEmoji, width) + "\n" +
+		center(titleAmber.Render("c o o p e r")+"  "+titleLinen.Render("c o n f i g u r e"), width) + "\n" +
+		center(tagline.Render("Barrel-proof containers for undiluted AI."), width)
 
 	// Menu items — rendered as a left-aligned block, then the block is centered.
 	var menuLines []string
@@ -672,13 +694,7 @@ func (w *welcomeModel) view(width, height int, existing bool) string {
 		statusLine = lipgloss.NewStyle().Foreground(theme.ColorCopper).Render("Status: No existing configuration found. Starting fresh.")
 	}
 
-	// Help bar.
-	helpLine := helpBar("\u2191\u2193 Nav", "Enter Select", "q Quit")
-
-	// Combine menu + status + help into a single left-aligned content block,
-	// then center the entire block within the terminal width by adding
-	// a uniform left margin to every line.
-	contentBlock := menuBlock + "\n\n" + statusLine + "\n\n" + helpLine
+	contentBlock := menuBlock + "\n\n" + statusLine
 
 	// Find the widest line in the content block to determine the block width.
 	blockWidth := 0
@@ -701,9 +717,33 @@ func (w *welcomeModel) view(width, height int, existing bool) string {
 	for i, line := range centeredLines {
 		centeredLines[i] = pad + line
 	}
-	s += strings.Join(centeredLines, "\n") + "\n"
+	content := strings.Join(centeredLines, "\n")
+	footer := " " + helpBar("["+theme.IconArrowUp+theme.IconArrowDown+" Nav]", "[Enter Select]", "[q Quit]")
+	ly := newLayout(header, content, footer, width, height)
+	ly.scrollOffset = w.scrollOffset
+	result := ly.Render()
+	w.scrollOffset = ly.scrollOffset
+	w.lastMaxScroll = ly.MaxScrollOffset()
+	w.lastBodyHeight = ly.ContentHeight()
+	return result
+}
 
-	return s
+func (w *welcomeModel) ensureCursorVisible() {
+	if w.lastBodyHeight <= 0 {
+		return
+	}
+	if w.cursor < w.scrollOffset {
+		w.scrollOffset = w.cursor
+	}
+	if w.cursor >= w.scrollOffset+w.lastBodyHeight {
+		w.scrollOffset = w.cursor - w.lastBodyHeight + 1
+	}
+	if w.scrollOffset < 0 {
+		w.scrollOffset = 0
+	}
+	if w.scrollOffset > w.lastMaxScroll {
+		w.scrollOffset = w.lastMaxScroll
+	}
 }
 
 // center centers a string within the given width.

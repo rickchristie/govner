@@ -191,6 +191,20 @@ When a new request enters manual approval, Cooper can play one short host-side a
 
 All configuration lives in `~/.cooper/`. Run `cooper configure` to change settings through the interactive wizard.
 
+Every Cooper screen keeps its header and help footer fixed. The middle body owns
+all remaining terminal rows and scrolls with the mouse wheel, arrow keys or
+`j`/`k`, and Page Up/Page Down. On selectable lists, moving the selection also
+keeps the selected row visible. Mouse reporting is enabled in both
+`cooper configure` and `cooper up`; hold your terminal's selection modifier
+(commonly Shift) when you want native text selection.
+
+`Save & Build` has two explicit phases. Configuration validation, template
+generation, ACL helper generation and CA staging finish on the preparation
+screen at 100%. Cooper then switches to a dedicated Docker build screen that
+streams combined Docker stdout/stderr. The log follows new output by default;
+scrolling pauses follow mode and `End` resumes it. A failed build preserves its
+logs and concrete error until dismissed.
+
 ### Programming Tools
 
 Cooper detects Go, Node.js (npm/yarn/bun), and Python (pip/pipenv/poetry) on your host and offers three version modes:

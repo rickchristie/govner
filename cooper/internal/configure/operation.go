@@ -2,7 +2,6 @@ package configure
 
 import (
 	"fmt"
-	"io"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -12,53 +11,52 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tui/loading"
 )
 
-type configureOperationResult struct {
+type configurePreparationResult struct {
 	warnings []string
+	prepared *buildflow.Prepared
 	err      error
 }
 
-func requestedStepNames(save saveModel, cfg *config.Config, cooperDir string) ([]string, error) {
+func requestedPreparationStepNames(save saveModel) []string {
 	steps := app.SaveStepNames()
 	if !save.buildRequested {
-		return steps, nil
+		return steps
 	}
-	buildSteps, err := buildflow.StepNames(cfg, cooperDir)
-	if err != nil {
-		return nil, err
-	}
-	return append(steps, buildSteps...), nil
+	return append(steps, buildflow.StagingStepNames()...)
 }
 
 func runRequestedActionWithLoading(ca *app.ConfigureApp, cfg *config.Config, save saveModel) ([]string, error) {
-	stepNames, err := requestedStepNames(save, cfg, ca.CooperDir())
-	if err != nil {
-		return nil, err
-	}
-
+	stepNames := requestedPreparationStepNames(save)
 	steps := make([]loading.LoadingStep, len(stepNames))
 	for i, stepName := range stepNames {
 		steps[i] = loading.LoadingStep{Name: stepName}
 	}
 
+	runningSubtitle := "applying configuration..."
+	doneSubtitle := "configuration applied"
+	if save.buildRequested {
+		runningSubtitle = "preparing configuration..."
+		doneSubtitle = "ready to build Docker images"
+	}
 	loadModel := loading.NewWithOptions(loading.Options{
 		Steps:           steps,
-		RunningSubtitle: "applying configuration...",
-		DoneSubtitle:    "configuration applied",
+		RunningSubtitle: runningSubtitle,
+		DoneSubtitle:    doneSubtitle,
 		ErrorSubtitle:   "configuration failed",
 		AllowCancel:     false,
 	})
 	p := tea.NewProgram(&configureLoadingAdapter{model: loadModel}, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
-	resultCh := make(chan configureOperationResult, 1)
+	resultCh := make(chan configurePreparationResult, 1)
 	go func() {
-		warnings, runErr := executeRequestedAction(ca, cfg, save, io.Discard, func(idx int, stepErr error) {
+		warnings, prepared, runErr := executeRequestedPreparation(ca, cfg, save, func(idx int, stepErr error) {
 			if stepErr != nil {
 				p.Send(loading.StepErrorMsg{Index: idx, Err: stepErr})
 				return
 			}
 			p.Send(loading.StepCompleteMsg{Index: idx})
 		})
-		resultCh <- configureOperationResult{warnings: warnings, err: runErr}
+		resultCh <- configurePreparationResult{warnings: warnings, prepared: prepared, err: runErr}
 	}()
 
 	loadingResult, runErr := p.Run()
@@ -82,33 +80,82 @@ func runRequestedActionWithLoading(ca *app.ConfigureApp, cfg *config.Config, sav
 	if !adapter.model.Done {
 		return result.warnings, fmt.Errorf("configure operation cancelled")
 	}
-	return result.warnings, result.err
+	if result.err != nil {
+		return result.warnings, result.err
+	}
+	if result.prepared != nil {
+		if err := runPreparedBuildWithFeedback(result.prepared, save.cleanBuildRequested); err != nil {
+			return result.warnings, err
+		}
+	}
+	return result.warnings, nil
 }
 
-func executeRequestedAction(ca *app.ConfigureApp, cfg *config.Config, save saveModel, out io.Writer, report func(step int, err error)) ([]string, error) {
+func executeRequestedPreparation(ca *app.ConfigureApp, cfg *config.Config, save saveModel, report func(step int, err error)) ([]string, *buildflow.Prepared, error) {
 	syncConfigureApp(ca, cfg)
-	warnings, err := ca.SaveWithProgress(func(step int, total int, name string, stepErr error) {
+	saveProgress := func(step int, total int, name string, stepErr error) {
 		if report != nil {
 			report(step, stepErr)
 		}
-	})
+	}
+	var (
+		warnings []string
+		implicit []config.ImplicitToolConfig
+		err      error
+	)
+	if save.buildRequested {
+		warnings, implicit, err = ca.SaveForBuildWithProgress(saveProgress)
+	} else {
+		warnings, err = ca.SaveWithProgress(saveProgress)
+	}
 	if err != nil {
-		return warnings, err
+		return warnings, nil, err
 	}
 	if !save.buildRequested {
-		return warnings, nil
+		return warnings, nil, nil
 	}
 	buildOffset := len(app.SaveStepNames())
-	buildErr := buildflow.Run(ca.Config(), ca.CooperDir(), buildflow.Options{
-		NoCache: save.cleanBuildRequested,
-		Out:     out,
+	prepared, prepareErr := buildflow.Stage(ca.Config(), ca.CooperDir(), implicit, buildflow.Options{
 		OnProgress: func(step int, total int, name string, stepErr error) {
 			if report != nil {
 				report(buildOffset+step, stepErr)
 			}
 		},
 	})
-	return warnings, buildErr
+	return warnings, prepared, prepareErr
+}
+
+func runPreparedBuildWithFeedback(prepared *buildflow.Prepared, noCache bool) error {
+	model := newBuildFeedbackModel(prepared.StepNames())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+
+	resultCh := make(chan error, 1)
+	go func() {
+		buildErr := prepared.Build(buildflow.Options{
+			NoCache: noCache,
+			OnOutput: func(line string) {
+				p.Send(dockerBuildLineMsg{Line: line})
+			},
+			OnProgress: func(step int, total int, name string, stepErr error) {
+				p.Send(dockerBuildStepFinishedMsg{Index: step, Err: stepErr})
+			},
+		})
+		resultCh <- buildErr
+		p.Send(dockerBuildFinishedMsg{Err: buildErr})
+	}()
+
+	finalModel, runErr := p.Run()
+	buildErr := <-resultCh
+	if runErr != nil {
+		return fmt.Errorf("docker build feedback screen: %w", runErr)
+	}
+	if _, ok := finalModel.(*buildFeedbackModel); !ok {
+		if buildErr != nil {
+			return buildErr
+		}
+		return fmt.Errorf("docker build feedback screen ended unexpectedly")
+	}
+	return buildErr
 }
 
 func syncConfigureApp(ca *app.ConfigureApp, cfg *config.Config) {

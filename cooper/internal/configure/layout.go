@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/rickchristie/govner/cooper/internal/tui/components"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
@@ -86,17 +87,7 @@ func (l *layout) ScrollToTop() {
 
 // ContentHeight returns the available height for content.
 func (l *layout) ContentHeight() int {
-	headerLines := countLines(l.header)
-	footerLines := countLines(l.footer)
-	sepCount := 2
-	if l.hideTopSep {
-		sepCount = 1
-	}
-	avail := l.height - headerLines - footerLines - sepCount
-	if avail < 0 {
-		avail = 0
-	}
-	return avail
+	return l.frame(l.footer).BodyHeight()
 }
 
 // TotalContentLines returns the total number of lines in the content.
@@ -119,20 +110,9 @@ func (l *layout) MaxScrollOffset() int {
 
 // Render renders the 3-row layout.
 func (l *layout) Render() string {
-	headerLines := strings.Split(l.header, "\n")
 	contentLines := splitContentLines(l.content)
 	footerLines := strings.Split(l.footer, "\n")
-
-	// Available height = total - header - footer - separator lines (1 or 2).
-	sepCount := 2
-	if l.hideTopSep {
-		sepCount = 1
-	}
-	availHeight := l.height - len(headerLines) - len(footerLines) - sepCount
-	if availHeight < 0 {
-		availHeight = 0
-	}
-
+	availHeight := l.ContentHeight()
 	totalContent := len(contentLines)
 
 	// Clamp scroll offset.
@@ -147,50 +127,31 @@ func (l *layout) Render() string {
 		l.scrollOffset = 0
 	}
 
-	var out []string
-
-	// Header-content separator.
-	sep := lipgloss.NewStyle().Foreground(theme.ColorOakLight).Render(strings.Repeat("─", l.width))
-
-	// 1. Header, optionally followed by separator.
-	out = append(out, headerLines...)
-	if !l.hideTopSep {
-		out = append(out, sep)
-	}
-
-	// 2. Content lines (scrollable region).
+	var visible []string
 	if totalContent <= availHeight {
-		// Content fits: render all, pad remaining space with empty lines.
-		out = append(out, contentLines...)
-		for i := totalContent; i < availHeight; i++ {
-			out = append(out, "")
-		}
+		visible = append(visible, contentLines...)
 	} else {
-		// Content overflows: render only the visible window.
 		end := l.scrollOffset + availHeight
 		if end > totalContent {
 			end = totalContent
 		}
-		out = append(out, contentLines[l.scrollOffset:end]...)
-		// Pad if needed (shouldn't normally happen, but be safe).
-		rendered := end - l.scrollOffset
-		for i := rendered; i < availHeight; i++ {
-			out = append(out, "")
-		}
+		visible = append(visible, contentLines[l.scrollOffset:end]...)
 	}
 
-	// Content-footer separator.
-	out = append(out, sep)
-
-	// 3. Footer with optional scroll indicator.
 	if l.NeedsScroll() {
-		footerWithScroll := l.appendScrollIndicator(footerLines)
-		out = append(out, footerWithScroll...)
-	} else {
-		out = append(out, footerLines...)
+		footerLines = l.appendScrollIndicator(footerLines)
 	}
+	return l.frame(strings.Join(footerLines, "\n")).View(strings.Join(visible, "\n"))
+}
 
-	return strings.Join(out, "\n")
+func (l *layout) frame(footer string) components.FixedFrame {
+	return components.FixedFrame{
+		Header:           l.header,
+		Footer:           footer,
+		Width:            l.width,
+		Height:           l.height,
+		HideTopSeparator: l.hideTopSep,
+	}
 }
 
 // maxScrollOffset returns the maximum scroll offset.

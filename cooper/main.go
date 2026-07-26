@@ -162,6 +162,7 @@ Use --screen to jump directly to a specific tab:
   cooper tui-test --screen monitor
   cooper tui-test --screen containers
   cooper tui-test --screen configure
+  cooper tui-test --screen build
   cooper tui-test --screen ports`,
 	RunE: runTUITest,
 }
@@ -199,7 +200,7 @@ func init() {
 	rootCmd.AddCommand(tuiTestCmd)
 
 	tuiTestCmd.Flags().StringVar(&tuiTestScreen, "screen", "",
-		"Jump to a specific screen: containers, monitor, blocked, allowed, bridge-logs, bridge-routes, settings, ports, about, loading, configure")
+		"Jump to a specific screen: containers, monitor, blocked, allowed, bridge-logs, bridge-routes, settings, ports, about, loading, configure, build")
 }
 
 func main() {
@@ -1420,8 +1421,13 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 			}
 			_, err := configure.Run(testCA)
 			return err
+		case "build", "build-feedback":
+			preview := configure.NewBuildFeedbackPreviewModel()
+			p := tea.NewProgram(preview, tea.WithAltScreen(), tea.WithMouseCellMotion())
+			_, err := p.Run()
+			return err
 		default:
-			return fmt.Errorf("unknown screen: %s\nAvailable: containers, monitor, blocked, allowed, squid-logs, bridge-logs, bridge-routes, settings, ports, about, loading, configure", tuiTestScreen)
+			return fmt.Errorf("unknown screen: %s\nAvailable: containers, monitor, blocked, allowed, squid-logs, bridge-logs, bridge-routes, settings, ports, about, loading, configure, build", tuiTestScreen)
 		}
 	}
 

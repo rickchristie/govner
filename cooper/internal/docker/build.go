@@ -108,28 +108,50 @@ func BuildImageWithOutput(name, dockerfilePath, contextDir string, buildArgs map
 
 		if err := cmd.Start(); err != nil {
 			errc <- fmt.Errorf("docker build %s failed to start: %w", name, err)
+			pw.Close()
+			pr.Close()
 			close(lines)
 			return
 		}
 
-		// Read output line by line and send on channel. The scanner
-		// goroutine owns closing the lines channel to avoid a send-on-
-		// closed-channel panic from the outer goroutine.
-		scanner := bufio.NewScanner(pr)
+		// Read without bufio.Scanner's token-size ceiling. Docker build steps
+		// can emit very long compiler or package-manager lines; stopping at the
+		// scanner limit would leave the pipe unread and could deadlock cmd.Wait.
+		readErrc := make(chan error, 1)
 		go func() {
 			defer close(lines)
-			for scanner.Scan() {
-				lines <- scanner.Text()
+			defer pr.Close()
+			reader := bufio.NewReader(pr)
+			for {
+				line, readErr := reader.ReadString('\n')
+				if len(line) > 0 {
+					line = strings.TrimSuffix(line, "\n")
+					line = strings.TrimSuffix(line, "\r")
+					lines <- line
+				}
+				if readErr != nil {
+					if readErr == io.EOF {
+						readErrc <- nil
+					} else {
+						readErrc <- readErr
+					}
+					return
+				}
 			}
 		}()
 
 		// Wait for the command to finish and close the write end of the pipe
-		// so the scanner goroutine exits.
+		// so the reader goroutine exits.
 		err := cmd.Wait()
 		pw.Close()
+		readErr := <-readErrc
 
 		if err != nil {
 			errc <- fmt.Errorf("docker build %s failed: %w", name, err)
+			return
+		}
+		if readErr != nil {
+			errc <- fmt.Errorf("read docker build %s output: %w", name, readErr)
 			return
 		}
 		errc <- nil

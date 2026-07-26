@@ -358,6 +358,41 @@ func TestConfigureApp_SaveWithProgressReportsAllSteps(t *testing.T) {
 	}
 }
 
+func TestConfigureApp_SaveForBuildReturnsRenderedImplicitSnapshot(t *testing.T) {
+	stubConfigureTestResolvers(t)
+
+	ca, err := NewConfigureApp(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewConfigureApp: %v", err)
+	}
+	ca.SetProgrammingTools([]config.ToolConfig{{
+		Name:          "go",
+		Enabled:       true,
+		Mode:          config.ModePin,
+		PinnedVersion: "1.22.5",
+	}})
+
+	var reported []string
+	warnings, implicit, err := ca.SaveForBuildWithProgress(func(step int, total int, name string, stepErr error) {
+		if stepErr != nil {
+			t.Fatalf("unexpected step error at %d (%s): %v", step, name, stepErr)
+		}
+		reported = append(reported, name)
+	})
+	if err != nil {
+		t.Fatalf("SaveForBuildWithProgress: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+	if !reflect.DeepEqual(reported, SaveStepNames()) {
+		t.Fatalf("reported steps = %v, want %v", reported, SaveStepNames())
+	}
+	if len(implicit) == 0 {
+		t.Fatal("strict build save did not return the implicit tools rendered into Dockerfiles")
+	}
+}
+
 // TestConfigureApp_ConfigIsCopy verifies that Config() returns a copy
 // that does not mutate the internal state.
 func TestConfigureApp_ConfigIsCopy(t *testing.T) {

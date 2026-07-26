@@ -187,6 +187,19 @@ func (a *ConfigureApp) Save() ([]string, error) {
 
 // SaveWithProgress performs Save while reporting step completion or failure.
 func (a *ConfigureApp) SaveWithProgress(onProgress func(step int, total int, name string, err error)) ([]string, error) {
+	warnings, _, err := a.saveWithProgress(true, onProgress)
+	return warnings, err
+}
+
+// SaveForBuildWithProgress saves the configuration using strict version
+// resolution and returns the exact implicit-tool snapshot rendered into the
+// Dockerfiles. Save-only may use a proven stale built snapshot, but an
+// immediately requested build must fail rather than build stale inputs.
+func (a *ConfigureApp) SaveForBuildWithProgress(onProgress func(step int, total int, name string, err error)) ([]string, []config.ImplicitToolConfig, error) {
+	return a.saveWithProgress(false, onProgress)
+}
+
+func (a *ConfigureApp) saveWithProgress(allowStaleFallback bool, onProgress func(step int, total int, name string, err error)) ([]string, []config.ImplicitToolConfig, error) {
 	report := func(step int, err error) {
 		if onProgress == nil {
 			return
@@ -197,13 +210,13 @@ func (a *ConfigureApp) SaveWithProgress(onProgress func(step int, total int, nam
 	if err := a.cfg.Validate(); err != nil {
 		err = fmt.Errorf("validation failed: %w", err)
 		report(0, err)
-		return nil, err
+		return nil, nil, err
 	}
 	canonicalBarrelEnvVars := config.CanonicalizeBarrelEnvVars(a.cfg.BarrelEnvVars)
 	if err := config.ValidateBarrelEnvVars(canonicalBarrelEnvVars); err != nil {
 		err = fmt.Errorf("barrel env validation failed: %w", err)
 		report(0, err)
-		return nil, err
+		return nil, nil, err
 	}
 	a.cfg.BarrelEnvVars = canonicalBarrelEnvVars
 	report(0, nil)
@@ -216,20 +229,20 @@ func (a *ConfigureApp) SaveWithProgress(onProgress func(step int, total int, nam
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			err = fmt.Errorf("create directory %s: %w", dir, err)
 			report(1, err)
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	report(1, nil)
 
-	warnings, err := config.RefreshDesiredToolVersions(a.cfg, config.DesiredVersionRefreshOptions{AllowStaleFallback: true})
+	warnings, err := config.RefreshDesiredToolVersions(a.cfg, config.DesiredVersionRefreshOptions{AllowStaleFallback: allowStaleFallback})
 	if err != nil {
 		report(2, err)
-		return nil, err
+		return nil, nil, err
 	}
-	implicit, implicitWarnings, err := config.ResolveImplicitToolsWithOptions(a.cfg, config.ImplicitToolResolveOptions{AllowStaleFallback: true})
+	implicit, implicitWarnings, err := config.ResolveImplicitToolsWithOptions(a.cfg, config.ImplicitToolResolveOptions{AllowStaleFallback: allowStaleFallback})
 	if err != nil {
 		report(2, err)
-		return warnings, err
+		return warnings, nil, err
 	}
 	warnings = append(warnings, implicitWarnings...)
 	report(2, nil)
@@ -239,7 +252,7 @@ func (a *ConfigureApp) SaveWithProgress(onProgress func(step int, total int, nam
 	if err := config.SaveConfig(configPath, a.cfg); err != nil {
 		err = fmt.Errorf("save config: %w", err)
 		report(3, err)
-		return warnings, err
+		return warnings, nil, err
 	}
 	report(3, nil)
 
@@ -247,14 +260,14 @@ func (a *ConfigureApp) SaveWithProgress(onProgress func(step int, total int, nam
 	if err := templates.WriteAllTemplates(baseDir, cliDir, a.cfg, implicit); err != nil {
 		err = fmt.Errorf("write CLI templates: %w", err)
 		report(4, err)
-		return warnings, err
+		return warnings, nil, err
 	}
 
 	// Generate proxy templates.
 	if err := templates.WriteProxyTemplates(proxyDir, a.cfg); err != nil {
 		err = fmt.Errorf("write proxy templates: %w", err)
 		report(4, err)
-		return warnings, err
+		return warnings, nil, err
 	}
 	report(4, nil)
 
@@ -262,11 +275,11 @@ func (a *ConfigureApp) SaveWithProgress(onProgress func(step int, total int, nam
 	if _, _, err := config.EnsureCA(a.cooperDir); err != nil {
 		err = fmt.Errorf("ensure CA: %w", err)
 		report(5, err)
-		return warnings, err
+		return warnings, nil, err
 	}
 	report(5, nil)
 
-	return warnings, nil
+	return warnings, append([]config.ImplicitToolConfig(nil), implicit...), nil
 }
 
 // SaveAndBuild performs Save() and then triggers a Docker build of both
