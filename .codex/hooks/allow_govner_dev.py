@@ -113,6 +113,17 @@ GIT_FETCH_BOOL_OPTIONS = {
     "-t",
     "-v",
 }
+GIT_LS_REMOTE_BOOL_OPTIONS = {
+    "--exit-code",
+    "--heads",
+    "--quiet",
+    "--refs",
+    "--symref",
+    "--tags",
+    "-h",
+    "-q",
+    "-t",
+}
 GIT_PUSH_BOOL_OPTIONS = {
     "--atomic",
     "--dry-run",
@@ -879,7 +890,7 @@ def is_allowed_simple_command(
         or is_script_pty_wrapper(tokens, cwd)
         or is_project_dev_build(tokens, cwd, complete_capture)
         or is_go_command(tokens, cwd, complete_capture)
-        or is_git_command(tokens, cwd)
+        or is_git_command(tokens, cwd, complete_capture)
         or is_docker_read_command(tokens)
         or is_lsof_probe(tokens)
         or is_direct_ps_probe(tokens)
@@ -1549,7 +1560,11 @@ def is_safe_go_package(value: str, cwd: Path) -> bool:
     return resolve_safe_path(value, cwd, allow_tmp=False) is not None
 
 
-def is_git_command(tokens: list[str], cwd: Path) -> bool:
+def is_git_command(
+    tokens: list[str],
+    cwd: Path,
+    complete_capture: bool,
+) -> bool:
     parsed = split_git_command(tokens, cwd)
     if parsed is None:
         return False
@@ -1560,6 +1575,8 @@ def is_git_command(tokens: list[str], cwd: Path) -> bool:
         return is_git_commit(args, git_cwd)
     if command == "fetch":
         return is_git_fetch(args)
+    if command == "ls-remote":
+        return is_git_ls_remote(args, complete_capture)
     if command == "push":
         return is_git_push(args)
     if command == "tag":
@@ -1711,6 +1728,29 @@ def is_git_fetch(args: list[str]) -> bool:
     if len(positionals) >= 2 and positionals[1] == "tag":
         return len(positionals) == 3 and is_current_release_tag(positionals[2])
     return all(is_safe_git_ref(ref) for ref in positionals[1:])
+
+
+def is_git_ls_remote(args: list[str], complete_capture: bool) -> bool:
+    """Allow the read-only remote-ref preflight used before a release.
+
+    Keeping the remote and patterns concrete prevents this narrow release
+    check from becoming approval for arbitrary URLs, remote helpers, or broad
+    ref enumeration. Full /tmp capture preserves the release audit trail.
+    """
+    if not complete_capture:
+        return False
+
+    positionals: list[str] = []
+    for token in args:
+        if token in GIT_LS_REMOTE_BOOL_OPTIONS:
+            continue
+        if token.startswith("-"):
+            return False
+        positionals.append(token)
+
+    if len(positionals) < 2 or positionals[0] != "origin":
+        return False
+    return all(is_safe_git_ls_remote_ref(ref) for ref in positionals[1:])
 
 
 def is_git_push(args: list[str]) -> bool:
@@ -1867,6 +1907,19 @@ def is_safe_git_ref(value: str) -> bool:
     ):
         return False
     return True
+
+
+def is_safe_git_ls_remote_ref(value: str) -> bool:
+    """Validate a concrete release-preflight ref, including a peeled tag."""
+    if value.startswith("refs/heads/"):
+        return is_safe_git_ref(value.removeprefix("refs/heads/"))
+
+    tag = value.removeprefix("refs/tags/")
+    if tag == value:
+        return False
+    if tag.endswith("^{}"):
+        tag = tag[:-3]
+    return is_current_release_tag(tag)
 
 
 def is_docker_read_command(tokens: list[str]) -> bool:

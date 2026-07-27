@@ -716,6 +716,18 @@
     "why": "Pruning and fetching tag metadata from origin are reviewed release preparation operations."
   },
   {
+    "id": "git-ls-remote-release-refs",
+    "command": "git ls-remote origin refs/heads/main refs/tags/cooper/v{COOPER_VERSION} 'refs/tags/cooper/v{COOPER_VERSION}^{}' > /tmp/cooper-release-remote-refs.txt 2>&1",
+    "expected": true,
+    "why": "The release preflight reads concrete main and current-version tag refs from the configured origin and preserves the result under /tmp."
+  },
+  {
+    "id": "git-ls-remote-gowt-release-tag",
+    "command": "git ls-remote --exit-code origin refs/tags/gowt/v{GOWT_VERSION} 'refs/tags/gowt/v{GOWT_VERSION}^{}' > /tmp/gowt-release-remote-refs.txt 2>&1",
+    "expected": true,
+    "why": "Read-only current-version release-tag checks apply consistently to every Govner project."
+  },
+  {
     "id": "git-push-origin-main",
     "command": "git push origin main",
     "expected": true,
@@ -780,6 +792,36 @@
     "command": "git fetch --upload-pack=/tmp/helper origin main",
     "expected": false,
     "why": "A custom upload-pack can execute an arbitrary program."
+  },
+  {
+    "id": "deny-git-ls-remote-without-log",
+    "command": "git ls-remote origin refs/heads/main refs/tags/cooper/v{COOPER_VERSION}",
+    "expected": false,
+    "why": "Release preflight output must preserve both stdout and stderr in a /tmp audit log."
+  },
+  {
+    "id": "deny-git-ls-remote-url",
+    "command": "git ls-remote https://example.com/repository.git refs/heads/main > /tmp/cooper-release-remote-refs.txt 2>&1",
+    "expected": false,
+    "why": "Remote-ref checks are limited to Govner's configured origin rather than arbitrary URLs."
+  },
+  {
+    "id": "deny-git-ls-remote-upload-pack",
+    "command": "git ls-remote --upload-pack=/tmp/helper origin refs/heads/main > /tmp/cooper-release-remote-refs.txt 2>&1",
+    "expected": false,
+    "why": "A custom upload-pack can execute an arbitrary local program despite ls-remote otherwise being read-only."
+  },
+  {
+    "id": "deny-git-ls-remote-ref-glob",
+    "command": "git ls-remote origin 'refs/tags/cooper/v*' > /tmp/cooper-release-remote-refs.txt 2>&1",
+    "expected": false,
+    "why": "Broad remote ref enumeration is outside the concrete release-preflight policy."
+  },
+  {
+    "id": "deny-git-ls-remote-stale-tag",
+    "command": "git ls-remote origin refs/tags/cooper/v999.0.0 'refs/tags/cooper/v999.0.0^{}' > /tmp/cooper-release-remote-refs.txt 2>&1",
+    "expected": false,
+    "why": "Release-tag checks must match the version currently declared by the selected project."
   },
   {
     "id": "deny-git-push-force",

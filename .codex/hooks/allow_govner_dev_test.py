@@ -281,6 +281,21 @@ class AllowGovnerDevTest(unittest.TestCase):
             "allow",
         )
 
+    def test_release_remote_ref_query_is_allowed_from_repo_root(self) -> None:
+        version = allow_govner_dev.project_version("cooper")
+        self.assertIsNotNone(version)
+        command = (
+            "git ls-remote origin refs/heads/main "
+            f"refs/tags/cooper/v{version} "
+            f"'refs/tags/cooper/v{version}^{{}}' "
+            "> /tmp/cooper-release-remote-refs.txt 2>&1"
+        )
+        output = json.loads(run_hook(command, str(REPO_ROOT)))
+        self.assertEqual(
+            output["hookSpecificOutput"]["decision"]["behavior"],
+            "allow",
+        )
+
     def test_every_reviewed_test_script_mode_is_allowed(self) -> None:
         for script, argument_sets in allow_govner_dev.COOPER_TEST_SCRIPTS.items():
             relative = script.relative_to(REPO_ROOT)

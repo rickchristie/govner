@@ -19,7 +19,8 @@ The initial policy is based on Govner/Cooper Codex sessions through
   private tag-message file under `/tmp`, and the exact build, tag, push, and
   Go-proxy indexing steps they print;
 - repo-scoped `git add`, non-interactive `git commit`, default/configured or
-  explicit-`origin` `git fetch`, and non-force `git push`;
+  explicit-`origin` `git fetch`, read-only release-ref checks with
+  `git ls-remote origin`, and non-force `git push`;
 - `go run ./cmd/cooper-test-driver` with its known scenarios and bounded flags;
 - read-only Docker listings plus image/network inspection for Cooper-prefixed
   resources;
@@ -67,6 +68,9 @@ logging and separately validates every executable release step:
   header;
 - release-tag and branch pushes must target `origin` without force, deletion,
   mirror, or destination-refspec options;
+- remote release preflights must query `origin` for concrete branch refs or a
+  project's currently declared release tag (optionally its standard peeled
+  `^{}` ref), and must capture stdout and stderr under `/tmp`;
 - Cooper artifacts must use one of the three platforms printed by
   `release-cooper.sh`, be built from `cooper/`, and land under the current
   `dist/cooper/v<Version>/` directory;
@@ -75,10 +79,13 @@ logging and separately validates every executable release step:
 
 The requested Git policy allows repo-wide or literal repo paths for `git add`,
 common non-interactive commit forms (including amend-without-editor),
-default/configured fetches and pushes, plus explicit `origin` operations. It
-rejects forced ignored-file staging, indirect pathspec files, editor-only
-commits, arbitrary fetch URLs or helpers, force pushes, remote-ref deletion,
-custom destination refspecs, and explicitly named non-origin remotes.
+default/configured fetches and pushes, plus explicit `origin` operations. The
+read-only `ls-remote` exception is narrower: it accepts concrete release
+preflight refs on `origin`, with full `/tmp` logging. It rejects forced
+ignored-file staging, indirect pathspec files, editor-only commits, arbitrary
+remote URLs or helpers, wildcard remote-ref queries, force pushes, remote-ref
+deletion, custom destination refspecs, and explicitly named non-origin
+remotes.
 
 The tracked `.vscode/tasks.json` is also inventoried by the unit suite. Its two
 plain Go build steps map to the exact development-binary policy above, and all

@@ -52,11 +52,18 @@ historical evidence:
 | Cooper test driver | Exact package, known scenarios, bounded flags, full `/tmp` logging | 8 |
 | Docker diagnostics | List operations, or image/network inspection limited to Cooper-prefixed resources; no container inspection | 20 |
 | Narrow process and file diagnostics | Known Cooper filters, bridge/lock probes, and reads limited to Govner or `/tmp` | 8 |
-| Git add/commit/fetch/push | Repo-scoped add, non-interactive commit, default/configured or origin fetch/push; destructive options denied | 8 |
+| Git add/commit/fetch/ls-remote/push | Repo-scoped add, non-interactive commit, default/configured or origin fetch/push, and concrete read-only release-ref checks on origin; destructive options denied | 8 |
 
 This deliberately favors repo-owned scripts over equivalent handwritten Docker
 commands. The scripts are versioned with the code, namespace their resources,
 and have tests for their cleanup behavior.
+
+The historical count above remains scoped to sessions through 2026-07-26. A
+2026-07-27 release added one newly observed read-only shape:
+`git ls-remote origin` for `refs/heads/main`, the selected project's currently
+declared release tag, and its standard peeled `^{}` ref, with complete `/tmp`
+capture. It is recorded in the policy corpus but is not retroactively included
+in the historical count.
 
 Canonical full-suite commands:
 
