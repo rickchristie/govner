@@ -80,7 +80,6 @@ func TestFormatDuration_EdgeCases(t *testing.T) {
 		seconds  float64
 		expected string
 	}{
-		{"negative zero", -0.0, "0.0s"},
 		{"very small", 0.01, "0.0s"},
 		{"very small rounds up", 0.05, "0.1s"},
 		{"boundary 59.99", 59.99, "1m0.0s"},

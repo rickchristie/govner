@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/rickchristie/govner/gowt/util"
 )
 
 // ModalButton represents a button in a modal
@@ -14,10 +16,10 @@ type ModalButton struct {
 
 // ModalConfig holds configuration for rendering a modal
 type ModalConfig struct {
-	Title      string
-	Message    string // Optional message below title
-	Buttons    []ModalButton
-	Width      int // 0 = auto, minimum width
+	Title   string
+	Message string // Optional message below title
+	Buttons []ModalButton
+	Width   int // 0 = auto, minimum width
 }
 
 // ModalStyles holds all styles for modal rendering
@@ -196,10 +198,9 @@ func buildModalBox(config ModalConfig, styles ModalStyles) string {
 func dimLineContent(line string, width int) string {
 	// Strip existing ANSI codes and apply dim styling
 	stripped := stripAnsi(line)
-
-	// Pad to full width
-	if len(stripped) < width {
-		stripped += strings.Repeat(" ", width-len(stripped))
+	stripped = ansi.Truncate(stripped, width, "")
+	if visualWidth := ansi.StringWidth(stripped); visualWidth < width {
+		stripped += strings.Repeat(" ", width-visualWidth)
 	}
 
 	// Apply dim color
@@ -209,25 +210,26 @@ func dimLineContent(line string, width int) string {
 
 // insertAtPosition inserts overlay text at a specific position in a line
 func insertAtPosition(baseLine, overlay string, col, screenWidth int, style lipgloss.Style) string {
-	// Get the base line as runes (handle unicode properly)
-	baseStripped := stripAnsi(baseLine)
-	baseRunes := []rune(baseStripped)
-
-	// Pad base to screen width if needed
-	for len(baseRunes) < screenWidth {
-		baseRunes = append(baseRunes, ' ')
+	if screenWidth <= 0 {
+		return ""
 	}
-
-	// Get overlay visual width
-	overlayStripped := stripAnsi(overlay)
-	overlayWidth := len([]rune(overlayStripped))
+	col = max(0, min(col, screenWidth))
+	base := ansi.Truncate(stripAnsi(baseLine), screenWidth, "")
+	if width := ansi.StringWidth(base); width < screenWidth {
+		base += strings.Repeat(" ", screenWidth-width)
+	}
+	overlay = ansi.Truncate(overlay, screenWidth-col, "")
+	overlayWidth := ansi.StringWidth(overlay)
 
 	// Build result
 	var result strings.Builder
 
 	// Part before overlay
 	if col > 0 {
-		before := string(baseRunes[:min(col, len(baseRunes))])
+		before := ansi.Cut(base, 0, col)
+		if width := ansi.StringWidth(before); width < col {
+			before += strings.Repeat(" ", col-width)
+		}
 		result.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("239")).Render(before))
 	}
 
@@ -240,12 +242,17 @@ func insertAtPosition(baseLine, overlay string, col, screenWidth int, style lipg
 
 	// Part after overlay
 	afterStart := col + overlayWidth
-	if afterStart < len(baseRunes) {
-		after := string(baseRunes[afterStart:])
+	if afterStart < screenWidth {
+		after := ansi.Cut(base, afterStart, screenWidth)
 		result.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("239")).Render(after))
 	}
 
-	return result.String()
+	rendered := result.String()
+	if width := ansi.StringWidth(rendered); width < screenWidth {
+		rendered += lipgloss.NewStyle().Foreground(lipgloss.Color("239")).
+			Render(strings.Repeat(" ", screenWidth-width))
+	}
+	return rendered
 }
 
 // maxLineWidth returns the maximum visual width of lines
@@ -262,24 +269,7 @@ func maxLineWidth(lines []string) int {
 
 // stripAnsi removes ANSI escape sequences from a string
 func stripAnsi(s string) string {
-	var result strings.Builder
-	inEscape := false
-
-	for _, r := range s {
-		if r == '\x1b' {
-			inEscape = true
-			continue
-		}
-		if inEscape {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-				inEscape = false
-			}
-			continue
-		}
-		result.WriteRune(r)
-	}
-
-	return result.String()
+	return util.StripANSI(s)
 }
 
 // RenderConfirmModal is a convenience function for yes/no confirmation dialogs

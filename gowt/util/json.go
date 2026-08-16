@@ -60,7 +60,9 @@ func TryFormatJSON(line string) string {
 
 	// Try to parse as JSON object
 	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(jsonStr))
+	decoder.UseNumber()
+	if err := decoder.Decode(&data); err != nil {
 		return ""
 	}
 
@@ -247,6 +249,11 @@ func formatJSONValue(v interface{}, key string) string {
 			return jsonNumberStyle.Render(fmt.Sprintf("%d", int64(val)))
 		}
 		return jsonNumberStyle.Render(fmt.Sprintf("%g", val))
+
+	case json.Number:
+		// Preserve the token emitted by the test exactly. Converting through
+		// float64 corrupts integer IDs above 2^53.
+		return jsonNumberStyle.Render(val.String())
 
 	case bool:
 		if val {

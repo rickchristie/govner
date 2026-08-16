@@ -1,8 +1,6 @@
 package view
 
 import (
-	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -31,12 +29,34 @@ const (
 
 // HelpView displays keyboard shortcuts
 type HelpView struct {
-	width    int
-	height   int
-	styles   helpStyles
-	viewport viewport.Model
-	ready    bool
-	source   HelpSource // Which screen opened the help
+	width         int
+	height        int
+	styles        helpStyles
+	viewport      viewport.Model
+	ready         bool
+	source        HelpSource // Which screen opened the help
+	clipboardHint string
+	rerunEnabled  bool
+}
+
+// SetClipboardHint injects environment knowledge from the application layer.
+// Help rendering stays a pure function and never probes PATH or environment.
+func (v HelpView) SetClipboardHint(hint string) HelpView {
+	v.clipboardHint = hint
+	if v.ready {
+		v.viewport.SetContent(v.renderContent())
+	}
+	return v
+}
+
+// SetRerunEnabled keeps documented shortcuts consistent with the actions the
+// owning application can actually perform.
+func (v HelpView) SetRerunEnabled(enabled bool) HelpView {
+	v.rerunEnabled = enabled
+	if v.ready {
+		v.viewport.SetContent(v.renderContent())
+	}
+	return v
 }
 
 type helpStyles struct {
@@ -68,7 +88,8 @@ func defaultHelpStyles() helpStyles {
 // NewHelpView creates a new HelpView
 func NewHelpView() HelpView {
 	return HelpView{
-		styles: defaultHelpStyles(),
+		styles:       defaultHelpStyles(),
+		rerunEnabled: true,
 	}
 }
 
@@ -114,13 +135,14 @@ func (v HelpView) Update(msg tea.Msg) (HelpView, tea.Cmd, HelpViewRequest) {
 		v.width = msg.Width
 		v.height = msg.Height
 		headerHeight := 1 // Title line
+		viewportHeight := max(1, msg.Height-headerHeight)
 		if !v.ready {
-			v.viewport = viewport.New(msg.Width, msg.Height-headerHeight)
+			v.viewport = viewport.New(max(1, msg.Width), viewportHeight)
 			v.viewport.SetContent(v.renderContent())
 			v.ready = true
 		} else {
-			v.viewport.Width = msg.Width
-			v.viewport.Height = msg.Height - headerHeight
+			v.viewport.Width = max(1, msg.Width)
+			v.viewport.Height = viewportHeight
 			v.viewport.SetContent(v.renderContent())
 		}
 
@@ -129,13 +151,13 @@ func (v HelpView) Update(msg tea.Msg) (HelpView, tea.Cmd, HelpViewRequest) {
 		case key.Matches(msg, helpKeys.Close):
 			request = CloseHelpRequest{}
 		case key.Matches(msg, helpKeys.Up):
-			v.viewport.LineUp(1)
+			v.viewport.ScrollUp(1)
 		case key.Matches(msg, helpKeys.Down):
-			v.viewport.LineDown(1)
+			v.viewport.ScrollDown(1)
 		case key.Matches(msg, helpKeys.PageUp):
-			v.viewport.HalfViewUp()
+			v.viewport.HalfPageUp()
 		case key.Matches(msg, helpKeys.PageDown):
-			v.viewport.HalfViewDown()
+			v.viewport.HalfPageDown()
 		}
 	}
 
@@ -194,8 +216,9 @@ func (v HelpView) renderTreeContent() string {
 	sb.WriteString("\n")
 	sb.WriteString(v.renderKey("Enter", "View test logs"))
 	sb.WriteString(v.renderKey("Space", "Toggle filter (All/Focus)"))
-	sb.WriteString(v.renderKey("r", "Rerun selected test"))
-	sb.WriteString(v.renderKey("R", "Rerun all failed tests"))
+	if v.rerunEnabled {
+		sb.WriteString(v.renderKey("r", "Rerun all tests"))
+	}
 
 	// Other
 	sb.WriteString("\n")
@@ -245,8 +268,10 @@ func (v HelpView) renderLogContent() string {
 	sb.WriteString(v.styles.section.Render("Actions"))
 	sb.WriteString("\n")
 	sb.WriteString(v.renderKey("Space", "Toggle view mode (Processed/Raw)"))
-	sb.WriteString(v.renderKey("c", "Copy logs to clipboard"+getClipboardHint()))
-	sb.WriteString(v.renderKey("r", "Rerun this test"))
+	sb.WriteString(v.renderKey("c", "Copy logs to clipboard"+v.clipboardHint))
+	if v.rerunEnabled {
+		sb.WriteString(v.renderKey("r", "Rerun this test"))
+	}
 
 	// Other
 	sb.WriteString("\n")
@@ -281,23 +306,4 @@ func padRight(s string, width int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", width-visualWidth)
-}
-
-// getClipboardHint returns a hint about clipboard availability
-func getClipboardHint() string {
-	// Check if any clipboard command is available
-	clipboardCmds := []string{"wl-copy", "xclip", "xsel", "pbcopy", "clip.exe"}
-	for _, cmd := range clipboardCmds {
-		if _, err := exec.LookPath(cmd); err == nil {
-			return "" // Clipboard available, no hint needed
-		}
-	}
-
-	// No clipboard command found - suggest installation based on display server
-	if os.Getenv("WAYLAND_DISPLAY") != "" {
-		return "\n             (install: sudo apt install wl-clipboard)"
-	} else if os.Getenv("DISPLAY") != "" {
-		return "\n             (install: sudo apt install xclip)"
-	}
-	return "\n             (no clipboard tool found)"
 }

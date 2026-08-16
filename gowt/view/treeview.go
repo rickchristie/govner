@@ -29,18 +29,6 @@ type SelectTestRequest struct {
 
 func (SelectTestRequest) isTreeViewRequest() {}
 
-// RerunTestRequest is emitted when user wants to rerun a test
-type RerunTestRequest struct {
-	Node *model.TestNode
-}
-
-func (RerunTestRequest) isTreeViewRequest() {}
-
-// RerunFailedRequest is emitted when user wants to rerun all failed tests
-type RerunFailedRequest struct{}
-
-func (RerunFailedRequest) isTreeViewRequest() {}
-
 // RerunAllRequest is emitted when user wants to rerun all tests from scratch
 type RerunAllRequest struct{}
 
@@ -90,7 +78,9 @@ type TreeView struct {
 	ready        bool
 	styles       treeStyles
 	running      bool // Whether tests are still running
+	rerunEnabled bool // Whether the owning app has a live test execution boundary
 	stopped      bool // Whether tests were stopped by user
+	errored      bool // Whether the run ended because Gowt could not execute/read it
 	animFrame    int  // Animation frame for spinner
 	selectorAnim int  // Animation frame for selector (0 = no animation)
 	expanded     bool // Track if tree is in expanded state (for toggle)
@@ -100,8 +90,8 @@ type TreeView struct {
 	cachedNodesValid bool              // Whether cache is valid
 
 	// Search state
-	searchMode    bool           // Whether search input mode is active
-	searchQuery   string         // Current search query (empty = no filtering)
+	searchMode    bool                    // Whether search input mode is active
+	searchQuery   string                  // Current search query (empty = no filtering)
 	searchMatches map[*model.TestNode]int // Match index for each node (-1 = no direct match but has matching descendant)
 }
 
@@ -135,10 +125,10 @@ type treeStyles struct {
 	barRemaining [21]string // "─" repeated 0-20 times, styled dim
 
 	// Pre-computed help bar widths (avoids lipgloss.Width() per frame)
-	helpBarWidthAll        int // Width of help bar when filter is "All" (not running)
-	helpBarWidthFocus      int // Width of help bar when filter is "Focus" (not running)
-	helpBarWidthAllRun     int // Width of help bar when filter is "All" (running)
-	helpBarWidthFocusRun   int // Width of help bar when filter is "Focus" (running)
+	helpBarWidthAll      int // Width of help bar when filter is "All" (not running)
+	helpBarWidthFocus    int // Width of help bar when filter is "Focus" (not running)
+	helpBarWidthAllRun   int // Width of help bar when filter is "All" (running)
+	helpBarWidthFocusRun int // Width of help bar when filter is "Focus" (running)
 
 	// Search highlighting
 	searchHighlight lipgloss.Style // Yellow background for matched text
@@ -233,11 +223,12 @@ func defaultTreeStyles() treeStyles {
 // NewTreeView creates a new TreeView
 func NewTreeView() TreeView {
 	return TreeView{
-		tree:     model.NewTestTree(),
-		cursor:   0,
-		filter:   FilterAll,
-		styles:   defaultTreeStyles(),
-		expanded: false, // Start collapsed for stable view during test runs
+		tree:         model.NewTestTree(),
+		cursor:       0,
+		filter:       FilterAll,
+		styles:       defaultTreeStyles(),
+		rerunEnabled: true,
+		expanded:     false, // Start collapsed for stable view during test runs
 	}
 }
 
@@ -248,6 +239,7 @@ func (v TreeView) Init() tea.Cmd {
 
 // SetData replaces the entire test tree and refreshes the cache
 func (v TreeView) SetData(tree *model.TestTree) TreeView {
+	v.expanded = treeIsExpanded(tree)
 	v.tree = tree
 	v.cachedNodesValid = false // Invalidate cache
 	v = v.refreshCache()       // Recompute
@@ -255,6 +247,34 @@ func (v TreeView) SetData(tree *model.TestTree) TreeView {
 		v.cursor = max(0, len(v.cachedNodes)-1)
 	}
 	return v
+}
+
+func treeIsExpanded(tree *model.TestTree) bool {
+	if tree == nil || len(tree.Packages) == 0 {
+		return false
+	}
+	foundExpandable := false
+	var visit func(*model.TestNode) bool
+	visit = func(node *model.TestNode) bool {
+		if len(node.Children) > 0 {
+			foundExpandable = true
+			if !node.Expanded {
+				return false
+			}
+		}
+		for _, child := range node.Children {
+			if !visit(child) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, pkg := range tree.Packages {
+		if !visit(pkg) {
+			return false
+		}
+	}
+	return foundExpandable
 }
 
 // refreshCache recomputes and caches visible nodes if invalid
@@ -283,9 +303,22 @@ func (v TreeView) SetRunning(running bool) TreeView {
 	return v
 }
 
+// SetRerunEnabled keeps action requests and their help text aligned with the
+// execution capabilities supplied by the owning application.
+func (v TreeView) SetRerunEnabled(enabled bool) TreeView {
+	v.rerunEnabled = enabled
+	return v
+}
+
 // SetStopped sets whether tests were stopped by user
 func (v TreeView) SetStopped(stopped bool) TreeView {
 	v.stopped = stopped
+	return v
+}
+
+// SetErrored distinguishes an operational failure from a completed test run.
+func (v TreeView) SetErrored(errored bool) TreeView {
+	v.errored = errored
 	return v
 }
 
@@ -322,7 +355,6 @@ type treeKeyMap struct {
 	Enter        key.Binding
 	Filter       key.Binding
 	Rerun        key.Binding
-	RerunFailed  key.Binding
 	Stop         key.Binding
 	Quit         key.Binding
 	Top          key.Binding
@@ -342,7 +374,6 @@ var treeKeys = treeKeyMap{
 	Enter:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "view logs")),
 	Filter:       key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "filter")),
 	Rerun:        key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rerun")),
-	RerunFailed:  key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "rerun failed")),
 	Stop:         key.NewBinding(key.WithKeys("s", "S"), key.WithHelp("s", "stop")),
 	Quit:         key.NewBinding(key.WithKeys("q", "Q", "ctrl+c"), key.WithHelp("q", "quit")),
 	Top:          key.NewBinding(key.WithKeys("g", "ctrl+home"), key.WithHelp("g", "top")),
@@ -364,12 +395,13 @@ func (v TreeView) Update(msg tea.Msg) (TreeView, tea.Cmd, TreeViewRequest) {
 	case tea.WindowSizeMsg:
 		v.width = msg.Width
 		v.height = msg.Height
+		viewportHeight := max(1, msg.Height-4)
 		if !v.ready {
-			v.viewport = viewport.New(msg.Width, msg.Height-4)
+			v.viewport = viewport.New(max(1, msg.Width), viewportHeight)
 			v.ready = true
 		} else {
-			v.viewport.Width = msg.Width
-			v.viewport.Height = msg.Height - 4
+			v.viewport.Width = max(1, msg.Width)
+			v.viewport.Height = viewportHeight
 		}
 
 	case tea.KeyMsg:
@@ -392,7 +424,7 @@ func (v TreeView) Update(msg tea.Msg) (TreeView, tea.Cmd, TreeViewRequest) {
 
 			case tea.KeyBackspace:
 				if len(v.searchQuery) > 0 {
-					v.searchQuery = v.searchQuery[:len(v.searchQuery)-1]
+					v.searchQuery = trimLastRune(v.searchQuery)
 					v.cachedNodesValid = false
 					v.cursor = 0
 					v.scrollTop = 0
@@ -479,10 +511,9 @@ func (v TreeView) Update(msg tea.Msg) (TreeView, tea.Cmd, TreeViewRequest) {
 			// Preserve user's expand/collapse state - no auto-expansion
 
 		case key.Matches(msg, treeKeys.Rerun):
-			request = RerunAllRequest{}
-
-		case key.Matches(msg, treeKeys.RerunFailed):
-			request = RerunFailedRequest{}
+			if v.rerunEnabled {
+				request = RerunAllRequest{}
+			}
 
 		case key.Matches(msg, treeKeys.Stop):
 			if v.running {
@@ -599,7 +630,16 @@ func (v TreeView) computeVisibleNodes() ([]*model.TestNode, map[*model.TestNode]
 	// Only show if there are failures or running tests
 	_, failed, _, running, _ := v.tree.ComputeAllStats()
 	if failed == 0 && running == 0 {
-		return nil, nil // Nothing to focus on
+		hasPackageState := false
+		for _, pkg := range v.tree.Packages {
+			if pkg.Status == model.StatusFailed || pkg.Status == model.StatusRunning {
+				hasPackageState = true
+				break
+			}
+		}
+		if !hasPackageState {
+			return nil, nil // Nothing to focus on
+		}
 	}
 
 	// Collect focus-relevant packages and sort them:
@@ -872,7 +912,7 @@ func (v TreeView) renderHeader() string {
 		statusIndicator = GetSpinnerGear(v.animFrame) // Pre-rendered gear with spinner color
 	} else {
 		// Show logo when done - red if failures, green otherwise
-		if failed > 0 {
+		if failed > 0 || v.errored {
 			statusIndicator = IconGearFailed // Pre-rendered red gear
 		} else {
 			statusIndicator = IconGearPassed // Pre-rendered green gear
@@ -906,7 +946,9 @@ func (v TreeView) renderHeader() string {
 		// Not running: show "Stopped" (red) or "Done" (green)
 		var statusStr string
 		elapsedFmt := time.Duration(elapsed * float64(time.Second)).Round(time.Millisecond * 100)
-		if v.stopped {
+		if v.errored {
+			statusStr = v.styles.failed.Render(fmt.Sprintf("Failed (%s)", elapsedFmt))
+		} else if v.stopped {
 			statusStr = v.styles.failed.Render(fmt.Sprintf("Stopped (%s)", elapsedFmt))
 		} else {
 			statusStr = v.styles.passed.Render(fmt.Sprintf("Done (%s)", elapsedFmt))
@@ -960,13 +1002,16 @@ func (v TreeView) renderHelpBar() string {
 			} else {
 				helpWidth = v.styles.helpBarWidthAllRun + 12
 			}
-		} else {
+		} else if v.rerunEnabled {
 			help = filterText + "  [/ Search]  [Arrows Navigate]  [↵ Logs]  [r Rerun]  [? Help]  [q Quit]"
 			if v.filter == FilterFocus {
 				helpWidth = v.styles.helpBarWidthFocus + 12
 			} else {
 				helpWidth = v.styles.helpBarWidthAll + 12
 			}
+		} else {
+			help = filterText + "  [/ Search]  [Arrows Navigate]  [↵ Logs]  [? Help]  [q Quit]"
+			helpWidth = lipgloss.Width(help)
 		}
 		helpRendered = v.styles.helpBar.Render(help)
 	}
@@ -1063,9 +1108,7 @@ func (v TreeView) renderTree() string {
 	return strings.Join(lines, "\n")
 }
 
-// getRenderedName returns the cached styled name for packages.
-// For tests or selected rows, returns plain name (no caching needed).
-// For truncated names, returns freshly styled truncated name.
+// getRenderedName styles a node name without mutating domain state from View.
 func (v TreeView) getRenderedName(node *model.TestNode, selected bool, displayName string) string {
 	// Selected rows use plain name (selection style applied separately)
 	// Don't apply search highlighting on selected row - selection provides visual feedback
@@ -1081,15 +1124,7 @@ func (v TreeView) getRenderedName(node *model.TestNode, selected bool, displayNa
 	if node.Parent != nil {
 		return displayName
 	}
-	// Package with truncation: render fresh (can't use cache)
-	if displayName != node.Name {
-		return v.styles.packageName.Render(displayName)
-	}
-	// Package without truncation: use cached rendered name
-	if node.RenderedName == "" {
-		node.RenderedName = v.styles.packageName.Render(node.Name)
-	}
-	return node.RenderedName
+	return v.styles.packageName.Render(displayName)
 }
 
 // highlightSearchMatch highlights the search query in the display name (non-selected rows only)
@@ -1131,15 +1166,9 @@ func (v TreeView) highlightSearchMatch(node *model.TestNode, displayName string,
 	return before + highlightedMatch + after
 }
 
-// getRenderedSuffix returns cached suffix (stats + progress + elapsed).
-// Rebuilds cache if invalid or terminal width changed.
+// getRenderedSuffix computes presentation from current state. Keeping this pure
+// avoids View racing event processing over cache fields on shared nodes.
 func (v TreeView) getRenderedSuffix(node *model.TestNode) string {
-	// Check cache validity
-	if node.SuffixCacheValid && node.SuffixCacheWidth == v.width {
-		return node.RenderedSuffix
-	}
-
-	// Rebuild suffix
 	var suffix string
 
 	// Stats + progress bar (only for nodes with children)
@@ -1157,12 +1186,7 @@ func (v TreeView) getRenderedSuffix(node *model.TestNode) string {
 		suffix += v.styles.elapsed.Render(" " + util.FormatDuration(node.Elapsed))
 	}
 
-	// Cache result
-	node.RenderedSuffix = suffix
-	node.SuffixCacheValid = true
-	node.SuffixCacheWidth = v.width
-
-	return node.RenderedSuffix
+	return suffix
 }
 
 func (v TreeView) renderNode(node *model.TestNode, selected bool) string {

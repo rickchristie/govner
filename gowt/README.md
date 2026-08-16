@@ -63,6 +63,15 @@ gowt --load results.json
 gowt -l results.json
 ```
 
+### Manual TUI QA
+
+Use the deterministic storybook to inspect layout, colors, resize behavior,
+search, raw/processed logs, and keyboard navigation without running a project:
+
+```bash
+gowt --storybook
+```
+
 ## Keyboard Shortcuts
 
 ### Tree View

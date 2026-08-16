@@ -8,8 +8,10 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/rickchristie/govner/gowt/meta"
 	model "github.com/rickchristie/govner/gowt/model"
+	"github.com/rickchristie/govner/gowt/util"
 )
 
 // LogViewRequest represents a request from LogView to the controller
@@ -28,14 +30,6 @@ type CopyLogsRequest struct {
 }
 
 func (CopyLogsRequest) isLogViewRequest() {}
-
-// OpenEditorRequest is emitted when user wants to open file in editor
-type OpenEditorRequest struct {
-	File string
-	Line int
-}
-
-func (OpenEditorRequest) isLogViewRequest() {}
 
 // LogRerunTestRequest is emitted when user wants to rerun the current test
 type LogRerunTestRequest struct {
@@ -69,12 +63,14 @@ type LogView struct {
 	viewport        viewport.Model
 	ready           bool
 	styles          logStyles
-	autoScroll      bool        // Auto-scroll to bottom when new content arrives
-	animFrame       int         // Animation frame for spinner
-	gotoBottom      bool        // Flag to scroll to bottom on next render
-	copyAnimTime    int         // Frames remaining for copy animation (0 = not animating)
-	copyAnimSuccess bool        // Whether copy was successful
-	viewMode        LogViewMode // Current view mode (processed or raw)
+	autoScroll      bool             // Auto-scroll to bottom when new content arrives
+	animFrame       int              // Animation frame for spinner
+	gotoBottom      bool             // Flag to scroll to bottom on next render
+	copyAnimTime    int              // Frames remaining for copy animation (0 = not animating)
+	copyAnimSuccess bool             // Whether copy was successful
+	viewMode        LogViewMode      // Current view mode (processed or raw)
+	statusSnapshot  model.TestStatus // Last status observed independently of the shared node pointer
+	rerunEnabled    bool             // Whether the owning app can execute another test run
 
 	// Separate scroll states for each mode (-1 means "go to bottom")
 	processedYOffset int // Saved scroll position for processed mode
@@ -130,7 +126,15 @@ func NewLogView() LogView {
 		styles:           defaultLogStyles(),
 		processedYOffset: scrollOffsetBottom,
 		rawYOffset:       scrollOffsetBottom,
+		rerunEnabled:     true,
 	}
+}
+
+// SetRerunEnabled keeps rerun keys and help text disabled for loaded fixtures
+// that have no TestRunner behind the presentation layer.
+func (v LogView) SetRerunEnabled(enabled bool) LogView {
+	v.rerunEnabled = enabled
+	return v
 }
 
 func (v LogView) Init() tea.Cmd {
@@ -154,11 +158,28 @@ func (v LogView) TriggerCopyAnimation(success bool) LogView {
 	return v
 }
 
+func (v *LogView) resetSearch() {
+	v.searchMode = false
+	v.searchQuery = ""
+	v.searchMatches = nil
+	v.currentMatchIndex = -1
+	v.searchActive = false
+	v.searchYOffsetSaved = 0
+	v.highlightedContent.Reset()
+	v.highlightedLastEnd = 0
+}
+
 func (v LogView) SetData(node *model.TestNode, processedBuffer, rawBuffer *model.LogBuffer) LogView {
 	v.node = node
 	v.buffer = processedBuffer
 	v.rawBuffer = rawBuffer
 	v.autoScroll = node != nil && node.Status == model.StatusRunning
+	if node != nil {
+		v.statusSnapshot = node.Status
+	} else {
+		v.statusSnapshot = ""
+	}
+	(&v).resetSearch()
 
 	// Reset scroll offsets for the new node (start at bottom for both modes)
 	v.processedYOffset = scrollOffsetBottom
@@ -186,19 +207,25 @@ func (v LogView) SetData(node *model.TestNode, processedBuffer, rawBuffer *model
 }
 
 func (v LogView) UpdateContent(node *model.TestNode) LogView {
-	if v.node == nil || node.FullPath != v.node.FullPath {
+	if v.node == nil || node == nil || node.FullPath != v.node.FullPath {
 		return v
 	}
 
-	wasRunning := v.node.Status == model.StatusRunning
+	wasRunning := v.statusSnapshot == model.StatusRunning
+	statusChanged := v.statusSnapshot != node.Status
 	v.node = node
+	v.statusSnapshot = node.Status
 
 	// Create renderers if they don't exist yet but logs are now available
+	processedCreated := false
 	if v.renderer == nil && node.ProcessedLog != nil && v.buffer != nil {
 		v.renderer = model.NewLogRenderer(v.buffer, node.ProcessedLog)
+		processedCreated = true
 	}
+	rawCreated := false
 	if v.rawRenderer == nil && node.RawLog != nil && v.rawBuffer != nil {
 		v.rawRenderer = model.NewLogRenderer(v.rawBuffer, node.RawLog)
+		rawCreated = true
 	}
 
 	// Update both renderers
@@ -206,11 +233,17 @@ func (v LogView) UpdateContent(node *model.TestNode) LogView {
 	rawNew := v.rawRenderer != nil && v.rawRenderer.AppendNew()
 
 	// Refresh viewport if the current mode's renderer has new content
-	hasNew := (v.viewMode == LogModeProcessed && processedNew) || (v.viewMode == LogModeRaw && rawNew)
-	if hasNew {
+	hasNew := (v.viewMode == LogModeProcessed && (processedCreated || processedNew)) ||
+		(v.viewMode == LogModeRaw && (rawCreated || rawNew))
+	if hasNew || statusChanged {
 		// If search highlighting is active, append new content with highlights
 		if v.searchActive {
-			(&v).appendHighlightedContent()
+			if (v.viewMode == LogModeProcessed && processedCreated) ||
+				(v.viewMode == LogModeRaw && rawCreated) {
+				(&v).rebuildHighlightedContent()
+			} else {
+				(&v).appendHighlightedContent()
+			}
 		}
 
 		if v.ready {
@@ -279,97 +312,7 @@ func softWrap(content string, width int) string {
 	if width <= 0 || len(content) == 0 {
 		return content
 	}
-
-	// Quick check: scan for any line that needs wrapping without splitting
-	needsWrap := false
-	lineStart := 0
-	for i := 0; i <= len(content); i++ {
-		if i == len(content) || content[i] == '\n' {
-			line := content[lineStart:i]
-			if lipgloss.Width(line) > width {
-				needsWrap = true
-				break
-			}
-			lineStart = i + 1
-		}
-	}
-
-	if !needsWrap {
-		return content
-	}
-
-	// Need to wrap - process line by line without intermediate slice
-	var result strings.Builder
-	result.Grow(len(content) + len(content)/width) // Estimate extra newlines
-
-	lineStart = 0
-	firstLine := true
-	for i := 0; i <= len(content); i++ {
-		if i == len(content) || content[i] == '\n' {
-			if !firstLine {
-				result.WriteByte('\n')
-			}
-			firstLine = false
-
-			line := content[lineStart:i]
-			lineWidth := lipgloss.Width(line)
-
-			if lineWidth <= width {
-				result.WriteString(line)
-			} else if !strings.Contains(line, "\x1b") {
-				// No ANSI codes - simple and fast byte slicing
-				for len(line) > 0 {
-					if len(line) <= width {
-						result.WriteString(line)
-						break
-					}
-					result.WriteString(line[:width])
-					result.WriteByte('\n')
-					line = line[width:]
-				}
-			} else {
-				// Has ANSI codes - need careful handling
-				result.WriteString(wrapLineWithANSI(line, width))
-			}
-
-			lineStart = i + 1
-		}
-	}
-
-	return result.String()
-}
-
-// wrapLineWithANSI wraps a line that contains ANSI escape codes.
-func wrapLineWithANSI(line string, width int) string {
-	var result strings.Builder
-	var visibleWidth int
-	var inEscape bool
-
-	for _, r := range line {
-		if r == '\x1b' {
-			inEscape = true
-			result.WriteRune(r)
-			continue
-		}
-
-		if inEscape {
-			result.WriteRune(r)
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-				inEscape = false
-			}
-			continue
-		}
-
-		if visibleWidth >= width {
-			result.WriteByte('\n')
-			visibleWidth = 0
-		}
-
-		result.WriteRune(r)
-		visibleWidth++
-	}
-
-	return result.String()
+	return ansi.Hardwrap(content, width, true)
 }
 
 type logKeyMap struct {
@@ -416,23 +359,22 @@ func (v LogView) Update(msg tea.Msg) (LogView, tea.Cmd, LogViewRequest) {
 		v.height = msg.Height
 
 		headerHeight := 3 // header + help bar + empty line
+		viewportHeight := max(1, msg.Height-headerHeight)
 
 		if !v.ready {
-			v.viewport = viewport.New(msg.Width, msg.Height-headerHeight)
+			v.viewport = viewport.New(max(1, msg.Width), viewportHeight)
 			v.viewport.Style = lipgloss.NewStyle()
 			v.ready = true
-			if v.renderer != nil || v.rawRenderer != nil {
-				v.viewport.SetContent(v.getContent())
-				if v.gotoBottom {
-					v.viewport.GotoBottom()
-					v.gotoBottom = false
-				}
+			v.viewport.SetContent(v.getContent())
+			if v.gotoBottom {
+				v.viewport.GotoBottom()
+				v.gotoBottom = false
 			}
 		} else {
 			// Check if width changed - need to recalculate line wrapping
 			widthChanged := v.viewport.Width != msg.Width
-			v.viewport.Width = msg.Width
-			v.viewport.Height = msg.Height - headerHeight
+			v.viewport.Width = max(1, msg.Width)
+			v.viewport.Height = viewportHeight
 
 			// Re-set content to recalculate line wrapping for new width
 			if widthChanged {
@@ -477,7 +419,7 @@ func (v LogView) Update(msg tea.Msg) (LogView, tea.Cmd, LogViewRequest) {
 
 			case tea.KeyBackspace:
 				if len(v.searchQuery) > 0 {
-					v.searchQuery = v.searchQuery[:len(v.searchQuery)-1]
+					v.searchQuery = trimLastRune(v.searchQuery)
 					v.performSearch()
 				}
 				return v, cmd, request
@@ -550,7 +492,7 @@ func (v LogView) Update(msg tea.Msg) (LogView, tea.Cmd, LogViewRequest) {
 			return v, cmd, request
 
 		case key.Matches(msg, logKeys.Rerun):
-			if v.node != nil {
+			if v.rerunEnabled && v.node != nil {
 				request = LogRerunTestRequest{Node: v.node}
 			}
 			return v, cmd, request
@@ -571,6 +513,9 @@ func (v LogView) Update(msg tea.Msg) (LogView, tea.Cmd, LogViewRequest) {
 			} else {
 				v.viewMode = LogModeProcessed
 			}
+			// Highlight offsets are renderer-specific. Clearing search on a mode
+			// change prevents processed content from being displayed in Raw mode.
+			(&v).resetSearch()
 
 			// Rebuild the renderer for the new mode to ensure all content is captured
 			// This handles cases where refs arrived out of order or AppendNew missed updates
@@ -698,6 +643,9 @@ func (v *LogView) rebuildHighlightedContent() {
 
 	// Get full content and apply highlighting
 	rawContent := renderer.String()
+	if v.viewMode == LogModeProcessed {
+		rawContent = util.StripANSI(rawContent)
+	}
 	highlighted := v.styles.searchHighlight.Render(v.searchQuery)
 	content := strings.ReplaceAll(rawContent, v.searchQuery, highlighted)
 
@@ -727,6 +675,9 @@ func (v *LogView) appendHighlightedContent() {
 
 	// Get full content to check length and extract new portion
 	fullContent := renderer.String()
+	if v.viewMode == LogModeProcessed {
+		fullContent = util.StripANSI(fullContent)
+	}
 	currentLen := len(fullContent)
 	if currentLen <= v.highlightedLastEnd {
 		return // No new content
@@ -740,12 +691,7 @@ func (v *LogView) appendHighlightedContent() {
 	newContent := fullContent[v.highlightedLastEnd:]
 
 	// Count new matches and add to searchMatches
-	// Strip ANSI for searching in processed mode
-	searchContent := newContent
-	if v.viewMode == LogModeProcessed {
-		searchContent = stripAnsi(newContent)
-	}
-	newLines := strings.Split(searchContent, "\n")
+	newLines := strings.Split(newContent, "\n")
 	for i, line := range newLines {
 		if strings.Contains(line, v.searchQuery) {
 			v.searchMatches = append(v.searchMatches, baseLineNum+i)
@@ -891,10 +837,14 @@ func (v LogView) renderHelpBar() string {
 		} else {
 			statusText = v.styles.copyFailed.Render("✗ No clipboard")
 		}
-		suffix := v.styles.helpBar.Render("  [r Rerun]  [? Help]")
+		suffixText := "  [? Help]"
+		if v.rerunEnabled {
+			suffixText = "  [r Rerun]  [? Help]"
+		}
+		suffix := v.styles.helpBar.Render(suffixText)
 		helpRendered = prefix + statusText + suffix
-		// Use longer text for width calculation to ensure consistent padding
-		helpWidth = lipgloss.Width("[Esc Back]  [↑↓ Scroll]  [Space Processed]  ✗ No clipboard  [r Rerun]  [? Help]")
+		// Use the longer mode/status labels so animation does not shift padding.
+		helpWidth = lipgloss.Width("[Esc Back]  [↑↓ Scroll]  [Space Processed]  ✗ No clipboard" + suffixText)
 	} else {
 		// Show search hint with n/N if there are matches
 		var searchHint string
@@ -903,7 +853,11 @@ func (v LogView) renderHelpBar() string {
 		} else {
 			searchHint = "  [/ Search]"
 		}
-		help := "[Esc Back]  [↑↓ Scroll]  [Space " + modeText + "]  [c Copy]" + searchHint + "  [? Help]"
+		rerunHint := ""
+		if v.rerunEnabled {
+			rerunHint = "  [r Rerun]"
+		}
+		help := "[Esc Back]  [↑↓ Scroll]  [Space " + modeText + "]  [c Copy]" + searchHint + rerunHint + "  [? Help]"
 		helpRendered = v.styles.helpBar.Render(help)
 		helpWidth = lipgloss.Width(help)
 	}
@@ -987,25 +941,4 @@ func (v LogView) GetNode() *model.TestNode {
 // IsAnimating returns true if there's an active animation that needs ticks
 func (v LogView) IsAnimating() bool {
 	return v.copyAnimTime > 0
-}
-
-func (v LogView) GetCopyCommand() string {
-	if v.node == nil {
-		return ""
-	}
-
-	testName := v.node.Name
-	pkg := v.node.Package
-
-	if v.node.Parent != nil && v.node.Parent.Parent != nil {
-		parts := []string{}
-		current := v.node
-		for current != nil && current.Parent != nil {
-			parts = append([]string{current.Name}, parts...)
-			current = current.Parent
-		}
-		testName = strings.Join(parts, "/")
-	}
-
-	return fmt.Sprintf("go test -v -run '%s' %s", testName, pkg)
 }

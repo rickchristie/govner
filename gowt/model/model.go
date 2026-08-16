@@ -48,12 +48,6 @@ type TestNode struct {
 	Depth        int         // Cached depth in tree (0 for packages, 1+ for tests/subtests)
 	NameWidth    int         // Cached runewidth of Name (0 = not computed yet)
 
-	// Render cache
-	RenderedName     string // Styled package name (permanent, never changes)
-	RenderedSuffix   string // Stats + progress + elapsed
-	SuffixCacheValid bool   // Is RenderedSuffix valid?
-	SuffixCacheWidth int    // Terminal width when suffix was cached
-
 	// Aggregated counts (includes self + all descendants)
 	PassedCount  int // Count of passed tests
 	FailedCount  int // Count of failed tests
@@ -123,9 +117,9 @@ func (t *TestTree) ProcessEvent(event TestEvent) bool {
 		t.appendOutput(pkgNode, event.Output)
 		return false // Log-only, no visual change
 	case "build-fail":
+		t.flushOutput(pkgNode)
 		prevStatus := pkgNode.Status
 		pkgNode.Status = StatusFailed
-		pkgNode.SuffixCacheValid = false
 		// Decrement running if was running, increment failed
 		if prevStatus == StatusRunning {
 			t.propagateCountDelta(pkgNode, -1, "running")
@@ -175,8 +169,9 @@ func (t *TestTree) getOrCreatePackage(pkgPath string) *TestNode {
 }
 
 func (t *TestTree) getOrCreateTest(pkgNode *TestNode, testName string) *TestNode {
-	// Skip invalid test names (must start with "Test")
-	if testName == "" || !strings.HasPrefix(testName, "Test") {
+	// The go test event stream is authoritative. Besides Test*, it legitimately
+	// emits Benchmark*, Fuzz*, Example*, and custom synthetic names.
+	if testName == "" {
 		return nil
 	}
 
@@ -222,27 +217,29 @@ func (t *TestTree) handlePackageEvent(node *TestNode, event TestEvent) bool {
 	switch event.Action {
 	case "start":
 		node.Status = StatusRunning
-		node.SuffixCacheValid = false
 		return true
 	case "pass":
+		t.flushOutput(node)
+		t.finalizeUnfinishedTests(node, StatusPassed)
 		node.Status = StatusPassed
 		node.Elapsed = event.Elapsed
-		node.SuffixCacheValid = false
 		return true
 	case "fail":
+		t.flushOutput(node)
+		t.finalizeUnfinishedTests(node, StatusFailed)
 		node.Status = StatusFailed
 		node.Elapsed = event.Elapsed
-		node.SuffixCacheValid = false
 		return true
 	case "skip":
+		t.flushOutput(node)
+		t.finalizeUnfinishedTests(node, StatusSkipped)
 		node.Status = StatusSkipped
-		node.SuffixCacheValid = false
 		return true
 	case "output":
 		t.appendOutput(node, event.Output)
 		// Detect cached package: format is "ok  \tpackage/path\t(cached)\n"
 		// Use strict matching to avoid false positives from log output
-		if isCachedOutput(event.Output) {
+		if isCachedOutput(event.Output, node.Package) {
 			t.markCached(node)
 			return true // Cached icon change
 		}
@@ -251,12 +248,28 @@ func (t *TestTree) handlePackageEvent(node *TestNode, event TestEvent) bool {
 	return false
 }
 
+// finalizeUnfinishedTests reconciles named events when test2json terminates a
+// workload only at package scope. Benchmarks are the common case: some Go
+// versions emit run and output records but no test-level pass or bench record.
+// A terminal package event is authoritative, so no descendant may remain in a
+// pending or running state after it arrives.
+func (t *TestTree) finalizeUnfinishedTests(node *TestNode, status TestStatus) {
+	for _, child := range node.Children {
+		if child.Status == StatusPending || child.Status == StatusRunning {
+			t.flushOutput(child)
+			t.finishTest(child, status, child.Elapsed)
+		}
+		t.finalizeUnfinishedTests(child, status)
+	}
+}
+
 // isCachedOutput detects Go's cached test output format.
 // Format: "ok  \tpackage/path\t(cached)\n"
 // Uses strict matching to avoid false positives from user log output.
-func isCachedOutput(output string) bool {
-	trimmed := strings.TrimSpace(output)
-	return strings.HasPrefix(trimmed, "ok") && strings.HasSuffix(trimmed, "(cached)")
+func isCachedOutput(output, pkg string) bool {
+	fields := strings.Split(strings.TrimSpace(output), "\t")
+	return len(fields) == 3 && strings.TrimSpace(fields[0]) == "ok" &&
+		strings.TrimSpace(fields[1]) == pkg && strings.TrimSpace(fields[2]) == "(cached)"
 }
 
 // markCached marks a node and all its children as cached
@@ -275,7 +288,6 @@ func (t *TestTree) markCached(node *TestNode) {
 	// Cached tests are always passing tests (Go only caches passing results)
 	node.Cached = true
 	node.Status = StatusPassed
-	node.SuffixCacheValid = false // Invalidate render cache
 	for _, child := range node.Children {
 		markChildCachedFlag(child)
 	}
@@ -287,7 +299,6 @@ func markChildCachedFlag(node *TestNode) {
 	node.Cached = true
 	node.Status = StatusPassed         // Cached tests are always passing
 	node.CachedCount = node.TotalCount // This node's subtree is all cached
-	node.SuffixCacheValid = false      // Invalidate render cache
 	for _, child := range node.Children {
 		markChildCachedFlag(child)
 	}
@@ -305,7 +316,6 @@ func (t *TestTree) handleTestEvent(node *TestNode, event TestEvent) bool {
 	switch event.Action {
 	case "run":
 		node.Status = StatusRunning
-		node.SuffixCacheValid = false
 		// Pending -> Running: increment running count
 		if prevStatus != StatusRunning {
 			t.propagateCountDelta(node, 1, "running")
@@ -313,7 +323,6 @@ func (t *TestTree) handleTestEvent(node *TestNode, event TestEvent) bool {
 		return true
 	case "pause":
 		node.Status = StatusPending
-		node.SuffixCacheValid = false
 		// Running -> Pending: decrement running count
 		if prevStatus == StatusRunning {
 			t.propagateCountDelta(node, -1, "running")
@@ -321,50 +330,62 @@ func (t *TestTree) handleTestEvent(node *TestNode, event TestEvent) bool {
 		return true
 	case "cont":
 		node.Status = StatusRunning
-		node.SuffixCacheValid = false
 		// Pending -> Running: increment running count
 		if prevStatus != StatusRunning {
 			t.propagateCountDelta(node, 1, "running")
 		}
 		return true
-	case "pass":
-		node.Status = StatusPassed
-		node.Elapsed = event.Elapsed
-		node.SuffixCacheValid = false
-		// Decrement running if was running, increment passed
-		if prevStatus == StatusRunning {
-			t.propagateCountDelta(node, -1, "running")
-		}
-		t.propagateCountDelta(node, 1, "passed")
-		t.propagateStatus(node)
-		return true
+	case "pass", "bench":
+		t.flushOutput(node)
+		return t.finishTest(node, StatusPassed, event.Elapsed)
 	case "fail":
-		node.Status = StatusFailed
-		node.Elapsed = event.Elapsed
-		node.SuffixCacheValid = false
-		// Decrement running if was running, increment failed
-		if prevStatus == StatusRunning {
-			t.propagateCountDelta(node, -1, "running")
-		}
-		t.propagateCountDelta(node, 1, "failed")
-		t.propagateStatus(node)
-		return true
+		t.flushOutput(node)
+		return t.finishTest(node, StatusFailed, event.Elapsed)
 	case "skip":
-		node.Status = StatusSkipped
-		node.Elapsed = event.Elapsed
-		node.SuffixCacheValid = false
-		// Decrement running if was running, increment skipped
-		if prevStatus == StatusRunning {
-			t.propagateCountDelta(node, -1, "running")
-		}
-		t.propagateCountDelta(node, 1, "skipped")
-		t.propagateStatus(node)
-		return true
+		t.flushOutput(node)
+		return t.finishTest(node, StatusSkipped, event.Elapsed)
 	case "output":
 		t.appendOutput(node, event.Output)
 		return false // Log-only, no visual change
 	}
 	return false
+}
+
+// finishTest applies one terminal transition without double-counting repeated
+// or corrected terminal records. test2json normally emits one result, but the
+// package-level reconciliation path can race a late explicit record in loaded
+// or synthetic streams, so counters must remain internally consistent.
+func (t *TestTree) finishTest(node *TestNode, status TestStatus, elapsed float64) bool {
+	previous := node.Status
+	if previous == status {
+		changed := node.Elapsed != elapsed
+		node.Elapsed = elapsed
+		return changed
+	}
+
+	switch previous {
+	case StatusRunning:
+		t.propagateCountDelta(node, -1, "running")
+	case StatusPassed:
+		t.propagateCountDelta(node, -1, "passed")
+	case StatusFailed:
+		t.propagateCountDelta(node, -1, "failed")
+	case StatusSkipped:
+		t.propagateCountDelta(node, -1, "skipped")
+	}
+
+	node.Status = status
+	node.Elapsed = elapsed
+	switch status {
+	case StatusPassed:
+		t.propagateCountDelta(node, 1, "passed")
+	case StatusFailed:
+		t.propagateCountDelta(node, 1, "failed")
+	case StatusSkipped:
+		t.propagateCountDelta(node, 1, "skipped")
+	}
+	t.propagateStatus(node)
+	return true
 }
 
 // Styles for processed log output
@@ -384,24 +405,7 @@ const (
 
 // stripAnsi removes ANSI escape sequences from a string
 func stripAnsi(s string) string {
-	var result strings.Builder
-	inEscape := false
-
-	for _, r := range s {
-		if r == '\x1b' {
-			inEscape = true
-			continue
-		}
-		if inEscape {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-				inEscape = false
-			}
-			continue
-		}
-		result.WriteRune(r)
-	}
-
-	return result.String()
+	return util.StripANSI(s)
 }
 
 // processOutput transforms raw test output for display:
@@ -524,82 +528,108 @@ func (t *TestTree) appendOutput(node *TestNode, output string) {
 		lines = lines[:len(lines)-1]
 	}
 
-	// Process each complete line
+	// Process each complete line, including empty lines. Blank output is part of
+	// test diagnostics and must remain byte-for-byte present in Raw mode.
 	for _, line := range lines {
-		if line == "" {
-			continue
+		t.appendCompleteOutput(node, line+"\n")
+	}
+}
+
+// FlushOutputBuffers commits final chunks that do not end in a newline. go
+// test permits a process to exit after writing such a chunk, and hiding it is
+// particularly harmful when it contains the only failure diagnostic.
+func (t *TestTree) FlushOutputBuffers() {
+	for fullPath, output := range t.OutputLineBuffer {
+		delete(t.OutputLineBuffer, fullPath)
+		if node := t.NodeIndex[fullPath]; node != nil {
+			t.appendCompleteOutput(node, output)
 		}
-		// Add newline back for raw output (preserves original format)
-		lineWithNewline := line + "\n"
+	}
+}
 
-		// Append raw output to shared buffer
-		rawRef := t.RawLogBuffer.Append(lineWithNewline)
+func (t *TestTree) flushOutput(node *TestNode) {
+	if node == nil {
+		return
+	}
+	output, ok := t.OutputLineBuffer[node.FullPath]
+	if !ok {
+		return
+	}
+	delete(t.OutputLineBuffer, node.FullPath)
+	t.appendCompleteOutput(node, output)
+}
 
-		// Add raw ref to this node
-		if node.RawLog == nil {
-			node.RawLog = NewNodeLog()
+func (t *TestTree) appendCompleteOutput(node *TestNode, output string) {
+	lineWithNewline := output
+
+	// Raw means unformatted, not unsafe. Strip terminal control sequences so a
+	// test cannot inject hyperlinks, clipboard commands, or cursor movement.
+	rawRef := t.RawLogBuffer.Append(stripAnsi(lineWithNewline))
+
+	// Add raw ref to this node
+	if node.RawLog == nil {
+		node.RawLog = NewNodeLog()
+	}
+	node.RawLog.Append(rawRef)
+
+	// Process output for display (filter and style)
+	processed := processOutput(lineWithNewline)
+	var processedRef BufferRef
+	if processed != "" {
+		processedRef = t.ProcessedLogBuffer.Append(processed)
+
+		// Add processed ref to this node
+		if node.ProcessedLog == nil {
+			node.ProcessedLog = NewNodeLog()
 		}
-		node.RawLog.Append(rawRef)
+		node.ProcessedLog.Append(processedRef)
+	}
 
-		// Process output for display (filter and style)
-		processed := processOutput(lineWithNewline)
-		var processedRef BufferRef
-		if processed != "" {
-			processedRef = t.ProcessedLogBuffer.Append(processed)
-
-			// Add processed ref to this node
-			if node.ProcessedLog == nil {
-				node.ProcessedLog = NewNodeLog()
+	// Add refs to package node (if this is a test node, not a package)
+	if node.Parent != nil {
+		pkg := t.Packages[node.Package]
+		if pkg != nil {
+			if pkg.RawLog == nil {
+				pkg.RawLog = NewNodeLog()
 			}
-			node.ProcessedLog.Append(processedRef)
-		}
+			pkg.RawLog.Append(rawRef)
 
-		// Add refs to package node (if this is a test node, not a package)
-		if node.Parent != nil {
-			pkg := t.Packages[node.Package]
-			if pkg != nil {
-				if pkg.RawLog == nil {
-					pkg.RawLog = NewNodeLog()
+			if processed != "" {
+				if pkg.ProcessedLog == nil {
+					pkg.ProcessedLog = NewNodeLog()
 				}
-				pkg.RawLog.Append(rawRef)
-
-				if processed != "" {
-					if pkg.ProcessedLog == nil {
-						pkg.ProcessedLog = NewNodeLog()
-					}
-					pkg.ProcessedLog.Append(processedRef)
-				}
+				pkg.ProcessedLog.Append(processedRef)
 			}
 		}
+	}
 
-		// Add refs to all ancestor test nodes by walking FullPath
-		testPath := strings.TrimPrefix(node.FullPath, node.Package)
-		testPath = strings.TrimPrefix(testPath, "/")
+	// Add refs to all ancestor test nodes by walking FullPath
+	testPath := strings.TrimPrefix(node.FullPath, node.Package)
+	testPath = strings.TrimPrefix(testPath, "/")
 
-		if testPath == "" {
-			continue // This is a package node, already handled
-		}
+	if testPath == "" {
+		return // This is a package node, already handled
+	}
 
-		parts := strings.Split(testPath, "/")
+	parts := strings.Split(testPath, "/")
 
-		// Add ref to each ancestor (all prefixes except the full path itself)
-		for i := 1; i < len(parts); i++ {
-			ancestorTestPath := strings.Join(parts[:i], "/")
-			ancestorFullPath := node.Package + "/" + ancestorTestPath
+	// Add ref to each ancestor (all prefixes except the full path itself)
+	for i := 1; i < len(parts); i++ {
+		ancestorTestPath := strings.Join(parts[:i], "/")
+		ancestorFullPath := node.Package + "/" + ancestorTestPath
 
-			ancestor := t.NodeIndex[ancestorFullPath]
-			if ancestor != nil {
-				if ancestor.RawLog == nil {
-					ancestor.RawLog = NewNodeLog()
+		ancestor := t.NodeIndex[ancestorFullPath]
+		if ancestor != nil {
+			if ancestor.RawLog == nil {
+				ancestor.RawLog = NewNodeLog()
+			}
+			ancestor.RawLog.Append(rawRef)
+
+			if processed != "" {
+				if ancestor.ProcessedLog == nil {
+					ancestor.ProcessedLog = NewNodeLog()
 				}
-				ancestor.RawLog.Append(rawRef)
-
-				if processed != "" {
-					if ancestor.ProcessedLog == nil {
-						ancestor.ProcessedLog = NewNodeLog()
-					}
-					ancestor.ProcessedLog.Append(processedRef)
-				}
+				ancestor.ProcessedLog.Append(processedRef)
 			}
 		}
 	}
@@ -609,7 +639,6 @@ func (t *TestTree) appendOutput(node *TestNode, output string) {
 func (t *TestTree) propagateCountDelta(node *TestNode, delta int, field string) {
 	current := node
 	for current != nil {
-		current.SuffixCacheValid = false // Invalidate render cache for count changes
 		switch field {
 		case "passed":
 			current.PassedCount += delta
@@ -775,65 +804,14 @@ func ShortPath(path string) string {
 		return path
 	}
 
-	// Find where the module prefix ends
-	// Module prefix typically starts with a domain (contains a dot)
-	// and includes org/repo segments (e.g., "github.com/example")
-	moduleEndIdx := 0
-
-	// If first segment contains a dot, it's a domain - find where module ends
-	if strings.Contains(parts[0], ".") {
-		// Skip domain + org + repo segments (typically 3 total)
-		// But also handle shorter modules like "github.com/user/repo"
-		moduleEndIdx = 3
-		if moduleEndIdx > len(parts) {
-			moduleEndIdx = len(parts)
-		}
-
-		// Adjust: keep skipping if next segment looks like part of module path
-		// (short segments without underscores that aren't common package names)
-		for moduleEndIdx < len(parts) {
-			segment := parts[moduleEndIdx]
-			// Stop at common Go package directory names
-			if isPackageDir(segment) {
-				break
-			}
-			// Stop at Test names
-			if strings.HasPrefix(segment, "Test") {
-				break
-			}
-			moduleEndIdx++
-		}
-	}
-
-	if moduleEndIdx >= len(parts) {
-		// Fallback: return last 2 parts
-		if len(parts) >= 2 {
-			return strings.Join(parts[len(parts)-2:], "/")
-		}
+	if !strings.Contains(parts[0], ".") {
 		return path
 	}
-
-	return strings.Join(parts[moduleEndIdx:], "/")
-}
-
-// isPackageDir returns true if the segment looks like a Go package directory
-func isPackageDir(segment string) bool {
-	// Common Go package directory patterns
-	commonDirs := []string{
-		"accessor", "service", "pservice", "lib", "pkg", "internal",
-		"cmd", "api", "model", "data", "view", "controller", "handler",
-		"middleware", "util", "utils", "helper", "helpers", "config",
-		"test", "tests", "mock", "mocks", "gen", "generated",
+	// A conventional hosted module is domain/owner/repository. For the module
+	// root itself, the repository name is the useful label; otherwise retain the
+	// package path below it.
+	if len(parts) <= 3 {
+		return parts[len(parts)-1]
 	}
-	segLower := strings.ToLower(segment)
-	for _, dir := range commonDirs {
-		if segLower == dir {
-			return true
-		}
-	}
-	// Also treat segments with underscores as package dirs (e.g., "my_package")
-	if strings.Contains(segment, "_") {
-		return true
-	}
-	return false
+	return strings.Join(parts[3:], "/")
 }

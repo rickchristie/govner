@@ -94,7 +94,7 @@ TreeView renders updated tree
 
 1. **TestRunner interface** (`runner.go:16-23`)
    - `Start(args []string) (EventStream, error)` - Run tests
-   - `StartSingle(pkg, testName string) (EventStream, error)` - Run single test
+   - `StartSingle(originalArgs []string, pkg, testName string) (EventStream, error)` - Rerun one package/test while preserving original flags
    - `CleanCache() error` - Clean test cache
 
 2. **EventStream interface** (`runner.go:25-36`)
