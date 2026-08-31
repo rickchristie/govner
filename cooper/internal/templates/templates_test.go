@@ -22,7 +22,8 @@ func testConfig() *config.Config {
 			{Name: "claude", Enabled: true},
 			{Name: "copilot", Enabled: true},
 			{Name: "codex", Enabled: true},
-			{Name: "opencode", Enabled: true},
+			{Name: "opencode", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.3.7"},
+			{Name: "grok", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.0.4"},
 		},
 		WhitelistedDomains: []config.DomainEntry{
 			{Domain: ".anthropic.com", IncludeSubdomains: true, Source: "default"},
@@ -73,6 +74,7 @@ func noToolsConfig() *config.Config {
 			{Name: "copilot", Enabled: false},
 			{Name: "codex", Enabled: false},
 			{Name: "opencode", Enabled: false},
+			{Name: "grok", Enabled: false},
 		},
 		WhitelistedDomains: []config.DomainEntry{},
 		PortForwardRules:   []config.PortForwardRule{},
@@ -94,6 +96,30 @@ func assertNotContains(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if strings.Contains(haystack, needle) {
 		t.Errorf("expected output NOT to contain %q, but it did.\nOutput (first 500 chars):\n%s", needle, truncate(haystack, 500))
+	}
+}
+
+func assertGrokPathPolicy(t *testing.T, conf string) {
+	t.Helper()
+	assertContains(t, conf, "acl grok_inference_host dstdomain cli-chat-proxy.grok.com")
+	assertContains(t, conf, `acl grok_allowed_path urlpath_regex ^/v1/(chat/completions|responses|messages|models|user)(\?.*)?$`)
+	assertContains(t, conf, `acl grok_allowed_path urlpath_regex ^/v1/privacy/coding-data-retention(\?.*)?$`)
+	assertContains(t, conf, "http_access deny grok_inference_host !grok_allowed_path")
+	assertContains(t, conf, "http_access allow grok_inference_host grok_allowed_path allowed_domains")
+	assertContains(t, conf, "http_access allow grok_inference_host grok_allowed_path pending_review")
+	assertNotContains(t, conf, "dstdomain .grok.com")
+	assertNotContains(t, conf, "dstdomain .x.ai")
+	assertContains(t, conf, "dstdomain cli-chat-proxy.grok.com")
+
+	connectIdx := strings.Index(conf, "http_access deny CONNECT all")
+	pathDenyIdx := strings.Index(conf, "http_access deny grok_inference_host !grok_allowed_path")
+	genericAllowIdx := strings.Index(conf, "http_access allow allowed_domains")
+	pendingIdx := strings.LastIndex(conf, "http_access allow pending_review")
+	if connectIdx < 0 || pathDenyIdx < 0 || genericAllowIdx < 0 || pendingIdx < 0 {
+		t.Fatal("missing required Squid access rules")
+	}
+	if !(connectIdx < pathDenyIdx && pathDenyIdx < genericAllowIdx && pathDenyIdx < pendingIdx) {
+		t.Fatalf("Grok path deny is not after CONNECT and before generic allow/pending rules")
 	}
 }
 
@@ -337,6 +363,27 @@ func TestRenderBaseDockerfile_InstallsImplicitTools(t *testing.T) {
 		t.Fatalf("RenderBaseDockerfile failed: %v", err)
 	}
 	assertContains(t, result, "go install golang.org/x/tools/gopls@")
+	assertContains(t, result, "GOTOOLCHAIN=local")
+	assertContains(t, result, "timeout --signal=TERM --kill-after=10s 2m")
+	assertContains(t, result, "GOPROXY=https://proxy.golang.org")
+	assertContains(t, result, "GOSUMDB=sum.golang.org")
+	assertContains(t, result, "max_attempts=8")
+	assertContains(t, result, "delay=$((attempt * 5))")
+	assertContains(t, result, "retrying official proxy")
+	assertContains(t, result, "gopls install failed after $attempt attempts using proxy.golang.org")
+	assertNotContains(t, result, "GOTOOLCHAIN=auto")
+	assertNotContains(t, result, "goproxy.cn")
+	assertNotContains(t, result, "goproxy.io")
+	assertNotContains(t, result, "GOPROXY=direct")
+	assertNotContains(t, result, "url.https://github.com/golang/.insteadOf")
+	assertNotContains(t, result, "https://go.googlesource.com/")
+	assertNotContains(t, result, "GIT_CONFIG_GLOBAL=")
+	assertNotContains(t, result, "GODEBUG=http2client=0")
+	assertNotContains(t, result, "git config --global")
+	assertNotContains(t, result, "GOSUMDB=off")
+	if got := strings.Count(result, "GOPROXY="); got != 1 {
+		t.Fatalf("generated Dockerfile has %d GOPROXY assignments, want official proxy only", got)
+	}
 	assertContains(t, result, "typescript-language-server@")
 	assertContains(t, result, "typescript@")
 	assertContains(t, result, "pyright@")
@@ -578,7 +625,9 @@ func TestRenderCLIToolDockerfile_ClaudeVersionPinned(t *testing.T) {
 		t.Fatalf("RenderCLIToolDockerfile failed: %v", err)
 	}
 
-	assertContains(t, result, "bash -s -- 2.1.87")
+	assertContains(t, result, "--output /tmp/claude-install.sh")
+	assertContains(t, result, "bash /tmp/claude-install.sh 2.1.87")
+	assertNotContains(t, result, "install.sh | bash")
 }
 
 func TestRenderCLIToolDockerfile_Copilot(t *testing.T) {
@@ -657,7 +706,7 @@ func TestRenderCLIToolDockerfile_CodexVersionPinned(t *testing.T) {
 func TestRenderCLIToolDockerfile_OpenCode(t *testing.T) {
 	cfg := &config.Config{
 		AITools: []config.ToolConfig{
-			{Name: "opencode", Enabled: true},
+			{Name: "opencode", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.3.7"},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -668,12 +717,16 @@ func TestRenderCLIToolDockerfile_OpenCode(t *testing.T) {
 		t.Fatalf("RenderCLIToolDockerfile failed: %v", err)
 	}
 
-	assertContains(t, result, "opencode.ai/install")
+	assertContains(t, result, "https://github.com/anomalyco/opencode/releases/download/v1.3.7/opencode-linux-${oc_arch}.tar.gz")
+	assertContains(t, result, "/home/user/.local/bin/opencode")
 	assertContains(t, result, "COOPER_CLI_TOOL=opencode")
 	assertContains(t, result, "/home/user/.config/opencode")
 	assertContains(t, result, "/home/user/.local/share/opencode")
 	assertContains(t, result, "/home/user/.local/state/opencode")
 	assertContains(t, result, "/home/user/.opencode")
+	assertContains(t, result, "amd64) oc_arch=x64")
+	assertContains(t, result, "arm64) oc_arch=arm64")
+	assertNotContains(t, result, "opencode.ai/install")
 }
 
 func TestRenderCLIToolDockerfile_OpenCodeVersionPinned(t *testing.T) {
@@ -690,8 +743,36 @@ func TestRenderCLIToolDockerfile_OpenCodeVersionPinned(t *testing.T) {
 		t.Fatalf("RenderCLIToolDockerfile failed: %v", err)
 	}
 
-	assertContains(t, result, "--version 1.3.7")
-	assertContains(t, result, "cp /home/user/.opencode/bin/opencode /home/user/.local/bin/opencode")
+	assertContains(t, result, "releases/download/v1.3.7/opencode-linux-${oc_arch}.tar.gz")
+	assertContains(t, result, "cp \"$src\" /home/user/.local/bin/opencode")
+	assertNotContains(t, result, "opencode.ai/install")
+	assertNotContains(t, result, "--version 1.3.7")
+}
+
+func TestRenderCLIToolDockerfile_OpenCodeEmptyVersion(t *testing.T) {
+	cfg := &config.Config{
+		AITools:   []config.ToolConfig{{Name: "opencode", Enabled: true, Mode: config.ModeLatest}},
+		ProxyPort: 3128,
+	}
+	_, err := RenderCLIToolDockerfile(cfg, "opencode")
+	if err == nil {
+		t.Fatal("expected empty OpenCode version to fail")
+	}
+	if !strings.Contains(err.Error(), "resolved version") {
+		t.Fatalf("error = %v, want resolved version", err)
+	}
+}
+
+func TestOpencodeReleaseTag(t *testing.T) {
+	if got := opencodeReleaseTag("1.3.7"); got != "v1.3.7" {
+		t.Fatalf("opencodeReleaseTag(1.3.7) = %q, want v1.3.7", got)
+	}
+	if got := opencodeReleaseTag("v1.18.18"); got != "v1.18.18" {
+		t.Fatalf("opencodeReleaseTag(v1.18.18) = %q, want v1.18.18", got)
+	}
+	if got := opencodeReleaseTag("  v1.3.7  "); got != "v1.3.7" {
+		t.Fatalf("opencodeReleaseTag(padded) = %q, want v1.3.7", got)
+	}
 }
 
 func TestRenderCLIToolDockerfile_UnknownTool(t *testing.T) {
@@ -724,6 +805,58 @@ func TestRenderCLIToolDockerfile_UsesCorrectBaseImage(t *testing.T) {
 
 	expectedBase := docker.GetImageBase()
 	assertContains(t, result, "FROM "+expectedBase)
+}
+
+func TestRenderCLIToolDockerfile_Grok(t *testing.T) {
+	cfg := &config.Config{
+		AITools: []config.ToolConfig{
+			{Name: "grok", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.0.4"},
+		},
+		ProxyPort:  3128,
+		BridgePort: 4343,
+	}
+	result, err := RenderCLIToolDockerfile(cfg, "grok")
+	if err != nil {
+		t.Fatalf("RenderCLIToolDockerfile failed: %v", err)
+	}
+	assertContains(t, result, "# Cooper CLI: Grok Build - Generated by cooper configure")
+	assertContains(t, result, "https://x.ai/cli/grok-1.0.4-linux-${grok_arch}")
+	assertContains(t, result, "/home/user/.local/bin/grok")
+	assertContains(t, result, "chmod 0755 /home/user/.local/bin/grok")
+	assertContains(t, result, "case \"${TARGETARCH}\"")
+	assertContains(t, result, "amd64) grok_arch=x86_64")
+	assertContains(t, result, "arm64) grok_arch=aarch64")
+	assertContains(t, result, "uname -m")
+	assertContains(t, result, "USER user")
+	assertContains(t, result, "GROK_HOME=/home/user/.grok")
+	assertContains(t, result, "GROK_LEADER_SOCKET=/tmp/cooper-grok-leader.sock")
+	assertContains(t, result, "COOPER_CLI_TOOL=grok")
+	assertContains(t, result, `COOPER_CLI_AUTO_APPROVE="--always-approve"`)
+	assertContains(t, result, "COOPER_CLIPBOARD_MODE=x11")
+	assertContains(t, result, "/home/user/.grok")
+	assertNotContains(t, result, "/etc/grok/requirements.toml")
+	assertNotContains(t, result, "GROK_AUTH_PATH")
+	assertNotContains(t, result, "GROK_WEB_FETCH")
+	assertNotContains(t, result, "GROK_MEMORY")
+	assertNotContains(t, result, "GROK_DISABLE_AUTOUPDATER")
+	assertNotContains(t, result, "npm install")
+	assertNotContains(t, result, "x.ai/cli/install.sh")
+	assertNotContains(t, result, "grok-latest-linux")
+	assertNotContains(t, result, "upload_queue")
+}
+
+func TestRenderCLIToolDockerfile_GrokEmptyVersion(t *testing.T) {
+	cfg := &config.Config{
+		AITools:   []config.ToolConfig{{Name: "grok", Enabled: true, Mode: config.ModeLatest}},
+		ProxyPort: 3128,
+	}
+	_, err := RenderCLIToolDockerfile(cfg, "grok")
+	if err == nil {
+		t.Fatal("expected empty Grok version to fail")
+	}
+	if !strings.Contains(err.Error(), "resolved version") {
+		t.Fatalf("error = %v, want resolved version", err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -924,7 +1057,7 @@ func TestWriteAllTemplates(t *testing.T) {
 	}
 
 	// Verify per-tool Dockerfiles in cliDir
-	expectedTools := []string{"claude", "copilot", "codex", "opencode"}
+	expectedTools := []string{"claude", "copilot", "codex", "opencode", "grok"}
 	for _, tool := range expectedTools {
 		path := filepath.Join(cliDir, tool, "Dockerfile")
 		info, err := os.Stat(path)
@@ -1021,6 +1154,14 @@ func TestWriteAllTemplates_FileContents(t *testing.T) {
 	}
 	assertContains(t, string(data), "@openai/codex")
 	assertContains(t, string(data), "COOPER_CLI_TOOL=codex")
+
+	data, err = os.ReadFile(filepath.Join(cliDir, "opencode", "Dockerfile"))
+	if err != nil {
+		t.Fatalf("failed to read opencode Dockerfile: %v", err)
+	}
+	assertContains(t, string(data), "github.com/anomalyco/opencode/releases/download/v1.3.7/opencode-linux-${oc_arch}.tar.gz")
+	assertContains(t, string(data), "COOPER_CLI_TOOL=opencode")
+	assertNotContains(t, string(data), "opencode.ai/install")
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,6 +1253,8 @@ func TestRenderSquidConf(t *testing.T) {
 
 	// Port should match config
 	assertContains(t, result, "http_port 3128")
+
+	assertGrokPathPolicy(t, result)
 }
 
 func TestRenderSquidConf_EmptyWhitelist(t *testing.T) {

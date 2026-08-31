@@ -468,6 +468,8 @@ func (m *model) syncConfigFromSubModels() {
 // navigateTo switches to a new screen and syncs config.
 func (m *model) navigateTo(screen Screen) {
 	m.syncConfigFromSubModels()
+	m.cfg.MergeDefaultDomains()
+	m.whitelist.refreshDomains(m.cfg.WhitelistedDomains)
 	m.screen = screen
 	// Refresh save model with latest config.
 	if screen == ScreenSave {
@@ -589,7 +591,7 @@ func newWelcomeModel(existing bool) welcomeModel {
 	return welcomeModel{
 		items: []welcomeItem{
 			{label: "Programming Tools", desc: "Go, Node.js, Python"},
-			{label: "AI CLI Tools", desc: "Claude Code, Copilot, Codex, OpenCode"},
+			{label: "AI CLI Tools", desc: "Claude Code, Copilot, Codex, OpenCode, Grok Build"},
 			{label: "Proxy Whitelist", desc: "Domain whitelist for network access"},
 			{label: "Port Forwarding to Host", desc: "Route container ports to host services"},
 			{label: "Proxy Settings", desc: "Proxy port, bridge port"},

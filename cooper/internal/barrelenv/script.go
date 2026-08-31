@@ -87,13 +87,27 @@ func RenderUserEnvFile(vars []config.BarrelEnvVar) ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
+// grokProtectedRuntimeEnvNames contains the state-root translation and the
+// per-barrel transport path. Both values must survive user session-env loading.
+// Other host Grok settings remain usable.
+var grokProtectedRuntimeEnvNames = []string{
+	"GROK_HOME",
+	"GROK_LEADER_SOCKET",
+}
+
 // ProtectedRuntimeEnvNames returns the stable runtime env restore list with any
 // dynamic token or IDE names appended once. Callers pass the names resolved for
 // the current tool so runtime restore stays aligned with auth.ResolveTokens
 // instead of freezing a token list in this package.
 func ProtectedRuntimeEnvNames(extra []string) []string {
-	seen := make(map[string]struct{}, len(protectedRuntimeStaticNames)+len(extra))
-	names := make([]string, 0, len(protectedRuntimeStaticNames)+len(extra))
+	return ProtectedRuntimeEnvNamesForTool("", extra)
+}
+
+// ProtectedRuntimeEnvNamesForTool appends the Cooper-set Grok path variables
+// only for a built-in Grok barrel.
+func ProtectedRuntimeEnvNamesForTool(toolName string, extra []string) []string {
+	seen := make(map[string]struct{}, len(protectedRuntimeStaticNames)+len(extra)+len(grokProtectedRuntimeEnvNames))
+	names := make([]string, 0, len(protectedRuntimeStaticNames)+len(extra)+len(grokProtectedRuntimeEnvNames))
 	appendUnique := func(name string) {
 		if name == "" {
 			return
@@ -106,6 +120,11 @@ func ProtectedRuntimeEnvNames(extra []string) []string {
 	}
 	for _, name := range protectedRuntimeStaticNames {
 		appendUnique(name)
+	}
+	if strings.EqualFold(strings.TrimSpace(toolName), "grok") {
+		for _, name := range grokProtectedRuntimeEnvNames {
+			appendUnique(name)
+		}
 	}
 	for _, name := range extra {
 		appendUnique(strings.TrimSpace(name))

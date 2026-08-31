@@ -9,6 +9,7 @@ import (
 	"text/template"
 
 	"github.com/rickchristie/govner/cooper/internal/aclsrc"
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
@@ -50,14 +51,21 @@ type baseDockerfileData struct {
 // cliToolDockerfileData holds template data for per-tool Dockerfiles.
 type cliToolDockerfileData struct {
 	BaseImage       string   // "cooper-base" or "{prefix}cooper-base"
-	ToolName        string   // "claude", "copilot", "codex", "opencode"
+	ToolName        string   // "claude", "copilot", "codex", "opencode", or "grok"
 	ToolDisplayName string   // "Claude Code", "Copilot CLI", etc.
-	Version         string   // Resolved version (empty = latest)
+	Version         string   // Resolved image version
 	AutoApproveFlag string   // Tool-specific auto-approve CLI flag
 	InstallCommands string   // Pre-rendered install RUN commands
 	ToolDirs        []string // Directories to create (e.g. /home/user/.claude)
 	ProxyPort       int      // Proxy port to restore after install
 	ClipboardMode   string   // Clipboard bridge mode: "shim", "x11", or "auto"
+	RuntimeEnvs     []runtimeEnv
+}
+
+// runtimeEnv is a Dockerfile ENV entry set after the tool is installed.
+type runtimeEnv struct {
+	Name  string
+	Value string
 }
 
 // proxyDockerfileData holds template data for the proxy Dockerfile.
@@ -88,20 +96,6 @@ type proxyEntrypointData struct {
 	BridgePort int
 }
 
-// clipboardModeForTool returns the clipboard bridge mode for a given AI tool.
-// Shim mode intercepts clipboard binaries with shell scripts that talk to the
-// bridge. X11 mode runs a real X server and relays clipboard events.
-func clipboardModeForTool(toolName string) string {
-	switch toolName {
-	case "claude", "opencode":
-		return "shim"
-	case "codex", "copilot":
-		return "x11"
-	default:
-		return "auto"
-	}
-}
-
 // anyAIToolEnabled returns true if at least one AI tool is enabled.
 func anyAIToolEnabled(tools []config.ToolConfig) bool {
 	for _, t := range tools {
@@ -120,6 +114,19 @@ func isToolEnabled(tools []config.ToolConfig, name string) bool {
 		}
 	}
 	return false
+}
+
+// opencodeReleaseTag maps a resolved npm/config version onto the GitHub
+// release tag. Official artifacts live at
+// https://github.com/anomalyco/opencode/releases/download/v<ver>/...
+// (the unprefixed /<ver>/ path 404s).
+func opencodeReleaseTag(version string) string {
+	version = strings.TrimSpace(version)
+	version = strings.TrimPrefix(version, "v")
+	if version == "" {
+		return ""
+	}
+	return "v" + version
 }
 
 // getToolVersion returns the pinned or host version for a tool, or empty string if not found.
@@ -207,40 +214,12 @@ func RenderBaseDockerfile(cfg *config.Config, implicit []config.ImplicitToolConf
 	return buf.String(), nil
 }
 
-// toolDefinition holds the static metadata for each built-in AI tool.
-type toolDefinition struct {
-	DisplayName     string
-	AutoApproveFlag string
-	ToolDirs        []string
-}
-
-// builtinTools maps tool name to its static definition.
-var builtinTools = map[string]toolDefinition{
-	"claude": {
-		DisplayName:     "Claude Code",
-		AutoApproveFlag: "--dangerously-skip-permissions",
-		ToolDirs:        []string{filepath.Join(docker.BarrelHomeDir, ".claude")},
-	},
-	"copilot": {
-		DisplayName:     "Copilot CLI",
-		AutoApproveFlag: "--allow-all-tools",
-		ToolDirs:        []string{filepath.Join(docker.BarrelHomeDir, ".copilot")},
-	},
-	"codex": {
-		DisplayName:     "Codex CLI",
-		AutoApproveFlag: "--dangerously-bypass-approvals-and-sandbox",
-		ToolDirs:        []string{filepath.Join(docker.BarrelHomeDir, ".codex")},
-	},
-	"opencode": {
-		DisplayName:     "OpenCode",
-		AutoApproveFlag: "",
-		ToolDirs: []string{
-			filepath.Join(docker.BarrelHomeDir, ".config", "opencode"),
-			filepath.Join(docker.BarrelHomeDir, ".local", "share", "opencode"),
-			filepath.Join(docker.BarrelHomeDir, ".local", "state", "opencode"),
-			filepath.Join(docker.BarrelHomeDir, ".opencode"),
-		},
-	},
+func toolHomeDirs(def aitool.Definition) []string {
+	dirs := make([]string, 0, len(def.HomeDirs))
+	for _, rel := range def.HomeDirs {
+		dirs = append(dirs, filepath.Join(docker.BarrelHomeDir, filepath.FromSlash(rel)))
+	}
+	return dirs
 }
 
 // renderInstallCommands returns the Dockerfile RUN commands for installing a tool.
@@ -248,11 +227,12 @@ func renderInstallCommands(toolName, version string) (string, error) {
 	switch toolName {
 	case "claude":
 		if version != "" {
-			// When version is pinned, don't run `claude install` — it upgrades to latest.
-			// The curl installer already handles shell integration setup.
-			return fmt.Sprintf("RUN curl -fsSL https://claude.ai/install.sh | bash -s -- %s", version), nil
+			// Do not run `claude install` for a pinned version. It upgrades to latest.
+			// Download before execution so a failed curl cannot become a successful
+			// empty shell pipeline.
+			return fmt.Sprintf("RUN curl -fsSL --http1.1 --retry 5 --retry-all-errors https://claude.ai/install.sh --output /tmp/claude-install.sh && \\\n    bash /tmp/claude-install.sh %s && \\\n    rm -f /tmp/claude-install.sh", version), nil
 		}
-		return "RUN curl -fsSL https://claude.ai/install.sh | bash && \\\n    /home/user/.local/bin/claude install", nil
+		return "RUN curl -fsSL --http1.1 --retry 5 --retry-all-errors https://claude.ai/install.sh --output /tmp/claude-install.sh && \\\n    bash /tmp/claude-install.sh && \\\n    rm -f /tmp/claude-install.sh && \\\n    /home/user/.local/bin/claude install", nil
 	case "copilot":
 		if version != "" {
 			return fmt.Sprintf("RUN npm install -g @github/copilot@%s", version), nil
@@ -264,16 +244,69 @@ func renderInstallCommands(toolName, version string) (string, error) {
 		}
 		return "RUN npm install -g @openai/codex", nil
 	case "opencode":
-		// The upstream installer places the binary under ~/.opencode/bin, but
-		// Cooper bind-mounts ~/.opencode at runtime for OpenCode state/auth. Copy
-		// the image's pinned binary into ~/.local/bin so the runtime mount cannot
-		// hide it or replace it with a different host-installed version.
-		postInstallCmd := `RUN mkdir -p /home/user/.config/opencode /home/user/.local/bin && \
-    cp /home/user/.opencode/bin/opencode /home/user/.local/bin/opencode`
-		if version != "" {
-			return fmt.Sprintf("RUN curl -fsSL https://opencode.ai/install | bash -s -- --version %s\n%s", version, postInstallCmd), nil
+		if strings.TrimSpace(version) == "" {
+			return "", fmt.Errorf("OpenCode image requires a resolved version; mirror, latest, and pin must resolve before rendering")
 		}
-		return fmt.Sprintf("RUN curl -fsSL https://opencode.ai/install | bash\n%s", postInstallCmd), nil
+		// Official versioned artifact from GitHub Releases. The convenience
+		// URL https://opencode.ai/install is only a 307 to a moving raw
+		// script that then fetches this same tarball; that wrapper 429s in
+		// Docker and `curl | bash` is not fail-closed.
+		// Install into ~/.local/bin so the runtime ~/.opencode state mount
+		// cannot hide or replace the pinned binary.
+		return fmt.Sprintf(`ARG TARGETARCH
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) oc_arch=x64 ;; \
+      arm64) oc_arch=arm64 ;; \
+      "") case "$(uname -m)" in \
+            x86_64) oc_arch=x64 ;; \
+            aarch64|arm64) oc_arch=arm64 ;; \
+            *) echo "unsupported OpenCode architecture: $(uname -m)" >&2; exit 1 ;; \
+          esac ;; \
+      *) echo "unsupported OpenCode architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /home/user/.config/opencode /home/user/.local/bin /tmp/opencode-extract; \
+    curl --fail --show-error --silent --location --http1.1 --retry 5 --retry-all-errors \
+      "https://github.com/anomalyco/opencode/releases/download/%s/opencode-linux-${oc_arch}.tar.gz" \
+      --output /tmp/opencode.tar.gz; \
+    tar -xzf /tmp/opencode.tar.gz -C /tmp/opencode-extract; \
+    if [ -f /tmp/opencode-extract/opencode ]; then \
+      src=/tmp/opencode-extract/opencode; \
+    elif [ -f /tmp/opencode-extract/bin/opencode ]; then \
+      src=/tmp/opencode-extract/bin/opencode; \
+    else \
+      echo "opencode binary missing from release tarball" >&2; \
+      find /tmp/opencode-extract -ls >&2; \
+      exit 1; \
+    fi; \
+    cp "$src" /home/user/.local/bin/opencode; \
+    chmod 0755 /home/user/.local/bin/opencode; \
+    rm -rf /tmp/opencode.tar.gz /tmp/opencode-extract; \
+    /home/user/.local/bin/opencode --version`, opencodeReleaseTag(version)), nil
+	case "grok":
+		if strings.TrimSpace(version) == "" {
+			return "", fmt.Errorf("Grok image requires a resolved version; mirror, latest, and pin must resolve before rendering")
+		}
+		// Download the immutable official artifact directly into ~/.local/bin.
+		// Do not run the moving installer and do not install under ~/.grok,
+		// because the runtime state-root mount would hide that path.
+		return fmt.Sprintf(`ARG TARGETARCH
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) grok_arch=x86_64 ;; \
+      arm64) grok_arch=aarch64 ;; \
+      "") case "$(uname -m)" in \
+            x86_64) grok_arch=x86_64 ;; \
+            aarch64|arm64) grok_arch=aarch64 ;; \
+            *) echo "unsupported Grok architecture: $(uname -m)" >&2; exit 1 ;; \
+          esac ;; \
+      *) echo "unsupported Grok architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl --fail --show-error --silent --location --retry 3 \
+      "https://x.ai/cli/grok-%s-linux-${grok_arch}" \
+      --output /home/user/.local/bin/grok; \
+    chmod 0755 /home/user/.local/bin/grok; \
+    /home/user/.local/bin/grok --version`, version), nil
 	default:
 		return "", fmt.Errorf("unknown tool: %s", toolName)
 	}
@@ -281,7 +314,7 @@ func renderInstallCommands(toolName, version string) (string, error) {
 
 // RenderCLIToolDockerfile renders a per-tool Dockerfile from config and tool name.
 func RenderCLIToolDockerfile(cfg *config.Config, toolName string) (string, error) {
-	def, ok := builtinTools[toolName]
+	def, ok := aitool.Lookup(toolName)
 	if !ok {
 		return "", fmt.Errorf("unknown AI tool: %s", toolName)
 	}
@@ -302,11 +335,12 @@ func RenderCLIToolDockerfile(cfg *config.Config, toolName string) (string, error
 		ToolName:        toolName,
 		ToolDisplayName: def.DisplayName,
 		Version:         version,
-		AutoApproveFlag: def.AutoApproveFlag,
+		AutoApproveFlag: def.AutoApproveArgs,
 		InstallCommands: installCmds,
-		ToolDirs:        def.ToolDirs,
+		ToolDirs:        toolHomeDirs(def),
 		ProxyPort:       cfg.ProxyPort,
-		ClipboardMode:   clipboardModeForTool(toolName),
+		ClipboardMode:   aitool.ClipboardMode(toolName),
+		RuntimeEnvs:     toolRuntimeEnvs(toolName),
 	}
 
 	var buf strings.Builder
@@ -397,11 +431,77 @@ func RenderEntrypoint(cfg *config.Config) (string, error) {
 	return buf.String(), nil
 }
 
+func toolRuntimeEnvs(toolName string) []runtimeEnv {
+	if toolName != "grok" {
+		return nil
+	}
+	return []runtimeEnv{
+		// Map any host GROK_HOME root to one stable container path.
+		{Name: "GROK_HOME", Value: docker.BarrelGrokStateRoot},
+		// Keep transient leader transport in the per-barrel /tmp mount. This
+		// prevents a barrel from attaching to a host Grok process through the
+		// leader socket in the shared state root.
+		{Name: "GROK_LEADER_SOCKET", Value: docker.BarrelGrokLeaderSocket},
+	}
+}
+
+// generatedCLIDockerfilePrefix is the first two lines Cooper writes into a
+// built-in CLI Dockerfile. Display name is included so the marker matches the
+// generated file exactly.
+func generatedCLIDockerfilePrefix(displayName string) string {
+	return "# Cooper CLI: " + displayName + " - Generated by cooper configure\n# DO NOT EDIT - This file is regenerated by cooper.\n"
+}
+
+// isGeneratedGrokOutputDir reports whether toolDir is Cooper-generated Grok
+// output. Only the exact generated Dockerfile header makes it replaceable.
+func isGeneratedGrokOutputDir(toolDir string) bool {
+	def, ok := aitool.Lookup("grok")
+	if !ok {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(toolDir, "Dockerfile"))
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(string(data), generatedCLIDockerfilePrefix(def.DisplayName))
+}
+
+// ValidateGrokOutputDir fails before a write when cli/grok is user-managed.
+// Grok is the only new reserved name. The four older built-in names already
+// had reserved directory behavior before Cooper added this migration check.
+func ValidateGrokOutputDir(cliDir string) error {
+	const toolName = "grok"
+	toolDir := filepath.Join(cliDir, toolName)
+	info, err := os.Lstat(toolDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat reserved CLI directory %s: %w", toolDir, err)
+	}
+	if info.IsDir() && isGeneratedGrokOutputDir(toolDir) {
+		return nil
+	}
+	return fmt.Errorf("custom image path %s uses the reserved built-in name %q and is not Cooper-generated. Rename it (for example, to %q) and update its `cooper cli` command. Cooper will not overwrite this path", toolDir, toolName, toolName+"-custom")
+}
+
 // WriteAllTemplates writes all generated files for the base image to the base directory,
 // and per-tool Dockerfiles to cli/<tool>/ directories.
 // baseDir is the path to ~/.cooper/base/.
 // cliDir is the path to ~/.cooper/cli/.
 func WriteAllTemplates(baseDir, cliDir string, cfg *config.Config, implicit []config.ImplicitToolConfig) error {
+	if err := ValidateGrokOutputDir(cliDir); err != nil {
+		return err
+	}
+	// Old Cooper versions put a requirements file in generated Grok output.
+	// Remove this host-setting override even when Grok is now disabled.
+	grokDir := filepath.Join(cliDir, "grok")
+	if isGeneratedGrokOutputDir(grokDir) {
+		reqPath := filepath.Join(grokDir, "requirements.toml")
+		if err := os.Remove(reqPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove obsolete Grok requirements.toml %s: %w", reqPath, err)
+		}
+	}
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return fmt.Errorf("failed to create base directory: %w", err)
 	}
@@ -447,7 +547,7 @@ func WriteAllTemplates(baseDir, cliDir string, cfg *config.Config, implicit []co
 			continue
 		}
 		// Skip custom tools (user-managed).
-		if _, ok := builtinTools[tool.Name]; !ok {
+		if !aitool.IsBuiltin(tool.Name) {
 			continue
 		}
 		toolDir := filepath.Join(cliDir, tool.Name)

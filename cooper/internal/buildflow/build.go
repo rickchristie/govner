@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/templates"
@@ -28,13 +29,6 @@ type Options struct {
 }
 
 type imageBuildFunc func(name, dockerfilePath, contextDir string, buildArgs map[string]string, noCache bool) (<-chan string, <-chan error)
-
-var builtinAITools = map[string]bool{
-	"claude":   true,
-	"copilot":  true,
-	"codex":    true,
-	"opencode": true,
-}
 
 var preparationStepNames = []string{
 	"Resolving tool versions...",
@@ -131,6 +125,9 @@ func Prepare(cfg *config.Config, cooperDir string, opts Options) (*Prepared, err
 	if err != nil {
 		return nil, err
 	}
+	// Prepare owns configuration migrations that affect generated templates.
+	// StepNames and buildPlan must not mutate caller state.
+	cfg.MergeDefaultDomains()
 	stepNames := PreparationStepNames()
 	report := func(step int, err error) {
 		if opts.OnProgress == nil {
@@ -372,6 +369,7 @@ func (p *Prepared) Build(opts Options) error {
 }
 
 func buildPlan(cfg *config.Config, cooperDir string) (plan, error) {
+	cliDir := filepath.Join(cooperDir, "cli")
 	var enabledAITools []string
 	if cfg != nil {
 		for _, tool := range cfg.AITools {
@@ -380,7 +378,7 @@ func buildPlan(cfg *config.Config, cooperDir string) (plan, error) {
 			}
 		}
 	}
-	customImages, err := discoverCustomImageNames(filepath.Join(cooperDir, "cli"))
+	customImages, err := DiscoverCustomImageNames(cliDir)
 	if err != nil {
 		return plan{}, err
 	}
@@ -425,7 +423,10 @@ func emitOutput(opts Options, line string) {
 	}
 }
 
-func discoverCustomImageNames(cliDir string) ([]string, error) {
+// DiscoverCustomImageNames returns user-managed CLI image names. It skips all
+// built-in directories. It returns a conflict for a user-managed cli/grok path,
+// including when Grok is disabled.
+func DiscoverCustomImageNames(cliDir string) ([]string, error) {
 	entries, err := os.ReadDir(cliDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -433,9 +434,12 @@ func discoverCustomImageNames(cliDir string) ([]string, error) {
 		}
 		return nil, fmt.Errorf("read cli directory %s: %w", cliDir, err)
 	}
+	if err := templates.ValidateGrokOutputDir(cliDir); err != nil {
+		return nil, err
+	}
 	custom := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.IsDir() || builtinAITools[entry.Name()] {
+		if !entry.IsDir() || aitool.IsBuiltin(entry.Name()) {
 			continue
 		}
 		if !fileExists(filepath.Join(cliDir, entry.Name(), "Dockerfile")) {

@@ -164,7 +164,7 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 // cooperDir provides Cooper-managed mounts such as language caches, CA,
 // socat rules, clipboard shims/tokens, Playwright support dirs, and the
 // per-barrel host-backed /tmp directory.
-// toolName scopes which AI tool auth directories are mounted.
+// toolName scopes which AI tool state directories are mounted.
 // containerName identifies per-barrel mounts such as the clipboard token
 // file and ~/.cooper/tmp/{containerName}.
 func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config.Config, cooperDir, toolName, containerName string) []string {
@@ -180,8 +180,8 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 		args = append(args, "-v", fmt.Sprintf("%s:%s:ro", gitHooksDir, gitHooksDir))
 	}
 
-	// Per-tool auth/config directories (read-write).
-	// Only mount auth dirs for the specific tool.
+	// Per-tool state directories (read-write).
+	// Only mount state for the specific tool.
 	switch toolName {
 	case "claude":
 		mountRW(homeDir, ".claude", &args)
@@ -199,6 +199,11 @@ func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config
 		mountRW(homeDir, filepath.Join(".local", "share", "opencode"), &args)
 		mountRW(homeDir, filepath.Join(".local", "state", "opencode"), &args)
 		mountRW(homeDir, ".opencode", &args)
+	case "grok":
+		// One read-write root keeps host and barrel auth, configuration,
+		// sessions, history, memory, skills, locks, and future Grok state in
+		// sync. Do not split children into Cooper-owned state directories.
+		args = append(args, "-v", fmt.Sprintf("%s:%s:rw", GrokHostStateRoot(homeDir), BarrelGrokStateRoot))
 	}
 
 	// Git config (read-only).
@@ -295,7 +300,11 @@ func ensureBarrelMountDirs(toolName, cooperDir, containerName string, cfg *confi
 	}
 
 	for _, dir := range barrelMountDirs(homeDir, toolName, cooperDir, containerName, cfg) {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		mode := os.FileMode(0o755)
+		if toolName == "grok" && dir == GrokHostStateRoot(homeDir) {
+			mode = 0o700
+		}
+		if err := os.MkdirAll(dir, mode); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
 	}
@@ -433,37 +442,48 @@ func BarrelHasSessionMount(name string) (bool, error) {
 	return false, nil
 }
 
-// clipboardModeForTool returns the clipboard mode for a given tool.
-// Built-in tools have known modes; custom tools default to "auto".
-//
-// Image paste support requires two different strategies depending on how
-// the AI CLI reads the clipboard:
-//
-//   - "shim": The CLI shells out to helper binaries (xclip, xsel, wl-paste)
-//     to read clipboard data. Cooper installs wrapper scripts earlier in PATH
-//     that intercept image-read calls and serve the staged image from the
-//     bridge. Claude and OpenCode both work this way — their binaries contain
-//     explicit references to these helper tools.
-//
-//   - "x11": The CLI reads the clipboard in-process via native X11 APIs.
-//     A helper-binary shim cannot intercept this. Instead, Cooper starts
-//     Xvfb and runs cooper-x11-bridge as the X11 CLIPBOARD selection owner.
-//     Codex uses arboard (Rust, in-process X11); Copilot uses
-//     @teddyzhu/clipboard (native Node module) — both verified by runtime
-//     inspection and live Xvfb experiments.
-//
-// Custom cooper-cli-* barrels default to "auto" (both shim and X11 plumbing
-// installed) so they work without the user having to manually classify the
-// CLI's clipboard strategy. Barrels can opt out with COOPER_CLIPBOARD_MODE=off.
-func clipboardModeForTool(toolName string) string {
-	switch toolName {
-	case "claude", "opencode":
-		return "shim"
-	case "codex", "copilot":
-		return "x11"
-	default:
-		return "auto"
+// BarrelHasGrokStateMount reports whether a running barrel has the expected
+// complete Grok state root as one read-write mount. A legacy barrel or a
+// barrel created with a different GROK_HOME must be recreated.
+func BarrelHasGrokStateMount(name, expectedHostRoot string) (bool, error) {
+	cmd := exec.Command("docker", "inspect",
+		"--format", `{{range .Mounts}}{{printf "%s\t%s\t%t\n" .Source .Destination .RW}}{{end}}`,
+		name,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("inspect barrel mounts for %s: %w\n%s", name, err, string(output))
 	}
+	return hasGrokStateMount(string(output), expectedHostRoot), nil
+}
+
+func hasGrokStateMount(inspectOutput, expectedHostRoot string) bool {
+	stateMounts := 0
+	expectedMount := false
+	for _, line := range strings.Split(strings.TrimSpace(inspectOutput), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 3 {
+			continue
+		}
+		destination := filepath.Clean(fields[1])
+		if destination != BarrelGrokStateRoot && !strings.HasPrefix(destination, BarrelGrokStateRoot+string(filepath.Separator)) {
+			continue
+		}
+		stateMounts++
+		if destination == BarrelGrokStateRoot && fields[2] == "true" && sameHostPath(fields[0], expectedHostRoot) {
+			expectedMount = true
+		}
+	}
+	return stateMounts == 1 && expectedMount
+}
+
+func sameHostPath(left, right string) bool {
+	if filepath.Clean(left) == filepath.Clean(right) {
+		return true
+	}
+	leftResolved, leftErr := filepath.EvalSymlinks(left)
+	rightResolved, rightErr := filepath.EvalSymlinks(right)
+	return leftErr == nil && rightErr == nil && filepath.Clean(leftResolved) == filepath.Clean(rightResolved)
 }
 
 // dirExists returns true if the path exists and is a directory.

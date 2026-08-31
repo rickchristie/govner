@@ -2607,9 +2607,16 @@ func TestCooperApp_PerToolDockerfiles(t *testing.T) {
 	docker.SetImagePrefix(testImagePrefix)
 
 	cfg := config.DefaultConfig()
+	cfg.AITools = []config.ToolConfig{
+		{Name: "claude", Enabled: true},
+		{Name: "copilot", Enabled: true},
+		{Name: "codex", Enabled: true},
+		{Name: "opencode", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.3.7"},
+		{Name: "grok", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.0.4"},
+	}
 
 	// Render per-tool Dockerfiles and verify they reference the base image.
-	for _, tool := range []string{"claude", "copilot", "codex", "opencode"} {
+	for _, tool := range []string{"claude", "copilot", "codex", "opencode", "grok"} {
 		df, err := templates.RenderCLIToolDockerfile(cfg, tool)
 		if err != nil {
 			t.Fatalf("RenderCLIToolDockerfile(%s) failed: %v", tool, err)
@@ -2637,7 +2644,7 @@ func TestCooperApp_PerToolDockerfiles(t *testing.T) {
 	if strings.Contains(base, "CACHE_BUST") {
 		t.Error("base Dockerfile should not contain CACHE_BUST")
 	}
-	for _, tool := range []string{"claude", "copilot", "codex", "opencode"} {
+	for _, tool := range []string{"claude", "copilot", "codex", "opencode", "grok"} {
 		if strings.Contains(base, "COOPER_CLI_TOOL="+tool) {
 			t.Errorf("base Dockerfile should not contain COOPER_CLI_TOOL=%s", tool)
 		}
@@ -2957,7 +2964,7 @@ func TestCooperApp_CustomToolImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadDir cli: %v", err)
 	}
-	builtinNames := map[string]bool{"claude": true, "copilot": true, "codex": true, "opencode": true}
+	builtinNames := map[string]bool{"claude": true, "copilot": true, "codex": true, "opencode": true, "grok": true}
 	found := false
 	for _, e := range entries {
 		if e.IsDir() && !builtinNames[e.Name()] && e.Name() == "my-custom" {

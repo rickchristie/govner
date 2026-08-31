@@ -41,6 +41,7 @@ BARREL_CLAUDE="barrel-e2e-workspace-claude"
 BARREL_COPILOT="barrel-e2e-workspace-copilot"
 BARREL_CODEX="barrel-e2e-workspace-codex"
 BARREL_OPENCODE="barrel-e2e-workspace-opencode"
+BARREL_GROK="barrel-e2e-workspace-grok"
 
 # Image names (prefixed to avoid collision).
 IMAGE_PROXY="${PREFIX}cooper-proxy"
@@ -49,9 +50,10 @@ IMAGE_CLAUDE="${PREFIX}cooper-cli-claude"
 IMAGE_COPILOT="${PREFIX}cooper-cli-copilot"
 IMAGE_CODEX="${PREFIX}cooper-cli-codex"
 IMAGE_OPENCODE="${PREFIX}cooper-cli-opencode"
+IMAGE_GROK="${PREFIX}cooper-cli-grok"
 
 # All tool names for iteration.
-ALL_TOOLS=(claude copilot codex opencode)
+ALL_TOOLS=(claude copilot codex opencode grok)
 
 # Colors.
 RED='\033[0;31m'
@@ -209,7 +211,8 @@ cat > "${CONFIG_DIR}/config.json" <<CONFIGEOF
     {"name": "claude", "enabled": true, "mode": "pin", "pinned_version": "2.1.87"},
     {"name": "copilot", "enabled": true, "mode": "pin", "pinned_version": "1.0.12"},
     {"name": "codex", "enabled": true, "mode": "pin", "pinned_version": "0.117.0"},
-    {"name": "opencode", "enabled": true, "mode": "pin", "pinned_version": "1.3.7"}
+    {"name": "opencode", "enabled": true, "mode": "pin", "pinned_version": "1.3.7"},
+    {"name": "grok", "enabled": true, "mode": "pin", "pinned_version": "1.0.4"}
   ],
   "whitelisted_domains": [
     {"domain": ".anthropic.com", "include_subdomains": true, "source": "default"},
@@ -221,7 +224,9 @@ cat > "${CONFIG_DIR}/config.json" <<CONFIGEOF
     {"domain": ".githubcopilot.com", "include_subdomains": true, "source": "default"},
     {"domain": "copilot-proxy.githubusercontent.com", "include_subdomains": false, "source": "default"},
     {"domain": "raw.githubusercontent.com", "include_subdomains": false, "source": "default"},
-    {"domain": "statsig.anthropic.com", "include_subdomains": false, "source": "default"}
+    {"domain": "statsig.anthropic.com", "include_subdomains": false, "source": "default"},
+    {"domain": "auth.x.ai", "include_subdomains": false, "source": "default"},
+    {"domain": "cli-chat-proxy.grok.com", "include_subdomains": false, "source": "default"}
   ],
   "port_forward_rules": [
     {"container_port": 5432, "host_port": 5432, "description": "PostgreSQL"},
@@ -249,7 +254,7 @@ else
 fi
 
 # Step 4: Assert all images exist (proxy, base, and each tool image).
-for img in "$IMAGE_PROXY" "$IMAGE_BASE" "$IMAGE_CLAUDE" "$IMAGE_COPILOT" "$IMAGE_CODEX" "$IMAGE_OPENCODE"; do
+for img in "$IMAGE_PROXY" "$IMAGE_BASE" "$IMAGE_CLAUDE" "$IMAGE_COPILOT" "$IMAGE_CODEX" "$IMAGE_OPENCODE" "$IMAGE_GROK"; do
     if docker image inspect "$img" &>/dev/null; then
         pass "Image exists: ${img}"
     else
@@ -406,8 +411,8 @@ mkdir -p "${CONFIG_DIR}/cache/go-build" 2>/dev/null || true
 mkdir -p "${CONFIG_DIR}/cache/npm" 2>/dev/null || true
 mkdir -p "${CONFIG_DIR}/cache/pip" 2>/dev/null || true
 
-# Helper: map tool name to its auth mount arguments.
-auth_mounts_for() {
+# Helper: map each tool to its host state mount arguments.
+state_mounts_for() {
     local tool=$1
     local mounts=()
     case "$tool" in
@@ -438,6 +443,37 @@ auth_mounts_for() {
             mounts+=("-v" "${HOME_DIR}/.local/state/opencode:/home/user/.local/state/opencode:rw")
             mounts+=("-v" "${HOME_DIR}/.opencode:/home/user/.opencode:rw")
             ;;
+        grok)
+            # Grok stores auth, config, sessions, history, memory, skills,
+            # locks, logs, and future state under one GROK_HOME root. Mount
+            # the root so a new Grok state child needs no Cooper change.
+            mkdir -p "${HOME_DIR}/.grok/bin" \
+                "${HOME_DIR}/.grok/sessions" \
+                "${HOME_DIR}/.grok/memory" \
+                "${HOME_DIR}/.grok/skills/e2e" \
+                "${HOME_DIR}/.grok/logs" \
+                "${HOME_DIR}/.grok/future-state"
+            chmod 700 "${HOME_DIR}/.grok" "${HOME_DIR}/.grok/sessions" "${HOME_DIR}/.grok/memory"
+            cat > "${HOME_DIR}/.grok/auth.json" <<'GROKAUTHEOF'
+{"https://auth.x.ai::openid":{"key":"e2e-fake-access-not-a-real-token","auth_mode":"oidc","oidc_issuer":"https://auth.x.ai","refresh_token":"e2e-fake-refresh-not-a-real-token"}}
+GROKAUTHEOF
+            cat > "${HOME_DIR}/.grok/config.toml" <<'GROKCONFIGEOF'
+[memory]
+enabled = true
+GROKCONFIGEOF
+            printf '%s\n' '# e2e host memory' > "${HOME_DIR}/.grok/memory/MEMORY.md"
+            printf '%s\n' 'e2e-host-session' > "${HOME_DIR}/.grok/sessions/e2e-host-session.jsonl"
+            printf '%s\n' '# e2e host skill' > "${HOME_DIR}/.grok/skills/e2e/SKILL.md"
+            printf '%s\n' 'e2e-host-log' > "${HOME_DIR}/.grok/logs/e2e.log"
+            printf '%s\n' 'e2e-future-state' > "${HOME_DIR}/.grok/future-state/value"
+            cat > "${HOME_DIR}/.grok/bin/grok" <<'GROKHOSTBINEOF'
+#!/bin/sh
+echo wrong-host-state-binary
+GROKHOSTBINEOF
+            chmod 600 "${HOME_DIR}/.grok/auth.json" "${HOME_DIR}/.grok/config.toml"
+            chmod 755 "${HOME_DIR}/.grok/bin/grok"
+            mounts+=("-v" "${HOME_DIR}/.grok:/home/user/.grok:rw")
+            ;;
     esac
     echo "${mounts[@]}"
 }
@@ -450,6 +486,7 @@ tool_binary_for() {
         copilot) echo "copilot" ;;
         codex)   echo "codex" ;;
         opencode) echo "opencode" ;;
+        grok) echo "grok" ;;
     esac
 }
 
@@ -520,10 +557,10 @@ sync_barrel_timezone_file() {
 build_barrel_run_args() {
     local barrel_name=$1
     local tool_image=$2
-    local auth_mounts_name=$3
+    local state_mounts_name=$3
     local extra_mounts_name=$4
     local extra_envs_name=$5
-    local -n auth_mounts_ref="$auth_mounts_name"
+    local -n state_mounts_ref="$state_mounts_name"
     local -n extra_mounts_ref="$extra_mounts_name"
     local -n extra_envs_ref="$extra_envs_name"
     local timezone_snapshot
@@ -548,8 +585,8 @@ build_barrel_run_args() {
         # Workspace (read-write).
         "-v" "${E2E_WORKSPACE}:${E2E_WORKSPACE}:rw"
 
-        # Tool-specific auth mounts.
-        "${auth_mounts_ref[@]}"
+        # Tool-specific host state mounts.
+        "${state_mounts_ref[@]}"
 
         # Language caches (Cooper-managed, all read-write).
         "-v" "${CONFIG_DIR}/cache/go-mod:/home/user/go/pkg/mod:rw"
@@ -750,14 +787,14 @@ for tool in "${ALL_TOOLS[@]}"; do
     barrel_name="$(barrel_name_for "$tool")"
     tool_image="$(image_name_for "$tool")"
 
-    # Read auth mounts into an array.
-    read -ra AUTH_MOUNTS <<< "$(auth_mounts_for "$tool")"
+    # Read host state mounts into an array.
+    read -ra STATE_MOUNTS <<< "$(state_mounts_for "$tool")"
     EXTRA_MOUNTS=()
     EXTRA_ENVS=()
 
     # Start barrel container.
     info "Starting ${tool} barrel container..."
-    build_barrel_run_args "$barrel_name" "$tool_image" AUTH_MOUNTS EXTRA_MOUNTS EXTRA_ENVS
+    build_barrel_run_args "$barrel_name" "$tool_image" STATE_MOUNTS EXTRA_MOUNTS EXTRA_ENVS
     docker "${BARREL_ARGS[@]}" >/dev/null 2>&1
     pass "${tool}: barrel container started"
 
@@ -843,6 +880,9 @@ for tool in "${ALL_TOOLS[@]}"; do
         opencode)
             actual=$(barrel_exec 'export PATH="$HOME/.opencode/bin:$PATH"; opencode --version 2>&1 || ls "$HOME/.opencode/bin/" 2>&1 || echo notfound')
             ;;
+        grok)
+            actual=$(barrel_exec 'grok --version 2>&1 || echo notfound')
+            ;;
     esac
     if echo "$actual" | grep -q "$expected_version"; then
         pass "${tool}: version ${expected_version} installed"
@@ -866,6 +906,107 @@ for tool in "${ALL_TOOLS[@]}"; do
             fail "${tool}: ${other} binary found at ${other_check} (should not be present!)"
         fi
     done
+
+    if [ "$tool" = "grok" ]; then
+        grok_home=$(barrel_exec 'printf "%s" "$GROK_HOME"')
+        if [ "$(echo "$grok_home" | tr -d '[:space:]')" = "/home/user/.grok" ]; then
+            pass "${tool}: GROK_HOME points at the shared state root"
+        else
+            fail "${tool}: GROK_HOME unexpected: ${grok_home}"
+        fi
+        grok_leader_socket=$(barrel_exec 'printf "%s" "$GROK_LEADER_SOCKET"')
+        if [ "$(echo "$grok_leader_socket" | tr -d '[:space:]')" = "/tmp/cooper-grok-leader.sock" ]; then
+            pass "${tool}: leader transport stays in the per-barrel tmp mount"
+        else
+            fail "${tool}: GROK_LEADER_SOCKET unexpected: ${grok_leader_socket}"
+        fi
+        grok_mounts=$(docker inspect --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}' "$barrel_name")
+        if echo "$grok_mounts" | grep -Fxq "${HOME_DIR}/.grok -> /home/user/.grok"; then
+            pass "${tool}: complete host Grok state root mounted"
+        else
+            fail "${tool}: complete host Grok state root not mounted: ${grok_mounts}"
+        fi
+        grok_state_mount_count=$(echo "$grok_mounts" | grep -Ec -- ' -> /home/user/\.grok($|/)' || true)
+        if [ "$grok_state_mount_count" = "1" ]; then
+            pass "${tool}: Grok uses one state mount"
+        else
+            fail "${tool}: Grok has ${grok_state_mount_count} state mounts, expected 1"
+        fi
+        if echo "$grok_mounts" | grep -qE '/\.cooper-grok-auth|/secrets/grok|/state/grok'; then
+            fail "${tool}: legacy split Grok state is still mounted"
+        else
+            pass "${tool}: no legacy split Grok state is mounted"
+        fi
+
+        if barrel_exec 'test -f "$GROK_HOME/auth.json" && grep -q "enabled = true" "$GROK_HOME/config.toml" && grep -q "e2e host memory" "$GROK_HOME/memory/MEMORY.md" && grep -q "e2e-host-session" "$GROK_HOME/sessions/e2e-host-session.jsonl" && grep -q "e2e host skill" "$GROK_HOME/skills/e2e/SKILL.md" && grep -q "e2e-future-state" "$GROK_HOME/future-state/value"'; then
+            pass "${tool}: auth, config, sessions, memory, skills, and future state are visible"
+        else
+            fail "${tool}: one or more host Grok state files are not visible"
+        fi
+        if barrel_exec 'printf "%s\n" "e2e-container-state" > "$GROK_HOME/e2e-container-write"' && \
+            grep -q "e2e-container-state" "${HOME_DIR}/.grok/e2e-container-write"; then
+            pass "${tool}: barrel Grok state writes return to the host root"
+        else
+            fail "${tool}: barrel Grok state write did not reach the host root"
+        fi
+        grok_command=$(barrel_exec 'command -v grok')
+        if [ "$(echo "$grok_command" | tr -d '[:space:]')" = "/home/user/.local/bin/grok" ]; then
+            pass "${tool}: image Grok binary wins over host state binary"
+        else
+            fail "${tool}: Grok command resolved to ${grok_command}"
+        fi
+        clip_mode=$(barrel_exec 'echo $COOPER_CLIPBOARD_MODE')
+        if [ "$(echo "$clip_mode" | tr -d '[:space:]')" = "x11" ]; then
+            pass "${tool}: COOPER_CLIPBOARD_MODE=x11"
+        else
+            fail "${tool}: COOPER_CLIPBOARD_MODE expected x11, got '${clip_mode}'"
+        fi
+        if echo "$grok_home$grok_leader_socket$grok_mounts$(barrel_exec 'echo $XAI_API_KEY')" | grep -q "e2e-fake-access-not-a-real-token"; then
+            fail "${tool}: fake auth secret appeared in inspect output"
+        fi
+
+        # Use squid's exit status. A successful parse prints
+        # "Processing: error_directory ...", so grepping for "error" is a false fail.
+        if squid_parse=$(docker exec "$PROXY_CONTAINER" \
+            squid -k parse -f /etc/squid/squid.conf 2>&1); then
+            pass "${tool}: squid -k parse succeeded"
+        else
+            parse_status=$?
+            fail "${tool}: squid -k parse failed (exit ${parse_status}): ${squid_parse}"
+        fi
+
+        grok_path_status() {
+            local path=$1
+            barrel_exec "curl -so /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 15 -x http://cooper-proxy:${PROXY_PORT} https://cli-chat-proxy.grok.com${path} 2>&1 || true"
+        }
+        allowed_status=$(grok_path_status "/v1/models")
+        if echo "$allowed_status" | grep -qE '^(401|403|404|405|200|204)$' && [ "$allowed_status" != "403" ]; then
+            pass "${tool}: approved inference path reached upstream (HTTP ${allowed_status})"
+        elif echo "$allowed_status" | grep -qE '^[45]'; then
+            # 403 from Squid vs upstream: treat 403 as proxy deny.
+            if [ "$allowed_status" = "403" ]; then
+                fail "${tool}: approved path /v1/models got Squid 403"
+            else
+                pass "${tool}: approved inference path produced HTTP ${allowed_status}"
+            fi
+        else
+            fail "${tool}: approved path /v1/models unexpected status ${allowed_status}"
+        fi
+        for denied_path in /v1/storage /v1/storage/ /v1/traces /v1/settings /v1/user/extra /v1/future-unknown; do
+            denied_status=$(grok_path_status "$denied_path")
+            if [ "$denied_status" = "403" ]; then
+                pass "${tool}: ${denied_path} denied with Squid 403"
+            else
+                fail "${tool}: ${denied_path} expected 403, got ${denied_status}"
+            fi
+        done
+        blocked_status=$(barrel_exec "curl -so /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 15 -x http://cooper-proxy:${PROXY_PORT} https://api.x.ai/v1/models 2>&1 || true")
+        if [ "$blocked_status" = "403" ] || [ "$blocked_status" = "000" ]; then
+            pass "${tool}: api.x.ai remains blocked (HTTP ${blocked_status})"
+        else
+            fail "${tool}: api.x.ai unexpectedly reachable (HTTP ${blocked_status})"
+        fi
+    fi
 
     # Check COOPER_CLI_TOOL env var.
     cli_tool_val=$(barrel_exec 'echo $COOPER_CLI_TOOL')
@@ -1064,10 +1205,10 @@ ACTIVE_IMAGE="$IMAGE_CLAUDE"
 ACTIVE_TOOL="claude"
 
 info "Starting claude barrel for domain tests..."
-read -ra CLAUDE_AUTH_MOUNTS <<< "$(auth_mounts_for claude)"
+read -ra CLAUDE_STATE_MOUNTS <<< "$(state_mounts_for claude)"
 CLAUDE_EXTRA_MOUNTS=()
 CLAUDE_EXTRA_ENVS=()
-build_barrel_run_args "$ACTIVE_BARREL" "$ACTIVE_IMAGE" CLAUDE_AUTH_MOUNTS CLAUDE_EXTRA_MOUNTS CLAUDE_EXTRA_ENVS
+build_barrel_run_args "$ACTIVE_BARREL" "$ACTIVE_IMAGE" CLAUDE_STATE_MOUNTS CLAUDE_EXTRA_MOUNTS CLAUDE_EXTRA_ENVS
 docker "${BARREL_ARGS[@]}" >/dev/null 2>&1
 
 # Wait for it.
@@ -1152,10 +1293,10 @@ section "Phase 6: Multiple Barrels Sharing Workspace"
 # Start a codex barrel alongside the running claude barrel.
 CODEX_BARREL="$BARREL_CODEX"
 info "Starting codex barrel alongside claude barrel..."
-read -ra CODEX_AUTH_MOUNTS <<< "$(auth_mounts_for codex)"
+read -ra CODEX_STATE_MOUNTS <<< "$(state_mounts_for codex)"
 CODEX_EXTRA_MOUNTS=()
 CODEX_EXTRA_ENVS=()
-build_barrel_run_args "$CODEX_BARREL" "$IMAGE_CODEX" CODEX_AUTH_MOUNTS CODEX_EXTRA_MOUNTS CODEX_EXTRA_ENVS
+build_barrel_run_args "$CODEX_BARREL" "$IMAGE_CODEX" CODEX_STATE_MOUNTS CODEX_EXTRA_MOUNTS CODEX_EXTRA_ENVS
 docker "${BARREL_ARGS[@]}" >/dev/null 2>&1
 
 # Wait for codex barrel to be running.
@@ -2318,8 +2459,8 @@ start_clipboard_barrel() {
     echo -n "$TOKEN" > "${CONFIG_DIR}/tokens/${ACTIVE_BARREL}"
     chmod 600 "${CONFIG_DIR}/tokens/${ACTIVE_BARREL}"
 
-    CLIPBOARD_AUTH_MOUNTS=()
-    read -ra CLIPBOARD_AUTH_MOUNTS <<< "$(auth_mounts_for "$tool")"
+    CLIPBOARD_STATE_MOUNTS=()
+    read -ra CLIPBOARD_STATE_MOUNTS <<< "$(state_mounts_for "$tool")"
     CLIPBOARD_EXTRA_MOUNTS=(
         "-v" "${CONFIG_DIR}/tokens/${ACTIVE_BARREL}:/etc/cooper/clipboard-token:ro"
     )
@@ -2336,7 +2477,7 @@ start_clipboard_barrel() {
     build_barrel_run_args \
         "$ACTIVE_BARREL" \
         "$ACTIVE_IMAGE" \
-        CLIPBOARD_AUTH_MOUNTS \
+        CLIPBOARD_STATE_MOUNTS \
         CLIPBOARD_EXTRA_MOUNTS \
         CLIPBOARD_EXTRA_ENVS
     docker "${BARREL_ARGS[@]}" >/dev/null 2>&1
@@ -2599,7 +2740,7 @@ else
     fail "Codex X11 bridge image checksum mismatch (got ${codex_image_sha:-empty})"
 fi
 
-# Seed only the isolated E2E auth mount. The TUI never submits a prompt, so
+# Seed only the isolated E2E state mount. The TUI never submits a prompt, so
 # this fake key merely bypasses the login screen and cannot incur API usage.
 if barrel_exec \
     'printf "sk-e2e-clipboard-sanity\n" | /home/user/.npm-global/bin/codex login --with-api-key >/tmp/e2e-codex-login.log 2>&1'; then

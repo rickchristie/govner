@@ -81,19 +81,23 @@ type comparableVersion struct {
 	patch int
 }
 
-// ResolveGoplsLatest fetches the latest stable gopls release from the Go module proxy.
+// ResolveGoplsLatest fetches the latest stable gopls release exclusively from
+// Go's official module proxy. A few fresh requests tolerate transient routing
+// failures without introducing another module operator into Cooper's trust
+// boundary. Invalid successful responses fail immediately: retrying malformed
+// metadata would hide an upstream protocol problem rather than a network blip.
 func ResolveGoplsLatest() (string, error) {
-	body, err := httpGet(goplsLatestURL)
+	body, err := officialGoGet(goplsLatestURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch gopls latest version: %w", err)
+		return "", fmt.Errorf("failed to fetch gopls latest version from %s: %w", goplsLatestURL, err)
 	}
 
 	var resp goModuleLatestResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return "", fmt.Errorf("failed to parse gopls latest version JSON: %w", err)
+		return "", fmt.Errorf("failed to parse gopls latest version JSON from %s: %w", goplsLatestURL, err)
 	}
 	if strings.TrimSpace(resp.Version) == "" {
-		return "", fmt.Errorf("gopls latest response did not include a version")
+		return "", fmt.Errorf("gopls latest response from %s did not include a version", goplsLatestURL)
 	}
 	return resp.Version, nil
 }
@@ -216,12 +220,34 @@ func EffectiveBaseNodeVersion(cfg *Config) (string, error) {
 	return DefaultBaseNodeVersion, nil
 }
 
-// ResolveGoplsVersion chooses the correct gopls release for a configured Go version.
+// ResolveGoplsVersion chooses a gopls release that can be built with the
+// configured image Go toolchain. Newer gopls releases raise their go.mod
+// directive (v0.23 requires Go 1.26), and GOTOOLCHAIN=auto would otherwise
+// download a moving toolchain during `cooper build`. Go 1.26 and later use
+// the live latest lookup. Older toolchains use compatible fixed releases.
 func ResolveGoplsVersion(goVersion string) (string, error) {
-	if ok, err := versionAtLeast(goVersion, "1.21"); err != nil {
+	if ok, err := versionAtLeast(goVersion, "1.26"); err != nil {
 		return "", fmt.Errorf("resolve gopls version for go %s: %w", goVersion, err)
 	} else if ok {
 		return GoplsLatestResolver()
+	}
+	// go.mod directives verified against proxy.golang.org on 2026-08-17:
+	// v0.21.1 -> go 1.25, v0.20.0 -> go 1.24.2, v0.18.1 -> go 1.23.4,
+	// v0.17.1 -> go 1.23.1, v0.16.2 -> go 1.19.
+	if ok, _ := versionAtLeast(goVersion, "1.25"); ok {
+		return "v0.21.1", nil
+	}
+	if ok, _ := versionAtLeast(goVersion, "1.24.2"); ok {
+		return "v0.20.0", nil
+	}
+	if ok, _ := versionAtLeast(goVersion, "1.23.4"); ok {
+		return "v0.18.1", nil
+	}
+	if ok, _ := versionAtLeast(goVersion, "1.23.1"); ok {
+		return "v0.17.1", nil
+	}
+	if ok, _ := versionAtLeast(goVersion, "1.21"); ok {
+		return "v0.16.2", nil
 	}
 	if ok, _ := versionAtLeast(goVersion, "1.20"); ok {
 		return "v0.15.3", nil
@@ -1115,7 +1141,7 @@ func BaseNodeVersionDrift(cfg *Config) (built string, expected string, mismatch 
 }
 
 func goplsUsesLatestLookup(goVersion string) bool {
-	ok, err := versionAtLeast(goVersion, "1.21")
+	ok, err := versionAtLeast(goVersion, "1.26")
 	return err == nil && ok
 }
 

@@ -21,10 +21,15 @@ func TestStepNamesSplitPreparationFromDockerBuilds(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	cfg.AITools = []config.ToolConfig{{Name: "claude", Enabled: true}}
+	cfg.WhitelistedDomains = []config.DomainEntry{{Domain: "custom.example", Source: "user"}}
+	beforeDomains := append([]config.DomainEntry(nil), cfg.WhitelistedDomains...)
 
 	all, err := StepNames(cfg, cooperDir)
 	if err != nil {
 		t.Fatalf("StepNames() failed: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.WhitelistedDomains, beforeDomains) {
+		t.Fatalf("StepNames() changed domains: got %+v, want %+v", cfg.WhitelistedDomains, beforeDomains)
 	}
 	preparation := PreparationStepNames()
 	if !reflect.DeepEqual(all[:len(preparation)], preparation) {

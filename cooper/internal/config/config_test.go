@@ -40,6 +40,64 @@ func TestDefaultConfigHasWhitelistedDomains(t *testing.T) {
 			t.Errorf("default config missing expected domain: %s", expected)
 		}
 	}
+
+	forbidden := []string{
+		"auth.x.ai", "cli-chat-proxy.grok.com", "api.x.ai", "accounts.x.ai",
+		"api.mixpanel.com", "storage.googleapis.com", "code.grok.com",
+		"grok.com", "assets.grok.com", "x.ai", "console.x.ai", ".x.ai", ".grok.com",
+	}
+	for _, name := range forbidden {
+		if domains[name] {
+			t.Errorf("default config unexpectedly contains Grok/optional host %s", name)
+		}
+	}
+}
+
+func TestReconcileGrokDefaultDomains(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AITools = []ToolConfig{{Name: "claude", Enabled: true}}
+	cfg.MergeDefaultDomains()
+	if hasDomainIgnoreCase(cfg.WhitelistedDomains, "auth.x.ai") {
+		t.Fatal("disabled/absent Grok should not add auth.x.ai")
+	}
+
+	cfg.AITools = append(cfg.AITools, ToolConfig{Name: "grok", Enabled: true})
+	cfg.MergeDefaultDomains()
+	cfg.MergeDefaultDomains()
+	var grokDefaults int
+	for _, d := range cfg.WhitelistedDomains {
+		if isGrokDefaultDomain(d.Domain) && d.Source == "default" {
+			grokDefaults++
+		}
+	}
+	if grokDefaults != 2 {
+		t.Fatalf("enabled Grok default hosts = %d, want 2", grokDefaults)
+	}
+
+	cfg.WhitelistedDomains = append(cfg.WhitelistedDomains, DomainEntry{
+		Domain: "auth.x.ai", IncludeSubdomains: false, Source: "user",
+	})
+	// Duplicate case-insensitive user entry should not add another default later.
+	cfg.AITools[len(cfg.AITools)-1].Enabled = false
+	cfg.MergeDefaultDomains()
+	var stillUser, stillDefault bool
+	for _, d := range cfg.WhitelistedDomains {
+		if d.Domain == "auth.x.ai" && d.Source == "user" {
+			stillUser = true
+		}
+		if d.Domain == "auth.x.ai" && d.Source == "default" {
+			stillDefault = true
+		}
+		if d.Domain == "cli-chat-proxy.grok.com" && d.Source == "default" {
+			t.Fatal("default inference host should be removed when Grok is disabled")
+		}
+	}
+	if !stillUser {
+		t.Fatal("user-added auth.x.ai was removed")
+	}
+	if stillDefault {
+		t.Fatal("default auth.x.ai should have been removed while preserving the user entry")
+	}
 }
 
 func TestDefaultConfigAllDomainsAreDefault(t *testing.T) {

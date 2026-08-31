@@ -42,6 +42,18 @@ type whitelistModel struct {
 }
 
 func newWhitelistModel(domains []config.DomainEntry) whitelistModel {
+	m := whitelistModel{
+		modal: domainModal{
+			domainInput: newTextInput("e.g., api.example.com", 40),
+		},
+	}
+	m.refreshDomains(domains)
+	return m
+}
+
+// refreshDomains replaces the displayed domain lists after AI-tool or
+// whitelist reconciliation. User entries and a still-valid cursor are kept.
+func (m *whitelistModel) refreshDomains(domains []config.DomainEntry) {
 	var defaultDomains, userDomains []config.DomainEntry
 	for _, d := range domains {
 		if d.Source == "default" {
@@ -50,13 +62,14 @@ func newWhitelistModel(domains []config.DomainEntry) whitelistModel {
 			userDomains = append(userDomains, d)
 		}
 	}
-
-	return whitelistModel{
-		defaultDomains: defaultDomains,
-		userDomains:    userDomains,
-		modal: domainModal{
-			domainInput: newTextInput("e.g., api.example.com", 40),
-		},
+	m.defaultDomains = defaultDomains
+	m.userDomains = userDomains
+	if m.domainCursor >= len(m.userDomains) {
+		if len(m.userDomains) == 0 {
+			m.domainCursor = 0
+		} else {
+			m.domainCursor = len(m.userDomains) - 1
+		}
 	}
 }
 
@@ -242,6 +255,8 @@ func (m *whitelistModel) viewDomains(width int) (string, string) {
 		"default.exp-tas.com":                     "Copilot",
 		"raw.githubusercontent.com":               "GitHub",
 		".opencode.ai":                            "OpenCode",
+		"auth.x.ai":                               "Grok Build",
+		"cli-chat-proxy.grok.com":                 "Grok Build",
 	}
 
 	var content string
@@ -314,6 +329,10 @@ func (m *whitelistModel) viewDomains(width int) (string, string) {
 		" Package registries (npm, pypi, crates.io, gopkg) are blocked by\n"+
 		" default to prevent supply-chain attacks. AI tool dependencies are\n"+
 		" installed at cooper build time, not runtime.\n\n"+
+		" Grok Build defaults appear only while Grok is enabled. The inference\n"+
+		" host also has a fixed path allowlist; storage, traces, settings, and\n"+
+		" unknown paths stay denied even if the host is approved. All enabled\n"+
+		" barrels still share one proxy and therefore share its domain set.\n\n"+
 		" For ad-hoc access, use the Monitor tab in cooper up to approve\n"+
 		" individual requests in real-time.", width)
 

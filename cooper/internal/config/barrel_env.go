@@ -97,6 +97,26 @@ func IsProtectedBarrelEnvName(name string) bool {
 	return ok
 }
 
+// IsProtectedBarrelEnvNameForTool reports whether name is reserved for a
+// specific barrel. Built-in Grok reserves GROK_HOME because Cooper maps the
+// effective host state root to /home/user/.grok. It reserves
+// GROK_LEADER_SOCKET because process transport must stay in the barrel. Other
+// Grok settings and API keys remain user-controlled.
+func IsProtectedBarrelEnvNameForTool(name, toolName string) bool {
+	if IsProtectedBarrelEnvName(name) {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(toolName), "grok") {
+		return false
+	}
+	switch strings.TrimSpace(name) {
+	case "GROK_HOME", "GROK_LEADER_SOCKET":
+		return true
+	default:
+		return false
+	}
+}
+
 // CanonicalizeBarrelEnvVars returns a copied slice with whitespace-trimmed
 // names and exact original values.
 func CanonicalizeBarrelEnvVars(vars []BarrelEnvVar) []BarrelEnvVar {
@@ -147,6 +167,14 @@ func ValidateBarrelEnvVars(vars []BarrelEnvVar) error {
 // for usable entries and lets normal shell export order make the last value
 // win during runtime recovery.
 func NormalizeBarrelEnvVarsForRuntime(vars []BarrelEnvVar) ([]BarrelEnvVar, []string) {
+	return NormalizeBarrelEnvVarsForRuntimeForTool(vars, "")
+}
+
+// NormalizeBarrelEnvVarsForRuntimeForTool is the tool-aware runtime filter.
+// For built-in Grok it also drops the state-root and leader-socket path values
+// with a visible warning. Cooper owns these path mappings, but it does not
+// override other Grok settings.
+func NormalizeBarrelEnvVarsForRuntimeForTool(vars []BarrelEnvVar, toolName string) ([]BarrelEnvVar, []string) {
 	canonical := CanonicalizeBarrelEnvVars(vars)
 	usable := make([]BarrelEnvVar, 0, len(canonical))
 	warnings := make([]string, 0)
@@ -157,7 +185,7 @@ func NormalizeBarrelEnvVarsForRuntime(vars []BarrelEnvVar) ([]BarrelEnvVar, []st
 			warnings = append(warnings, "ignoring barrel env with empty name")
 		case !barrelEnvNameRE.MatchString(variable.Name):
 			warnings = append(warnings, fmt.Sprintf("ignoring barrel env %q: invalid name", variable.Name))
-		case IsProtectedBarrelEnvName(variable.Name):
+		case IsProtectedBarrelEnvNameForTool(variable.Name, toolName):
 			warnings = append(warnings, fmt.Sprintf("ignoring barrel env %q: protected name", variable.Name))
 		default:
 			if err := validateBarrelEnvValue(variable.Value); err != nil {

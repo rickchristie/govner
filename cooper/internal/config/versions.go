@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 )
 
 // VersionMode controls how a tool's version is resolved.
@@ -156,19 +158,18 @@ func (s VersionStatus) String() string {
 	}
 }
 
-// semverRegex matches semantic version strings (e.g., "1.22.5", "20.11.0", "3.12.1").
-var semverRegex = regexp.MustCompile(`(\d+\.\d+(?:\.\d+)?)`)
+// semverRegex extracts a version from host command output. The optional
+// prerelease suffix is limited to a leading hyphen plus alphanumerics,
+// dots, and underscores so paths, whitespace, shell characters, and URLs
+// cannot be accepted as a version.
+var semverRegex = regexp.MustCompile(`(\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z][0-9A-Za-z._]*)?)`)
 
-// toolVersionCommands maps tool names to the command and args used to detect
-// the host version.
-var toolVersionCommands = map[string][]string{
-	"go":       {"go", "version"},
-	"node":     {"node", "--version"},
-	"python":   {"python3", "--version"},
-	"claude":   {"claude", "--version"},
-	"copilot":  {"copilot", "--version"},
-	"codex":    {"codex", "--version"},
-	"opencode": {"opencode", "--version"},
+// programmingToolVersionCommands maps programming-tool names to the command
+// used to detect the host version. Built-in AI tools come from aitool.
+var programmingToolVersionCommands = map[string][]string{
+	"go":     {"go", "version"},
+	"node":   {"node", "--version"},
+	"python": {"python3", "--version"},
 }
 
 // execCommand is a package-level variable to allow test mocking.
@@ -181,7 +182,7 @@ var HostVersionDetector = DetectHostVersion
 // DetectHostVersion runs the appropriate command to detect the installed
 // version of a tool on the host machine. Returns the parsed semver string.
 func DetectHostVersion(toolName string) (string, error) {
-	args, ok := toolVersionCommands[toolName]
+	args, ok := hostVersionCommand(toolName)
 	if !ok {
 		return "", fmt.Errorf("unknown tool: %q", toolName)
 	}
@@ -193,6 +194,17 @@ func DetectHostVersion(toolName string) (string, error) {
 	}
 
 	return parseVersion(string(output))
+}
+
+func hostVersionCommand(toolName string) ([]string, bool) {
+	if def, ok := aitool.Lookup(toolName); ok {
+		return def.HostVersionCommand, true
+	}
+	args, ok := programmingToolVersionCommands[toolName]
+	if !ok {
+		return nil, false
+	}
+	return append([]string(nil), args...), true
 }
 
 // parseVersion extracts a semver-like version string from command output.

@@ -25,6 +25,10 @@ ENV HTTP_PROXY=http://cooper-proxy:{{.ProxyPort}}
 ENV HTTPS_PROXY=http://cooper-proxy:{{.ProxyPort}}
 ENV NO_PROXY=localhost,127.0.0.1
 
+{{- range .RuntimeEnvs}}
+ENV {{.Name}}={{.Value}}
+{{- end}}
+
 # Tool identification for entrypoint
 ENV COOPER_CLI_TOOL={{.ToolName}}
 ENV COOPER_CLI_AUTO_APPROVE="{{.AutoApproveFlag}}"

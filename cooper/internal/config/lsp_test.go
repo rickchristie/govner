@@ -91,7 +91,14 @@ func TestResolveGoplsVersion(t *testing.T) {
 		want      string
 		wantErr   bool
 	}{
-		{name: "go121plus uses latest", goVersion: "1.24.10", want: "v0.21.1"},
+		{name: "go126plus uses latest", goVersion: "1.26.0", want: "v0.21.1"},
+		{name: "go125", goVersion: "1.25.1", want: "v0.21.1"},
+		{name: "go12410", goVersion: "1.24.10", want: "v0.20.0"},
+		{name: "go1242", goVersion: "1.24.2", want: "v0.20.0"},
+		{name: "go1240", goVersion: "1.24.0", want: "v0.18.1"},
+		{name: "go1234", goVersion: "1.23.4", want: "v0.18.1"},
+		{name: "go1231", goVersion: "1.23.1", want: "v0.17.1"},
+		{name: "go121", goVersion: "1.21.13", want: "v0.16.2"},
 		{name: "go120", goVersion: "1.20.14", want: "v0.15.3"},
 		{name: "go118", goVersion: "1.18.10", want: "v0.14.2"},
 		{name: "go117", goVersion: "1.17.13", want: "v0.11.0"},
@@ -115,6 +122,18 @@ func TestResolveGoplsVersion(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGoplsUsesLatestLookupOnlyForCurrentGo(t *testing.T) {
+	if goplsUsesLatestLookup("1.24.10") {
+		t.Fatal("Go 1.24.10 must not use the live gopls latest lookup")
+	}
+	if goplsUsesLatestLookup("1.25.1") {
+		t.Fatal("Go 1.25 must use the pinned gopls band, not latest")
+	}
+	if !goplsUsesLatestLookup("1.26.0") {
+		t.Fatal("Go 1.26+ should use the live gopls latest lookup")
 	}
 }
 
@@ -483,7 +502,7 @@ func TestResolveImplicitToolsWithOptions_UsesBuiltFallbackWhenLatestLookupsFail(
 
 	cfg := &Config{
 		ProgrammingTools: []ToolConfig{
-			{Name: "go", Enabled: true, Mode: ModeLatest, PinnedVersion: "1.24.10", ContainerVersion: "1.24.10"},
+			{Name: "go", Enabled: true, Mode: ModeLatest, PinnedVersion: "1.26.0", ContainerVersion: "1.26.0"},
 			{Name: "node", Enabled: true, Mode: ModeLatest, PinnedVersion: "22.12.0", ContainerVersion: "22.12.0"},
 			{Name: "python", Enabled: true, Mode: ModeLatest, PinnedVersion: "3.12.1", ContainerVersion: "3.12.1"},
 		},

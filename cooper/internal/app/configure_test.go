@@ -471,7 +471,7 @@ func TestConfigureApp_Save_ImplicitLatestFallsBackToBuiltImplicitVersion(t *test
 	if err != nil {
 		t.Fatalf("NewConfigureApp: %v", err)
 	}
-	ca.SetProgrammingTools([]config.ToolConfig{{Name: "go", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.24.10", ContainerVersion: "1.24.10"}})
+	ca.SetProgrammingTools([]config.ToolConfig{{Name: "go", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.26.0", ContainerVersion: "1.26.0"}})
 	ca.cfg.ImplicitTools = []config.ImplicitToolConfig{{Name: "gopls", Kind: config.ImplicitToolKindLSP, ParentTool: "go", Binary: "gopls", ContainerVersion: "v0.20.0"}}
 
 	warnings, err := ca.Save()
@@ -501,7 +501,7 @@ func TestConfigureApp_Save_ImplicitLatestFailsWithoutBuiltFallback(t *testing.T)
 	if err != nil {
 		t.Fatalf("NewConfigureApp: %v", err)
 	}
-	ca.SetProgrammingTools([]config.ToolConfig{{Name: "go", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.24.10", ContainerVersion: "1.24.10"}})
+	ca.SetProgrammingTools([]config.ToolConfig{{Name: "go", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.26.0", ContainerVersion: "1.26.0"}})
 
 	if _, err := ca.Save(); err == nil {
 		t.Fatal("expected Save() to fail when implicit latest lookup fails without usable built fallback")

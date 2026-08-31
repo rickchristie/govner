@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/templates"
 )
@@ -38,26 +39,9 @@ func SaveStepNames() []string {
 	return append([]string(nil), configureSaveStepNames...)
 }
 
-// programmingToolDefs defines the known programming tools and their display names.
-var programmingToolDefs = []struct {
-	name        string
-	displayName string
-}{
-	{name: "go", displayName: "Go"},
-	{name: "node", displayName: "Node.js"},
-	{name: "python", displayName: "Python"},
-}
-
-// aiToolDefs defines the known AI CLI tools and their display names.
-var aiToolDefs = []struct {
-	name        string
-	displayName string
-}{
-	{name: "claude", displayName: "Claude Code"},
-	{name: "copilot", displayName: "Copilot CLI"},
-	{name: "codex", displayName: "Codex CLI"},
-	{name: "opencode", displayName: "OpenCode"},
-}
+// programmingToolNames is the ordered list of programming tools that Cooper
+// can detect on the host.
+var programmingToolNames = []string{"go", "node", "python"}
 
 // NewConfigureApp creates a new ConfigureApp. It loads an existing config
 // from cooperDir/config.json if present, otherwise creates default config.
@@ -90,28 +74,25 @@ func NewConfigureApp(cooperDir string) (*ConfigureApp, error) {
 // Enabled, and Mode populated. Tools that are detected get Enabled=true
 // and Mode=ModeMirror; tools that are not found get Enabled=false.
 func (a *ConfigureApp) DetectHostTools() []config.ToolConfig {
-	return detectTools(programmingToolDefs)
+	return detectTools(programmingToolNames)
 }
 
 // DetectHostAITools detects installed AI CLI tools and their versions
 // on the host machine. Returns a ToolConfig slice with Name, HostVersion,
 // Enabled, and Mode populated.
 func (a *ConfigureApp) DetectHostAITools() []config.ToolConfig {
-	return detectTools(aiToolDefs)
+	return detectTools(aitool.Names())
 }
 
-// detectTools runs host version detection for each tool definition and
+// detectTools runs host version detection for each tool name and
 // returns a ToolConfig slice.
-func detectTools(defs []struct {
-	name        string
-	displayName string
-}) []config.ToolConfig {
-	result := make([]config.ToolConfig, len(defs))
-	for i, def := range defs {
+func detectTools(names []string) []config.ToolConfig {
+	result := make([]config.ToolConfig, len(names))
+	for i, name := range names {
 		tc := config.ToolConfig{
-			Name: def.name,
+			Name: name,
 		}
-		v, err := config.DetectHostVersion(def.name)
+		v, err := config.DetectHostVersion(name)
 		if err == nil && v != "" {
 			tc.HostVersion = v
 			tc.Enabled = true
@@ -135,6 +116,8 @@ func (a *ConfigureApp) SetProgrammingTools(tools []config.ToolConfig) {
 // SetAITools updates the AI CLI tools configuration.
 func (a *ConfigureApp) SetAITools(tools []config.ToolConfig) {
 	a.cfg.AITools = append([]config.ToolConfig(nil), tools...)
+	// Reconcile Grok's exact default hosts whenever the enabled set changes.
+	a.cfg.MergeDefaultDomains()
 }
 
 // SetWhitelistedDomains updates the whitelisted domains.
@@ -219,6 +202,7 @@ func (a *ConfigureApp) saveWithProgress(allowStaleFallback bool, onProgress func
 		return nil, nil, err
 	}
 	a.cfg.BarrelEnvVars = canonicalBarrelEnvVars
+	a.cfg.MergeDefaultDomains()
 	report(0, nil)
 
 	// Ensure cooperDir and subdirectories exist.
@@ -246,6 +230,12 @@ func (a *ConfigureApp) saveWithProgress(allowStaleFallback bool, onProgress func
 	}
 	warnings = append(warnings, implicitWarnings...)
 	report(2, nil)
+
+	if err := templates.ValidateGrokOutputDir(cliDir); err != nil {
+		err = fmt.Errorf("validate reserved Grok CLI directory: %w", err)
+		report(2, err)
+		return warnings, nil, err
+	}
 
 	// Save config.json.
 	configPath := filepath.Join(a.cooperDir, "config.json")

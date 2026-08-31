@@ -188,6 +188,62 @@ func TestNormalizeBarrelEnvVarsForRuntimeSkipsInvalidEntries(t *testing.T) {
 	}
 }
 
+func TestGrokProtectedEnvOnlyAtRuntimeForGrok(t *testing.T) {
+	if err := ValidateBarrelEnvVars([]BarrelEnvVar{{Name: "GROK_WEB_FETCH", Value: "1"}, {Name: "XAI_API_KEY", Value: "k"}}); err != nil {
+		t.Fatalf("configure-time validation should allow GROK_* and XAI_API_KEY: %v", err)
+	}
+	if IsProtectedBarrelEnvNameForTool("GROK_WEB_FETCH", "grok") {
+		t.Fatal("GROK_WEB_FETCH should remain user-controlled for grok")
+	}
+	if IsProtectedBarrelEnvNameForTool("XAI_API_KEY", "grok") {
+		t.Fatal("XAI_API_KEY should remain user-controlled for grok")
+	}
+	if !IsProtectedBarrelEnvNameForTool("GROK_HOME", "grok") {
+		t.Fatal("GROK_HOME should be protected for grok")
+	}
+	if !IsProtectedBarrelEnvNameForTool("GROK_LEADER_SOCKET", "grok") {
+		t.Fatal("GROK_LEADER_SOCKET should be protected for grok")
+	}
+
+	usable, warnings := NormalizeBarrelEnvVarsForRuntimeForTool([]BarrelEnvVar{
+		{Name: "GROK_WEB_FETCH", Value: "1"},
+		{Name: "PROJECT_TOKEN", Value: "ok"},
+	}, "grok")
+	if len(usable) != 2 || usable[0].Name != "GROK_WEB_FETCH" || usable[1].Name != "PROJECT_TOKEN" {
+		t.Fatalf("usable = %+v", usable)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+
+	usable, warnings = NormalizeBarrelEnvVarsForRuntimeForTool([]BarrelEnvVar{
+		{Name: "GROK_HOME", Value: "/tmp/not-the-mounted-root"},
+	}, "grok")
+	if len(usable) != 0 || len(warnings) != 1 || !strings.Contains(warnings[0], "GROK_HOME") {
+		t.Fatalf("GROK_HOME filter = %+v warnings=%v", usable, warnings)
+	}
+
+	usable, warnings = NormalizeBarrelEnvVarsForRuntimeForTool([]BarrelEnvVar{
+		{Name: "GROK_LEADER_SOCKET", Value: "/home/user/.grok/leader.sock"},
+	}, "grok")
+	if len(usable) != 0 || len(warnings) != 1 || !strings.Contains(warnings[0], "GROK_LEADER_SOCKET") {
+		t.Fatalf("GROK_LEADER_SOCKET filter = %+v warnings=%v", usable, warnings)
+	}
+
+	usable, warnings = NormalizeBarrelEnvVarsForRuntimeForTool([]BarrelEnvVar{
+		{Name: "GROK_WEB_FETCH", Value: "1"},
+	}, "custom-xai")
+	if len(usable) != 1 || usable[0].Name != "GROK_WEB_FETCH" {
+		t.Fatalf("custom tool should keep GROK_WEB_FETCH, got %+v warnings=%v", usable, warnings)
+	}
+	usable, warnings = NormalizeBarrelEnvVarsForRuntimeForTool([]BarrelEnvVar{
+		{Name: "GROK_LEADER_SOCKET", Value: "/custom/leader.sock"},
+	}, "custom-xai")
+	if len(usable) != 1 || usable[0].Name != "GROK_LEADER_SOCKET" {
+		t.Fatalf("custom tool should keep GROK_LEADER_SOCKET, got %+v warnings=%v", usable, warnings)
+	}
+}
+
 func TestNormalizeBarrelEnvVarsForRuntimePreservesDuplicateOrder(t *testing.T) {
 	usable, warnings := NormalizeBarrelEnvVarsForRuntime([]BarrelEnvVar{{Name: "FOO", Value: "1"}, {Name: "FOO", Value: "2"}})
 	if len(warnings) != 0 {

@@ -406,7 +406,7 @@ func TestCheckToolVersions_IncludesImplicitToolMismatches(t *testing.T) {
 	if len(warnings) == 0 {
 		t.Fatal("expected implicit mismatch warning")
 	}
-	if !strings.Contains(strings.Join(warnings, "\n"), "gopls (for go): container=v0.15.3, expected=v0.21.1") {
+	if !strings.Contains(strings.Join(warnings, "\n"), "gopls (for go): container=v0.15.3, expected=v0.20.0") {
 		t.Fatalf("expected gopls mismatch warning, got %v", warnings)
 	}
 }
@@ -438,7 +438,7 @@ func TestCheckToolVersions_PartialImplicitFailureStillReportsOtherParents(t *tes
 	config.LatestVersionResolver = func(name string) (string, error) {
 		switch name {
 		case "go":
-			return "1.24.10", nil
+			return "1.26.0", nil
 		case "node":
 			return "22.12.0", nil
 		default:
@@ -468,7 +468,7 @@ func TestCheckToolVersions_PartialImplicitFailureStillReportsOtherParents(t *tes
 
 	cfg := &config.Config{
 		ProgrammingTools: []config.ToolConfig{
-			{Name: "go", Enabled: true, Mode: config.ModeLatest, PinnedVersion: "1.24.10", ContainerVersion: "1.24.10"},
+			{Name: "go", Enabled: true, Mode: config.ModeLatest, PinnedVersion: "1.26.0", ContainerVersion: "1.26.0"},
 			{Name: "node", Enabled: true, Mode: config.ModeLatest, PinnedVersion: "22.12.0", ContainerVersion: "22.12.0"},
 		},
 		ImplicitTools: []config.ImplicitToolConfig{
@@ -539,7 +539,7 @@ func TestCollectUpdatePlan_ImplicitToolMismatchRebuildsBase(t *testing.T) {
 	if !plan.baseChanged {
 		t.Fatal("expected implicit mismatch to mark baseChanged")
 	}
-	if !strings.Contains(out.String(), "gopls (for go): container=v0.15.3, expected=v0.21.1") {
+	if !strings.Contains(out.String(), "gopls (for go): container=v0.15.3, expected=v0.20.0") {
 		t.Fatalf("expected implicit mismatch in output, got %q", out.String())
 	}
 }

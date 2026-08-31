@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/auth"
 	"github.com/rickchristie/govner/cooper/internal/barrelenv"
 	"github.com/rickchristie/govner/cooper/internal/bridge"
@@ -345,12 +346,15 @@ func (ctx *ProofContext) phaseContainer() {
 	}
 }
 
-// firstBarrel returns the name of any running barrel for tests that only need one.
-func (ctx *ProofContext) firstBarrel() string {
-	for _, name := range ctx.barrels {
-		return name
+// firstBarrel returns the first configured barrel. Config order makes the
+// selection stable and also identifies the tool-specific runtime rules.
+func (ctx *ProofContext) firstBarrel() (string, string) {
+	for _, tool := range ctx.Cfg.AITools {
+		if name, ok := ctx.barrels[tool.Name]; ok {
+			return tool.Name, name
+		}
 	}
-	return ""
+	return "", ""
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +363,7 @@ func (ctx *ProofContext) firstBarrel() string {
 
 func (ctx *ProofContext) phaseNetworkSecurity() {
 	ctx.printPhase("Phase 4: Network Security")
+	_, barrelName := ctx.firstBarrel()
 
 	proxyAddr := fmt.Sprintf("cooper-proxy:%d", ctx.Cfg.ProxyPort)
 
@@ -374,7 +379,7 @@ func (ctx *ProofContext) phaseNetworkSecurity() {
 		`curl -so /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s %s 2>&1`,
 		proxyAddr, sslTarget,
 	)
-	out, err := dockerExec(ctx.firstBarrel(), shellCmd)
+	out, err := dockerExec(barrelName, shellCmd)
 	if err == nil && out != "" && out != "000" {
 		ctx.pass("SSL bump (CA chain)", fmt.Sprintf("%s -> HTTP %s", sslTarget, out))
 	} else {
@@ -394,7 +399,7 @@ func (ctx *ProofContext) phaseNetworkSecurity() {
 			`curl -so /dev/null -w '%%{http_code}' --connect-timeout 10 -x http://%s https://%s 2>&1`,
 			proxyAddr, domain,
 		)
-		out, _ := dockerExec(ctx.firstBarrel(), shellCmd)
+		out, _ := dockerExec(barrelName, shellCmd)
 		code := 0
 		fmt.Sscanf(out, "%d", &code)
 		if code >= 200 && code < 400 {
@@ -410,7 +415,7 @@ func (ctx *ProofContext) phaseNetworkSecurity() {
 
 	// Direct egress blocked (bypass proxy).
 	shellCmd = `curl -so /dev/null --noproxy '*' --connect-timeout 5 https://example.com 2>&1`
-	out, err = dockerExec(ctx.firstBarrel(), shellCmd)
+	out, err = dockerExec(barrelName, shellCmd)
 	if err != nil {
 		ctx.pass("Direct egress blocked", "no route from internal network")
 	} else {
@@ -430,7 +435,7 @@ func (ctx *ProofContext) phaseTools() {
 	// specific validation, such as confirming Apple Silicon builds contain a native
 	// arm64 Node binary, still requires a real build on the target Docker host
 	// because TARGETARCH is resolved by the active daemon platform.
-	barrel := ctx.firstBarrel()
+	_, barrel := ctx.firstBarrel()
 	if barrel == "" {
 		ctx.fail("Programming tools", "no barrel running")
 		return
@@ -521,6 +526,7 @@ func (ctx *ProofContext) phaseTools() {
 		"copilot":  "copilot --version 2>/dev/null || github-copilot-cli --version",
 		"codex":    "codex --version",
 		"opencode": "opencode --version",
+		"grok":     "grok --version",
 	}
 	for _, t := range ctx.Cfg.AITools {
 		if !t.Enabled {
@@ -699,6 +705,14 @@ func (ctx *ProofContext) phaseAICLI() {
 			name = "OpenCode"
 			// OpenCode may not have a one-shot mode — verify API reachability.
 			cmd = `opencode --version 2>&1`
+		case "grok":
+			name = "Grok Build"
+			def, ok := aitool.Lookup(t.Name)
+			if !ok {
+				ctx.fail(name, "built-in tool metadata is missing")
+				continue
+			}
+			cmd = fmt.Sprintf(`grok -p "Reply with only the word: ok" %s --max-turns 1 2>&1`, def.AutoApproveArgs)
 		default:
 			continue
 		}
@@ -712,9 +726,10 @@ func (ctx *ProofContext) phaseAICLI() {
 		elapsed := time.Since(start).Round(100 * time.Millisecond)
 
 		switch t.Name {
-		case "claude":
-			// These are chat CLIs — we expect a response containing text.
-			if err == nil && out != "" && !strings.Contains(strings.ToLower(out), "error") {
+		case "claude", "grok":
+			// Chat CLIs — require a successful response containing the marker.
+			lower := strings.ToLower(out)
+			if err == nil && out != "" && strings.Contains(lower, "ok") && !strings.Contains(lower, "error") {
 				ctx.pass(name, fmt.Sprintf("response received (%s)", elapsed))
 			} else {
 				detail := truncate(out, 150)
@@ -724,7 +739,11 @@ func (ctx *ProofContext) phaseAICLI() {
 				if err != nil {
 					detail = truncate(fmt.Sprintf("%v: %s", err, out), 150)
 				}
-				ctx.warn(name, fmt.Sprintf("no response — %s", detail))
+				if t.Name == "grok" {
+					ctx.fail(name, fmt.Sprintf("no response — %s", detail))
+				} else {
+					ctx.warn(name, fmt.Sprintf("no response — %s", detail))
+				}
 			}
 		default:
 			// Version check tools — just verify they ran.
@@ -751,20 +770,20 @@ func (ctx *ProofContext) phaseBarrelEnv() {
 	}
 
 	ctx.printPhase("Phase 7: Barrel Environment")
-	barrelName := ctx.firstBarrel()
+	toolName, barrelName := ctx.firstBarrel()
 	if barrelName == "" {
 		ctx.fail("Barrel environment", "no barrel running")
 		return
 	}
 
-	usable, warnings := config.NormalizeBarrelEnvVarsForRuntime(ctx.Cfg.BarrelEnvVars)
+	usable, warnings := config.NormalizeBarrelEnvVarsForRuntimeForTool(ctx.Cfg.BarrelEnvVars, toolName)
 	for _, warning := range warnings {
 		ctx.warn("Barrel env config", warning)
 	}
 
 	sessionName := names.Generate(ctx.WorkspaceDir)
 	defer names.Release(sessionName)
-	sessionEnvFile, _, err := barrelenv.PrepareSessionEnvFile(ctx.CooperDir, barrelName, sessionName, ctx.Cfg.BarrelEnvVars)
+	sessionEnvFile, _, err := barrelenv.PrepareSessionEnvFileForTool(ctx.CooperDir, barrelName, sessionName, ctx.Cfg.BarrelEnvVars, toolName)
 	if err != nil {
 		ctx.fail("Barrel environment", err.Error())
 		return
@@ -786,7 +805,7 @@ func (ctx *ProofContext) phaseBarrelEnv() {
 	checkCmd := buildBarrelEnvProofCommand(usable)
 	wrappedCmd, err := barrelenv.BuildExecWrapperCommand(
 		sessionEnvFile.ContainerPath,
-		barrelenv.ProtectedRuntimeEnvNames(tokenNames),
+		barrelenv.ProtectedRuntimeEnvNamesForTool(toolName, tokenNames),
 		[]string{"bash", "-c", checkCmd},
 	)
 	if err != nil {
@@ -864,6 +883,7 @@ func parseBarrelEnvProofOutput(out string) map[string]string {
 
 func (ctx *ProofContext) phasePortForwarding() {
 	ctx.printPhase("Phase 8: Port Forwarding & Bridge")
+	_, barrelName := ctx.firstBarrel()
 
 	// Bridge health.
 	bridgePort := ctx.Cfg.BridgePort
@@ -871,7 +891,7 @@ func (ctx *ProofContext) phasePortForwarding() {
 		`curl -s --connect-timeout 5 http://localhost:%d/health 2>&1`,
 		bridgePort,
 	)
-	out, err := dockerExec(ctx.firstBarrel(), shellCmd)
+	out, err := dockerExec(barrelName, shellCmd)
 	if err == nil && strings.Contains(out, "ok") {
 		ctx.pass("Bridge /health", fmt.Sprintf("port %d -> {\"status\":\"ok\"}", bridgePort))
 	} else {
@@ -900,7 +920,7 @@ func (ctx *ProofContext) phasePortForwarding() {
 				name = fmt.Sprintf("Port %d (%s)", port, rule.Description)
 			}
 			shellCmd := fmt.Sprintf(`bash -c 'echo > /dev/tcp/localhost/%d' 2>&1`, port)
-			_, err := dockerExec(ctx.firstBarrel(), shellCmd)
+			_, err := dockerExec(barrelName, shellCmd)
 			if err == nil {
 				ctx.pass(name, "connected")
 			} else {
@@ -913,7 +933,7 @@ func (ctx *ProofContext) phasePortForwarding() {
 }
 
 func (ctx *ProofContext) checkLoopbackOnlyHostAccess() {
-	barrel := ctx.firstBarrel()
+	_, barrel := ctx.firstBarrel()
 	if barrel == "" {
 		ctx.warn("Loopback host access", "no barrel running")
 		return

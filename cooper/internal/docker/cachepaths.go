@@ -69,7 +69,7 @@ func languageCacheSpecs(cooperDir string, cfg *config.Config) []cacheMountSpec {
 }
 
 // barrelMountDirs returns every host directory that must exist before
-// Docker bind-mounts them into a barrel. This includes auth dirs (tool-
+// Docker bind-mounts them into a barrel. This includes state dirs (tool-
 // specific), language cache dirs (from languageCacheSpecs), Playwright
 // support dirs, the per-barrel /tmp directory, and the read-only per-barrel
 // session directory that Cooper uses for host-controlled runtime files.
@@ -79,7 +79,7 @@ func languageCacheSpecs(cooperDir string, cfg *config.Config) []cacheMountSpec {
 func barrelMountDirs(homeDir, toolName, cooperDir, containerName string, cfg *config.Config) []string {
 	var dirs []string
 
-	// Tool-specific auth directories.
+	// Tool-specific state directories.
 	switch toolName {
 	case "claude":
 		dirs = append(dirs, filepath.Join(homeDir, ".claude"))
@@ -95,6 +95,8 @@ func barrelMountDirs(homeDir, toolName, cooperDir, containerName string, cfg *co
 			filepath.Join(homeDir, ".local", "state", "opencode"),
 			filepath.Join(homeDir, ".opencode"),
 		)
+	case "grok":
+		dirs = append(dirs, GrokHostStateRoot(homeDir))
 	}
 
 	// Cooper-managed language caches.

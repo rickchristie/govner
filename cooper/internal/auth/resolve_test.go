@@ -28,6 +28,23 @@ func TestResolveFromEnv(t *testing.T) {
 	}
 }
 
+func TestResolveGrokAPIKeyFromHostEnv(t *testing.T) {
+	t.Setenv("XAI_API_KEY", "xai-test-env-key")
+
+	results, err := ResolveTokens("/tmp/test-workspace", t.TempDir(), []string{"grok"})
+	if err != nil {
+		t.Fatalf("ResolveTokens: %v", err)
+	}
+
+	found := findToken(results, "XAI_API_KEY")
+	if found == nil {
+		t.Fatal("expected XAI_API_KEY in results")
+	}
+	if found.Value != "xai-test-env-key" || found.Source != "env" {
+		t.Fatalf("XAI_API_KEY = %+v", found)
+	}
+}
+
 func TestResolveFromEnv_GH_TOKEN(t *testing.T) {
 	t.Setenv("GH_TOKEN", "ghp-test-token")
 
@@ -716,7 +733,7 @@ func TestResolveToken_MultipleToolsSameToken(t *testing.T) {
 
 func TestResolveToken_ToolTokenDefs_Coverage(t *testing.T) {
 	// Verify all expected tools are defined in toolTokenDefs.
-	expectedTools := []string{"claude", "copilot", "codex", "opencode"}
+	expectedTools := []string{"claude", "copilot", "codex", "opencode", "grok"}
 	for _, tool := range expectedTools {
 		if _, ok := toolTokenDefs[tool]; !ok {
 			t.Errorf("expected tool %q in toolTokenDefs", tool)

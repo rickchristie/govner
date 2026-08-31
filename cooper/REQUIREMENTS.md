@@ -125,6 +125,15 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
             - Python: `endoflife.date/api/python.json` or similar stable API
             - AI CLI tools (npm-based): npm registry HTTP API (`https://registry.npmjs.org/<package>`) queried
               directly from Go. Does NOT require npm installed on the host.
+            - OpenCode: latest/pin versions still come from the `opencode-ai` npm package (those versions
+              match GitHub release tags). Image install does **not** use `https://opencode.ai/install`;
+              that URL is a convenience wrapper that 307s to a moving raw script and 429s in Docker.
+              The image downloads the official GitHub Release tarball
+              `https://github.com/anomalyco/opencode/releases/download/v<version>/opencode-linux-<x64|arm64>.tar.gz`
+              (the unprefixed `/<version>/` path 404s) and installs the binary into `~/.local/bin/opencode`
+              so the runtime `~/.opencode` state mount cannot hide it.
+            - Grok Build: official xAI native CLI channel (`https://x.ai/cli/stable` for latest,
+              `https://x.ai/cli/grok-<version>-linux-<arch>` for pin validation). Not npm.
             All version resolution is done via HTTP APIs directly from Go — the only host dependencies are
             Docker Engine and bash/zsh. Cooper resolves versions at `cooper configure` time and at `cooper update` time, not at runtime.
           - Back button. Go back to Programming Tool Setup screen.
@@ -136,7 +145,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
           matches the current desired runtime. Otherwise it fails rather than rendering misleading templates.
     - AI CLI Tool Setup Flow:
       - Sets up which AI CLI tool to install in the CLI container, so when user runs `cooper cli` to enter the CLI container, the AI CLIs are ready to use.
-      - Out-of-the-box support for: Claude Code, GitHub Copilot CLI, OpenAI Codex, OpenCode.
+      - Out-of-the-box support for: Claude Code, GitHub Copilot CLI, OpenAI Codex, OpenCode, Grok Build.
         User is able to auto-generate Dockerfile for these.
       - User is instructed that they can add AI CLI tools that they want manually if not in the list.
         User is also instructed to create GitHub issue in our repo to request adding CLI tool they want.
@@ -163,7 +172,11 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - By default, all traffic is blocked, except the ones whitelisted.
       - By default, these traffic is allowed:
         - Requests to AI provider API domains that are enabled in the CLI container, so that AI CLI tools work out of the box.
-          (e.g., `.anthropic.com` for Claude, `.openai.com` for Codex, `.githubcopilot.com` for Copilot, etc.)
+          (e.g., `.anthropic.com` for Claude, `.openai.com` for Codex, `.githubcopilot.com` for Copilot, exact `auth.x.ai` and
+          `cli-chat-proxy.grok.com` while Grok is enabled, etc.)
+        - Grok inference paths are a positive allowlist on `cli-chat-proxy.grok.com`. `/v1/storage`, `/v1/traces`,
+          `/v1/settings`, and every unlisted path are denied before dynamic approval. Disabling Grok removes only
+          Cooper-owned default Grok hosts and preserves matching user entries.
         - Requests to `raw.githubusercontent.com`, because it's read-only and safe.
       - All package registries (npm, gopkg, pypi, crates.io, etc.) are blocked by default — including NPM.
         AI tool installation happens at image build time (`cooper build`/`cooper update`), not at runtime.
@@ -353,7 +366,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
   - Updates built state in `config.json` to reflect what was just built, including top-level `ContainerVersion` fields, `implicit_tools`, and `base_node_version`.
 
 - `cooper cli {tool-name}` opens a CLI container for a specific AI tool:
-  - Usage: `cooper cli claude`, `cooper cli codex`, `cooper cli copilot`, `cooper cli opencode`.
+  - Usage: `cooper cli claude`, `cooper cli codex`, `cooper cli copilot`, `cooper cli opencode`, `cooper cli grok`.
   - `cooper cli list` lists available tool images.
   - Each tool uses its own image (`cooper-cli-{toolname}`), but the same image is used across all workspaces.
   - It mounts the current folder where user runs this command to the CLI container.
@@ -378,7 +391,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - `~/.claude` and `~/.claude.json` — Claude Code auth and config
       - `~/.copilot` — GitHub Copilot CLI auth and chat history
       - `~/.codex` — OpenAI Codex CLI config
-      - `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode`, and `~/.opencode` — OpenCode CLI config, state, and install data
+      - `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode`, and `~/.opencode` — OpenCode CLI config and state. The pinned binary is installed to `~/.local/bin/opencode` from the official GitHub Release tarball so this state mount cannot hide it.
     - `~/.gitconfig` — git identity (read-only)
     - Clipboard bridge (read-only):
       - `~/.cooper/tokens/{containerName}` → `/etc/cooper/clipboard-token` — per-barrel auth token
@@ -418,6 +431,8 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - Claude Code: auth handled via mounted `~/.claude` and `~/.claude.json` (no env var needed)
       - GitHub Copilot CLI: `GH_TOKEN` or `GITHUB_TOKEN` env var, or `~/.copilot/.gh_token` file
       - OpenAI Codex CLI: `OPENAI_API_KEY` env var
+      - OpenCode: auth and settings use the mounted OpenCode state directories
+      - Grok Build: auth uses the mounted Grok state root; forward `XAI_API_KEY` when the host sets it
     - Terminal and IDE integration env vars forwarded when available: terminal identity/capability (`TERM`, `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LC_TERMINAL`, `LC_TERMINAL_VERSION`, `TERM_SESSION_ID`, `ITERM_PROFILE`, `ITERM_SESSION_ID`, `VTE_VERSION`, `KONSOLE_VERSION`, `KONSOLE_PROFILE_NAME`, `WT_SESSION`, `WT_PROFILE_ID`, `KITTY_WINDOW_ID`, `WEZTERM_PANE`, `TERMINAL_EMULATOR`, `DOMTERM`, `TERMINOLOGY`), terminal palette hint (`COLORFGBG`), color/hyperlink policy (`NO_COLOR`, `FORCE_COLOR`, `FORCE_HYPERLINK`, `CLICOLOR`, `CLICOLOR_FORCE`, `NODE_DISABLE_COLORS`), and IDE integration (`CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_ENTRYPOINT`, `ENABLE_IDE_INTEGRATION`).
     - `CLAUDECODE` env var is NOT forwarded (prevents "nested session" error — container is an isolated sandbox, not a nested session).
   - Security Settings:
@@ -430,12 +445,12 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
     - Cooper CA certificate injected into container at build time (system CA store + `NODE_EXTRA_CA_CERTS` env var) to
       enable SSL bump. This is transparent to AI tools — they see valid certificates signed by a trusted CA.
     - Auto-approve aliases configured in container's `.bashrc` via the entrypoint script (safe because container is already
-      sandboxed by Cooper's network isolation, seccomp, and capability restrictions). These aliases are critical — without
-      them, each AI tool would prompt for its own permission system, which is redundant inside the sandbox:
+      sandboxed by Cooper's network isolation, seccomp, and capability restrictions). Cooper sets an alias only when the
+      tool has a supported auto-approve flag:
       - `claude` → `claude --dangerously-skip-permissions`
       - `copilot` → `copilot --allow-all-tools`
       - `codex` → `codex --dangerously-bypass-approvals-and-sandbox`
-      - `opencode` → `opencode --auto-approve`
+      - `grok` → `grok --always-approve`
     - The entrypoint script must be generated from template (not hardcoded) so it adapts to which AI tools are enabled.
       Disabled tools should not have aliases or startup configuration.
 
@@ -451,9 +466,10 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
     - Tests blocked domains are actually blocked (example.com, google.com).
     - Tests direct internet access is blocked (no route bypassing proxy).
   - **Phase 5 — Tools**: Verifies Go/Node/Python installations and versions (based on enabled tools).
-    Verifies AI CLI tool installations (Claude Code, Copilot, Codex, OpenCode — based on enabled tools).
+    Verifies AI CLI tool installations (Claude Code, Copilot, Codex, OpenCode, and Grok Build — based on enabled tools).
   - **Phase 6 — AI CLI Smoke Test**: Runs actual AI CLI commands to verify API connectivity (e.g., `claude -p "Reply with only the word: ok"`).
-  - **Phase 7 — Port Forwarding & Bridge**: Tests bridge health endpoint and port forwarding connectivity.
+  - **Phase 7 — Barrel Environment**: Tests configured environment values and protected runtime values.
+  - **Phase 8 — Port Forwarding & Bridge**: Tests bridge health endpoint and port forwarding connectivity.
   - **Teardown**: Always runs (even on failure) — stops ACL listener, bridge, barrels, proxy, cleans up networks.
   - Output shows real-time progress with ANSI colors and summary counts (PASS/FAIL/WARN/INFO).
   - Usage: `cooper proof` (from the workspace directory).
@@ -463,7 +479,21 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
   - Removes cooper Docker images (`cooper-proxy`, `cooper-base`, and all `cooper-cli-*` tool images).
   - Removes Docker networks (`cooper-external`, `cooper-internal`).
   - Optionally removes `~/.cooper` directory (config, logs, Dockerfiles). Prompts for confirmation before deleting config.
-  - Does NOT remove auth directories (`~/.claude`, `~/.copilot`, etc.) — these belong to the AI tools, not cooper.
+  - Does NOT remove host state directories (`~/.claude`, `~/.copilot`, `~/.grok`, etc.) — these belong to the AI tools, not cooper.
+    The complete Grok state root is host-owned and must never be part of Cooper cleanup.
+
+## Grok Build
+
+- Grok is a fifth built-in AI CLI (`grok` / Grok Build), after OpenCode.
+- Host detection uses `grok --version`. First-run detected Grok defaults to enabled/mirror. Existing configs gain a disabled Grok row without changing other selections.
+- Latest/pin use xAI's native CLI channel, never npm. Empty versions cannot be rendered into a Dockerfile.
+- Cooper mounts the effective host Grok state root read-write at `/home/user/.grok`. The source is a nonempty host `GROK_HOME`, or `~/.grok` when it is unset.
+- The root mount includes all current and future Grok auth, config, session, history, memory, skill, plugin, log, lock, and update state. Do not split its children into Cooper-owned mounts.
+- Cooper sets `GROK_HOME=/home/user/.grok`. It sets `GROK_LEADER_SOCKET=/tmp/cooper-grok-leader.sock` so a barrel cannot attach to a host Grok process through the shared root. Grok uses this override for both the client and its paired leader lock. Cooper does not install `/etc/grok/requirements.toml` or set behavior-related `GROK_*` values that override host config.
+- Host OAuth and API-key auth are both valid. A set host `XAI_API_KEY` is forwarded for the Grok session.
+- Cooper cleanup never removes or changes the host Grok state root.
+- Default proxy hosts while Grok is enabled are exact `auth.x.ai` and `cli-chat-proxy.grok.com`. Inference paths are a positive allowlist; unknown paths fail closed before dynamic approval.
+- Shared proxy caveat: other agents' global defaults (including GitHub) remain visible to every barrel. This is not per-tool network identity.
 
 ## Clipboard Bridge
 

@@ -163,9 +163,38 @@ func defaultWhitelistedDomains() []DomainEntry {
 	}
 }
 
+// grokDefaultDomains are added only while the built-in Grok tool is enabled.
+// They are exact hosts; no x.ai or grok.com wildcards.
+func grokDefaultDomains() []DomainEntry {
+	return []DomainEntry{
+		{Domain: "auth.x.ai", IncludeSubdomains: false, Source: "default"},
+		{Domain: "cli-chat-proxy.grok.com", IncludeSubdomains: false, Source: "default"},
+	}
+}
+
+func isGrokDefaultDomain(domain string) bool {
+	for _, entry := range grokDefaultDomains() {
+		if strings.EqualFold(domain, entry.Domain) {
+			return true
+		}
+	}
+	return false
+}
+
+func grokEnabled(tools []ToolConfig) bool {
+	for _, tool := range tools {
+		if strings.EqualFold(tool.Name, "grok") && tool.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
 // MergeDefaultDomains ensures all default whitelisted domains are present
 // in the config. New defaults added in code updates are merged into existing
 // configs so users don't have to reconfigure to pick up new tool domains.
+// Grok hosts are reconciled separately: they are added only while Grok is
+// enabled and removed only when they are still Cooper-owned defaults.
 func (c *Config) MergeDefaultDomains() {
 	existing := make(map[string]bool)
 	for _, d := range c.WhitelistedDomains {
@@ -176,6 +205,47 @@ func (c *Config) MergeDefaultDomains() {
 			c.WhitelistedDomains = append(c.WhitelistedDomains, d)
 		}
 	}
+	c.reconcileGrokDefaultDomains()
+}
+
+// reconcileGrokDefaultDomains adds or removes the exact Grok default hosts
+// based on whether built-in Grok is enabled. User-added matching entries are
+// never removed, and case-insensitive duplicates are not introduced.
+func (c *Config) reconcileGrokDefaultDomains() {
+	if grokEnabled(c.AITools) {
+		c.addGrokDefaultDomains()
+		return
+	}
+	c.removeDefaultGrokDomains()
+}
+
+func (c *Config) addGrokDefaultDomains() {
+	for _, want := range grokDefaultDomains() {
+		if hasDomainIgnoreCase(c.WhitelistedDomains, want.Domain) {
+			continue
+		}
+		c.WhitelistedDomains = append(c.WhitelistedDomains, want)
+	}
+}
+
+func (c *Config) removeDefaultGrokDomains() {
+	filtered := c.WhitelistedDomains[:0]
+	for _, d := range c.WhitelistedDomains {
+		if isGrokDefaultDomain(d.Domain) && d.Source == "default" {
+			continue
+		}
+		filtered = append(filtered, d)
+	}
+	c.WhitelistedDomains = filtered
+}
+
+func hasDomainIgnoreCase(domains []DomainEntry, domain string) bool {
+	for _, d := range domains {
+		if strings.EqualFold(d.Domain, domain) {
+			return true
+		}
+	}
+	return false
 }
 
 // Validate checks if the configuration is valid. Returns an error if any

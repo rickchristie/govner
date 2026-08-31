@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/tableutil"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
@@ -30,16 +31,17 @@ type aicliModel struct {
 	lastDetailMaxScroll int
 }
 
-var defaultAITools = []toolEntry{
-	{name: "claude", displayName: "Claude Code"},
-	{name: "copilot", displayName: "Copilot CLI"},
-	{name: "codex", displayName: "Codex CLI"},
-	{name: "opencode", displayName: "OpenCode"},
+func defaultAITools() []toolEntry {
+	defs := aitool.Definitions()
+	tools := make([]toolEntry, len(defs))
+	for i, def := range defs {
+		tools[i] = toolEntry{name: def.Name, displayName: def.DisplayName}
+	}
+	return tools
 }
 
 func newAICLIModel(existing []config.ToolConfig) aicliModel {
-	tools := make([]toolEntry, len(defaultAITools))
-	copy(tools, defaultAITools)
+	tools := defaultAITools()
 
 	// Detect host versions.
 	for i := range tools {
@@ -363,7 +365,11 @@ func (m *aicliModel) viewDetail(width, height int) string {
 		mode config.VersionMode
 	}
 	var modes []modeOption
-	modes = append(modes, modeOption{"Latest", "Install latest from npm", config.ModeLatest})
+	latestDesc := "Install latest from npm"
+	if t.name == "grok" {
+		latestDesc = "Install latest from xAI CLI channel"
+	}
+	modes = append(modes, modeOption{"Latest", latestDesc, config.ModeLatest})
 	if t.hostVersion != "" {
 		modes = append(modes, modeOption{"Mirror", fmt.Sprintf("Install same version as host: %s", t.hostVersion), config.ModeMirror})
 	}

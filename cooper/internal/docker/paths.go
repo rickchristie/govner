@@ -21,4 +21,11 @@ const (
 	BarrelPIPCacheDir        = BarrelHomeDir + "/.cache/pip"
 	BarrelPlaywrightCacheDir = BarrelHomeDir + "/.cache/ms-playwright"
 	BarrelFontsDir           = BarrelHomeDir + "/.local/share/fonts"
+
+	// BarrelGrokStateRoot is the container view of the host Grok state root.
+	// The image binary stays outside this mount in ~/.local/bin.
+	BarrelGrokStateRoot = BarrelHomeDir + "/.grok"
+	// BarrelGrokLeaderSocket keeps Grok process transport in the per-barrel
+	// /tmp mount. A barrel must not attach to a leader process on the host.
+	BarrelGrokLeaderSocket = "/tmp/cooper-grok-leader.sock"
 )

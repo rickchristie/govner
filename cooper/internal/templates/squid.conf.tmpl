@@ -61,6 +61,22 @@ external_acl_type cooper_acl ttl=0 negative_ttl=0 children-max=20 children-start
 acl pending_review external cooper_acl
 
 # ============================================================================
+# GROK INFERENCE PATH POLICY
+# ============================================================================
+# These ACLs are unconditional. Unknown paths on cli-chat-proxy.grok.com must
+# fail closed even if a user later adds the host or dynamically approves it.
+# Rule order is security-critical:
+#   1. CONNECT has no API path, so CONNECT allow/deny stays first.
+#   2. After TLS is bumped, deny every inference-host path that is not on the
+#      reviewed allowlist, before generic allowed_domains / pending_review.
+#   3. Allowed Grok paths still require domain authorization so this is not
+#      an independent host bypass for plain HTTP.
+
+acl grok_inference_host dstdomain cli-chat-proxy.grok.com
+acl grok_allowed_path urlpath_regex ^/v1/(chat/completions|responses|messages|models|user)(\?.*)?$
+acl grok_allowed_path urlpath_regex ^/v1/privacy/coding-data-retention(\?.*)?$
+
+# ============================================================================
 # ACCESS RULES
 # ============================================================================
 
@@ -72,6 +88,12 @@ http_access allow CONNECT SSL_ports pending_review
 
 # Deny all other CONNECT
 http_access deny CONNECT all
+
+# Decrypted HTTP: Grok inference host uses a positive path allowlist.
+# This deny must precede both allowed_domains and pending_review.
+http_access deny grok_inference_host !grok_allowed_path
+http_access allow grok_inference_host grok_allowed_path allowed_domains
+http_access allow grok_inference_host grok_allowed_path pending_review
 
 # HTTP: Allow whitelisted domains
 http_access allow allowed_domains

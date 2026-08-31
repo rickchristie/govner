@@ -7,7 +7,15 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+func disableOfficialGoRetryDelay(t *testing.T) {
+	t.Helper()
+	orig := officialGoRetrySleep
+	officialGoRetrySleep = func(time.Duration) {}
+	t.Cleanup(func() { officialGoRetrySleep = orig })
+}
 
 // --- Go version resolution tests ---
 
@@ -91,6 +99,35 @@ func TestResolveGoLatestInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestResolveGoLatestRetriesTransientOfficialFailure(t *testing.T) {
+	disableOfficialGoRetryDelay(t)
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < officialGoRequestMaxAttempts {
+			http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprint(w, `[{"version":"go1.27.1","stable":true}]`)
+	}))
+	defer server.Close()
+
+	origURL := goLatestURL
+	goLatestURL = server.URL
+	defer func() { goLatestURL = origURL }()
+
+	version, err := ResolveGoLatest()
+	if err != nil {
+		t.Fatalf("ResolveGoLatest() error = %v", err)
+	}
+	if version != "1.27.1" {
+		t.Fatalf("ResolveGoLatest() = %q, want 1.27.1", version)
+	}
+	if calls != officialGoRequestMaxAttempts {
+		t.Fatalf("calls = %d, want %d", calls, officialGoRequestMaxAttempts)
+	}
+}
+
 func TestResolveGoplsLatest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -123,6 +160,61 @@ func TestResolveGoplsLatestInvalidJSON(t *testing.T) {
 
 	if _, err := ResolveGoplsLatest(); err == nil {
 		t.Fatal("expected invalid JSON error")
+	}
+}
+
+func TestResolveGoplsLatestRetriesOfficialEndpointAfterTransientFailure(t *testing.T) {
+	disableOfficialGoRetryDelay(t)
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < officialGoRequestMaxAttempts {
+			http.Error(w, "upstream unavailable", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"Version":"v0.23.0"}`)
+	}))
+	defer server.Close()
+
+	origURL := goplsLatestURL
+	goplsLatestURL = server.URL
+	defer func() { goplsLatestURL = origURL }()
+
+	version, err := ResolveGoplsLatest()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if version != "v0.23.0" {
+		t.Fatalf("got %q, want v0.23.0", version)
+	}
+	if calls != officialGoRequestMaxAttempts {
+		t.Fatalf("calls = %d, want %d", calls, officialGoRequestMaxAttempts)
+	}
+}
+
+func TestResolveGoplsLatestStopsAfterBoundedOfficialAttempts(t *testing.T) {
+	disableOfficialGoRetryDelay(t)
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	origURL := goplsLatestURL
+	goplsLatestURL = server.URL
+	defer func() { goplsLatestURL = origURL }()
+
+	_, err := ResolveGoplsLatest()
+	if err == nil {
+		t.Fatal("expected bounded retry failure")
+	}
+	if calls != officialGoRequestMaxAttempts {
+		t.Fatalf("calls = %d, want %d", calls, officialGoRequestMaxAttempts)
+	}
+	if !strings.Contains(err.Error(), server.URL) || !strings.Contains(err.Error(), "after 4 attempts") {
+		t.Fatalf("error does not identify the endpoint and bounded attempt count: %v", err)
 	}
 }
 
@@ -543,17 +635,20 @@ func TestResolveLatestVersionUnknownTool(t *testing.T) {
 
 func TestResolveValidateGoVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `[
-			{"version": "go1.22.5", "stable": true},
-			{"version": "go1.22.4", "stable": true}
-		]`)
+		if r.Method != http.MethodHead {
+			t.Errorf("method = %s, want HEAD", r.Method)
+		}
+		if strings.Contains(r.URL.Path, "1.22.5") {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
 	}))
 	defer server.Close()
 
-	origURL := goLatestURL
-	goLatestURL = server.URL
-	defer func() { goLatestURL = origURL }()
+	origURLFn := goVersionDownloadURL
+	goVersionDownloadURL = func(version string) string { return server.URL + "/go" + version + ".tar.gz" }
+	defer func() { goVersionDownloadURL = origURLFn }()
 
 	exists, err := ValidateVersion("go", "1.22.5")
 	if err != nil {
@@ -569,6 +664,79 @@ func TestResolveValidateGoVersion(t *testing.T) {
 	}
 	if exists {
 		t.Error("expected version 1.20.0 to not exist")
+	}
+}
+
+func TestValidateGoVersionRetriesTransientOfficialFailure(t *testing.T) {
+	disableOfficialGoRetryDelay(t)
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < officialGoRequestMaxAttempts {
+			http.Error(w, "temporary", http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	origURLFn := goVersionDownloadURL
+	goVersionDownloadURL = func(string) string { return server.URL + "/go1.24.10.tar.gz" }
+	defer func() { goVersionDownloadURL = origURLFn }()
+
+	exists, err := validateGoVersion("1.24.10")
+	if err != nil || !exists {
+		t.Fatalf("validateGoVersion() = (%v, %v), want (true, nil)", exists, err)
+	}
+	if calls != officialGoRequestMaxAttempts {
+		t.Fatalf("calls = %d, want %d", calls, officialGoRequestMaxAttempts)
+	}
+}
+
+func TestValidateGoVersionDoesNotRetryNotFound(t *testing.T) {
+	disableOfficialGoRetryDelay(t)
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	origURLFn := goVersionDownloadURL
+	goVersionDownloadURL = func(string) string { return server.URL + "/missing.tar.gz" }
+	defer func() { goVersionDownloadURL = origURLFn }()
+
+	exists, err := validateGoVersion("1.2.3")
+	if err != nil || exists {
+		t.Fatalf("validateGoVersion() = (%v, %v), want (false, nil)", exists, err)
+	}
+	if calls != 1 {
+		t.Fatalf("404 calls = %d, want 1", calls)
+	}
+}
+
+func TestValidateGoVersionReportsPersistentServerError(t *testing.T) {
+	disableOfficialGoRetryDelay(t)
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "temporary", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	origURLFn := goVersionDownloadURL
+	goVersionDownloadURL = func(string) string { return server.URL + "/go1.24.10.tar.gz" }
+	defer func() { goVersionDownloadURL = origURLFn }()
+
+	_, err := validateGoVersion("1.24.10")
+	if err == nil {
+		t.Fatal("expected persistent server error")
+	}
+	if calls != officialGoRequestMaxAttempts {
+		t.Fatalf("calls = %d, want %d", calls, officialGoRequestMaxAttempts)
+	}
+	if !strings.Contains(err.Error(), "after 4 attempts") || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("error = %v, want attempt count and HTTP status", err)
 	}
 }
 
@@ -679,6 +847,7 @@ func TestResolveValidateVersionUnknownTool(t *testing.T) {
 // --- HTTP error handling tests ---
 
 func TestResolveHTTPServerError(t *testing.T) {
+	disableOfficialGoRetryDelay(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -717,6 +886,7 @@ func TestResolveHTTPNotFound(t *testing.T) {
 }
 
 func TestResolveHTTPNetworkError(t *testing.T) {
+	disableOfficialGoRetryDelay(t)
 	// Use a URL that will definitely fail to connect
 	origURL := goLatestURL
 	goLatestURL = "http://127.0.0.1:1" // port 1 should refuse connection
@@ -803,5 +973,123 @@ func TestResolveNPMPackageNameMapping(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tt.wantPkg)
 			}
 		})
+	}
+
+	if _, ok := npmPackageNames["grok"]; ok {
+		t.Fatal("grok must not have an npm package mapping")
+	}
+}
+
+func TestResolveGrokLatest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "  1.0.4\n")
+	}))
+	defer server.Close()
+	orig := grokStableURL
+	grokStableURL = server.URL
+	defer func() { grokStableURL = orig }()
+
+	got, err := ResolveGrokLatest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1.0.4" {
+		t.Fatalf("got %q, want 1.0.4", got)
+	}
+}
+
+func TestResolveGrokLatestRejectsMalformed(t *testing.T) {
+	cases := []string{"", "<html>1.0.4</html>", "1.0.4/../evil", strings.Repeat("1", 200)}
+	for _, body := range cases {
+		t.Run(body[:min(len(body), 16)], func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, body)
+			}))
+			defer server.Close()
+			orig := grokStableURL
+			grokStableURL = server.URL
+			defer func() { grokStableURL = orig }()
+			if _, err := ResolveGrokLatest(); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
+func TestValidateGrokVersionArtifact(t *testing.T) {
+	var seen string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.URL.Path
+		if r.Header.Get("Range") == "" {
+			t.Error("expected Range header")
+		}
+		switch {
+		case strings.Contains(r.URL.Path, "1.0.4"):
+			w.WriteHeader(http.StatusPartialContent)
+		case strings.Contains(r.URL.Path, "9.9.9"):
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	origFn := grokArtifactURLFn
+	origArch := grokHostArch
+	grokArtifactURLFn = func(version, arch string) string {
+		return server.URL + "/grok-" + version + "-linux-" + arch
+	}
+	grokHostArch = "amd64"
+	defer func() {
+		grokArtifactURLFn = origFn
+		grokHostArch = origArch
+	}()
+
+	ok, err := ValidateVersion("grok", "1.0.4")
+	if err != nil || !ok {
+		t.Fatalf("1.0.4: ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(seen, "grok-1.0.4-linux-x86_64") {
+		t.Fatalf("amd64 artifact path = %q", seen)
+	}
+	ok, err = ValidateVersion("grok", " 1.0.4 ")
+	if err != nil || !ok || !strings.Contains(seen, "grok-1.0.4-linux-x86_64") {
+		t.Fatalf("padded 1.0.4: ok=%v err=%v path=%q", ok, err, seen)
+	}
+
+	grokHostArch = "arm64"
+	ok, err = ValidateVersion("grok", "1.0.4")
+	if err != nil || !ok {
+		t.Fatalf("arm64 1.0.4: ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(seen, "linux-aarch64") {
+		t.Fatalf("arm64 artifact path = %q", seen)
+	}
+
+	ok, err = ValidateVersion("grok", "9.9.9")
+	if err != nil || ok {
+		t.Fatalf("missing artifact: ok=%v err=%v", ok, err)
+	}
+
+	if _, err := ValidateVersion("grok", "../oops"); err == nil {
+		t.Fatal("invalid syntax should fail without treating as found")
+	}
+
+	grokHostArch = "riscv64"
+	if _, err := ValidateVersion("grok", "1.0.4"); err == nil {
+		t.Fatal("expected unsupported architecture error")
+	}
+}
+
+func TestResolveLatestVersionGrokDoesNotUseNPM(t *testing.T) {
+	orig := grokStableURL
+	grokStableURL = "http://127.0.0.1:1/stable"
+	defer func() { grokStableURL = orig }()
+	_, err := ResolveLatestVersion("grok")
+	if err == nil {
+		t.Fatal("expected transport error from Grok resolver")
+	}
+	if strings.Contains(err.Error(), "npm") {
+		t.Fatalf("Grok latest used npm path: %v", err)
 	}
 }

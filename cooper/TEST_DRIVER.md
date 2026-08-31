@@ -138,3 +138,23 @@ Keep the package focused on reusable runtime primitives:
 
 If later we want to test the real TUI, build a separate TUI driver on top of
 these primitives rather than mixing Bubble Tea interactions into this package.
+
+## Grok State Fixtures
+
+Automated Grok mount tests must use an isolated fake home. Create one `.grok`
+root below that home. Put fake auth, config, session, history, memory, skill, and
+future-state files below the root. Mount the root read-write. Test that all
+files are visible and that a barrel write appears in the fake host root.
+
+Do not copy or mount the developer's real Grok state in an automated test. Do
+not send fake credentials to xAI. Do not print fake credential values.
+
+A real authenticated one-turn prompt is an opt-in release check:
+
+```bash
+grok login --oauth
+cooper cli grok -c 'grok -p "Reply with only the word: ok" --always-approve --max-turns 1'
+```
+
+Keep that output in a private `/tmp` log and confirm it does not contain token
+material. The general E2E gate must not require a real user credential.

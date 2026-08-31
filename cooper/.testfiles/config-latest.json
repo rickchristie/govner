@@ -8,7 +8,8 @@
     {"name": "claude", "enabled": true, "mode": "latest"},
     {"name": "copilot", "enabled": true, "mode": "latest"},
     {"name": "codex", "enabled": true, "mode": "latest"},
-    {"name": "opencode", "enabled": true, "mode": "latest"}
+    {"name": "opencode", "enabled": true, "mode": "latest"},
+    {"name": "grok", "enabled": true, "mode": "latest"}
   ],
   "whitelisted_domains": [
     {"domain": ".anthropic.com", "include_subdomains": true, "source": "default"},

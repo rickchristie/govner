@@ -26,11 +26,42 @@ AI coding assistants need broad system access to be useful -- but that access is
 | **Claude Code** | `cooper cli claude` | `--dangerously-skip-permissions` |
 | **GitHub Copilot CLI** | `cooper cli copilot` | `--allow-all-tools` |
 | **OpenAI Codex CLI** | `cooper cli codex` | `--dangerously-bypass-approvals-and-sandbox` |
-| **OpenCode** | `cooper cli opencode` | `--auto-approve` |
+| **OpenCode** | `cooper cli opencode` | None |
+| **Grok Build** | `cooper cli grok` | `--always-approve` |
 
-Auto-approve flags are safe because the container is already sandboxed -- Cooper's network isolation, seccomp profile, and capability restrictions replace each tool's built-in permission system.
+The listed auto-approve flags are safe because the container is already sandboxed -- Cooper's network isolation, seccomp profile, and capability restrictions replace each tool's built-in permission system.
 
-Custom tools can be added by placing a Dockerfile in `~/.cooper/cli/{tool-name}/`.
+Custom tools can be added by placing a Dockerfile in `~/.cooper/cli/{tool-name}/`. The name `grok` is reserved for built-in Grok Build. If you already have a custom `~/.cooper/cli/grok` directory, rename it and update any `cooper cli` invocation before configuring Grok.
+
+### Grok Build
+
+Grok is installed from xAI's native CLI release channel, not npm. Mirror, latest, and pin all resolve to an exact `grok-<version>-linux-<arch>` artifact that Cooper copies into `/home/user/.local/bin/grok`.
+
+Sign in with Grok on the host before you start a Grok barrel:
+
+```bash
+grok login --oauth
+```
+
+Cooper mounts the complete host Grok state root read-write at `/home/user/.grok`. The source is `GROK_HOME` when that variable is not empty. Otherwise, the source is `~/.grok`. Cooper maps the source to a stable container path and sets `GROK_HOME=/home/user/.grok` in the image.
+
+One root mount includes `auth.json`, `config.toml`, managed config, requirements, sessions, conversation search indexes, history, memory, rules, skills, plugins, logs, locks, downloads, and future Grok state. Cooper does not keep a separate OAuth store or per-barrel session store. A state file that Grok adds below this root is shared without a Cooper update.
+
+The Grok leader socket is transient process transport, not durable state. Cooper sets `GROK_LEADER_SOCKET=/tmp/cooper-grok-leader.sock`. Grok uses this path for the socket and its paired lock. Each barrel has a separate `/tmp` mount. Thus, a Grok process in a barrel cannot attach to a Grok leader process on the host or in another barrel.
+
+The workspace also has the same absolute path on the host and in the barrel. Thus, Grok uses the same workspace session key in both places. Exit a Grok conversation before you resume it in the other environment. Grok lock files protect shared files, but they do not make one conversation safe to use from two terminals at the same time.
+
+Cooper does not install a Grok requirements file and does not set behavior-related `GROK_*` variables. The state-root and leader-socket variables only map paths. Host Grok settings, including memory settings, apply in the barrel. A host `XAI_API_KEY` is also forwarded when it is set. Cooper's network policy is separate from Grok settings. Default proxy hosts while Grok is enabled are exact `auth.x.ai` and `cli-chat-proxy.grok.com`. The inference host has a fixed path allowlist (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/models`, `/v1/user`, `/v1/privacy/coding-data-retention`). Storage, traces, settings, and unknown paths are denied even after dynamic approval. A Grok feature that needs another host remains blocked until the user allows that host. All barrels share one proxy, so domains required by other agents, including GitHub for Copilot, remain reachable from a Grok barrel.
+
+Clipboard paste uses Cooper's X11 bridge.
+
+### OpenCode
+
+OpenCode is installed from the official GitHub Release tarball
+`https://github.com/anomalyco/opencode/releases/download/v<version>/opencode-linux-<x64|arm64>.tar.gz`,
+not from `https://opencode.ai/install`. That convenience URL only redirects to a moving install script
+which then fetches the same artifact, and it rate-limits (HTTP 429) during Docker builds.
+The binary is placed in `/home/user/.local/bin/opencode` so the runtime `~/.opencode` state mount cannot hide it.
 
 ## Supported Platforms
 
@@ -221,6 +252,24 @@ Built-in programming tools also install Cooper-managed standard language-server 
 - Node.js -> `typescript-language-server` and `typescript`
 - Python -> `pyright` and `python-lsp-server`
 
+During the image build, Cooper installs `gopls` exclusively through the
+official `proxy.golang.org` module service and `sum.golang.org` checksum
+database. It does not trust a third-party module mirror and does not use
+`GOPROXY=direct`, which would still depend on Google's vanity and source hosts.
+
+Intermittent destination-specific routing failures can occur even while other
+internet traffic remains healthy, so Cooper makes up to eight fresh install
+attempts. Each attempt has a two-minute deadline and completed module-cache
+downloads remain available to the next attempt. A five-second linear backoff
+between attempts lets a failing edge or NAT path recover while keeping the
+Docker layer's worst-case duration bounded.
+
+The smaller official Go metadata requests use four bounded attempts with a
+short linear backoff. Transport failures, HTTP 429, and server errors are
+retried; HTTP 404 remains a definitive missing-version result. This covers both
+latest-version resolution and the `go.dev` artifact check used to validate an
+older pinned Go release before a build starts.
+
 These are implicit defaults attached to the language tool, not separate top-level programming tools. TypeScript remains bundled under Node.js.
 
 `~/.cooper/config.json` stores both desired configuration and built state. That built state includes top-level `container_version` values, resolved `implicit_tools`, and the built base Node runtime (`base_node_version`). `cooper update` and startup/About warnings compare those built values against the current desired state.
@@ -295,7 +344,7 @@ Press `c` in the TUI to capture an image from your host clipboard. AI tools insi
 - **Per-barrel authenticated** -- each barrel gets a unique cryptographic token. No cross-barrel access.
 - **Format support** -- PNG, JPEG, GIF, BMP, TIFF, WebP, SVG (via ImageMagick). All converted to PNG.
 
-Works transparently with every supported AI tool. Claude Code and OpenCode use shim scripts that intercept clipboard helper calls. Codex and Copilot use an X11 bridge that owns the virtual display clipboard. Custom tools get both strategies.
+Works transparently with every supported AI tool. Claude Code and OpenCode use shim scripts that intercept clipboard helper calls. Codex, Copilot, and Grok Build use an X11 bridge that owns the virtual display clipboard. Custom tools get both strategies.
 
 Configure TTL and max image size in the TUI Runtime Settings tab.
 
@@ -318,10 +367,11 @@ Cooper does **not** install Playwright itself or download browsers. Your project
 |-----------|---------------|------|---------|
 | Current directory | Same path | read-write | Workspace |
 | `.git/hooks` | Same path | read-only | Prevent hook injection |
-| `~/.claude`, `~/.claude.json` | `/home/user/...` | read-write | Claude Code auth/config |
-| `~/.copilot` | `/home/user/.copilot` | read-write | Copilot auth/history |
-| `~/.codex` | `/home/user/.codex` | read-write | Codex config |
-| `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode`, `~/.opencode` | `/home/user/...` | read-write | OpenCode config, state, and install data |
+| `~/.claude`, `~/.claude.json` | `/home/user/...` | read-write | Claude Code state |
+| `~/.copilot` | `/home/user/.copilot` | read-write | Copilot state |
+| `~/.codex` | `/home/user/.codex` | read-write | Codex state |
+| `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode`, `~/.opencode` | `/home/user/...` | read-write | OpenCode config and state (binary lives in `~/.local/bin`) |
+| `$GROK_HOME`, or `~/.grok` when unset | `/home/user/.grok` | read-write | Complete Grok auth, config, sessions, history, memory, and other state |
 | `~/.gitconfig` | `/home/user/.gitconfig` | read-only | Git identity |
 | `~/.cooper/cache/go-mod` | `/home/user/go/pkg/mod` | read-write | Go module cache |
 | `~/.cooper/cache/go-build` | `/home/user/.cache/go-build` | read-write | Go build cache |
@@ -368,6 +418,15 @@ cooper proof
 ```
 
 This stands up the entire stack, tests SSL, proxy, tools, AI CLI connectivity, port forwarding, and bridge -- then tears everything down. Output is designed to be copy-pasted into a GitHub issue.
+
+### Grok login, versions, or custom-directory collisions
+
+- Missing or expired login: stop active Grok sessions and run `grok login --oauth` on the host. The next barrel uses the updated shared `auth.json`.
+- Unexpected state root: start Cooper from the same host environment as Grok. If you use `GROK_HOME`, make sure that it is set before `cooper cli grok` starts.
+- A conversation is not available: use the same workspace path, and exit the first Grok process before you resume the conversation.
+- A new Grok API path is blocked: Squid denies unknown `cli-chat-proxy.grok.com` paths with 403. That is fail-closed until Cooper reviews the path.
+- Unsupported architecture: Grok images support Linux `amd64`/`x86_64` and `arm64`/`aarch64` only.
+- `~/.cooper/cli/grok` already exists as a custom image: rename it. Cooper will not overwrite or ignore that directory.
 
 ### Check logs
 

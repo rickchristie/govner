@@ -19,7 +19,13 @@ type SessionEnvFile struct {
 // PrepareSessionEnvFile writes a per-session env file into the barrel's
 // read-only session directory after tolerant runtime sanitization.
 func PrepareSessionEnvFile(cooperDir, containerName, sessionName string, vars []config.BarrelEnvVar) (SessionEnvFile, []string, error) {
-	usable, warnings := config.NormalizeBarrelEnvVarsForRuntime(vars)
+	return PrepareSessionEnvFileForTool(cooperDir, containerName, sessionName, vars, "")
+}
+
+// PrepareSessionEnvFileForTool applies tool-aware protected-name filtering
+// before writing the per-session env file.
+func PrepareSessionEnvFileForTool(cooperDir, containerName, sessionName string, vars []config.BarrelEnvVar, toolName string) (SessionEnvFile, []string, error) {
+	usable, warnings := config.NormalizeBarrelEnvVarsForRuntimeForTool(vars, toolName)
 	if len(usable) == 0 {
 		return SessionEnvFile{}, warnings, nil
 	}

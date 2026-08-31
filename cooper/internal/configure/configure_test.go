@@ -460,12 +460,29 @@ func TestNewAICLIModel_ExistingConfig_Preserved(t *testing.T) {
 	if codexTool.enabled {
 		t.Error("expected codex to be disabled per existing config")
 	}
+
+	var grokTool *toolEntry
+	for i := range m.tools {
+		if m.tools[i].name == "grok" {
+			grokTool = &m.tools[i]
+			break
+		}
+	}
+	if grokTool == nil {
+		t.Fatal("expected existing config to gain a Grok row")
+	}
+	if grokTool.enabled {
+		t.Error("existing config must gain Grok disabled")
+	}
+	if grokTool.displayName != "Grok Build" {
+		t.Errorf("grok displayName = %q", grokTool.displayName)
+	}
 }
 
 func TestNewAICLIModel_DefaultToolList(t *testing.T) {
 	m := newAICLIModel(nil)
 
-	expected := map[string]bool{"claude": true, "copilot": true, "codex": true, "opencode": true}
+	expected := map[string]bool{"claude": true, "copilot": true, "codex": true, "opencode": true, "grok": true}
 	for _, tool := range m.tools {
 		if _, ok := expected[tool.name]; !ok {
 			t.Errorf("unexpected tool %q in default AI tools", tool.name)

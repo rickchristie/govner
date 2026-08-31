@@ -52,6 +52,20 @@ func TestRenderUserEnvFilePreservesLiteralCharacters(t *testing.T) {
 	}
 }
 
+func TestProtectedRuntimeEnvNamesForToolGrok(t *testing.T) {
+	names := ProtectedRuntimeEnvNamesForTool("grok", nil)
+	if !containsName(names, "GROK_HOME") {
+		t.Fatal("expected GROK_HOME in Grok protected names")
+	}
+	if !containsName(names, "GROK_LEADER_SOCKET") {
+		t.Fatal("expected GROK_LEADER_SOCKET in Grok protected names")
+	}
+	other := ProtectedRuntimeEnvNamesForTool("claude", nil)
+	if containsName(other, "GROK_HOME") || containsName(other, "GROK_LEADER_SOCKET") {
+		t.Fatal("claude must not restore Grok path env values")
+	}
+}
+
 func TestProtectedRuntimeEnvNamesDedupesAndPreservesStableOrder(t *testing.T) {
 	first := ProtectedRuntimeEnvNames([]string{"OPENAI_API_KEY", "TERM", "OPENAI_API_KEY"})
 	second := ProtectedRuntimeEnvNames([]string{"OPENAI_API_KEY", "TERM", "OPENAI_API_KEY"})

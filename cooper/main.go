@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -125,10 +124,12 @@ automatically with auto-approve enabled.
   cooper cli codex        Launch Codex CLI
   cooper cli copilot      Launch Copilot CLI
   cooper cli opencode     Launch OpenCode
+  cooper cli grok         Launch Grok Build
   cooper cli list         List available tool images
 
 Use -c to run a one-shot command instead:
-  cooper cli claude -c "go test ./..."`,
+  cooper cli claude -c "go test ./..."
+  cooper cli grok -c 'grok -p "Reply with only the word: ok" --always-approve --max-turns 1'`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runCLI,
 }
@@ -337,29 +338,6 @@ func expectedToolVersion(tool config.ToolConfig) string {
 	default:
 		return ""
 	}
-}
-
-func discoverCustomImageNames(cliDir string) ([]string, error) {
-	entries, err := os.ReadDir(cliDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read cli directory %s: %w", cliDir, err)
-	}
-	builtinNames := map[string]bool{"claude": true, "copilot": true, "codex": true, "opencode": true}
-	custom := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() || builtinNames[entry.Name()] {
-			continue
-		}
-		if !fileExists(filepath.Join(cliDir, entry.Name(), "Dockerfile")) {
-			continue
-		}
-		custom = append(custom, entry.Name())
-	}
-	sort.Strings(custom)
-	return custom, nil
 }
 
 // ---------- cooper up ----------
@@ -865,6 +843,23 @@ func runCLI(cmd *cobra.Command, args []string) error {
 			barrelRunning = false
 		}
 	}
+	if barrelRunning && toolName == "grok" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("get home directory: %w", err)
+		}
+		hasGrokState, err := docker.BarrelHasGrokStateMount(containerName, docker.GrokHostStateRoot(homeDir))
+		if err != nil {
+			return fmt.Errorf("inspect barrel Grok state mount: %w", err)
+		}
+		if !hasGrokState {
+			fmt.Fprintf(os.Stderr, "Recreating Grok barrel container %s to share the complete host Grok state...\n", containerName)
+			if err := docker.StopBarrel(containerName); err != nil {
+				return fmt.Errorf("stop legacy Grok barrel: %w", err)
+			}
+			barrelRunning = false
+		}
+	}
 	if !barrelRunning {
 		// Generate and write clipboard token before starting the barrel.
 		// The token file is mounted read-only into the container. The running
@@ -909,7 +904,7 @@ func runCLI(cmd *cobra.Command, args []string) error {
 			}
 		}()
 	}
-	sessionEnvFile, warnings, err := barrelenv.PrepareSessionEnvFile(cooperDir, containerName, sessionName, cfg.BarrelEnvVars)
+	sessionEnvFile, warnings, err := barrelenv.PrepareSessionEnvFileForTool(cooperDir, containerName, sessionName, cfg.BarrelEnvVars, toolName)
 	if err != nil {
 		return fmt.Errorf("prepare barrel env session file: %w", err)
 	}
@@ -947,7 +942,7 @@ func runCLI(cmd *cobra.Command, args []string) error {
 	}
 	execCmd, err := barrelenv.BuildExecWrapperCommand(
 		sessionEnvFile.ContainerPath,
-		barrelenv.ProtectedRuntimeEnvNames(tokenNames),
+		barrelenv.ProtectedRuntimeEnvNamesForTool(toolName, tokenNames),
 		targetCmd,
 	)
 	if err != nil {
@@ -1137,7 +1132,7 @@ func collectUpdatePlan(cfg *config.Config, cliDir string, out io.Writer) (update
 		plan.baseChanged = true
 	}
 
-	customImages, err := discoverCustomImageNames(cliDir)
+	customImages, err := buildflow.DiscoverCustomImageNames(cliDir)
 	if err != nil {
 		return plan, err
 	}
@@ -1292,6 +1287,7 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 		{Name: "copilot", Enabled: true, Mode: config.ModeLatest, ContainerVersion: "0.7.2", HostVersion: "0.7.2"},
 		{Name: "codex", Enabled: false, Mode: config.ModeOff},
 		{Name: "opencode", Enabled: false, Mode: config.ModeOff},
+		{Name: "grok", Enabled: false, Mode: config.ModeOff},
 	}
 	cfg.ImplicitTools = []config.ImplicitToolConfig{
 		{Name: "gopls", Kind: config.ImplicitToolKindLSP, ParentTool: "go", Binary: "gopls", ContainerVersion: "v0.18.1"},
