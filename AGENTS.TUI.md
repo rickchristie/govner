@@ -217,6 +217,18 @@ func TestApproveFailureShowsError(t *testing.T) {
 }
 ```
 
+## Visual QA Standard
+
+- **LAW: Inspect each material layout, theme, resize, or interaction change as an image.**
+- **LAW: Use the `$tui-visual-qa` skill and `scripts/capture-tui.sh` for repeatable captures.**
+- **LAW: Capture a deterministic `tui-test` or storybook fixture.** Do not use production data or a live service.
+- **LAW: Put screenshots and capture logs under `/tmp`.** Do not add generated screenshots to the repository.
+- **LAW: Open and inspect every PNG with an image tool.** ANSI text output alone does not verify visual quality.
+- **LAW: Keep the terminal dimensions, font, theme, locale, and fixture fixed while you compare revisions.**
+- **LAW: Use VHS by default.** Use the isolated Xvfb backend when native XTerm rendering is important or VHS cannot render the program.
+- **LAW: Do not capture the active desktop.** A desktop capture can include private windows and depends on unrelated host state.
+- **LAW: Visual inspection does not replace behavior, component, or integration tests.**
+
 ## Refactoring Laws
 
 - **LAW: When you refactor a TUI, preserve behavior first. Then improve the structure.**

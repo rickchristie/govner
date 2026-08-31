@@ -81,8 +81,8 @@ timeout 90m ./cooper/test-docker-build.sh all > /tmp/cooper-docker-build.txt 2>&
 
 ## Repository workflow inventory
 
-Every tracked shell file is classified, and a unit test fails if a new tracked
-shell script is added without an explicit policy decision.
+Every tracked or new non-ignored shell file is classified. A unit test fails if
+a repository shell script is added without an explicit policy decision.
 
 | Tracked workflow | Reviewed behavior | Policy |
 | --- | --- | --- |
@@ -91,6 +91,8 @@ shell script is added without an explicit policy decision.
 | `scripts/release-cooper.sh` | Reads the current version, tags, and log; writes a private `/tmp` tag-message file; prints shell-quoted artifact/tag/push/index commands | Auto-approved preview; each printed executable step is separately validated |
 | `scripts/release-gowt.sh` | Reads the current version, tags, and log; writes a private `/tmp` tag-message file; prints shell-quoted tag/push/index commands | Auto-approved preview; each printed executable step is separately validated |
 | `scripts/release-pgflock.sh` | Reads the current version, tags, and log; writes a private `/tmp` tag-message file; prints shell-quoted tag/push/index commands | Auto-approved preview; each printed executable step is separately validated |
+| `scripts/capture-tui.sh` | Prepares pinned VHS and Xvfb images on explicit request; capture runs without a network, mounts one selected executable and a private `/tmp` directory, and verifies the PNG type | Intentionally manual; image preparation uses the network and capture runs a caller-selected executable |
+| `scripts/tui-capture/xvfb-entrypoint.sh` | Runs only in the capture image; owns its Xvfb and XTerm processes, applies deterministic actions, captures one window, and cleans up its processes | Intentionally not a host workflow; invoked through `scripts/capture-tui.sh` |
 | `scripts/convert-agents.sh` | Overwrites sibling tracked `AGENTS.md` files from `CLAUDE.md` | Intentionally manual; maintenance mutation, not build/test/release |
 | `cooper/internal/templates/doctor.sh` | Container-installed diagnostic that probes container networking, tools, proxy policy, and clipboard state | Intentionally not a host script; exercised through reviewed Cooper workflows |
 

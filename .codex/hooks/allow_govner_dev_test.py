@@ -249,16 +249,24 @@ class AllowGovnerDevTest(unittest.TestCase):
             with self.subTest(script=script):
                 self.assertTrue(script.is_file(), f"missing reviewed script {script}")
 
-    def test_every_tracked_shell_script_has_an_explicit_policy(self) -> None:
+    def test_every_repository_shell_script_has_an_explicit_policy(self) -> None:
         result = subprocess.run(
-            ["git", "ls-files", "*.sh"],
+            [
+                "git",
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "--",
+                "*.sh",
+            ],
             cwd=REPO_ROOT,
             check=True,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        tracked = {
+        repository_scripts = {
             (REPO_ROOT / value).resolve()
             for value in result.stdout.splitlines()
             if value
@@ -268,7 +276,7 @@ class AllowGovnerDevTest(unittest.TestCase):
             | set(allow_govner_dev.RELEASE_SCRIPTS)
             | allow_govner_dev.MANUALLY_REVIEWED_SCRIPTS
         )
-        self.assertEqual(tracked, reviewed)
+        self.assertEqual(repository_scripts, reviewed)
 
     def test_docker_build_clean_mode_is_allowed_from_repo_root(self) -> None:
         command = (

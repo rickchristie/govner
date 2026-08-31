@@ -130,6 +130,8 @@ The hook deliberately does not auto-approve:
 - direct `docker run`, `docker exec`, container inspection, builds, cleanup,
   or network mutation;
 - arbitrary binaries or scripts assembled in `/tmp`;
+- the TUI capture workflow, because image preparation uses the network and a
+  capture runs a caller-selected executable;
 - reads outside Govner and `/tmp`, sensitive paths, shell expansion, command
   substitution, background jobs, or unrecognized shell pipelines.
 
@@ -144,9 +146,10 @@ commands.
 
 Add positive and negative examples to `allow_govner_dev_cases.json` first.
 Every new command class needs a rationale and denial cases for the nearest
-unsafe variants. Every tracked shell script must also be classified as a test
-workflow, release generator, or intentionally manual/non-host script; the unit
-suite enforces that inventory. The release-generator test also creates an
+unsafe variants. Every tracked or new non-ignored shell script must also be
+classified as a test workflow, release generator, or intentionally
+manual/non-host script; the unit suite enforces that inventory. The
+release-generator test also creates an
 isolated Git fixture and validates every command actually printed by all three
 release scripts, including a changelog containing quotes and command-like
 text. Then update the hook and run:

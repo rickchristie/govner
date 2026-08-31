@@ -1,0 +1,4 @@
+interface:
+  display_name: "TUI Visual QA"
+  short_description: "Capture and inspect deterministic TUI screenshots"
+  default_prompt: "Use $tui-visual-qa to capture and inspect this TUI change."

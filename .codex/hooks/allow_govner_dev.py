@@ -59,7 +59,9 @@ RELEASE_SCRIPTS = {
 }
 MANUALLY_REVIEWED_SCRIPTS = {
     (COOPER_ROOT / "internal/templates/doctor.sh").resolve(),
+    (REPO_ROOT / "scripts/capture-tui.sh").resolve(),
     (REPO_ROOT / "scripts/convert-agents.sh").resolve(),
+    (REPO_ROOT / "scripts/tui-capture/xvfb-entrypoint.sh").resolve(),
 }
 COOPER_RELEASE_TARGETS = {
     ("darwin", "amd64"),
