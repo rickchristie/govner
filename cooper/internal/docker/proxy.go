@@ -123,33 +123,70 @@ func IsProxyRunning() (bool, error) {
 	return strings.TrimSpace(string(output)) == proxyName, nil
 }
 
-// ProxyExec executes a command inside the running proxy container and
-// returns its combined stdout/stderr output.
-func ProxyExec(cmd string) (string, error) {
-	proxyName := ProxyContainerName()
-	// Split the command string into args for exec.
-	parts := strings.Fields(cmd)
-	if len(parts) == 0 {
-		return "", fmt.Errorf("empty command")
-	}
-
-	args := append([]string{"exec", proxyName}, parts...)
-	c := exec.Command("docker", args...)
-	output, err := c.CombinedOutput()
-	if err != nil {
-		return string(output), fmt.Errorf("docker exec %s %q failed: %w\n%s",
-			proxyName, cmd, err, string(output))
-	}
-	return strings.TrimSpace(string(output)), nil
-}
-
-// ReconfigureSquid sends the reconfigure signal to Squid inside the proxy
-// container. This causes Squid to reload squid.conf without restarting,
-// enabling hot-reload of whitelist and ACL changes.
+// ReconfigureSquid validates squid.conf and sends SIGHUP to the supervised
+// Squid process. Squid runs with -N and does not keep pid_filename, so
+// `squid -k reconfigure` cannot find it even while the process is healthy.
+// Docker can report the container as running before its entrypoint starts
+// Squid. The polls cover that startup interval and wait until Squid confirms
+// that the new listener is active.
 func ReconfigureSquid() error {
-	_, err := ProxyExec("squid -k reconfigure")
+	const script = `set -u
+if ! squid -k parse; then
+    echo "Squid configuration validation failed." >&2
+    exit 1
+fi
+pid=""
+port="$(awk '$1 == "http_port" { print $2; exit }' /etc/squid/squid.conf)"
+ready=0
+attempt=0
+while [ "$attempt" -lt 50 ]; do
+    pid="$(pgrep squid | head -n 1)"
+    if [ -n "$pid" ] && [ -n "$port" ] && nc -z -w 1 127.0.0.1 "$port"; then
+        ready=1
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+if [ "$ready" != 1 ]; then
+    echo "The supervised Squid process did not become ready." >&2
+    exit 1
+fi
+cache_log=/var/log/squid/cache.log
+log_size=0
+if [ -f "$cache_log" ]; then
+    log_size="$(wc -c < "$cache_log")"
+fi
+if ! kill -HUP "$pid"; then
+    echo "Cannot send SIGHUP to Squid process $pid." >&2
+    exit 1
+fi
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+    if ! kill -0 "$pid"; then
+        echo "Squid process $pid stopped during configuration reload." >&2
+        exit 1
+    fi
+    current_size=0
+    if [ -f "$cache_log" ]; then
+        current_size="$(wc -c < "$cache_log")"
+    fi
+    log_offset=$((log_size + 1))
+    if [ "$current_size" -lt "$log_size" ]; then
+        log_offset=1
+    fi
+    if tail -c +"$log_offset" "$cache_log" 2>/dev/null | grep -Fq "Accepting SSL bumped HTTP Socket connections"; then
+        exit 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+echo "Squid did not confirm the configuration reload." >&2
+exit 1`
+	cmd := exec.Command("docker", "exec", ProxyContainerName(), "sh", "-c", script)
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("squid reconfigure: %w", err)
+		return fmt.Errorf("validate and signal Squid reconfigure: %w\n%s", err, string(output))
 	}
 	return nil
 }

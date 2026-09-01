@@ -360,8 +360,8 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
     - Rebuilds `cooper-base` if programming tool versions changed, if implicit language-server/support-tool versions drifted, or if the effective base Node runtime drifted from the last built `base_node_version`.
     - Rebuilds individual `cooper-cli-{toolname}` images if AI tool versions changed.
   - This is cheaper than `cooper build` — it only rebuilds images that have version mismatches.
-  - If AI tool selection has changed (tools added/removed), `cooper update` also regenerates the proxy squid.conf
-    (to add/remove the corresponding API domains) and hot-reloads it via `squid -k reconfigure`. No proxy image rebuild needed —
+  - Every `cooper update` regenerates the proxy squid.conf, validates it, and sends SIGHUP to the supervised Squid process.
+    This applies AI tool selection and domain changes even when no image version changed. No proxy image rebuild is needed because
     squid.conf is volume-mounted, not baked into the image.
   - Updates built state in `config.json` to reflect what was just built, including top-level `ContainerVersion` fields, `implicit_tools`, and `base_node_version`.
 
@@ -485,13 +485,14 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
 ## Grok Build
 
 - Grok is a fifth built-in AI CLI (`grok` / Grok Build), after OpenCode.
-- Host detection uses `grok --version`. First-run detected Grok defaults to enabled/mirror. Existing configs gain a disabled Grok row without changing other selections.
+- Host detection uses `grok --version`. First-run detected Grok defaults to enabled/mirror. Existing configs gain a disabled Grok row in latest mode without changing other selections.
 - Latest/pin use xAI's native CLI channel, never npm. Empty versions cannot be rendered into a Dockerfile.
 - Cooper mounts the effective host Grok state root read-write at `/home/user/.grok`. The source is a nonempty host `GROK_HOME`, or `~/.grok` when it is unset.
 - The root mount includes all current and future Grok auth, config, session, history, memory, skill, plugin, log, lock, and update state. Do not split its children into Cooper-owned mounts.
 - Cooper sets `GROK_HOME=/home/user/.grok`. It sets `GROK_LEADER_SOCKET=/tmp/cooper-grok-leader.sock` so a barrel cannot attach to a host Grok process through the shared root. Grok uses this override for both the client and its paired leader lock. Cooper does not install `/etc/grok/requirements.toml` or set behavior-related `GROK_*` values that override host config.
 - Host OAuth and API-key auth are both valid. A set host `XAI_API_KEY` is forwarded for the Grok session.
 - Cooper cleanup never removes or changes the host Grok state root.
+- Cooper rejects direct overlap and overlap after existing symlinks are resolved. The Grok state root cannot contain or be inside the Cooper configuration directory.
 - Default proxy hosts while Grok is enabled are exact `auth.x.ai` and `cli-chat-proxy.grok.com`. Inference paths are a positive allowlist; unknown paths fail closed before dynamic approval.
 - Shared proxy caveat: other agents' global defaults (including GitHub) remain visible to every barrel. This is not per-tool network identity.
 
@@ -693,7 +694,7 @@ Different config types are editable in different places and require different ac
 
 | Config change | Required action | Reason |
 |---|---|---|
-| Domain whitelist add/remove | Proxy hot-reload (`squid -k reconfigure`) | squid.conf is volume-mounted, not baked in |
+| Domain whitelist add/remove | Validated proxy hot reload | squid.conf is volume-mounted, not baked in |
 | AI tool enabled/disabled | `cooper update` (CLI image rebuild + proxy hot-reload) | Tool installed in image; proxy domains change |
 | Programming tool version | `cooper update` (CLI image rebuild) | Tool version baked into image |
 | Port forwarding rule add/remove | Live reload via SIGHUP | socat rules file is volume-mounted; SIGHUP triggers re-read in proxy + barrels |
@@ -809,7 +810,7 @@ Internet:
 - Reaches the internet via `cooper-external` (for whitelisted/approved requests)
 - Reachable from CLI containers as `cooper-proxy` via Docker DNS on `cooper-internal`
 - Runs socat relays for host service access: listens on `cooper-internal`, forwards to host via `cooper-external`
-- Squid config is volume-mounted (not baked in) so `cooper update` can hot-reload via `squid -k reconfigure`
+- Squid config is volume-mounted (not baked in) so `cooper update` can validate it and send SIGHUP to the supervised Squid process
 
 **CLI containers (internal network only):**
 - Connected to `cooper-internal` ONLY — physically isolated from the internet
@@ -1034,7 +1035,7 @@ cooper/
 │   │   ├── helper.go                # ACL helper utilities
 │   │   ├── monitor.go               # Request stream parsing, history (blocked/allowed)
 │   │   ├── monitor_test.go
-│   │   └── reconfigure.go           # Squid config hot-reload (squid -k reconfigure)
+│   │   └── reconfigure.go           # Validated Squid config hot reload
 │   │
 │   ├── bridge/                      # Execution bridge HTTP API
 │   │   ├── server.go                # HTTP server on 127.0.0.1 + Docker gateway IP

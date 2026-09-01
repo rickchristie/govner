@@ -807,6 +807,17 @@ func runCLI(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	var grokStateRoot string
+	if toolName == "grok" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("get home directory: %w", err)
+		}
+		if err := docker.ValidateGrokHostStateRoot(homeDir, cooperDir); err != nil {
+			return fmt.Errorf("validate Grok state root: %w", err)
+		}
+		grokStateRoot = docker.GrokHostStateRoot(homeDir)
+	}
 
 	// 5. Resolve tokens (only for the specified tool).
 	workspaceDir, err := os.Getwd()
@@ -844,11 +855,7 @@ func runCLI(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if barrelRunning && toolName == "grok" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("get home directory: %w", err)
-		}
-		hasGrokState, err := docker.BarrelHasGrokStateMount(containerName, docker.GrokHostStateRoot(homeDir))
+		hasGrokState, err := docker.BarrelHasGrokStateMount(containerName, grokStateRoot)
 		if err != nil {
 			return fmt.Errorf("inspect barrel Grok state mount: %w", err)
 		}
@@ -989,6 +996,15 @@ func runProof(cmd *cobra.Command, args []string) error {
 func runCleanup(cmd *cobra.Command, args []string) error {
 	// Load cooperDir for token cleanup. Non-fatal if it fails.
 	_, cooperDir, _ := loadConfig()
+	if cooperDir != "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("get home directory before cleanup: %w", err)
+		}
+		if err := docker.ValidateGrokHostStateRoot(homeDir, cooperDir); err != nil {
+			return fmt.Errorf("refuse Cooper cleanup: %w", err)
+		}
+	}
 
 	// 1. List and stop all barrels.
 	fmt.Fprintln(os.Stderr, "Stopping barrel containers...")
@@ -1051,7 +1067,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		answer, _ := reader.ReadString('\n')
 		answer = strings.TrimSpace(strings.ToLower(answer))
 		if answer == "y" || answer == "yes" {
-			if err := os.RemoveAll(cooperDir); err != nil {
+			if err := removeCooperConfigDir(cooperDir); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: could not remove %s: %v\n", cooperDir, err)
 			} else {
 				fmt.Fprintf(os.Stderr, "Removed %s\n", cooperDir)
@@ -1063,6 +1079,19 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintln(os.Stderr, "Cleanup complete.")
 	return nil
+}
+
+// removeCooperConfigDir keeps the host-owned Grok state root outside the
+// recursive Cooper configuration deletion boundary.
+func removeCooperConfigDir(cooperDir string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home directory before Cooper directory removal: %w", err)
+	}
+	if err := docker.ValidateGrokHostStateRoot(homeDir, cooperDir); err != nil {
+		return err
+	}
+	return os.RemoveAll(cooperDir)
 }
 
 // ---------- cooper update ----------
@@ -1157,26 +1186,20 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	if !baseChanged && len(toolsChanged) == 0 {
 		fmt.Fprintln(os.Stderr, "All tool versions match. No rebuild needed.")
-		return nil
 	}
 
-	// Only reload Squid if an AI tool changed (AI tools affect the domain whitelist).
-	needsSquidReload := len(toolsChanged) > 0
-
-	// 3. Regenerate templates.
+	// Always regenerate templates. A save-only selection or whitelist change can
+	// need a proxy reload even when no image version changed.
 	fmt.Fprintln(os.Stderr, "Regenerating templates...")
 	if err := templates.WriteAllTemplates(baseDir, cliDir, cfg, plan.targetImplicit); err != nil {
 		return fmt.Errorf("write templates: %w", err)
 	}
-
-	if needsSquidReload {
-		proxyDir := filepath.Join(cooperDir, "proxy")
-		if err := templates.WriteProxyTemplates(proxyDir, cfg); err != nil {
-			return fmt.Errorf("write proxy templates: %w", err)
-		}
+	proxyDir := filepath.Join(cooperDir, "proxy")
+	if err := templates.WriteProxyTemplates(proxyDir, cfg); err != nil {
+		return fmt.Errorf("write proxy templates: %w", err)
 	}
 
-	// 4. Stage CA cert into base build context.
+	// Stage the CA certificate into the base build context.
 	caCert := filepath.Join(cooperDir, "ca", "cooper-ca.pem")
 	if fileExists(caCert) {
 		if err := copyFile(caCert, filepath.Join(baseDir, "cooper-ca.pem")); err != nil {
@@ -1186,7 +1209,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	configPath := filepath.Join(cooperDir, "config.json")
 
-	// 5. Rebuild base if programming tools or implicit tooling changed.
+	// Rebuild the base if programming tools or implicit tooling changed.
 	if baseChanged {
 		fmt.Fprintln(os.Stderr, "Rebuilding base image...")
 		baseDockerfile := filepath.Join(baseDir, "Dockerfile")
@@ -1207,7 +1230,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 6. Rebuild tool images.
+	// Rebuild tool images.
 	// If base changed, ALL tool images need rebuilding (FROM changed).
 	// If only specific tools changed, only those images rebuild.
 	if baseChanged {
@@ -1256,14 +1279,26 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 7. Hot-reload squid if needed.
-	if needsSquidReload {
-		proxyRunning, _ := docker.IsProxyRunning()
-		if proxyRunning {
-			fmt.Fprintln(os.Stderr, "Hot-reloading Squid configuration...")
-			if err := docker.ReconfigureSquid(); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: squid reconfigure failed: %v\n", err)
+	// Persist canonical desired values even when no image needed a rebuild.
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		return fmt.Errorf("save config after update: %w", err)
+	}
+
+	// The proxy configuration is volume-mounted. Always tell a running Squid
+	// process to load the generated file so a save-only domain removal cannot
+	// leave old authorization active.
+	proxyRunning, err := docker.IsProxyRunning()
+	if err != nil {
+		return fmt.Errorf("check proxy before Squid reconfigure: %w", err)
+	}
+	if proxyRunning {
+		fmt.Fprintln(os.Stderr, "Hot-reloading Squid configuration...")
+		if err := docker.ReconfigureSquid(); err != nil {
+			stopErr := docker.StopProxy()
+			if stopErr != nil {
+				return fmt.Errorf("Squid reconfigure failed: %w; stop proxy with stale authorization: %v", err, stopErr)
 			}
+			return fmt.Errorf("Squid reconfigure failed and Cooper stopped the proxy to prevent stale authorization: %w", err)
 		}
 	}
 

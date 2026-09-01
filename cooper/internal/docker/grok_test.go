@@ -42,6 +42,71 @@ func TestGrokHostStateRootHonorsOverride(t *testing.T) {
 	}
 }
 
+func TestValidateGrokHostStateRootRejectsCooperOwnedPath(t *testing.T) {
+	cooperDir := t.TempDir()
+	stateRoot := filepath.Join(cooperDir, "tmp", "grok")
+	t.Setenv("GROK_HOME", stateRoot)
+
+	err := ValidateGrokHostStateRoot(t.TempDir(), cooperDir)
+	if err == nil || !strings.Contains(err.Error(), "overlaps Cooper-owned directory") {
+		t.Fatalf("ValidateGrokHostStateRoot() error = %v, want overlap error", err)
+	}
+}
+
+func TestValidateGrokHostStateRootRejectsSymlinkedParent(t *testing.T) {
+	cooperDir := t.TempDir()
+	ownedTarget := filepath.Join(cooperDir, "tmp")
+	if err := os.MkdirAll(ownedTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "grok-link")
+	if err := os.Symlink(ownedTarget, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GROK_HOME", filepath.Join(link, "new-state"))
+
+	err := ValidateGrokHostStateRoot(t.TempDir(), cooperDir)
+	if err == nil || !strings.Contains(err.Error(), "overlaps Cooper-owned directory") {
+		t.Fatalf("ValidateGrokHostStateRoot() error = %v, want symlink overlap error", err)
+	}
+}
+
+func TestValidateGrokHostStateRootRejectsSymlinkInsideCooperDir(t *testing.T) {
+	cooperDir := t.TempDir()
+	outsideState := t.TempDir()
+	stateLink := filepath.Join(cooperDir, "grok-link")
+	if err := os.Symlink(outsideState, stateLink); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GROK_HOME", stateLink)
+
+	err := ValidateGrokHostStateRoot(t.TempDir(), cooperDir)
+	if err == nil || !strings.Contains(err.Error(), "overlaps Cooper-owned directory") {
+		t.Fatalf("ValidateGrokHostStateRoot() error = %v, want direct overlap error", err)
+	}
+}
+
+func TestValidateGrokHostStateRootRejectsStateParentOfCooperDir(t *testing.T) {
+	stateRoot := t.TempDir()
+	cooperDir := filepath.Join(stateRoot, "cooper")
+	t.Setenv("GROK_HOME", stateRoot)
+
+	err := ValidateGrokHostStateRoot(t.TempDir(), cooperDir)
+	if err == nil || !strings.Contains(err.Error(), "overlaps Cooper-owned directory") {
+		t.Fatalf("ValidateGrokHostStateRoot() error = %v, want parent overlap error", err)
+	}
+}
+
+func TestValidateGrokHostStateRootAllowsSiblingPath(t *testing.T) {
+	parent := t.TempDir()
+	cooperDir := filepath.Join(parent, ".cooper")
+	t.Setenv("GROK_HOME", filepath.Join(parent, ".cooper-grok"))
+
+	if err := ValidateGrokHostStateRoot(t.TempDir(), cooperDir); err != nil {
+		t.Fatalf("ValidateGrokHostStateRoot() error = %v, want nil", err)
+	}
+}
+
 func TestSameHostPathResolvesSymlinks(t *testing.T) {
 	realDir := filepath.Join(t.TempDir(), "real")
 	if err := os.MkdirAll(realDir, 0o700); err != nil {

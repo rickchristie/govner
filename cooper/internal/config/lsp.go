@@ -701,7 +701,8 @@ func refreshDesiredToolVersion(tool *ToolConfig, opts DesiredVersionRefreshOptio
 		tool.HostVersion = hostVersion
 		return "", nil
 	case ModePin:
-		if strings.TrimSpace(tool.PinnedVersion) == "" {
+		tool.PinnedVersion = strings.TrimSpace(tool.PinnedVersion)
+		if tool.PinnedVersion == "" {
 			return "", fmt.Errorf("%s is enabled in pin mode but no pinned version is set", tool.Name)
 		}
 		ok, err := VersionValidator(tool.Name, tool.PinnedVersion)

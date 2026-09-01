@@ -1781,13 +1781,23 @@ fi
 # ============================================================================
 section "Phase 9: Squid Config Hot Reload"
 
-# Verify that squid can be reconfigured without restart.
-squid_reconf=$(docker exec "$PROXY_CONTAINER" squid -k reconfigure 2>&1 || true)
-squid_running=$(docker exec "$PROXY_CONTAINER" pgrep squid 2>/dev/null || true)
-if [ -n "$squid_running" ]; then
-    pass "Squid is running after reconfigure signal"
+# Verify that Squid accepts a validated reload signal and stays running. Squid
+# runs with -N, so it does not keep the PID file used by `squid -k reconfigure`.
+if squid_reconf=$(docker exec "$PROXY_CONTAINER" sh -c '
+    squid -k parse &&
+    squid_pid="$(pgrep squid | head -n 1)" &&
+    test -n "$squid_pid" &&
+    kill -HUP "$squid_pid"
+' 2>&1); then
+    sleep 1
+    squid_running=$(docker exec "$PROXY_CONTAINER" pgrep squid 2>/dev/null || true)
+    if [ -n "$squid_running" ]; then
+        pass "Squid accepted reconfigure and remains running"
+    else
+        fail "Squid process not running after successful reconfigure"
+    fi
 else
-    fail "Squid process not running after reconfigure"
+    fail "Squid reconfigure command failed: ${squid_reconf}"
 fi
 
 # NOTE: Bridge HTTP API tests are not run here because the bridge server is

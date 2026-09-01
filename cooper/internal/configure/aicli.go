@@ -35,7 +35,7 @@ func defaultAITools() []toolEntry {
 	defs := aitool.Definitions()
 	tools := make([]toolEntry, len(defs))
 	for i, def := range defs {
-		tools[i] = toolEntry{name: def.Name, displayName: def.DisplayName}
+		tools[i] = toolEntry{name: def.Name, displayName: def.DisplayName, mode: config.ModeLatest}
 	}
 	return tools
 }
@@ -70,6 +70,14 @@ func newAICLIModel(existing []config.ToolConfig) aicliModel {
 				}
 				break
 			}
+		}
+	}
+	// Off is not a selectable AI version mode. Older configs and rows added by
+	// a catalog migration can contain its zero value. Keep the tool disabled,
+	// but give it a usable version mode for a later Space toggle.
+	for i := range tools {
+		if tools[i].mode == config.ModeOff {
+			tools[i].mode = config.ModeLatest
 		}
 	}
 
@@ -120,6 +128,9 @@ func (m *aicliModel) updateList(msg tea.Msg) toolScreenResult {
 			}
 		case " ":
 			m.tools[m.cursor].enabled = !m.tools[m.cursor].enabled
+			if m.tools[m.cursor].enabled && m.tools[m.cursor].mode == config.ModeOff {
+				m.tools[m.cursor].mode = config.ModeLatest
+			}
 		case "enter":
 			m.inDetail = true
 			m.detailScrollOffset = 0

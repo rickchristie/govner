@@ -18,6 +18,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/templates"
 	"github.com/rickchristie/govner/cooper/internal/testdocker"
 	"github.com/rickchristie/govner/cooper/internal/testdriver"
 )
@@ -851,5 +852,160 @@ func TestRunUpdateNoRebuildNeeded(t *testing.T) {
 	cfgPath := filepath.Join(driver.CooperDir(), "config.json")
 	if _, err := os.Stat(cfgPath); err != nil {
 		t.Fatalf("expected config.json to remain after update: %v", err)
+	}
+}
+
+func TestRunUpdateReloadsRunningProxyAfterGrokIsDisabled(t *testing.T) {
+	driver := setupCommandDriver(t, func(cfg *config.Config) {
+		cfg.ProgrammingTools = nil
+		cfg.AITools = []config.ToolConfig{{
+			Name:             "grok",
+			Enabled:          true,
+			Mode:             config.ModePin,
+			PinnedVersion:    "1.0.4",
+			ContainerVersion: "1.0.4",
+		}}
+		cfg.BaseNodeVersion = config.DefaultBaseNodeVersion
+		cfg.MergeDefaultDomains()
+	})
+	withCommandGlobals(t, driver.CooperDir())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := driver.Start(ctx); err != nil {
+		t.Fatalf("start Cooper runtime: %v", err)
+	}
+
+	configPath := filepath.Join(driver.CooperDir(), "config.json")
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load enabled Grok config: %v", err)
+	}
+	for i := range cfg.AITools {
+		if cfg.AITools[i].Name == "grok" {
+			cfg.AITools[i].Enabled = false
+		}
+	}
+	cfg.MergeDefaultDomains()
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("save disabled Grok config: %v", err)
+	}
+	proxyDir := filepath.Join(driver.CooperDir(), "proxy")
+	if err := templates.WriteProxyTemplates(proxyDir, cfg); err != nil {
+		t.Fatalf("write save-only proxy templates: %v", err)
+	}
+	squidConfig, err := os.ReadFile(filepath.Join(proxyDir, "squid.conf"))
+	if err != nil {
+		t.Fatalf("read disabled Grok Squid config: %v", err)
+	}
+	for _, host := range []string{"auth.x.ai", "cli-chat-proxy.grok.com"} {
+		allowedRule := "acl allowed_domains dstdomain " + host
+		if strings.Contains(string(squidConfig), allowedRule) {
+			t.Fatalf("disabled Grok authorization %q remains in generated Squid config:\n%s", allowedRule, squidConfig)
+		}
+	}
+
+	_, stderr, err := captureCommandIO(t, "", func() error {
+		return runUpdate(nil, nil)
+	})
+	if err != nil {
+		t.Fatalf("runUpdate() failed: %v", err)
+	}
+	if !strings.Contains(stderr, "All tool versions match. No rebuild needed.") {
+		t.Fatalf("expected no image rebuild, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "Hot-reloading Squid configuration...") {
+		t.Fatalf("expected Squid reload after Grok disable, got %q", stderr)
+	}
+
+	target, err := testdocker.StartHTTPSTarget("auth.x.ai", "api.anthropic.com")
+	if err != nil {
+		t.Fatalf("start local Grok authorization target: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := target.Remove(); err != nil {
+			t.Errorf("remove local Grok authorization target: %v", err)
+		}
+	})
+
+	certPEM, err := exec.Command("docker", "exec", target.ContainerName, "cat", "/tmp/target.crt").Output()
+	if err != nil {
+		t.Fatalf("read local Grok target certificate: %v", err)
+	}
+	trustTarget := exec.Command(
+		"docker", "exec", "-i", "-u", "root", docker.ProxyContainerName(),
+		"sh", "-lc", "cat >/usr/local/share/ca-certificates/cooper-grok-test-target.crt && update-ca-certificates >/tmp/cooper-grok-test-target-ca.log 2>&1",
+	)
+	trustTarget.Stdin = bytes.NewReader(certPEM)
+	if output, err := trustTarget.CombinedOutput(); err != nil {
+		t.Fatalf("trust local Grok target certificate: %v\n%s", err, output)
+	}
+
+	barrel, err := driver.StartBarrel("claude")
+	if err != nil {
+		t.Fatalf("start local proxy probe barrel: %v", err)
+	}
+	proxyReady := false
+	lastReadinessResult := "no attempt"
+	readinessDeadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(readinessDeadline) {
+		output, probeErr := driver.ExecBarrel(
+			barrel.Name,
+			fmt.Sprintf("curl -k -sS --connect-timeout 2 --max-time 4 -o /dev/null -w '%%{http_code}' -x http://%s:%d https://api.anthropic.com/", docker.ProxyHost(), cfg.ProxyPort),
+		)
+		lastReadinessResult = fmt.Sprintf("output=%q err=%v", strings.TrimSpace(output), probeErr)
+		if probeErr == nil && strings.TrimSpace(output) == "200" {
+			proxyReady = true
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !proxyReady {
+		t.Fatalf("barrel could not reach the reloaded proxy and local HTTPS target: %s", lastReadinessResult)
+	}
+	type requestResult struct {
+		output string
+		err    error
+	}
+	requestDone := make(chan requestResult, 1)
+	go func() {
+		output, requestErr := driver.ExecBarrel(
+			barrel.Name,
+			fmt.Sprintf("curl -k -sS --connect-timeout 2 --max-time 10 -o /dev/null -w '%%{http_code}' -x http://%s:%d https://auth.x.ai/", docker.ProxyHost(), cfg.ProxyPort),
+		)
+		requestDone <- requestResult{output: strings.TrimSpace(output), err: requestErr}
+	}()
+
+	select {
+	case request := <-driver.App().ACLRequests():
+		driver.App().DenyRequest(request.ID)
+		if request.Domain != "auth.x.ai" {
+			t.Fatalf("reloaded proxy reviewed %q, want auth.x.ai", request.Domain)
+		}
+	case result := <-requestDone:
+		t.Fatalf("Grok target request completed without review: output=%q err=%v", result.output, result.err)
+	case <-time.After(12 * time.Second):
+		t.Fatalf("reloaded proxy did not send auth.x.ai for review; pending=%d", len(driver.App().PendingRequests()))
+	}
+}
+
+func TestRemoveCooperConfigDirPreservesOverlappingGrokState(t *testing.T) {
+	cooperDir := t.TempDir()
+	stateRoot := filepath.Join(cooperDir, "host-grok")
+	marker := filepath.Join(stateRoot, "auth.json")
+	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("host-owned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GROK_HOME", stateRoot)
+
+	err := removeCooperConfigDir(cooperDir)
+	if err == nil {
+		t.Fatal("removeCooperConfigDir() succeeded for overlapping Grok state")
+	}
+	if data, readErr := os.ReadFile(marker); readErr != nil || string(data) != "host-owned" {
+		t.Fatalf("host-owned Grok state changed: data=%q err=%v", data, readErr)
 	}
 }

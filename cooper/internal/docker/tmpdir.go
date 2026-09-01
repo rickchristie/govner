@@ -41,6 +41,9 @@ func ResetBarrelTmpRoot(cooperDir string) error {
 	if cooperDir == "" {
 		return nil
 	}
+	if err := validateGrokStateOutsideCooperDir(cooperDir); err != nil {
+		return err
+	}
 
 	return resetOwnedRoot(BarrelTmpRoot(cooperDir), "barrel tmp")
 }
@@ -53,8 +56,19 @@ func ResetBarrelSessionRoot(cooperDir string) error {
 	if cooperDir == "" {
 		return nil
 	}
+	if err := validateGrokStateOutsideCooperDir(cooperDir); err != nil {
+		return err
+	}
 
 	return resetOwnedRoot(BarrelSessionRoot(cooperDir), "barrel session")
+}
+
+func validateGrokStateOutsideCooperDir(cooperDir string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home directory before Cooper-owned cleanup: %w", err)
+	}
+	return ValidateGrokHostStateRoot(homeDir, cooperDir)
 }
 
 func resetOwnedRoot(rootPath, label string) error {

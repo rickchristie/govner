@@ -39,6 +39,7 @@ func TestBarrelSessionDir(t *testing.T) {
 }
 
 func TestResetBarrelTmpRoot_CreatesMissingDir(t *testing.T) {
+	t.Setenv("GROK_HOME", "")
 	cooperDir := t.TempDir()
 
 	if err := ResetBarrelTmpRoot(cooperDir); err != nil {
@@ -49,6 +50,7 @@ func TestResetBarrelTmpRoot_CreatesMissingDir(t *testing.T) {
 }
 
 func TestResetBarrelTmpRoot_RemovesExistingContents(t *testing.T) {
+	t.Setenv("GROK_HOME", "")
 	cooperDir := t.TempDir()
 	tmpRoot := BarrelTmpRoot(cooperDir)
 	staleFile := filepath.Join(tmpRoot, "barrel-demo", "session", "stale.txt")
@@ -67,6 +69,7 @@ func TestResetBarrelTmpRoot_RemovesExistingContents(t *testing.T) {
 }
 
 func TestResetBarrelTmpRoot_ReplacesFileWithDir(t *testing.T) {
+	t.Setenv("GROK_HOME", "")
 	cooperDir := t.TempDir()
 	tmpRoot := BarrelTmpRoot(cooperDir)
 	if err := os.WriteFile(tmpRoot, []byte("not-a-dir"), 0o644); err != nil {
@@ -87,6 +90,7 @@ func TestResetBarrelTmpRoot_EmptyCooperDirIsNoop(t *testing.T) {
 }
 
 func TestResetBarrelSessionRoot_CreatesMissingDir(t *testing.T) {
+	t.Setenv("GROK_HOME", "")
 	cooperDir := t.TempDir()
 
 	if err := ResetBarrelSessionRoot(cooperDir); err != nil {
@@ -97,6 +101,7 @@ func TestResetBarrelSessionRoot_CreatesMissingDir(t *testing.T) {
 }
 
 func TestResetBarrelSessionRoot_RemovesExistingContents(t *testing.T) {
+	t.Setenv("GROK_HOME", "")
 	cooperDir := t.TempDir()
 	sessionRoot := BarrelSessionRoot(cooperDir)
 	staleFile := filepath.Join(sessionRoot, "barrel-demo", "stale.txt")
@@ -112,6 +117,26 @@ func TestResetBarrelSessionRoot_RemovesExistingContents(t *testing.T) {
 	}
 
 	assertDirExistsAndEmpty(t, sessionRoot)
+}
+
+func TestResetBarrelTmpRootPreservesOverlappingGrokState(t *testing.T) {
+	cooperDir := t.TempDir()
+	stateRoot := filepath.Join(BarrelTmpRoot(cooperDir), "grok")
+	marker := filepath.Join(stateRoot, "auth.json")
+	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("host-owned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GROK_HOME", stateRoot)
+
+	if err := ResetBarrelTmpRoot(cooperDir); err == nil {
+		t.Fatal("ResetBarrelTmpRoot() succeeded for overlapping Grok state")
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "host-owned" {
+		t.Fatalf("host-owned Grok state changed: data=%q err=%v", data, err)
+	}
 }
 
 func assertDirExistsAndEmpty(t *testing.T, path string) {

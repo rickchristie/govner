@@ -474,9 +474,33 @@ func TestNewAICLIModel_ExistingConfig_Preserved(t *testing.T) {
 	if grokTool.enabled {
 		t.Error("existing config must gain Grok disabled")
 	}
+	if grokTool.mode != config.ModeLatest {
+		t.Errorf("migrated Grok mode = %v, want latest", grokTool.mode)
+	}
 	if grokTool.displayName != "Grok Build" {
 		t.Errorf("grok displayName = %q", grokTool.displayName)
 	}
+}
+
+func TestNewAICLIModelRepairsDisabledOffModeBeforeEnable(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	m := newAICLIModel([]config.ToolConfig{{Name: "grok", Enabled: false, Mode: config.ModeOff}})
+
+	for i := range m.tools {
+		if m.tools[i].name != "grok" {
+			continue
+		}
+		if m.tools[i].mode != config.ModeLatest {
+			t.Fatalf("repaired Grok mode = %v, want latest", m.tools[i].mode)
+		}
+		m.cursor = i
+		m.updateList(tea.KeyMsg{Type: tea.KeySpace})
+		if !m.tools[i].enabled || m.tools[i].mode != config.ModeLatest {
+			t.Fatalf("enabled Grok = %+v, want enabled latest", m.tools[i])
+		}
+		return
+	}
+	t.Fatal("Grok row not found")
 }
 
 func TestNewAICLIModel_DefaultToolList(t *testing.T) {

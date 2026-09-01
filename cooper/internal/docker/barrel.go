@@ -72,6 +72,15 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 	if err != nil {
 		return fmt.Errorf("resolve workspace path: %w", err)
 	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home directory: %w", err)
+	}
+	if toolName == "grok" {
+		if err := ValidateGrokHostStateRoot(homeDir, cooperDir); err != nil {
+			return fmt.Errorf("validate Grok state root before mount: %w", err)
+		}
+	}
 
 	// Create host directories that may not exist yet.
 	if err := ensureBarrelMountDirs(toolName, cooperDir, name, cfg); err != nil {
@@ -89,7 +98,6 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 
 	// Remove existing container with the same name.
 	_ = exec.Command("docker", "rm", "-f", name).Run()
-	homeDir, _ := os.UserHomeDir()
 
 	args := []string{
 		"run", "-d",

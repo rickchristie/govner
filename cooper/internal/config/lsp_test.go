@@ -481,6 +481,36 @@ func TestRefreshDesiredToolVersionsBestEffort(t *testing.T) {
 	}
 }
 
+func TestRefreshDesiredToolVersionsCanonicalizesPinnedVersion(t *testing.T) {
+	previousValidator := VersionValidator
+	defer func() { VersionValidator = previousValidator }()
+
+	var validatedVersion string
+	VersionValidator = func(toolName, version string) (bool, error) {
+		if toolName != "grok" {
+			t.Fatalf("validated tool = %q, want grok", toolName)
+		}
+		validatedVersion = version
+		return true, nil
+	}
+	cfg := &Config{AITools: []ToolConfig{{
+		Name:          "grok",
+		Enabled:       true,
+		Mode:          ModePin,
+		PinnedVersion: "  1.0.4  ",
+	}}}
+
+	if _, err := RefreshDesiredToolVersions(cfg, DesiredVersionRefreshOptions{}); err != nil {
+		t.Fatalf("RefreshDesiredToolVersions() error = %v", err)
+	}
+	if validatedVersion != "1.0.4" {
+		t.Fatalf("validated version = %q, want 1.0.4", validatedVersion)
+	}
+	if cfg.AITools[0].PinnedVersion != "1.0.4" {
+		t.Fatalf("stored pinned version = %q, want 1.0.4", cfg.AITools[0].PinnedVersion)
+	}
+}
+
 func TestResolveImplicitToolsWithOptions_UsesBuiltFallbackWhenLatestLookupsFail(t *testing.T) {
 	prevGopls := GoplsLatestResolver
 	prevNPMLatest := NPMPackageLatestResolver

@@ -45,6 +45,8 @@ grok login --oauth
 
 Cooper mounts the complete host Grok state root read-write at `/home/user/.grok`. The source is `GROK_HOME` when that variable is not empty. Otherwise, the source is `~/.grok`. Cooper maps the source to a stable container path and sets `GROK_HOME=/home/user/.grok` in the image.
 
+The Grok state root and the Cooper configuration directory must not contain each other. Cooper checks the direct paths and the paths after existing symlinks are resolved. It refuses an overlap before it resets runtime data, mounts Grok state, or removes Cooper configuration. This rule prevents Cooper cleanup from deleting host-owned Grok auth or sessions.
+
 One root mount includes `auth.json`, `config.toml`, managed config, requirements, sessions, conversation search indexes, history, memory, rules, skills, plugins, logs, locks, downloads, and future Grok state. Cooper does not keep a separate OAuth store or per-barrel session store. A state file that Grok adds below this root is shared without a Cooper update.
 
 The Grok leader socket is transient process transport, not durable state. Cooper sets `GROK_LEADER_SOCKET=/tmp/cooper-grok-leader.sock`. Grok uses this path for the socket and its paired lock. Each barrel has a separate `/tmp` mount. Thus, a Grok process in a barrel cannot attach to a Grok leader process on the host or in another barrel.
@@ -193,7 +195,7 @@ cooper proof
 | `cooper configure` | Interactive TUI wizard -- programming tools, AI tools, whitelist, ports, barrel env, bridge |
 | `cooper build` | Build proxy and all CLI container images. `--clean` for no-cache rebuild |
 | `cooper up` | Start proxy, bridge, and TUI control panel. Must be running for barrels to work |
-| `cooper update` | Regenerate Dockerfiles and rebuild only images with desired-vs-built drift, including implicit tools and base runtime changes |
+| `cooper update` | Regenerate templates, reload a running proxy, and rebuild only images with desired-vs-built drift |
 | `cooper cli <tool>` | Launch a barrel. `-c "cmd"` for one-shot execution. `list` to show available tools |
 | `cooper proof` | Full lifecycle integration test -- preflight through AI smoke test, then teardown |
 | `cooper cleanup` | Remove all containers, images, and networks. Optionally remove `~/.cooper` |
@@ -278,6 +280,8 @@ These are implicit defaults attached to the language tool, not separate top-leve
 
 Run `cooper update` to apply Mirror/Latest changes after host upgrades.
 When built language-server versions or the effective base Node runtime drift from the current desired versions, startup warnings and the About tab surface that mismatch before you open barrels.
+
+Every `cooper update` also regenerates the volume-mounted proxy configuration. If Squid is running, Cooper reloads it even when no image needs a rebuild. This prevents save-only tool selection and whitelist changes from leaving Squid on an older authorization set.
 
 ### AI Tools
 
@@ -423,6 +427,7 @@ This stands up the entire stack, tests SSL, proxy, tools, AI CLI connectivity, p
 
 - Missing or expired login: stop active Grok sessions and run `grok login --oauth` on the host. The next barrel uses the updated shared `auth.json`.
 - Unexpected state root: start Cooper from the same host environment as Grok. If you use `GROK_HOME`, make sure that it is set before `cooper cli grok` starts.
+- Unsafe state root: move `GROK_HOME` outside the Cooper configuration directory. Neither path can contain the other, including through a symlink.
 - A conversation is not available: use the same workspace path, and exit the first Grok process before you resume the conversation.
 - A new Grok API path is blocked: Squid denies unknown `cli-chat-proxy.grok.com` paths with 403. That is fail-closed until Cooper reviews the path.
 - Unsupported architecture: Grok images support Linux `amd64`/`x86_64` and `arm64`/`aarch64` only.

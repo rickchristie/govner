@@ -178,6 +178,14 @@ func isProcessNotFound(err error) bool {
 }
 
 func cleanupRuntimeState(cooperDir string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home directory before runtime cleanup: %w", err)
+	}
+	if err := docker.ValidateGrokHostStateRoot(homeDir, cooperDir); err != nil {
+		return fmt.Errorf("refuse runtime cleanup: %w", err)
+	}
+
 	var errs []string
 	if err := removeRuntimeTokenFiles(cooperDir); err != nil {
 		errs = append(errs, err.Error())

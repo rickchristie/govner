@@ -40,6 +40,7 @@ Read README.md of the project before starting.
 - Do not install a Grok requirements file or set behavior-related `GROK_*` values. These values override the host Grok config. Cooper can set path values that map host state or isolate process transport. Cooper's proxy enforces network policy separately.
 - Keep image-installed CLI binaries outside mounted state roots. A host state mount must not hide the image version.
 - Cooper cleanup must never delete or change a host CLI state root.
+- Reject a Grok state root that overlaps the Cooper directory in either direction. Check the direct paths and the paths after existing symlinks are resolved.
 
 ### Tests and releases
 - **Cooper test suites:** when validating `cooper`, run
