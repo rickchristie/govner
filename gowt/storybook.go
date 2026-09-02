@@ -23,9 +23,9 @@ func runStorybookModeWithProgram(run func(tea.Model) (tea.Model, error)) error {
 func newStorybookTree() *model.TestTree {
 	tree := model.NewTestTree()
 	events := []model.TestEvent{
-		{Action: "run", Package: "example.com/gowt/story/pass", Test: "TestJSON"},
-		{Action: "output", Package: "example.com/gowt/story/pass", Test: "TestJSON", Output: "{\"level\":\"info\",\"message\":\"ready\",\"request_id\":9007199254740993}\n"},
-		{Action: "pass", Package: "example.com/gowt/story/pass", Test: "TestJSON", Elapsed: 0.12},
+		{Action: "run", Package: "example.com/gowt/story/pass", Test: "TestExpectedError"},
+		{Action: "output", Package: "example.com/gowt/story/pass", Test: "TestExpectedError", Output: "{\"level\":\"error\",\"message\":\"expected service failure\",\"request_id\":9007199254740993}\n"},
+		{Action: "pass", Package: "example.com/gowt/story/pass", Test: "TestExpectedError", Elapsed: 0.12},
 		{Action: "pass", Package: "example.com/gowt/story/pass", Elapsed: 0.14},
 
 		{Action: "run", Package: "example.com/gowt/story/fail", Test: "TestCheckout/card/declined"},

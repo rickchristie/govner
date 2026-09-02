@@ -193,6 +193,80 @@ func TestRepeatedAndCorrectedTerminalEventsKeepCountsConsistent(t *testing.T) {
 	assert.Equal(t, []int{1, 0, 0, 0, 0}, statsSlice(tree))
 }
 
+func TestOutputSeverityDoesNotChangeTestStatus(t *testing.T) {
+	const pkg = "example.com/project/pkg"
+	tree := NewTestTree()
+	processEvents(t, tree,
+		TestEvent{Action: "start", Package: pkg},
+		TestEvent{Action: "run", Package: pkg, Test: "TestExpectedError"},
+		TestEvent{
+			Action:  "output",
+			Package: pkg,
+			Test:    "TestExpectedError",
+			Output:  "{\"level\":\"error\",\"message\":\"expected service failure\"}\n",
+		},
+	)
+
+	node := tree.GetNode(pkg + "/TestExpectedError")
+	require.NotNil(t, node)
+	assert.Equal(t, StatusRunning, node.Status)
+	assert.Zero(t, tree.FailedCount)
+
+	processEvents(t, tree,
+		TestEvent{Action: "pass", Package: pkg, Test: "TestExpectedError"},
+		TestEvent{Action: "pass", Package: pkg},
+	)
+
+	assert.Equal(t, StatusPassed, node.Status)
+	assert.Equal(t, StatusPassed, tree.GetNode(pkg).Status)
+	assert.Equal(t, []int{1, 0, 0, 0, 0}, statsSlice(tree))
+}
+
+func TestCorrectedChildResultClearsAggregateFailure(t *testing.T) {
+	const pkg = "example.com/project/pkg"
+	tree := NewTestTree()
+	processEvents(t, tree,
+		TestEvent{Action: "start", Package: pkg},
+		TestEvent{Action: "run", Package: pkg, Test: "TestParent"},
+		TestEvent{Action: "run", Package: pkg, Test: "TestParent/child"},
+		TestEvent{Action: "fail", Package: pkg, Test: "TestParent/child"},
+	)
+
+	parent := tree.GetNode(pkg + "/TestParent")
+	require.NotNil(t, parent)
+	assert.Equal(t, StatusFailed, parent.Status)
+
+	tree.ProcessEvent(TestEvent{Action: "pass", Package: pkg, Test: "TestParent/child"})
+	assert.Equal(t, StatusRunning, parent.Status)
+	assert.Equal(t, StatusRunning, tree.GetNode(pkg).Status)
+
+	processEvents(t, tree,
+		TestEvent{Action: "pass", Package: pkg, Test: "TestParent"},
+		TestEvent{Action: "pass", Package: pkg},
+	)
+
+	assert.Equal(t, StatusPassed, parent.Status)
+	assert.Equal(t, StatusPassed, tree.GetNode(pkg).Status)
+	assert.Equal(t, []int{2, 0, 0, 0, 0}, statsSlice(tree))
+}
+
+func TestParentFailureCountsItsOwnTerminalEvent(t *testing.T) {
+	const pkg = "example.com/project/pkg"
+	tree := NewTestTree()
+	processEvents(t, tree,
+		TestEvent{Action: "start", Package: pkg},
+		TestEvent{Action: "run", Package: pkg, Test: "TestParent"},
+		TestEvent{Action: "run", Package: pkg, Test: "TestParent/child"},
+		TestEvent{Action: "fail", Package: pkg, Test: "TestParent/child"},
+		TestEvent{Action: "fail", Package: pkg, Test: "TestParent"},
+		TestEvent{Action: "fail", Package: pkg},
+	)
+
+	assert.Equal(t, StatusFailed, tree.GetNode(pkg).Status)
+	assert.Equal(t, StatusFailed, tree.GetNode(pkg+"/TestParent").Status)
+	assert.Equal(t, []int{0, 2, 0, 0, 0}, statsSlice(tree))
+}
+
 func TestPackageEventLifecycle(t *testing.T) {
 	tests := []struct {
 		action        string

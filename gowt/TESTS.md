@@ -56,9 +56,11 @@ is exercised through the bounded-drain and build-constraint tests.
 ## Manual terminal QA
 
 `gowt --storybook` opens deterministic fixtures for passed, failed, skipped,
-cached, fuzz, structured-log, Unicode, long-line, blank-line, and build-error
-states. Use it to inspect color, resize behavior, navigation, search, modals,
-and Processed/Raw switching in a real terminal without running another project.
+cached, fuzz, Unicode, long-line, blank-line, and build-error states. It also
+includes a passing test with an error-level structured log. This state verifies
+that log severity does not change the test result. Use the storybook to inspect
+color, resize behavior, navigation, search, modals, and Processed/Raw switching
+in a real terminal without running another project.
 
 The fixture is built by `newStorybookTree` and is tested like other startup
 paths, so manual screenshots always begin from the same state.
@@ -101,7 +103,9 @@ exercise orchestration without opening a TTY.
 - `model_test.go`
   - package, test, subtest, fuzz, benchmark, example, and build lifecycles
   - benchmark `bench` terminals and package-terminal reconciliation
-  - run/pause/continue/pass/fail/skip transitions and aggregate counts
+  - run/pause/continue/pass/fail/skip transitions, corrected results, and
+    aggregate counts
+  - the rule that only test2json result actions, not log severity, set failure
   - node indexing, depth, parents, sorting, flattening, and cached propagation
   - split output reassembly, blank lines, final partial lines, and per-node
     buffers

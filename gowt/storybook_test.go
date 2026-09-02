@@ -17,11 +17,13 @@ func TestStorybookTreeContainsManualQAStates(t *testing.T) {
 	assert.Greater(t, tree.SkippedCount, 0)
 	assert.Greater(t, tree.CachedCount, 0)
 	assert.Equal(t, model.StatusFailed, tree.GetNode("example.com/gowt/story/build").Status)
+	assert.Equal(t, model.StatusPassed, tree.GetNode("example.com/gowt/story/pass/TestExpectedError").Status)
 	assert.NotNil(t, tree.GetNode("example.com/gowt/story/skip/FuzzParser/seed#0"))
 	allLogs := tree.ProcessedLogBuffer.Slice(model.BufferRef{
 		Start: 0, End: tree.ProcessedLogBuffer.Len(),
 	})
 	assert.Contains(t, allLogs, "9007199254740993")
+	assert.Contains(t, allLogs, "expected service failure")
 }
 
 func TestRunStorybookModeUsesInjectedTerminalBoundary(t *testing.T) {

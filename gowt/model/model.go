@@ -37,7 +37,7 @@ type TestNode struct {
 	Name         string      // Short name (e.g., "TestFoo" or "subtest1")
 	FullPath     string      // Full path (e.g., "pkg/foo/TestFoo/subtest1")
 	Package      string      // Package path
-	Status       TestStatus  // Current status
+	Status       TestStatus  // Aggregate status shown in the tree
 	Elapsed      float64     // Duration in seconds
 	RawLog       *NodeLog    // Raw log output refs (points to shared RawLogBuffer)
 	ProcessedLog *NodeLog    // Processed log refs (filtered & styled, points to ProcessedLogBuffer)
@@ -47,6 +47,11 @@ type TestNode struct {
 	Cached       bool        // Whether this result is from cache
 	Depth        int         // Cached depth in tree (0 for packages, 1+ for tests/subtests)
 	NameWidth    int         // Cached runewidth of Name (0 = not computed yet)
+
+	// eventStatus is the status from this node's own test2json event. Status can
+	// also become failed because a child failed. Keep these values separate so a
+	// child result cannot hide this node's running state or corrupt its counters.
+	eventStatus TestStatus
 
 	// Aggregated counts (includes self + all descendants)
 	PassedCount  int // Count of passed tests
@@ -118,14 +123,13 @@ func (t *TestTree) ProcessEvent(event TestEvent) bool {
 		return false // Log-only, no visual change
 	case "build-fail":
 		t.flushOutput(pkgNode)
-		prevStatus := pkgNode.Status
-		pkgNode.Status = StatusFailed
-		// Decrement running if was running, increment failed
-		if prevStatus == StatusRunning {
-			t.propagateCountDelta(pkgNode, -1, "running")
+		if pkgNode.eventStatus != StatusFailed {
+			// A build failure has no test node, but it must still appear in the
+			// global failure total. Repeated build-fail events are one result.
+			t.propagateCountDelta(pkgNode, 1, "failed")
 		}
-		t.propagateCountDelta(pkgNode, 1, "failed")
-		t.propagateStatus(pkgNode)
+		pkgNode.eventStatus = StatusFailed
+		t.refreshStatus(pkgNode)
 		return true // Status change
 	}
 
@@ -154,14 +158,15 @@ func (t *TestTree) getOrCreatePackage(pkgPath string) *TestNode {
 
 	shortName := shortPackageName(pkgPath)
 	node := &TestNode{
-		Name:      shortName,
-		NameWidth: runewidth.StringWidth(shortName),
-		FullPath:  pkgPath,
-		Package:   pkgPath,
-		Status:    StatusPending,
-		Expanded:  false, // Packages start collapsed for stable view during test runs
-		Children:  make([]*TestNode, 0),
-		Depth:     0, // Package nodes are at root level
+		Name:        shortName,
+		NameWidth:   runewidth.StringWidth(shortName),
+		FullPath:    pkgPath,
+		Package:     pkgPath,
+		Status:      StatusPending,
+		eventStatus: StatusPending,
+		Expanded:    false, // Packages start collapsed for stable view during test runs
+		Children:    make([]*TestNode, 0),
+		Depth:       0, // Package nodes are at root level
 	}
 	t.Packages[pkgPath] = node
 	t.NodeIndex[pkgPath] = node // Add to index for O(1) lookup
@@ -184,15 +189,16 @@ func (t *TestTree) getOrCreateTest(pkgNode *TestNode, testName string) *TestNode
 		child := findChild(current, part)
 		if child == nil {
 			child = &TestNode{
-				Name:      part,
-				NameWidth: runewidth.StringWidth(part),
-				FullPath:  fullPath,
-				Package:   pkgNode.Package,
-				Status:    StatusPending,
-				Parent:    current,
-				Children:  make([]*TestNode, 0),
-				Expanded:  false,
-				Depth:     i + 1, // Depth relative to package (TestFoo=1, TestFoo/sub=2, etc.)
+				Name:        part,
+				NameWidth:   runewidth.StringWidth(part),
+				FullPath:    fullPath,
+				Package:     pkgNode.Package,
+				Status:      StatusPending,
+				eventStatus: StatusPending,
+				Parent:      current,
+				Children:    make([]*TestNode, 0),
+				Expanded:    false,
+				Depth:       i + 1, // Depth relative to package (TestFoo=1, TestFoo/sub=2, etc.)
 			}
 			current.Children = append(current.Children, child)
 			t.NodeIndex[fullPath] = child // Add to index for O(1) lookup
@@ -216,24 +222,28 @@ func findChild(parent *TestNode, name string) *TestNode {
 func (t *TestTree) handlePackageEvent(node *TestNode, event TestEvent) bool {
 	switch event.Action {
 	case "start":
-		node.Status = StatusRunning
+		node.eventStatus = StatusRunning
+		t.refreshStatus(node)
 		return true
 	case "pass":
 		t.flushOutput(node)
 		t.finalizeUnfinishedTests(node, StatusPassed)
-		node.Status = StatusPassed
+		node.eventStatus = StatusPassed
 		node.Elapsed = event.Elapsed
+		t.refreshStatus(node)
 		return true
 	case "fail":
 		t.flushOutput(node)
 		t.finalizeUnfinishedTests(node, StatusFailed)
-		node.Status = StatusFailed
+		node.eventStatus = StatusFailed
 		node.Elapsed = event.Elapsed
+		t.refreshStatus(node)
 		return true
 	case "skip":
 		t.flushOutput(node)
 		t.finalizeUnfinishedTests(node, StatusSkipped)
-		node.Status = StatusSkipped
+		node.eventStatus = StatusSkipped
+		t.refreshStatus(node)
 		return true
 	case "output":
 		t.appendOutput(node, event.Output)
@@ -255,11 +265,11 @@ func (t *TestTree) handlePackageEvent(node *TestNode, event TestEvent) bool {
 // pending or running state after it arrives.
 func (t *TestTree) finalizeUnfinishedTests(node *TestNode, status TestStatus) {
 	for _, child := range node.Children {
-		if child.Status == StatusPending || child.Status == StatusRunning {
+		t.finalizeUnfinishedTests(child, status)
+		if child.eventStatus == StatusPending || child.eventStatus == StatusRunning {
 			t.flushOutput(child)
 			t.finishTest(child, status, child.Elapsed)
 		}
-		t.finalizeUnfinishedTests(child, status)
 	}
 }
 
@@ -311,30 +321,13 @@ func (t *TestTree) ComputeAllStats() (passed, failed, skipped, running, cached i
 }
 
 func (t *TestTree) handleTestEvent(node *TestNode, event TestEvent) bool {
-	prevStatus := node.Status
-
 	switch event.Action {
 	case "run":
-		node.Status = StatusRunning
-		// Pending -> Running: increment running count
-		if prevStatus != StatusRunning {
-			t.propagateCountDelta(node, 1, "running")
-		}
-		return true
+		return t.transitionTest(node, StatusRunning)
 	case "pause":
-		node.Status = StatusPending
-		// Running -> Pending: decrement running count
-		if prevStatus == StatusRunning {
-			t.propagateCountDelta(node, -1, "running")
-		}
-		return true
+		return t.transitionTest(node, StatusPending)
 	case "cont":
-		node.Status = StatusRunning
-		// Pending -> Running: increment running count
-		if prevStatus != StatusRunning {
-			t.propagateCountDelta(node, 1, "running")
-		}
-		return true
+		return t.transitionTest(node, StatusRunning)
 	case "pass", "bench":
 		t.flushOutput(node)
 		return t.finishTest(node, StatusPassed, event.Elapsed)
@@ -356,36 +349,39 @@ func (t *TestTree) handleTestEvent(node *TestNode, event TestEvent) bool {
 // package-level reconciliation path can race a late explicit record in loaded
 // or synthetic streams, so counters must remain internally consistent.
 func (t *TestTree) finishTest(node *TestNode, status TestStatus, elapsed float64) bool {
-	previous := node.Status
-	if previous == status {
-		changed := node.Elapsed != elapsed
-		node.Elapsed = elapsed
-		return changed
-	}
-
-	switch previous {
-	case StatusRunning:
-		t.propagateCountDelta(node, -1, "running")
-	case StatusPassed:
-		t.propagateCountDelta(node, -1, "passed")
-	case StatusFailed:
-		t.propagateCountDelta(node, -1, "failed")
-	case StatusSkipped:
-		t.propagateCountDelta(node, -1, "skipped")
-	}
-
-	node.Status = status
+	changed := t.transitionTest(node, status)
+	elapsedChanged := node.Elapsed != elapsed
 	node.Elapsed = elapsed
+	return changed || elapsedChanged
+}
+
+// transitionTest applies a direct test2json state transition. Status is an
+// aggregate presentation value, so only eventStatus can identify the counter
+// that belongs to this node.
+func (t *TestTree) transitionTest(node *TestNode, status TestStatus) bool {
+	previous := node.eventStatus
+	if previous == status {
+		return false
+	}
+
+	t.changeTestCount(node, previous, -1)
+	node.eventStatus = status
+	t.changeTestCount(node, status, 1)
+	t.refreshStatus(node)
+	return true
+}
+
+func (t *TestTree) changeTestCount(node *TestNode, status TestStatus, delta int) {
 	switch status {
 	case StatusPassed:
-		t.propagateCountDelta(node, 1, "passed")
+		t.propagateCountDelta(node, delta, "passed")
 	case StatusFailed:
-		t.propagateCountDelta(node, 1, "failed")
+		t.propagateCountDelta(node, delta, "failed")
 	case StatusSkipped:
-		t.propagateCountDelta(node, 1, "skipped")
+		t.propagateCountDelta(node, delta, "skipped")
+	case StatusRunning:
+		t.propagateCountDelta(node, delta, "running")
 	}
-	t.propagateStatus(node)
-	return true
 }
 
 // Styles for processed log output
@@ -672,32 +668,52 @@ func (t *TestTree) propagateCountDelta(node *TestNode, delta int, field string) 
 	}
 }
 
-// propagateStatus updates parent status based on children
-// Only propagates "bad" statuses (Failed, Running) upward - parents get Passed
-// status when they receive their own "pass" event, not from children
-func (t *TestTree) propagateStatus(node *TestNode) {
-	parent := node.Parent
-	for parent != nil {
-		// Find worst status among children
-		worstStatus := StatusPassed
-		for _, child := range parent.Children {
-			switch child.Status {
-			case StatusFailed:
-				worstStatus = StatusFailed
-			case StatusRunning:
-				if worstStatus != StatusFailed {
-					worstStatus = StatusRunning
-				}
-			}
-		}
-		// Only propagate "bad" statuses (Failed, Running)
-		// Don't set parent to Passed - that happens when parent's own "pass" event arrives
-		// This preserves parent's Running status so count decrements work correctly
-		if worstStatus == StatusFailed || worstStatus == StatusRunning {
-			parent.Status = worstStatus
-		}
-		parent = parent.Parent
+// refreshStatus recomputes aggregate presentation status from the changed node
+// through the package root. Recalculation is necessary because a corrected
+// child result must clear a failure that the child previously propagated.
+func (t *TestTree) refreshStatus(node *TestNode) {
+	for current := node; current != nil; current = current.Parent {
+		current.Status = aggregateStatus(current)
 	}
+}
+
+func aggregateStatus(node *TestNode) TestStatus {
+	hasPassedChild := false
+	hasSkippedChild := false
+	hasRunningChild := false
+
+	for _, child := range node.Children {
+		switch child.Status {
+		case StatusFailed:
+			return StatusFailed
+		case StatusRunning:
+			hasRunningChild = true
+		case StatusPassed:
+			hasPassedChild = true
+		case StatusSkipped:
+			hasSkippedChild = true
+		}
+	}
+
+	if node.eventStatus == StatusFailed {
+		return StatusFailed
+	}
+	if node.eventStatus == StatusRunning || hasRunningChild {
+		return StatusRunning
+	}
+	if node.eventStatus == StatusPassed {
+		return StatusPassed
+	}
+	if node.eventStatus == StatusSkipped {
+		return StatusSkipped
+	}
+	if hasPassedChild {
+		return StatusPassed
+	}
+	if hasSkippedChild {
+		return StatusSkipped
+	}
+	return StatusPending
 }
 
 // GetSortedPackages returns packages sorted by name
