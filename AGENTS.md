@@ -30,11 +30,16 @@ Read README.md of the project before starting.
 ## Cooper
 
 ### Design
-- Cooper mounts **ALL** CLI agent directories of the host (e.g. `~/.grok`, `~/.codex`) to Docker.
-  Goal is to sync auth, sessions, all configs, conversation history, auto-memory, everything from the host.
-  Goal is user can start session in host, exit and continue that conversation in cooper, and vice-versa.
-  All settings on the host side gets applied directly to cooper.
+- Cooper supports the complete host state directories of all built-in CLI agents (e.g. `~/.grok`, `~/.codex`).
+  Each `cooper cli [agent]` or `cooper vm [agent]` session mounts only the state directories of the selected agent.
+  Mount the complete selected state read-write. This includes auth, sessions, all configs, conversation history, auto-memory, and future state.
+  A user must be able to start a session on the host, exit it, and continue it in Cooper, or do the reverse.
+  All host settings for the selected agent must apply directly in Cooper.
 - Treat each CLI state root as host-owned data. Mount it read-write. Do not copy it or split its children into Cooper-owned state.
+- `cooper cli [agent]` and `cooper vm [agent]` must give the same user experience. They must use the same workspace path, selected-agent mounts, tool versions, settings, environment, proxy policy, clipboard behavior, port forwarding, and other Cooper features.
+- The execution boundary is the only functional difference. `cooper cli` uses a Docker barrel. `cooper vm` uses a virtual machine with its own Docker daemon, so the agent can do Docker development in allow-all mode. Never mount the host Docker or container-runtime socket in the VM.
+- Use `cooper cli` for most work because it starts faster and uses fewer resources. Use `cooper vm` when the work needs Docker or a stronger kernel boundary.
+- A Cooper VM must have no direct route to the internet or the host LAN. Enforce this rule outside the guest so guest root cannot change it. All guest processes, the guest Docker daemon, Docker builds, guest containers, and a nested Cooper proxy must use the host Cooper proxy.
 - For Grok, mount the effective host `GROK_HOME` as one root. Use `~/.grok` when `GROK_HOME` is empty. Map it to `/home/user/.grok` in the barrel.
 - Keep transient Grok leader transport in the per-barrel `/tmp` mount. A barrel must not attach to a Grok process on the host through the shared state root.
 - Do not install a Grok requirements file or set behavior-related `GROK_*` values. These values override the host Grok config. Cooper can set path values that map host state or isolate process transport. Cooper's proxy enforces network policy separately.
