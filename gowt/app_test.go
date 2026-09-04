@@ -353,6 +353,18 @@ func TestAppUpdateStoresStreamAndProcessesCurrentEvents(t *testing.T) {
 	assert.Nil(t, app.tree.GetNode("pkg/TestStale"))
 }
 
+func TestAppShowsNodeCreatedByOutputBeforeRunEvent(t *testing.T) {
+	app := NewLiveApp(nil, &fakeTestRunner{})
+	updated, _ := app.Update(TestEventMsg{Event: model.TestEvent{
+		Action: "output", Package: "pkg", Test: "TestOutputFirst", Output: "early log\n",
+	}})
+	app = appFromModel(t, updated)
+
+	require.NotNil(t, app.tree.GetNode("pkg/TestOutputFirst"))
+	assert.NotContains(t, app.View(), "No tests to display")
+	assert.Contains(t, app.View(), "pkg")
+}
+
 func TestAppRejectsStaleStartedStream(t *testing.T) {
 	current := newFakeEventStream()
 	stale := newFakeEventStream()
@@ -512,6 +524,26 @@ func TestAppUpdateParsesStderrByPackage(t *testing.T) {
 	app = appFromModel(t, updated)
 	assert.Nil(t, app.tree.GetNode("stale/pkg"))
 	assert.Equal(t, "example.com/project/pkg", app.stderrPkg)
+}
+
+func TestAppStderrContentDoesNotFailSuccessfulRun(t *testing.T) {
+	app := NewLiveApp(nil, &fakeTestRunner{})
+	updated, _ := app.Update(StderrMsg{
+		Line:   "{\"level\":\"error\",\"message\":\"expected\"}\n",
+		RunGen: 0,
+	})
+	app = appFromModel(t, updated)
+
+	updated, _ = app.Update(TestDoneMsg{ExitCode: 0, RunGen: 0})
+	app = appFromModel(t, updated)
+
+	node := app.tree.GetNode("go test")
+	require.NotNil(t, node)
+	assert.Equal(t, model.StatusPending, node.Status)
+	assert.Zero(t, app.tree.FailedCount)
+	assert.Zero(t, app.exitCode)
+	assert.Contains(t, app.View(), "Done")
+	assert.NotContains(t, app.View(), "Failed")
 }
 
 func TestCacheCleanedMessagesResetAndRestart(t *testing.T) {

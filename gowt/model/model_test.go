@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -68,11 +69,11 @@ func TestProcessEventSkipsEventsWithoutPackageIdentity(t *testing.T) {
 func TestProcessEventUsesImportPathForBuildEvents(t *testing.T) {
 	tree := NewTestTree()
 
-	assert.False(t, tree.ProcessEvent(TestEvent{
+	assert.True(t, tree.ProcessEvent(TestEvent{
 		Action:     "build-output",
 		ImportPath: "example.com/project/broken",
 		Output:     "broken.go:4: undefined: missing\n",
-	}))
+	}), "the first build output creates a visible package node")
 	assert.True(t, tree.ProcessEvent(TestEvent{
 		Action:     "build-fail",
 		ImportPath: "example.com/project/broken",
@@ -199,13 +200,18 @@ func TestOutputSeverityDoesNotChangeTestStatus(t *testing.T) {
 	processEvents(t, tree,
 		TestEvent{Action: "start", Package: pkg},
 		TestEvent{Action: "run", Package: pkg, Test: "TestExpectedError"},
-		TestEvent{
-			Action:  "output",
-			Package: pkg,
-			Test:    "TestExpectedError",
-			Output:  "{\"level\":\"error\",\"message\":\"expected service failure\"}\n",
-		},
 	)
+	for _, output := range []string{
+		"{\"level\":\"error\",\"message\":\"expected service failure\"}\n",
+		"--- FAIL: expected text from a fixture (0.00s)\n",
+		"FAIL\n",
+		"panic: expected and recovered\n",
+		"fatal error text used by a parser test\n",
+	} {
+		assert.False(t, tree.ProcessEvent(TestEvent{
+			Action: "output", Package: pkg, Test: "TestExpectedError", Output: output,
+		}))
+	}
 
 	node := tree.GetNode(pkg + "/TestExpectedError")
 	require.NotNil(t, node)
@@ -267,6 +273,124 @@ func TestParentFailureCountsItsOwnTerminalEvent(t *testing.T) {
 	assert.Equal(t, []int{0, 2, 0, 0, 0}, statsSlice(tree))
 }
 
+func TestResultCorrectionsKeepAllTreeAggregatesConsistent(t *testing.T) {
+	tree := NewTestTree()
+	packages := []string{"example.com/project/one", "example.com/project/two"}
+	tests := []string{"TestParent/first", "TestParent/second", "TestStandalone", "BenchmarkLookup"}
+	testActions := []string{"run", "pause", "cont", "pass", "fail", "skip", "bench", "output"}
+	packageActions := []string{"start", "pass", "fail", "skip"}
+
+	for step := 0; step < 400; step++ {
+		pkg := packages[step%len(packages)]
+		var event TestEvent
+		if step%11 == 0 {
+			event = TestEvent{Action: packageActions[(step/11)%len(packageActions)], Package: pkg}
+		} else {
+			event = TestEvent{
+				Action:  testActions[step%len(testActions)],
+				Package: pkg,
+				Test:    tests[(step/3)%len(tests)],
+				Output:  "{\"level\":\"error\",\"message\":\"expected\"}\n",
+			}
+		}
+		tree.ProcessEvent(event)
+		assertTreeAggregates(t, tree, step)
+	}
+}
+
+type expectedTreeState struct {
+	passed  int
+	failed  int
+	skipped int
+	running int
+	total   int
+	status  TestStatus
+}
+
+func assertTreeAggregates(t *testing.T, tree *TestTree, step int) {
+	t.Helper()
+	var global expectedTreeState
+	for _, pkg := range tree.Packages {
+		expected := expectedNodeState(t, pkg, step)
+		global.passed += expected.passed
+		global.failed += expected.failed
+		global.skipped += expected.skipped
+		global.running += expected.running
+		global.total += expected.total
+	}
+	message := fmt.Sprintf("after event %d", step)
+	assert.Equal(t, global.passed, tree.PassedCount, message)
+	assert.Equal(t, global.failed, tree.FailedCount, message)
+	assert.Equal(t, global.skipped, tree.SkippedCount, message)
+	assert.Equal(t, global.running, tree.RunningCount, message)
+	assert.Equal(t, global.total, tree.TotalCount, message)
+}
+
+func expectedNodeState(t *testing.T, node *TestNode, step int) expectedTreeState {
+	t.Helper()
+	state := expectedTreeState{status: node.eventStatus}
+	if node.Parent != nil {
+		state.total = 1
+		switch node.eventStatus {
+		case StatusPassed:
+			state.passed = 1
+		case StatusFailed:
+			state.failed = 1
+		case StatusSkipped:
+			state.skipped = 1
+		case StatusRunning:
+			state.running = 1
+		}
+	}
+
+	hasPassedChild := false
+	hasSkippedChild := false
+	hasRunningChild := false
+	for _, child := range node.Children {
+		childState := expectedNodeState(t, child, step)
+		state.passed += childState.passed
+		state.failed += childState.failed
+		state.skipped += childState.skipped
+		state.running += childState.running
+		state.total += childState.total
+		switch childState.status {
+		case StatusFailed:
+			state.status = StatusFailed
+		case StatusRunning:
+			hasRunningChild = true
+		case StatusPassed:
+			hasPassedChild = true
+		case StatusSkipped:
+			hasSkippedChild = true
+		}
+	}
+	if state.status != StatusFailed {
+		switch {
+		case node.eventStatus == StatusRunning || hasRunningChild:
+			state.status = StatusRunning
+		case node.eventStatus == StatusPassed:
+			state.status = StatusPassed
+		case node.eventStatus == StatusSkipped:
+			state.status = StatusSkipped
+		case hasPassedChild:
+			state.status = StatusPassed
+		case hasSkippedChild:
+			state.status = StatusSkipped
+		default:
+			state.status = StatusPending
+		}
+	}
+
+	message := fmt.Sprintf("node %s after event %d", node.FullPath, step)
+	assert.Equal(t, state.status, node.Status, message)
+	assert.Equal(t, state.passed, node.PassedCount, message)
+	assert.Equal(t, state.failed, node.FailedCount, message)
+	assert.Equal(t, state.skipped, node.SkippedCount, message)
+	assert.Equal(t, state.running, node.RunningCount, message)
+	assert.Equal(t, state.total, node.TotalCount, message)
+	return state
+}
+
 func TestPackageEventLifecycle(t *testing.T) {
 	tests := []struct {
 		action        string
@@ -283,10 +407,11 @@ func TestPackageEventLifecycle(t *testing.T) {
 		{
 			action:        "output",
 			wantStatus:    StatusPending,
+			wantChanged:   true,
 			output:        "package output\n",
 			wantRawOutput: "package output\n",
 		},
-		{action: "unknown", wantStatus: StatusPending},
+		{action: "unknown", wantStatus: StatusPending, wantChanged: true},
 	}
 
 	for _, tt := range tests {
@@ -451,9 +576,9 @@ func TestOutputIsReassembledAndSharedWithAncestors(t *testing.T) {
 	pkg := "example.com/project/pkg"
 	testName := "TestParent/child"
 
-	assert.False(t, tree.ProcessEvent(TestEvent{
+	assert.True(t, tree.ProcessEvent(TestEvent{
 		Action: "output", Package: pkg, Test: testName, Output: "split ",
-	}))
+	}), "the first output event creates visible package and test nodes")
 	leaf := tree.GetNode(pkg + "/" + testName)
 	require.NotNil(t, leaf)
 	assert.Empty(t, rawOutput(t, tree, leaf))
@@ -618,6 +743,61 @@ func TestCachedOutputMarksEntirePackageOnce(t *testing.T) {
 		Output:  "ok  \texample.com/project/pkg\t(cached)\n",
 	}))
 	assert.Equal(t, total, tree.CachedCount, "the cached count must be idempotent")
+}
+
+func TestCachedOutputDoesNotSetResultStatus(t *testing.T) {
+	pkg := "example.com/project/pkg"
+	tests := []struct {
+		name        string
+		events      []TestEvent
+		wantStatus  TestStatus
+		wantFailed  int
+		wantRunning int
+	}{
+		{
+			name: "running",
+			events: []TestEvent{
+				{Action: "start", Package: pkg},
+				{Action: "run", Package: pkg, Test: "TestResult"},
+			},
+			wantStatus:  StatusRunning,
+			wantRunning: 1,
+		},
+		{
+			name: "failed",
+			events: []TestEvent{
+				{Action: "run", Package: pkg, Test: "TestResult"},
+				{Action: "fail", Package: pkg, Test: "TestResult"},
+			},
+			wantStatus: StatusFailed,
+			wantFailed: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tree := NewTestTree()
+			processEvents(t, tree, tt.events...)
+
+			assert.True(t, tree.ProcessEvent(TestEvent{
+				Action:  "output",
+				Package: pkg,
+				Output:  "ok  \texample.com/project/pkg\t(cached)\n",
+			}))
+
+			pkgNode := tree.GetNode(pkg)
+			testNode := tree.GetNode(pkg + "/TestResult")
+			require.NotNil(t, pkgNode)
+			require.NotNil(t, testNode)
+			assert.Equal(t, tt.wantStatus, pkgNode.Status)
+			assert.Equal(t, tt.wantStatus, testNode.Status)
+			assert.Zero(t, tree.PassedCount)
+			assert.Equal(t, tt.wantFailed, tree.FailedCount)
+			assert.Equal(t, tt.wantRunning, tree.RunningCount)
+			assert.True(t, pkgNode.Cached)
+			assert.True(t, testNode.Cached)
+		})
+	}
 }
 
 func TestCachedOutputDetectionIsConservativeForNormalLogs(t *testing.T) {

@@ -36,6 +36,10 @@ Then reload your shell or run `source ~/.bashrc`.
 
 `Gowt` wraps `go test` and provides a live TUI for viewing test results. You can pass any `go test` flags and specify packages as usual: 
 
+Gowt always enables `-json` because the TUI reads the structured event stream.
+User-supplied command-level `-json` options cannot disable this requirement.
+Arguments after `-args` remain unchanged and belong to the test binary.
+
 ```bash
 # Run all tests in current directory
 gowt ./...

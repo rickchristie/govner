@@ -393,6 +393,18 @@ func TestGoTestCommandArgsKeepsChangeDirectoryFirst(t *testing.T) {
 	))
 }
 
+func TestGoTestCommandArgsCannotDisableRequiredJSON(t *testing.T) {
+	assert.Equal(t, []string{
+		"test", "-json", "./...",
+	}, buildGoTestCommandArgs([]string{"-json=false", "--json", "./..."}))
+	assert.Equal(t, []string{
+		"test", "-json", "-exec", "-json=false", "./...",
+	}, buildGoTestCommandArgs([]string{"-exec", "-json=false", "./...", "--json=false"}))
+	assert.Equal(t, []string{
+		"test", "-json", "./...", "-args", "-json=false",
+	}, buildGoTestCommandArgs([]string{"./...", "-args", "-json=false"}))
+}
+
 func TestGoTestValueFlagTableCoversAcceptedSplitFlags(t *testing.T) {
 	// Keep this list aligned with `go help build`, `go help test`,
 	// `go help testflag`, and the unstable debug flags registered by

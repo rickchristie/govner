@@ -53,6 +53,9 @@ overall: root 87.4%, model 96.9%, utility 96.8%, and view 95.4%. The aggregate
 shift reflects the new platform-specific cleanup paths; their portable contract
 is exercised through the bounded-drain and build-constraint tests.
 
+After the 2026-09-04 event-boundary audit, the baseline is 93.9% overall: root
+89.0%, model 97.7%, utility 96.8%, and view 95.4%.
+
 ## Manual terminal QA
 
 `gowt --storybook` opens deterministic fixtures for passed, failed, skipped,
@@ -71,6 +74,7 @@ paths, so manual screenshots always begin from the same state.
 
 - `runner_test.go`
   - original `go test` flag forwarding and single-rerun flag preservation
+  - required JSON output cannot be disabled by a forwarded `-json=false`
   - complete split-value/boolean flag classification and double-dash spellings
   - escaped test/subtest regexes and benchmark selection
   - JSON/stderr streaming, malformed JSON diagnostics, partial final records,
@@ -82,13 +86,15 @@ paths, so manual screenshots always begin from the same state.
   - loaded/live constructors and typed asynchronous messages
   - generation filtering for starts, events, stderr, cache completion, and done
   - final event draining in `Update`, elapsed ticks, and output-buffer flushing
-  - stderr attribution, including diagnostics without a package header
+  - stderr attribution, including diagnostics without a package header, and
+    the rule that stderr content cannot fail a successful run
   - rerun, single-rerun, stop, quit, error, and clipboard modal state
   - tree/log/help routing and build-event relevance through `ImportPath`
   - clipboard command selection, failure, and timeout behavior
   - saved JSON loading, malformed data, missing files, and multi-megabyte events
 - `main_test.go`
   - help and long version flags, including `-v` forwarding to `go test`
+  - Gowt mode names remain data when used as split Go flag values
   - missing load arguments, usage, terminal errors, and final exit propagation
 - `storybook_test.go`
   - deterministic fixture states and injected terminal startup
@@ -106,7 +112,8 @@ exercise orchestration without opening a TTY.
   - run/pause/continue/pass/fail/skip transitions, corrected results, and
     aggregate counts
   - the rule that only test2json result actions, not log severity, set failure
-  - node indexing, depth, parents, sorting, flattening, and cached propagation
+  - node indexing, depth, parents, sorting, flattening, cache propagation, and
+    the rule that cache metadata cannot set result status
   - split output reassembly, blank lines, final partial lines, and per-node
     buffers
   - raw/processed fan-out to packages and test ancestors
@@ -121,7 +128,8 @@ counts. This catches drift between event transitions and rendered aggregates.
 ### View package
 
 - `treeview_test.go`
-  - navigation, paging, scrolling, expansion, replacement, and parent selection
+  - navigation, paging, scrolling, expansion, replacement, stable selection
+    across live resorting, and parent selection
   - All/Focus filtering, including package-only setup/build failures
   - search input, Unicode deletion, ancestor inclusion, ordering, and clearing
   - typed requests and running/done/stopped/failed/empty rendering
@@ -229,6 +237,34 @@ A second review found five boundary cases. Each now has a regression test:
 7. selected reruns preserve the split values of Go's unstable
    `-debug-actiongraph`, `-debug-runtime-trace`, and `-debug-trace` flags. This
    keeps the selected package from being consumed as a debug artifact path.
+
+## 2026-09-04 event-boundary audit ledger
+
+The full Gowt audit found five more cases where data and control state crossed a
+boundary. Each case has a permanent regression test:
+
+1. Gowt removes command-level `-json` arguments and injects one required
+   `-json`. A later `-json=false` can no longer turn a successful plain-text run
+   into a decoder failure. A `-json=false` value that belongs to another flag,
+   or appears after `-args`, remains unchanged.
+2. The CLI skips split Go flag values when it looks for Gowt modes. Values such
+   as `-run --help` and `-exec --storybook` remain values instead of opening a
+   different Gowt mode.
+3. A first `output` or `build-output` event reports the package or test node that
+   it creates as a visible change. Early diagnostics now invalidate the tree
+   cache and appear before a later status event.
+4. Live tree refreshes preserve the selected node across completion-based
+   resorting and clamp stale scroll offsets after a rerun. A status update can
+   no longer move Enter to another package or hide early rerun results above an
+   empty viewport.
+5. The textual `(cached)` package summary sets cache metadata only. Explicit Go
+   result events remain the sole status authority, so cached-looking output
+   cannot turn a running or failed test into a passing test.
+
+The model suite also applies 400 deterministic result corrections and checks
+every node and global status counter after each event. This invariant test
+protects the boundary between direct event state, aggregate presentation state,
+and counters. Focused transition tests assert each direct event state.
 
 ## State ownership invariants
 

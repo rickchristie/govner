@@ -390,7 +390,26 @@ func buildGoTestCommandArgs(args []string) []string {
 		}
 	}
 	cmdArgs = append(cmdArgs, "-json")
-	return append(cmdArgs, args...)
+
+	// Gowt owns JSON output because its model consumes test2json events. A later
+	// -json=false would make a successful run look like a decoder failure. Keep
+	// test-binary arguments opaque after their explicit boundary.
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" || arg == "-args" || arg == "--args" {
+			return append(cmdArgs, args[i:]...)
+		}
+		name := flagName(arg)
+		if name == "-json" {
+			continue
+		}
+		cmdArgs = append(cmdArgs, arg)
+		if goTestValueFlags[name] && !strings.Contains(arg, "=") && i+1 < len(args) {
+			i++
+			cmdArgs = append(cmdArgs, args[i])
+		}
+	}
+	return cmdArgs
 }
 
 func buildSingleTestArgs(originalArgs []string, pkg, testName string) []string {

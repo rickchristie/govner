@@ -239,13 +239,32 @@ func (v TreeView) Init() tea.Cmd {
 
 // SetData replaces the entire test tree and refreshes the cache
 func (v TreeView) SetData(tree *model.TestTree) TreeView {
+	// Completion counts can reorder rows while tests are running. Preserve the
+	// selected node identity so an update cannot move Enter to another test.
+	selectedPath := ""
+	if v.cursor >= 0 && v.cursor < len(v.cachedNodes) {
+		selectedPath = v.cachedNodes[v.cursor].FullPath
+	}
+
 	v.expanded = treeIsExpanded(tree)
 	v.tree = tree
 	v.cachedNodesValid = false // Invalidate cache
 	v = v.refreshCache()       // Recompute
-	if v.cursor >= len(v.cachedNodes) {
+	if selectedPath != "" {
+		for i, node := range v.cachedNodes {
+			if node.FullPath == selectedPath {
+				v.cursor = i
+				v.scrollTop = v.computeScrollTop()
+				return v
+			}
+		}
+	}
+	if v.cursor < 0 || v.cursor >= len(v.cachedNodes) {
 		v.cursor = max(0, len(v.cachedNodes)-1)
 	}
+	// A rerun replaces a large tree with an empty one. Clamp the old offset so
+	// early results are visible instead of remaining above a blank viewport.
+	v.scrollTop = v.computeScrollTop()
 	return v
 }
 

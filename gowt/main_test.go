@@ -78,7 +78,7 @@ func TestVersionFlagDoesNotConsumeGoTestVerboseFlag(t *testing.T) {
 }
 
 func TestParseCLIInvocationStopsAtTestBinaryArgs(t *testing.T) {
-	for _, boundary := range []string{"-args", "--args"} {
+	for _, boundary := range []string{"-args", "--args", "--"} {
 		t.Run(boundary, func(t *testing.T) {
 			args := []string{
 				"./pkg", boundary, "--storybook", "--load", "fixture.json",
@@ -93,6 +93,26 @@ func TestParseCLIInvocationStopsAtTestBinaryArgs(t *testing.T) {
 				"./pkg", boundary, "--storybook", "--load", "fixture.json",
 				"--help", "--version",
 			}, args, "mode parsing must not rewrite forwarded arguments")
+		})
+	}
+}
+
+func TestParseCLIInvocationDoesNotInterpretGoFlagValues(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "help is run pattern", args: []string{"-run", "--help", "./..."}},
+		{name: "version is overlay path", args: []string{"-overlay", "--version", "./..."}},
+		{name: "storybook is exec command", args: []string{"-exec", "--storybook", "./..."}},
+		{name: "load is tag value", args: []string{"--tags", "--load", "./..."}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			invocation, err := parseCLIInvocation(tt.args)
+			require.NoError(t, err)
+			assert.Equal(t, cliModeLive, invocation.mode)
 		})
 	}
 }

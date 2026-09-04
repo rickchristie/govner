@@ -349,6 +349,38 @@ func TestTreeViewSetDataClampsCursor(t *testing.T) {
 	assert.Nil(t, view.GetSelectedNode())
 }
 
+func TestTreeViewSetDataPreservesSelectionAcrossResort(t *testing.T) {
+	tree := treeWithEvents(
+		model.TestEvent{Action: "start", Package: "a"},
+		model.TestEvent{Action: "start", Package: "b"},
+	)
+	view := NewTreeView().SetData(tree)
+	view, _, _ = view.Update(tea.KeyMsg{Type: tea.KeyDown})
+	require.Equal(t, "b", view.GetSelectedNode().FullPath)
+
+	tree.ProcessEvent(model.TestEvent{Action: "pass", Package: "b", Test: "TestDone"})
+	view = view.SetData(tree)
+
+	assert.Equal(t, []string{"b", "a"}, visiblePaths(view))
+	assert.Equal(t, "b", view.GetSelectedNode().FullPath)
+}
+
+func TestTreeViewSetDataClampsStaleScrollOffset(t *testing.T) {
+	view := NewTreeView().SetData(treeWithEvents(
+		model.TestEvent{Action: "start", Package: "a"},
+		model.TestEvent{Action: "start", Package: "b"},
+	))
+	view.height = 5
+	view.cursor = 1
+	view.scrollTop = 1
+
+	view = view.SetData(treeWithEvents(model.TestEvent{Action: "start", Package: "only"}))
+
+	assert.Zero(t, view.cursor)
+	assert.Zero(t, view.scrollTop)
+	assert.Contains(t, stripAnsi(view.renderTree()), "only")
+}
+
 func TestTreeViewSortsByCompletedCountThenPath(t *testing.T) {
 	tree := treeWithEvents(
 		model.TestEvent{Action: "pass", Package: "a", Test: "TestOne"},

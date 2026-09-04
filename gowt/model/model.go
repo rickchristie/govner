@@ -110,17 +110,21 @@ func (t *TestTree) ProcessEvent(event TestEvent) bool {
 		pkgPath = event.ImportPath
 	}
 
-	// Get or create package node
+	// Get or create package node. Output is normally preceded by a start or run
+	// event, but build tools and alternative runners can emit output first.
+	// Creating a node changes tree visibility even when its event is log-only.
+	_, packageExisted := t.Packages[pkgPath]
 	pkgNode := t.getOrCreatePackage(pkgPath)
 	if pkgNode == nil {
 		return false // Skip events with empty package
 	}
+	packageCreated := !packageExisted
 
 	// Handle build-specific events
 	switch event.Action {
 	case "build-output":
 		t.appendOutput(pkgNode, event.Output)
-		return false // Log-only, no visual change
+		return packageCreated
 	case "build-fail":
 		t.flushOutput(pkgNode)
 		if pkgNode.eventStatus != StatusFailed {
@@ -135,15 +139,19 @@ func (t *TestTree) ProcessEvent(event TestEvent) bool {
 
 	// Package-level event (no test name)
 	if event.Test == "" {
-		return t.handlePackageEvent(pkgNode, event)
+		changed := t.handlePackageEvent(pkgNode, event)
+		return packageCreated || changed
 	}
 
 	// Test-level event
+	testPath := pkgPath + "/" + event.Test
+	_, testExisted := t.NodeIndex[testPath]
 	testNode := t.getOrCreateTest(pkgNode, event.Test)
 	if testNode == nil {
 		return false // Skip invalid test names
 	}
-	return t.handleTestEvent(testNode, event)
+	changed := t.handleTestEvent(testNode, event)
+	return packageCreated || !testExisted || changed
 }
 
 func (t *TestTree) getOrCreatePackage(pkgPath string) *TestNode {
@@ -282,8 +290,10 @@ func isCachedOutput(output, pkg string) bool {
 		strings.TrimSpace(fields[1]) == pkg && strings.TrimSpace(fields[2]) == "(cached)"
 }
 
-// markCached marks a node and all its children as cached
-// Uses TotalCount to set CachedCount in O(1) instead of propagating per-node
+// markCached marks a node and all its children as cached. The canonical cache
+// summary is output text, not a result event, so it must not change Status.
+// Go emits explicit pass events for cached tests and the package.
+// Uses TotalCount to set CachedCount in O(1) instead of propagating per-node.
 func (t *TestTree) markCached(node *TestNode) {
 	if node.CachedCount > 0 {
 		return // Already marked as cached
@@ -294,21 +304,18 @@ func (t *TestTree) markCached(node *TestNode) {
 	node.CachedCount = cachedCount
 	t.CachedCount += cachedCount
 
-	// Mark individual nodes as Cached=true and Passed for UI display
-	// Cached tests are always passing tests (Go only caches passing results)
+	// Mark cache metadata only. Result actions remain the sole status authority.
 	node.Cached = true
-	node.Status = StatusPassed
 	for _, child := range node.Children {
 		markChildCachedFlag(child)
 	}
 }
 
-// markChildCachedFlag recursively sets Cached=true flag, Status=Passed, and CachedCount on nodes
-// Does NOT propagate - parent's CachedCount is already set via TotalCount
+// markChildCachedFlag recursively sets cache metadata on descendants. It does
+// not propagate because the parent's CachedCount already includes its subtree.
 func markChildCachedFlag(node *TestNode) {
 	node.Cached = true
-	node.Status = StatusPassed         // Cached tests are always passing
-	node.CachedCount = node.TotalCount // This node's subtree is all cached
+	node.CachedCount = node.TotalCount
 	for _, child := range node.Children {
 		markChildCachedFlag(child)
 	}

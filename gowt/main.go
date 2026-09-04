@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/rickchristie/govner/gowt/meta"
@@ -53,20 +54,15 @@ type cliInvocation struct {
 	loadPath string
 }
 
-// parseCLIInvocation only interprets Gowt's own flags before go test's -args
-// boundary. The remainder belongs to the test binary and must stay opaque even
-// when it contains names such as --storybook, --load, or --help.
+// parseCLIInvocation only interprets Gowt's own flags when they are command
+// arguments. Split values of Go flags and arguments after an opaque boundary
+// must stay untouched, even when they have names such as --load or --help.
 func parseCLIInvocation(args []string) (cliInvocation, error) {
-	gowtArgs := args
-	for i, arg := range args {
-		if arg == "-args" || arg == "--args" {
-			gowtArgs = args[:i]
-			break
-		}
-	}
+	argumentIndexes, argumentEnd := gowtModeArgumentIndexes(args)
 
 	// Help and version retain their existing precedence over load/storybook.
-	for _, arg := range gowtArgs {
+	for _, i := range argumentIndexes {
+		arg := args[i]
 		if arg == "--help" || arg == "-h" {
 			return cliInvocation{mode: cliModeHelp}, nil
 		}
@@ -75,19 +71,42 @@ func parseCLIInvocation(args []string) (cliInvocation, error) {
 		}
 	}
 
-	for i, arg := range gowtArgs {
+	for _, i := range argumentIndexes {
+		arg := args[i]
 		switch arg {
 		case "--storybook":
 			return cliInvocation{mode: cliModeStorybook}, nil
 		case "--load", "-l":
-			if i+1 >= len(gowtArgs) {
+			if i+1 >= argumentEnd {
 				return cliInvocation{}, fmt.Errorf("--load requires a file path")
 			}
-			return cliInvocation{mode: cliModeLoad, loadPath: gowtArgs[i+1]}, nil
+			return cliInvocation{mode: cliModeLoad, loadPath: args[i+1]}, nil
 		}
 	}
 
 	return cliInvocation{mode: cliModeLive}, nil
+}
+
+// gowtModeArgumentIndexes returns arguments that Gowt can inspect for its own
+// modes. Go flag values are data, not Gowt flags. A bare separator and -args
+// make the remaining arguments opaque to Gowt.
+func gowtModeArgumentIndexes(args []string) ([]int, int) {
+	indexes := make([]int, 0, len(args))
+	argumentEnd := len(args)
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" || arg == "-args" || arg == "--args" {
+			argumentEnd = i
+			break
+		}
+
+		indexes = append(indexes, i)
+		name := flagName(arg)
+		if goTestValueFlags[name] && !strings.Contains(arg, "=") && i+1 < len(args) {
+			i++
+		}
+	}
+	return indexes, argumentEnd
 }
 
 // -v belongs to go test and must be forwarded. Only the unambiguous long flag
