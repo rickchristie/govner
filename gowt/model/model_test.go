@@ -82,10 +82,179 @@ func TestProcessEventUsesImportPathForBuildEvents(t *testing.T) {
 	node := tree.GetNode("example.com/project/broken")
 	require.NotNil(t, node)
 	assert.Equal(t, StatusFailed, node.Status)
+	assert.Equal(t, FailureKindBuild, node.FailureKind)
+	assert.Equal(t, "broken.go:4: undefined: missing", node.FailureSummary)
 	assert.Equal(t, "broken.go:4: undefined: missing\n", rawOutput(t, tree, node))
 	assert.Equal(t, 1, node.FailedCount)
 	assert.Equal(t, 1, tree.FailedCount)
 	assert.Zero(t, tree.TotalCount, "a package build failure is not a test node")
+}
+
+func TestTestBuildIDUsesOwningPackageAndFailedBuildMetadata(t *testing.T) {
+	const (
+		pkg     = "example.com/project/service"
+		buildID = pkg + " [" + pkg + ".test]"
+	)
+	tree := NewTestTree()
+	processEvents(t, tree,
+		TestEvent{Action: "build-output", ImportPath: buildID, Output: "# " + buildID + "\n"},
+		TestEvent{Action: "build-output", ImportPath: buildID, Output: "./service_test.go:9:2: undefined: missingSymbol\n"},
+		TestEvent{Action: "build-fail", ImportPath: buildID},
+		TestEvent{Action: "start", Package: pkg},
+		TestEvent{Action: "output", Package: pkg, Output: "FAIL\t" + pkg + " [build failed]\n"},
+		TestEvent{Action: "fail", Package: pkg, FailedBuild: buildID},
+	)
+
+	assert.Len(t, tree.Packages, 1, "a Go build ID must not create a duplicate package")
+	assert.Nil(t, tree.GetNode(buildID))
+	node := tree.GetNode(pkg)
+	require.NotNil(t, node)
+	assert.Equal(t, StatusFailed, node.Status)
+	assert.Equal(t, FailureKindBuild, node.FailureKind)
+	assert.Equal(t, "./service_test.go:9:2: undefined: missingSymbol", node.FailureSummary)
+	assert.Contains(t, rawOutput(t, tree, node), "undefined: missingSymbol")
+	assert.Contains(t, rawOutput(t, tree, node), "[build failed]")
+	assert.Equal(t, 1, tree.FailedCount)
+}
+
+func TestFailedBuildLinksDependencyDiagnosticsToAffectedPackage(t *testing.T) {
+	const (
+		dependency = "example.com/project/generated"
+		pkg        = "example.com/project/service"
+	)
+	tree := NewTestTree()
+	processEvents(t, tree,
+		TestEvent{Action: "build-output", ImportPath: dependency, Output: "generated.go:7: undefined: missingType\n"},
+		TestEvent{Action: "build-fail", ImportPath: dependency},
+		TestEvent{Action: "start", Package: pkg},
+		TestEvent{Action: "output", Package: pkg, Output: "FAIL\t" + pkg + " [build failed]\n"},
+		TestEvent{Action: "fail", Package: pkg, FailedBuild: dependency},
+	)
+
+	node := tree.GetNode(pkg)
+	require.NotNil(t, node)
+	assert.Equal(t, FailureKindBuild, node.FailureKind)
+	assert.Equal(t, "generated.go:7: undefined: missingType", node.FailureSummary)
+	assert.Contains(t, rawOutput(t, tree, node), "generated.go:7: undefined: missingType")
+	assert.Contains(t, processedOutput(t, tree, node), "generated.go:7: undefined: missingType")
+}
+
+func TestLinkerBuildIDMovesToOwningPackageOnce(t *testing.T) {
+	const (
+		pkg     = "example.com/project/linker"
+		buildID = pkg + ".test"
+	)
+	tree := NewTestTree()
+	processEvents(t, tree,
+		TestEvent{Action: "build-output", ImportPath: buildID, Output: "relocation target missingSymbol not defined\n"},
+		TestEvent{Action: "build-fail", ImportPath: buildID},
+	)
+	assert.True(t, tree.HasFailedPackage())
+
+	final := TestEvent{Action: "fail", Package: pkg, FailedBuild: buildID}
+	tree.ProcessEvent(final)
+	tree.ProcessEvent(final)
+
+	assert.Len(t, tree.Packages, 1)
+	assert.Nil(t, tree.GetNode(buildID))
+	node := tree.GetNode(pkg)
+	require.NotNil(t, node)
+	assert.Equal(t, FailureKindBuild, node.FailureKind)
+	assert.Equal(t, "relocation target missingSymbol not defined\n", rawOutput(t, tree, node))
+	assert.Equal(t, 1, tree.FailedCount)
+}
+
+func TestCorrectedPackageResultClearsNonTestFailureCount(t *testing.T) {
+	tree := NewTestTree()
+	processEvents(t, tree,
+		TestEvent{Action: "build-output", ImportPath: "pkg", Output: "compile failed\n"},
+		TestEvent{Action: "build-fail", ImportPath: "pkg"},
+	)
+	assert.Equal(t, 1, tree.FailedCount)
+
+	tree.ProcessEvent(TestEvent{Action: "pass", Package: "pkg"})
+	node := tree.GetNode("pkg")
+	require.NotNil(t, node)
+	assert.Equal(t, StatusPassed, node.Status)
+	assert.Equal(t, FailureKindNone, node.FailureKind)
+	assert.Zero(t, tree.FailedCount)
+}
+
+func TestFailedBuildWithoutBuildEventsStillMarksPackage(t *testing.T) {
+	const pkg = "example.com/project/setup"
+	tree := NewTestTree()
+	processEvents(t, tree,
+		TestEvent{Action: "start", Package: pkg},
+		TestEvent{Action: "output", Package: pkg, Output: "found packages one and two in ./setup\n"},
+		TestEvent{Action: "fail", Package: pkg, FailedBuild: pkg},
+	)
+
+	node := tree.GetNode(pkg)
+	require.NotNil(t, node)
+	assert.Equal(t, StatusFailed, node.Status)
+	assert.Equal(t, FailureKindBuild, node.FailureKind)
+	assert.Equal(t, "found packages one and two in ./setup", node.FailureSummary)
+	assert.Equal(t, 1, tree.FailedCount)
+}
+
+func TestMarkCommandFailureUsesDiagnosticsWithoutParsingTheirSeverity(t *testing.T) {
+	tree := NewTestTree()
+	assert.False(t, tree.HasFailedPackage())
+	processEvents(t, tree, TestEvent{
+		Action: "output", Package: "go test", Output: "go: unknown flag -bad-flag\n",
+	})
+
+	node := tree.GetNode("go test")
+	require.NotNil(t, node)
+	assert.Equal(t, StatusPending, node.Status, "diagnostic text alone is not a failure")
+
+	tree.MarkCommandFailure("go test")
+	assert.Equal(t, StatusFailed, node.Status)
+	assert.Equal(t, FailureKindCommand, node.FailureKind)
+	assert.Equal(t, "go: unknown flag -bad-flag", node.FailureSummary)
+	assert.Equal(t, 1, tree.FailedCount)
+	assert.True(t, tree.HasFailedPackage())
+}
+
+func TestMarkBuildFailureClassifiesPlainStderrDiagnostics(t *testing.T) {
+	tree := NewTestTree()
+	processEvents(t, tree, TestEvent{
+		Action: "output", Package: "pkg", Output: "file.go:3: undefined: missing\n",
+	})
+	tree.MarkBuildFailure("pkg")
+
+	node := tree.GetNode("pkg")
+	require.NotNil(t, node)
+	assert.Equal(t, StatusFailed, node.Status)
+	assert.Equal(t, FailureKindBuild, node.FailureKind)
+	assert.Equal(t, "file.go:3: undefined: missing", node.FailureSummary)
+}
+
+func TestPackageScopeFailureIsCountedAndKeepsItsDiagnostic(t *testing.T) {
+	const pkg = "example.com/project/testmain"
+	tree := NewTestTree()
+	processEvents(t, tree,
+		TestEvent{Action: "start", Package: pkg},
+		TestEvent{Action: "output", Package: pkg, Output: "test setup could not continue\n"},
+		TestEvent{Action: "output", Package: pkg, Output: "FAIL\t" + pkg + "\t0.01s\n"},
+		TestEvent{Action: "fail", Package: pkg, Elapsed: 0.01},
+	)
+
+	node := tree.GetNode(pkg)
+	require.NotNil(t, node)
+	assert.Equal(t, StatusFailed, node.Status)
+	assert.Equal(t, FailureKindPackage, node.FailureKind)
+	assert.Equal(t, "test setup could not continue", node.FailureSummary)
+	assert.Equal(t, 1, tree.FailedCount)
+}
+
+func TestDiagnosticSummaryKeepsRootCauseAheadOfToolSummary(t *testing.T) {
+	summary := diagnosticSummary("", "file.s:2: unrecognized instruction GOWT_BAD\n")
+	summary = diagnosticSummary(summary, "asm: assembly of file.s failed\nexit status 1\n")
+	assert.Equal(t, "file.s:2: unrecognized instruction GOWT_BAD", summary)
+
+	summary = diagnosticSummary("", "package example.com/cycle\nimports child\nimport cycle not allowed\n")
+	assert.Equal(t, "import cycle not allowed", summary)
 }
 
 func TestProcessEventAcceptsAllGoTestNamedWorkloads(t *testing.T) {

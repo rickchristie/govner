@@ -11,6 +11,7 @@ Useful when you have thousands of tests to run.
 - 🎯 **Live test streaming** - Watch tests run in real-time with animated spinners
 - 🌳 **Tree view** - Hierarchical display of packages and tests
 - 📋 **Log viewer** - View detailed test output with search functionality
+- 🧰 **Build diagnostics** - See compiler, setup, vet, assembler, linker, and command failures on the affected package
 - 🔍 **Focus mode** - Filter to show only failed and running tests
 - 🔄 **Rerun tests** - Quickly rerun all tests or specific failed tests
 - 📋 **Copy to clipboard** - Copy test logs for easy sharing
@@ -60,12 +61,22 @@ You can also view previously saved test results:
 
 ```bash
 # Save test results to a file
-go test -json ./... > results.json
+go test -json -count=1 ./... > results.json 2> results.stderr
 
 # View saved results
 gowt --load results.json
 gowt -l results.json
 ```
+
+Do not combine stderr with the JSON file. `2>&1` can put plain command errors
+between JSON records and make the file invalid. Go writes normal test output
+and build diagnostics as JSON `output` and `build-output` records. It reserves
+stderr for errors that happen outside that event stream, such as an invalid
+working directory. Live Gowt reads both streams. Load mode reads the JSON file.
+
+Build, package, and command failures have explicit labels in the tree. The
+tree also shows a short diagnostic when space is available. Press `Enter` to
+open the complete diagnostic; use Raw mode when you need Go's original text.
 
 ### Manual TUI QA
 

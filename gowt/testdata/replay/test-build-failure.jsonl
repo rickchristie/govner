@@ -1,0 +1,6 @@
+{"ImportPath":"example.com/replay/service [example.com/replay/service.test]","Action":"build-output","Output":"# example.com/replay/service [example.com/replay/service.test]\n"}
+{"ImportPath":"example.com/replay/service [example.com/replay/service.test]","Action":"build-output","Output":"./service_test.go:9:2: undefined: replayMissingSymbol\n"}
+{"ImportPath":"example.com/replay/service [example.com/replay/service.test]","Action":"build-fail"}
+{"Time":"2026-09-04T10:00:00Z","Action":"start","Package":"example.com/replay/service"}
+{"Time":"2026-09-04T10:00:00.001Z","Action":"output","Package":"example.com/replay/service","Output":"FAIL\texample.com/replay/service [build failed]\n"}
+{"Time":"2026-09-04T10:00:00.002Z","Action":"fail","Package":"example.com/replay/service","Elapsed":0,"FailedBuild":"example.com/replay/service [example.com/replay/service.test]"}

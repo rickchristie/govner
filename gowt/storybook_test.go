@@ -16,7 +16,12 @@ func TestStorybookTreeContainsManualQAStates(t *testing.T) {
 	assert.Greater(t, tree.FailedCount, 0)
 	assert.Greater(t, tree.SkippedCount, 0)
 	assert.Greater(t, tree.CachedCount, 0)
-	assert.Equal(t, model.StatusFailed, tree.GetNode("example.com/gowt/story/build").Status)
+	buildNode := tree.GetNode("example.com/gowt/story/build")
+	require.NotNil(t, buildNode)
+	assert.Equal(t, model.StatusFailed, buildNode.Status)
+	assert.Equal(t, model.FailureKindBuild, buildNode.FailureKind)
+	assert.Contains(t, buildNode.FailureSummary, "missingSymbol")
+	assert.Nil(t, tree.GetNode("example.com/gowt/story/build [example.com/gowt/story/build.test]"))
 	assert.Equal(t, model.StatusPassed, tree.GetNode("example.com/gowt/story/pass/TestExpectedError").Status)
 	assert.NotNil(t, tree.GetNode("example.com/gowt/story/skip/FuzzParser/seed#0"))
 	allLogs := tree.ProcessedLogBuffer.Slice(model.BufferRef{

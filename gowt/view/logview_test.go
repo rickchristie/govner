@@ -374,6 +374,49 @@ func TestLogViewRendering(t *testing.T) {
 	assert.Contains(t, stripAnsi(view.renderHelpBar()), "No clipboard")
 }
 
+func TestLogViewBuildFailureHeaderOmitsInvalidEmptyTestCount(t *testing.T) {
+	tree := model.NewTestTree()
+	tree.ProcessEvent(model.TestEvent{
+		Action: "build-output", ImportPath: "pkg", Output: "broken.go:3: undefined: missing\n",
+	})
+	tree.ProcessEvent(model.TestEvent{Action: "build-fail", ImportPath: "pkg"})
+	node := tree.GetNode("pkg")
+	require.NotNil(t, node)
+
+	view := NewLogView().SetData(node, tree.ProcessedLogBuffer, tree.RawLogBuffer)
+	header := stripAnsi(view.renderHeader())
+	assert.Contains(t, header, "BUILD FAILED")
+	assert.NotContains(t, header, "(1/0)")
+	assert.NotContains(t, header, "(0/0)")
+}
+
+func TestLogViewHeaderNamesEveryNonTestFailureClass(t *testing.T) {
+	tests := []struct {
+		kind   model.FailureKind
+		label  string
+		total  int
+		passed int
+		failed int
+		count  string
+	}{
+		{kind: model.FailureKindBuild, label: "BUILD FAILED"},
+		{kind: model.FailureKindPackage, label: "PACKAGE FAILED", total: 1, passed: 1, failed: 1, count: "(1/1)"},
+		{kind: model.FailureKindCommand, label: "COMMAND FAILED"},
+	}
+	for _, tt := range tests {
+		node := &model.TestNode{
+			Name: tt.label, FullPath: "pkg", Package: "pkg", Status: model.StatusFailed,
+			FailureKind: tt.kind, TotalCount: tt.total, PassedCount: tt.passed, FailedCount: tt.failed,
+		}
+		header := stripAnsi(NewLogView().SetData(node, model.NewLogBuffer(), model.NewLogBuffer()).renderHeader())
+		assert.Contains(t, header, tt.label)
+		if tt.count != "" {
+			assert.Contains(t, header, tt.count)
+		}
+		assert.NotContains(t, header, "(1/0)")
+	}
+}
+
 func TestLogViewHelpBarModes(t *testing.T) {
 	tree, node := testLogTree(model.StatusPassed, "match\n", "other\n")
 	view := NewLogView().SetData(node, tree.ProcessedLogBuffer, tree.RawLogBuffer)

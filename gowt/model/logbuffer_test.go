@@ -125,3 +125,16 @@ func TestLogRendererAppendNewHandlesOverlappingReference(t *testing.T) {
 	assert.True(t, renderer.AppendNew())
 	assert.Equal(t, "abcdef", renderer.String())
 }
+
+func TestLogRendererRebuildsWhenBuildDiagnosticsArePrepended(t *testing.T) {
+	buffer := NewLogBuffer()
+	diagnostic := buffer.Append("compile diagnostic\n")
+	result := buffer.Append("FAIL package [build failed]\n")
+	log := &NodeLog{Refs: []BufferRef{result}}
+	renderer := NewLogRenderer(buffer, log)
+	assert.Equal(t, "FAIL package [build failed]\n", renderer.String())
+
+	log.Refs = []BufferRef{diagnostic, result}
+	assert.True(t, renderer.AppendNew())
+	assert.Equal(t, "compile diagnostic\nFAIL package [build failed]\n", renderer.String())
+}

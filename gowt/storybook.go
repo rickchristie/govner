@@ -42,8 +42,14 @@ func newStorybookTree() *model.TestTree {
 		{Action: "pass", Package: "example.com/gowt/story/cached", Test: "ExampleClient", Elapsed: 0.02},
 		{Action: "output", Package: "example.com/gowt/story/cached", Output: "ok  \texample.com/gowt/story/cached\t(cached)\n"},
 
-		{Action: "build-output", ImportPath: "example.com/gowt/story/build", Output: "./broken.go:8:2: undefined: missingSymbol\n"},
-		{Action: "build-fail", ImportPath: "example.com/gowt/story/build"},
+		// Test compilation uses a bracket-qualified Go build ID. The final
+		// FailedBuild value links it back to the package shown to the user.
+		{Action: "build-output", ImportPath: "example.com/gowt/story/build [example.com/gowt/story/build.test]", Output: "# example.com/gowt/story/build [example.com/gowt/story/build.test]\n"},
+		{Action: "build-output", ImportPath: "example.com/gowt/story/build [example.com/gowt/story/build.test]", Output: "./broken_test.go:8:2: undefined: missingSymbol\n"},
+		{Action: "build-fail", ImportPath: "example.com/gowt/story/build [example.com/gowt/story/build.test]"},
+		{Action: "start", Package: "example.com/gowt/story/build"},
+		{Action: "output", Package: "example.com/gowt/story/build", Output: "FAIL\texample.com/gowt/story/build [build failed]\n"},
+		{Action: "fail", Package: "example.com/gowt/story/build", FailedBuild: "example.com/gowt/story/build [example.com/gowt/story/build.test]"},
 	}
 	for _, event := range events {
 		tree.ProcessEvent(event)

@@ -774,12 +774,27 @@ func (v LogView) renderHeader() string {
 
 	// Build test counts string (completed/total) from node's subtree counts
 	completed := v.node.PassedCount + v.node.FailedCount + v.node.SkippedCount
-	countsStr := fmt.Sprintf("(%d/%d)", completed, v.node.TotalCount)
+	if v.node.Parent == nil && v.node.FailureKind != model.FailureKindNone && completed > 0 {
+		completed--
+	}
+	counts := ""
+	if v.node.TotalCount > 0 {
+		counts = " " + v.styles.helpBar.Render(fmt.Sprintf("(%d/%d)", completed, v.node.TotalCount))
+	}
 
 	statusIndicator := v.renderStatusIcon(v.node.Status)
 	path := model.ShortPath(v.node.FullPath)
+	failure := ""
+	switch v.node.FailureKind {
+	case model.FailureKindBuild:
+		failure = " " + v.styles.failed.Bold(true).Render("BUILD FAILED")
+	case model.FailureKindPackage:
+		failure = " " + v.styles.failed.Bold(true).Render("PACKAGE FAILED")
+	case model.FailureKindCommand:
+		failure = " " + v.styles.failed.Bold(true).Render("COMMAND FAILED")
+	}
 
-	return logo + " " + v.styles.header.Render("GOWT") + " " + v.styles.helpBar.Render(meta.Version) + " " + v.styles.helpBar.Render(countsStr) + " " + statusIndicator + " " + path
+	return logo + " " + v.styles.header.Render("GOWT") + " " + v.styles.helpBar.Render(meta.Version) + counts + " " + statusIndicator + failure + " " + path
 }
 
 func (v LogView) renderHelpBar() string {

@@ -98,6 +98,8 @@ type LogRenderer struct {
 	nodeLog  *NodeLog
 	rendered strings.Builder // Cached rendered output
 	lastEnd  int             // Last buffer position we've rendered up to
+	refCount int             // Number of references in the last rendered shape
+	firstRef BufferRef       // Detects prepended or replaced diagnostic references
 }
 
 // NewLogRenderer creates a renderer for a node's log
@@ -115,6 +117,8 @@ func (r *LogRenderer) RebuildFull() {
 	r.rendered.Reset()
 	if r.nodeLog == nil || r.nodeLog.IsEmpty() {
 		r.lastEnd = 0
+		r.refCount = 0
+		r.firstRef = BufferRef{}
 		return
 	}
 
@@ -124,6 +128,8 @@ func (r *LogRenderer) RebuildFull() {
 		r.rendered.Write(r.buffer.SliceBytes(ref))
 	}
 	r.lastEnd = r.nodeLog.LastEnd()
+	r.refCount = len(r.nodeLog.Refs)
+	r.firstRef = r.nodeLog.Refs[0]
 }
 
 // AppendNew appends only new content since last render.
@@ -131,6 +137,11 @@ func (r *LogRenderer) RebuildFull() {
 func (r *LogRenderer) AppendNew() bool {
 	if r.nodeLog == nil {
 		return false
+	}
+	if len(r.nodeLog.Refs) < r.refCount ||
+		(r.refCount > 0 && len(r.nodeLog.Refs) > 0 && r.nodeLog.Refs[0] != r.firstRef) {
+		r.RebuildFull()
+		return true
 	}
 
 	currentEnd := r.nodeLog.LastEnd()
@@ -150,6 +161,10 @@ func (r *LogRenderer) AppendNew() bool {
 		}
 	}
 	r.lastEnd = currentEnd
+	r.refCount = len(r.nodeLog.Refs)
+	if len(r.nodeLog.Refs) > 0 {
+		r.firstRef = r.nodeLog.Refs[0]
+	}
 	return true
 }
 

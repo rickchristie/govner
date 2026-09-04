@@ -7,7 +7,8 @@ boundaries for process, clipboard, and lifecycle behavior.
 
 The automated suite must be deterministic and must not require a terminal, an
 outside Go workspace, a display server, or a real clipboard. Use the storybook
-for real-terminal inspection.
+for real-terminal inspection. The build-diagnostic integration suite starts the
+installed Go command only against the nested module in `testdata/buildfail`.
 
 ## Required validation
 
@@ -56,6 +57,11 @@ is exercised through the bounded-drain and build-constraint tests.
 After the 2026-09-04 event-boundary audit, the baseline is 93.9% overall: root
 89.0%, model 97.7%, utility 96.8%, and view 95.4%.
 
+After the build-diagnostic matrix, the baseline remains 93.9% overall: root
+89.4%, model 97.3%, utility 96.8%, and view 95.1%. The new root integration
+tests execute real Go failure producers, while model and view tests assert the
+associated state and presentation branches directly.
+
 ## Manual terminal QA
 
 `gowt --storybook` opens deterministic fixtures for passed, failed, skipped,
@@ -67,6 +73,26 @@ in a real terminal without running another project.
 
 The fixture is built by `newStorybookTree` and is tested like other startup
 paths, so manual screenshots always begin from the same state.
+
+## Capture and replay Go events
+
+Use separate files for the JSON event stream and stderr:
+
+```sh
+go test -json -count=1 ./... \
+  > /tmp/gowt-project-events.jsonl \
+  2> /tmp/gowt-project-stderr.txt
+```
+
+Do not use `2>&1` for a replay file. Plain stderr can make JSON Lines invalid.
+Normal compiler and test diagnostics are already `build-output` or `output`
+records in the JSON file. stderr contains command-level failures that happen
+outside the test2json stream. The live runner consumes both sources.
+
+Use `gowt --load /tmp/gowt-project-events.jsonl` to inspect the JSON stream.
+Before a project trace becomes a committed fixture, remove private source paths
+and application data. Timestamps can stay because replay preserves event order
+and does not use wall-clock values for status.
 
 ## Suite map
 
@@ -82,12 +108,23 @@ paths, so manual screenshots always begin from the same state.
   - successful/failing exit codes, cache cleanup, process termination, and
     output draining when descendants retain inherited descriptors
   - mutually exclusive platform process implementations, including iOS
+- `build_diagnostics_integration_test.go`
+  - real `go test -json` transport against repository-owned invalid packages
+  - compiler, syntax, internal-test, external-test, setup, import-cycle, module
+    package resolution, vet, assembler, linker, and `TestMain` failures
+  - preservation of every stdout event payload and stderr line
+  - package attribution, `FailedBuild` association, visible failure labels,
+    complete log-view diagnostics, and removal of synthetic test-binary rows
+  - a real passing test can write error-level stdout and stderr without failing
+  - deterministic saved-event replay and raw command-failure stderr
 - `app_test.go`
   - loaded/live constructors and typed asynchronous messages
   - generation filtering for starts, events, stderr, cache completion, and done
   - final event draining in `Update`, elapsed ticks, and output-buffer flushing
   - stderr attribution, including diagnostics without a package header, and
     the rule that stderr content cannot fail a successful run
+  - nonzero command results make unstructured stderr discoverable without
+    treating error-level text as a result
   - rerun, single-rerun, stop, quit, error, and clipboard modal state
   - tree/log/help routing and build-event relevance through `ImportPath`
   - clipboard command selection, failure, and timeout behavior
@@ -112,6 +149,8 @@ exercise orchestration without opening a TTY.
   - run/pause/continue/pass/fail/skip transitions, corrected results, and
     aggregate counts
   - the rule that only test2json result actions, not log severity, set failure
+  - `FailedBuild` links, synthetic build IDs, package-scope failures, and short
+    diagnostic summaries backed by complete Raw and Processed logs
   - node indexing, depth, parents, sorting, flattening, cache propagation, and
     the rule that cache metadata cannot set result status
   - split output reassembly, blank lines, final partial lines, and per-node
@@ -120,7 +159,7 @@ exercise orchestration without opening a TTY.
   - Go marker and JSON formatting plus CSI/OSC/control sanitization
 - `logbuffer_test.go`
   - references, invalid bounds, node-log metrics, full/incremental rendering,
-    empty logs, overlapping references, and rebuilds
+    empty logs, overlapping references, prepended diagnostics, and rebuilds
 
 Event tests call real `TestTree.ProcessEvent`; they do not pre-fill derived
 counts. This catches drift between event transitions and rendered aggregates.
@@ -260,6 +299,20 @@ boundary. Each case has a permanent regression test:
 5. The textual `(cached)` package summary sets cache metadata only. Explicit Go
    result events remain the sole status authority, so cached-looking output
    cannot turn a running or failed test into a passing test.
+6. Gowt reads and uses `FailedBuild`, including bracket-qualified test builds
+   and linker IDs that end in `.test`. Compiler output now belongs to the
+   affected package instead of a duplicate synthetic row.
+7. The tree labels build, package-scope, and command failures and shows a short
+   diagnostic when width permits. The log header states the failure class and
+   keeps the complete Raw and Processed output available.
+8. A nonzero process result promotes stderr-only diagnostics into a failed
+   command node. stderr text from a successful run remains diagnostic data and
+   cannot set failure status.
+9. A package failure without a failed named test, such as `TestMain`, is counted
+   and remains visible in Focus mode.
+10. Real-Go integration fixtures cover each major producer boundary and verify
+    every event and stderr payload. A saved JSON Lines trace protects load-mode
+    replay of the original test-build identity defect.
 
 The model suite also applies 400 deterministic result corrections and checks
 every node and global status counter after each event. This invariant test

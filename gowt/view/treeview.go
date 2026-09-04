@@ -1208,12 +1208,56 @@ func (v TreeView) getRenderedSuffix(node *model.TestNode) string {
 	return suffix
 }
 
+func failureLabel(node *model.TestNode) string {
+	switch node.FailureKind {
+	case model.FailureKindBuild:
+		return " [build failed]"
+	case model.FailureKindPackage:
+		return " [package failed]"
+	case model.FailureKindCommand:
+		return " [command failed]"
+	default:
+		return ""
+	}
+}
+
+// renderFailureSuffix keeps the failure class visible even when a long package
+// name must be shortened. The exact diagnostic uses only space left after the
+// complete name, so ordinary package identity remains easy to scan.
+func (v TreeView) renderFailureSuffix(node *model.TestNode, availableWidth, fixedWidth, nameWidth int) (string, int) {
+	label := failureLabel(node)
+	if label == "" {
+		return "", 0
+	}
+
+	maxLabelWidth := availableWidth - fixedWidth - 3
+	if maxLabelWidth <= 0 {
+		return "", 0
+	}
+	labelWidth := runewidth.StringWidth(label)
+	if labelWidth > maxLabelWidth {
+		label = truncatePlainText(label, maxLabelWidth)
+		return v.styles.failed.Render(label), runewidth.StringWidth(label)
+	}
+
+	detail := ""
+	detailWidth := availableWidth - fixedWidth - nameWidth - labelWidth
+	if node.FailureSummary != "" && detailWidth > 1 {
+		detail = " " + truncatePlainText(node.FailureSummary, detailWidth-1)
+	}
+
+	rendered := v.styles.failed.Render(label)
+	if detail != "" {
+		rendered += v.styles.elapsed.Render(detail)
+	}
+	return rendered, labelWidth + runewidth.StringWidth(detail)
+}
+
 func (v TreeView) renderNode(node *model.TestNode, selected bool) string {
 	depth := node.Depth           // Use cached depth (O(1))
 	availableWidth := v.width - 3 // Reserve 3 for "..."
 
-	// Get cached suffix first (we need its width for truncation calculation)
-	suffix := v.getRenderedSuffix(node)
+	baseSuffix := v.getRenderedSuffix(node)
 
 	// Calculate widths of plain text components BEFORE styling
 	indentWidth := depth * 4
@@ -1235,6 +1279,15 @@ func (v TreeView) renderNode(node *model.TestNode, selected bool) string {
 	if node.Elapsed > 0 {
 		suffixWidth += 1 + 9 // " " + elapsed time (e.g., "10h30m0s")
 	}
+
+	failureSuffix, failureWidth := v.renderFailureSuffix(
+		node,
+		availableWidth,
+		indentWidth+coreFixedWidth+suffixWidth,
+		nameWidth,
+	)
+	suffix := failureSuffix + baseSuffix
+	suffixWidth += failureWidth
 
 	// Total width calculation
 	totalWidth := indentWidth + coreFixedWidth + nameWidth + suffixWidth

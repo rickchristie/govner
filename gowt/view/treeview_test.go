@@ -432,6 +432,46 @@ func TestTreeViewRenderingStates(t *testing.T) {
 	assert.Contains(t, stripAnsi(view.renderHeader()), "Stopped")
 }
 
+func TestTreeViewShowsBuildFailureClassAndDiagnostic(t *testing.T) {
+	const (
+		pkg     = "example.com/project/build"
+		buildID = pkg + " [" + pkg + ".test]"
+	)
+	tree := treeWithEvents(
+		model.TestEvent{Action: "build-output", ImportPath: buildID, Output: "./broken_test.go:8:2: undefined: missingSymbol\n"},
+		model.TestEvent{Action: "build-fail", ImportPath: buildID},
+		model.TestEvent{Action: "fail", Package: pkg, FailedBuild: buildID},
+	)
+	view := NewTreeView().SetData(tree)
+	view.width = 100
+	view.height = 20
+
+	rendered := stripAnsi(view.renderNode(tree.GetNode(pkg), false))
+	assert.Contains(t, rendered, "[build failed]")
+	assert.Contains(t, rendered, "undefined: missingSymbol")
+	assert.LessOrEqual(t, lipgloss.Width(rendered), view.width)
+
+	view.width = 38
+	narrow := stripAnsi(view.renderNode(tree.GetNode(pkg), false))
+	assert.Contains(t, narrow, "[build failed]")
+	assert.LessOrEqual(t, lipgloss.Width(narrow), view.width)
+}
+
+func TestFailureLabelsCoverNonTestFailureClasses(t *testing.T) {
+	tests := []struct {
+		kind model.FailureKind
+		want string
+	}{
+		{kind: model.FailureKindBuild, want: " [build failed]"},
+		{kind: model.FailureKindPackage, want: " [package failed]"},
+		{kind: model.FailureKindCommand, want: " [command failed]"},
+		{kind: model.FailureKindNone, want: ""},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, failureLabel(&model.TestNode{FailureKind: tt.kind}))
+	}
+}
+
 func TestTreeViewHelpBarModes(t *testing.T) {
 	tree := treeWithEvents(model.TestEvent{
 		Action: "run", Package: "pkg", Test: "TestNeedle",

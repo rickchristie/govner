@@ -21,37 +21,53 @@ const (
 	StatusSkipped TestStatus = "skip"
 )
 
+// FailureKind identifies failures that happen outside a named test. Log text
+// is intentionally not a failure signal because tests often write expected
+// errors while they verify error handling.
+type FailureKind string
+
+const (
+	FailureKindNone    FailureKind = ""
+	FailureKindBuild   FailureKind = "build"
+	FailureKindPackage FailureKind = "package"
+	FailureKindCommand FailureKind = "command"
+)
+
 // TestEvent represents a single test event from go test -json output
 type TestEvent struct {
-	Time       time.Time `json:"Time"`
-	Action     string    `json:"Action"`
-	Package    string    `json:"Package"`
-	ImportPath string    `json:"ImportPath"` // Used for build errors
-	Test       string    `json:"Test"`
-	Elapsed    float64   `json:"Elapsed"`
-	Output     string    `json:"Output"`
+	Time        time.Time `json:"Time"`
+	Action      string    `json:"Action"`
+	Package     string    `json:"Package"`
+	ImportPath  string    `json:"ImportPath"`  // Used for build errors
+	FailedBuild string    `json:"FailedBuild"` // Build ID that caused a package failure
+	Test        string    `json:"Test"`
+	Elapsed     float64   `json:"Elapsed"`
+	Output      string    `json:"Output"`
 }
 
 // TestNode represents a node in the test tree (package, subtest, or test)
 type TestNode struct {
-	Name         string      // Short name (e.g., "TestFoo" or "subtest1")
-	FullPath     string      // Full path (e.g., "pkg/foo/TestFoo/subtest1")
-	Package      string      // Package path
-	Status       TestStatus  // Aggregate status shown in the tree
-	Elapsed      float64     // Duration in seconds
-	RawLog       *NodeLog    // Raw log output refs (points to shared RawLogBuffer)
-	ProcessedLog *NodeLog    // Processed log refs (filtered & styled, points to ProcessedLogBuffer)
-	Children     []*TestNode // Child tests/subtests
-	Parent       *TestNode   // Parent node (nil for root packages)
-	Expanded     bool        // UI state: is this node expanded
-	Cached       bool        // Whether this result is from cache
-	Depth        int         // Cached depth in tree (0 for packages, 1+ for tests/subtests)
-	NameWidth    int         // Cached runewidth of Name (0 = not computed yet)
+	Name           string      // Short name (e.g., "TestFoo" or "subtest1")
+	FullPath       string      // Full path (e.g., "pkg/foo/TestFoo/subtest1")
+	Package        string      // Package path
+	Status         TestStatus  // Aggregate status shown in the tree
+	Elapsed        float64     // Duration in seconds
+	RawLog         *NodeLog    // Raw log output refs (points to shared RawLogBuffer)
+	ProcessedLog   *NodeLog    // Processed log refs (filtered & styled, points to ProcessedLogBuffer)
+	Children       []*TestNode // Child tests/subtests
+	Parent         *TestNode   // Parent node (nil for root packages)
+	Expanded       bool        // UI state: is this node expanded
+	Cached         bool        // Whether this result is from cache
+	Depth          int         // Cached depth in tree (0 for packages, 1+ for tests/subtests)
+	NameWidth      int         // Cached runewidth of Name (0 = not computed yet)
+	FailureKind    FailureKind // Failure outside a named test, such as a compile failure
+	FailureSummary string      // Short diagnostic for the tree; complete output remains in the logs
 
 	// eventStatus is the status from this node's own test2json event. Status can
 	// also become failed because a child failed. Keep these values separate so a
 	// child result cannot hide this node's running state or corrupt its counters.
-	eventStatus TestStatus
+	eventStatus           TestStatus
+	nonTestFailureCounted bool
 
 	// Aggregated counts (includes self + all descendants)
 	PassedCount  int // Count of passed tests
@@ -75,6 +91,12 @@ type TestTree struct {
 	// Key is node FullPath, value is the partial line being accumulated.
 	OutputLineBuffer map[string]string
 
+	// Go emits build records before the final package failure. The final event's
+	// FailedBuild value links the package to this build ID. Keep this mapping so
+	// diagnostics from dependency builds can also appear on the affected package.
+	buildFailureNodes    map[string]*TestNode
+	attachedBuildFailure map[string]map[string]bool
+
 	// Global aggregated counts (sum of all packages)
 	PassedCount  int // Count of passed tests
 	FailedCount  int // Count of failed tests
@@ -87,11 +109,13 @@ type TestTree struct {
 // NewTestTree creates a new empty test tree
 func NewTestTree() *TestTree {
 	return &TestTree{
-		Packages:           make(map[string]*TestNode),
-		NodeIndex:          make(map[string]*TestNode),
-		RawLogBuffer:       NewLogBuffer(),
-		ProcessedLogBuffer: NewLogBuffer(),
-		OutputLineBuffer:   make(map[string]string),
+		Packages:             make(map[string]*TestNode),
+		NodeIndex:            make(map[string]*TestNode),
+		RawLogBuffer:         NewLogBuffer(),
+		ProcessedLogBuffer:   NewLogBuffer(),
+		OutputLineBuffer:     make(map[string]string),
+		buildFailureNodes:    make(map[string]*TestNode),
+		attachedBuildFailure: make(map[string]map[string]bool),
 	}
 }
 
@@ -104,11 +128,7 @@ func (t *TestTree) GetNode(fullPath string) *TestNode {
 // Returns true if the event changed tree visibility (status, counts, icons).
 // Returns false for log-only events that don't affect the display.
 func (t *TestTree) ProcessEvent(event TestEvent) bool {
-	// Use ImportPath if Package is empty (for build errors)
-	pkgPath := event.Package
-	if pkgPath == "" {
-		pkgPath = event.ImportPath
-	}
+	pkgPath := PackagePathForEvent(event)
 
 	// Get or create package node. Output is normally preceded by a start or run
 	// event, but build tools and alternative runners can emit output first.
@@ -123,18 +143,20 @@ func (t *TestTree) ProcessEvent(event TestEvent) bool {
 	// Handle build-specific events
 	switch event.Action {
 	case "build-output":
+		t.buildFailureNodes[event.ImportPath] = pkgNode
 		t.appendOutput(pkgNode, event.Output)
 		return packageCreated
 	case "build-fail":
+		t.buildFailureNodes[event.ImportPath] = pkgNode
 		t.flushOutput(pkgNode)
-		if pkgNode.eventStatus != StatusFailed {
-			// A build failure has no test node, but it must still appear in the
-			// global failure total. Repeated build-fail events are one result.
-			t.propagateCountDelta(pkgNode, 1, "failed")
-		}
-		pkgNode.eventStatus = StatusFailed
-		t.refreshStatus(pkgNode)
+		t.summarizeNode(pkgNode)
+		t.markNonTestFailure(pkgNode, FailureKindBuild)
 		return true // Status change
+	}
+
+	if event.Action == "fail" && event.FailedBuild != "" {
+		t.attachBuildFailure(pkgNode, event.FailedBuild)
+		t.markNonTestFailure(pkgNode, FailureKindBuild)
 	}
 
 	// Package-level event (no test name)
@@ -152,6 +174,206 @@ func (t *TestTree) ProcessEvent(event TestEvent) bool {
 	}
 	changed := t.handleTestEvent(testNode, event)
 	return packageCreated || !testExisted || changed
+}
+
+// PackagePathForEvent returns the package that owns an event in the Gowt tree.
+// BuildEvent.ImportPath is a Go build ID, not always an import path. Test build
+// IDs such as "example.com/p [example.com/p.test]" belong to example.com/p.
+func PackagePathForEvent(event TestEvent) string {
+	if event.Package != "" {
+		return event.Package
+	}
+	return packagePathFromBuildID(event.ImportPath)
+}
+
+func packagePathFromBuildID(buildID string) string {
+	const testSuffix = ".test]"
+	open := strings.LastIndex(buildID, " [")
+	if open < 0 || !strings.HasSuffix(buildID, testSuffix) {
+		return buildID
+	}
+	owner := buildID[open+2 : len(buildID)-len(testSuffix)]
+	if owner == "" {
+		return buildID
+	}
+	return owner
+}
+
+func (t *TestTree) attachBuildFailure(node *TestNode, buildID string) {
+	node.FailureKind = FailureKindBuild
+	source := t.buildFailureNodes[buildID]
+	if source == nil {
+		t.summarizeNode(node)
+		return
+	}
+	t.summarizeNode(source)
+	if source == node {
+		return
+	}
+
+	attached := t.attachedBuildFailure[node.FullPath]
+	if attached == nil {
+		attached = make(map[string]bool)
+		t.attachedBuildFailure[node.FullPath] = attached
+	}
+	if attached[buildID] {
+		return
+	}
+	attached[buildID] = true
+
+	// The package summary arrives after the compiler output. Put the linked
+	// build diagnostics first, as they appeared in the original Go output.
+	node.RawLog = prependLogRefs(node.RawLog, source.RawLog)
+	node.ProcessedLog = prependLogRefs(node.ProcessedLog, source.ProcessedLog)
+	if source.FailureSummary != "" {
+		node.FailureSummary = source.FailureSummary
+	}
+
+	// The link step uses "package.test" as a synthetic build ID. It is not a
+	// second user package. Keep its logs through the references above, then
+	// remove its temporary tree row and transfer failure counting to the owner.
+	if buildID == node.Package+".test" {
+		t.removePackage(source)
+	}
+}
+
+func (t *TestTree) removePackage(node *TestNode) {
+	delete(t.Packages, node.Package)
+	delete(t.NodeIndex, node.FullPath)
+	delete(t.OutputLineBuffer, node.FullPath)
+	t.PassedCount -= node.PassedCount
+	t.FailedCount -= node.FailedCount
+	t.SkippedCount -= node.SkippedCount
+	t.RunningCount -= node.RunningCount
+	t.CachedCount -= node.CachedCount
+	t.TotalCount -= node.TotalCount
+}
+
+func prependLogRefs(destination, source *NodeLog) *NodeLog {
+	if source == nil || source.IsEmpty() {
+		return destination
+	}
+	if destination == nil {
+		destination = NewNodeLog()
+	}
+	refs := make([]BufferRef, 0, len(source.Refs)+len(destination.Refs))
+	refs = append(refs, source.Refs...)
+	refs = append(refs, destination.Refs...)
+	destination.Refs = refs
+	return destination
+}
+
+func (t *TestTree) markNonTestFailure(node *TestNode, kind FailureKind) {
+	if !node.nonTestFailureCounted {
+		// A non-test failure must appear in the global total. Repeated terminal
+		// records still represent one failed result.
+		t.propagateCountDelta(node, 1, "failed")
+		node.nonTestFailureCounted = true
+	}
+	node.eventStatus = StatusFailed
+	node.FailureKind = kind
+	t.refreshStatus(node)
+}
+
+func (t *TestTree) clearNonTestFailure(node *TestNode) {
+	if !node.nonTestFailureCounted {
+		return
+	}
+	t.propagateCountDelta(node, -1, "failed")
+	node.nonTestFailureCounted = false
+	node.FailureKind = FailureKindNone
+	node.FailureSummary = ""
+}
+
+// MarkCommandFailure makes raw command diagnostics discoverable when the Go
+// process exits unsuccessfully without a structured package failure.
+func (t *TestTree) MarkCommandFailure(packagePath string) {
+	t.markOutputFailure(packagePath, FailureKindCommand)
+}
+
+// MarkBuildFailure makes a plain stderr build diagnostic discoverable when a
+// wrapper or tool writes outside Go's structured JSON stream.
+func (t *TestTree) MarkBuildFailure(packagePath string) {
+	t.markOutputFailure(packagePath, FailureKindBuild)
+}
+
+func (t *TestTree) markOutputFailure(packagePath string, kind FailureKind) {
+	node := t.getOrCreatePackage(packagePath)
+	if node == nil {
+		return
+	}
+	t.flushOutput(node)
+	t.summarizeNode(node)
+	t.markNonTestFailure(node, kind)
+}
+
+func (t *TestTree) summarizeNode(node *TestNode) {
+	if node.FailureSummary != "" || node.RawLog == nil {
+		return
+	}
+	for _, ref := range node.RawLog.Refs {
+		node.FailureSummary = diagnosticSummary(node.FailureSummary, t.RawLogBuffer.Slice(ref))
+	}
+}
+
+// HasFailedPackage reports whether a structured event already identified a
+// failed package. It lets the controller avoid inventing a second failure for
+// harmless stderr that accompanied an ordinary test failure.
+func (t *TestTree) HasFailedPackage() bool {
+	for _, node := range t.Packages {
+		if node.Status == StatusFailed {
+			return true
+		}
+	}
+	return false
+}
+
+func diagnosticSummary(previous, output string) string {
+	bestScore := diagnosticScore(previous)
+	for _, line := range strings.Split(stripAnsi(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "# ") || isGoResultSummary(line) {
+			continue
+		}
+		score := diagnosticScore(line)
+		if score >= bestScore {
+			previous = line
+			bestScore = score
+		}
+	}
+	return previous
+}
+
+// diagnosticScore chooses a useful one-line preview only. It never controls
+// status. Prefer the root error over trailing tool summaries and exit codes.
+func diagnosticScore(line string) int {
+	line = strings.ToLower(line)
+	if line == "" {
+		return -1
+	}
+	if strings.HasPrefix(line, "exit status ") {
+		return 0
+	}
+	for _, marker := range []string{
+		"panic:", "fatal error:", "syntax error", "undefined:", "not defined",
+		"not found", "not allowed", "no required module", "no such file",
+		"invalid ", "unknown ", "unrecognized ", "wrong type",
+	} {
+		if strings.Contains(line, marker) {
+			return 3
+		}
+	}
+	if strings.Contains(line, "failed") || strings.Contains(line, "cannot ") || strings.Contains(line, "could not ") {
+		return 2
+	}
+	return 1
+}
+
+func isGoResultSummary(line string) bool {
+	return line == "FAIL" || line == "PASS" ||
+		strings.HasPrefix(line, "FAIL\t") ||
+		strings.HasPrefix(line, "ok  \t") ||
+		strings.HasPrefix(line, "?   \t")
 }
 
 func (t *TestTree) getOrCreatePackage(pkgPath string) *TestNode {
@@ -230,12 +452,16 @@ func findChild(parent *TestNode, name string) *TestNode {
 func (t *TestTree) handlePackageEvent(node *TestNode, event TestEvent) bool {
 	switch event.Action {
 	case "start":
+		if node.FailureKind != FailureKindNone {
+			return false
+		}
 		node.eventStatus = StatusRunning
 		t.refreshStatus(node)
 		return true
 	case "pass":
 		t.flushOutput(node)
 		t.finalizeUnfinishedTests(node, StatusPassed)
+		t.clearNonTestFailure(node)
 		node.eventStatus = StatusPassed
 		node.Elapsed = event.Elapsed
 		t.refreshStatus(node)
@@ -243,6 +469,12 @@ func (t *TestTree) handlePackageEvent(node *TestNode, event TestEvent) bool {
 	case "fail":
 		t.flushOutput(node)
 		t.finalizeUnfinishedTests(node, StatusFailed)
+		if node.FailedCount == 0 {
+			t.summarizeNode(node)
+			t.markNonTestFailure(node, FailureKindPackage)
+			node.Elapsed = event.Elapsed
+			return true
+		}
 		node.eventStatus = StatusFailed
 		node.Elapsed = event.Elapsed
 		t.refreshStatus(node)
@@ -250,6 +482,7 @@ func (t *TestTree) handlePackageEvent(node *TestNode, event TestEvent) bool {
 	case "skip":
 		t.flushOutput(node)
 		t.finalizeUnfinishedTests(node, StatusSkipped)
+		t.clearNonTestFailure(node)
 		node.eventStatus = StatusSkipped
 		t.refreshStatus(node)
 		return true

@@ -1,0 +1,3 @@
+TEXT ·brokenAssembly(SB),$0-0
+	GOWT_NOT_A_REAL_INSTRUCTION
+	RET

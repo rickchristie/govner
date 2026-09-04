@@ -452,7 +452,10 @@ func TestAppCompletionProcessesPendingDataAndSurfacesOperationalErrors(t *testin
 	node := app.tree.GetNode("pkg/TestFinal")
 	require.NotNil(t, node)
 	assert.Equal(t, "last diagnostic", node.GetFullOutput(app.tree.RawLogBuffer))
-	assert.NotNil(t, app.tree.GetNode("go test"), "unscoped stderr must remain visible")
+	commandNode := app.tree.GetNode("go test")
+	require.NotNil(t, commandNode, "unscoped stderr must remain visible")
+	assert.Equal(t, model.StatusFailed, commandNode.Status)
+	assert.Contains(t, commandNode.GetFullOutput(app.tree.RawLogBuffer), runErr.Error())
 	assert.True(t, app.showErrorModal)
 	assert.Contains(t, app.View(), "Test run failed")
 	assert.Contains(t, app.View(), runErr.Error())
@@ -468,6 +471,11 @@ func TestAppOperationalFailureForcesNonzeroExitCode(t *testing.T) {
 
 	assert.Equal(t, 1, app.exitCode)
 	assert.True(t, app.showErrorModal)
+	node := app.tree.GetNode("go test")
+	require.NotNil(t, node)
+	assert.Equal(t, model.StatusFailed, node.Status)
+	assert.Equal(t, model.FailureKindCommand, node.FailureKind)
+	assert.Contains(t, node.GetFullOutput(app.tree.RawLogBuffer), runErr.Error())
 }
 
 func TestBuildEventRelevanceUsesImportPath(t *testing.T) {
@@ -475,9 +483,46 @@ func TestBuildEventRelevanceUsesImportPath(t *testing.T) {
 	assert.True(t, isEventRelevantToNode(model.TestEvent{
 		Action: "build-output", ImportPath: node.Package,
 	}, node))
+	assert.True(t, isEventRelevantToNode(model.TestEvent{
+		Action: "build-output", ImportPath: node.Package + " [" + node.Package + ".test]",
+	}, node))
 	assert.False(t, isEventRelevantToNode(model.TestEvent{
 		Action: "build-output", ImportPath: "example.com/project/other",
 	}, node))
+}
+
+func TestOpenSyntheticLinkerLogMovesToOwningPackage(t *testing.T) {
+	const (
+		pkg     = "example.com/project/linker"
+		buildID = pkg + ".test"
+	)
+	app := NewLiveApp(nil, &fakeTestRunner{})
+	for _, event := range []model.TestEvent{
+		{Action: "build-output", ImportPath: buildID, Output: "relocation target missingSymbol not defined\n"},
+		{Action: "build-fail", ImportPath: buildID},
+	} {
+		app.processTestEvent(event)
+	}
+	synthetic := app.tree.GetNode(buildID)
+	require.NotNil(t, synthetic)
+	app.screen = ScreenLog
+	app.logView = view.NewLogView().SetData(
+		synthetic, app.tree.ProcessedLogBuffer, app.tree.RawLogBuffer,
+	)
+
+	for _, event := range []model.TestEvent{
+		{Action: "start", Package: pkg},
+		{Action: "output", Package: pkg, Output: "FAIL\t" + pkg + " [build failed]\n"},
+		{Action: "fail", Package: pkg, FailedBuild: buildID},
+	} {
+		app.processTestEvent(event)
+	}
+
+	assert.Nil(t, app.tree.GetNode(buildID))
+	owner := app.tree.GetNode(pkg)
+	require.NotNil(t, owner)
+	assert.Same(t, owner, app.logView.GetNode())
+	assert.Contains(t, owner.GetFullOutput(app.tree.RawLogBuffer), "missingSymbol")
 }
 
 func TestAppUpdateTick(t *testing.T) {
@@ -526,6 +571,24 @@ func TestAppUpdateParsesStderrByPackage(t *testing.T) {
 	assert.Equal(t, "example.com/project/pkg", app.stderrPkg)
 }
 
+func TestAppStderrNormalizesTestBuildHeader(t *testing.T) {
+	const pkg = "example.com/project/pkg"
+	app := NewLiveApp(nil, &fakeTestRunner{})
+	app.processStderrLine("# " + pkg + " [" + pkg + ".test]\n")
+	app.processStderrLine("pkg_test.go:3: undefined: missing\n")
+
+	assert.Equal(t, pkg, app.stderrPkg)
+	node := app.tree.GetNode(pkg)
+	require.NotNil(t, node)
+	assert.Contains(t, node.GetFullOutput(app.tree.RawLogBuffer), "undefined: missing")
+	assert.Nil(t, app.tree.GetNode(pkg+" ["+pkg+".test]"))
+
+	updated, _ := app.Update(TestDoneMsg{ExitCode: 1, RunGen: 0})
+	app = appFromModel(t, updated)
+	assert.Equal(t, model.StatusFailed, node.Status)
+	assert.Equal(t, model.FailureKindBuild, node.FailureKind)
+}
+
 func TestAppStderrContentDoesNotFailSuccessfulRun(t *testing.T) {
 	app := NewLiveApp(nil, &fakeTestRunner{})
 	updated, _ := app.Update(StderrMsg{
@@ -544,6 +607,54 @@ func TestAppStderrContentDoesNotFailSuccessfulRun(t *testing.T) {
 	assert.Zero(t, app.exitCode)
 	assert.Contains(t, app.View(), "Done")
 	assert.NotContains(t, app.View(), "Failed")
+}
+
+func TestAppNonzeroExitMakesStderrDiagnosticsDiscoverable(t *testing.T) {
+	app := NewLiveApp(nil, &fakeTestRunner{})
+	updated, _ := app.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	app = appFromModel(t, updated)
+	updated, _ = app.Update(StderrMsg{
+		Line:   "go: unknown flag -not-a-real-flag\n",
+		RunGen: 0,
+	})
+	app = appFromModel(t, updated)
+
+	updated, _ = app.Update(TestDoneMsg{ExitCode: 2, RunGen: 0})
+	app = appFromModel(t, updated)
+
+	node := app.tree.GetNode("go test")
+	require.NotNil(t, node)
+	assert.Equal(t, model.StatusFailed, node.Status)
+	assert.Equal(t, model.FailureKindCommand, node.FailureKind)
+	assert.Equal(t, "go: unknown flag -not-a-real-flag", node.FailureSummary)
+	assert.Equal(t, 1, app.tree.FailedCount)
+	assert.Contains(t, app.View(), "command failed")
+}
+
+func TestAppStructuredFailureDoesNotPromoteUnrelatedStderr(t *testing.T) {
+	app := NewLiveApp(nil, &fakeTestRunner{})
+	for _, event := range []model.TestEvent{
+		{Action: "run", Package: "pkg", Test: "TestFailed"},
+		{Action: "fail", Package: "pkg", Test: "TestFailed"},
+		{Action: "fail", Package: "pkg"},
+	} {
+		updated, _ := app.Update(TestEventMsg{Event: event, RunGen: 0})
+		app = appFromModel(t, updated)
+	}
+	updated, _ := app.Update(StderrMsg{
+		Line:   "{\"level\":\"error\",\"message\":\"expected diagnostic\"}\n",
+		RunGen: 0,
+	})
+	app = appFromModel(t, updated)
+
+	updated, _ = app.Update(TestDoneMsg{ExitCode: 1, RunGen: 0})
+	app = appFromModel(t, updated)
+
+	stderrNode := app.tree.GetNode("go test")
+	require.NotNil(t, stderrNode)
+	assert.Equal(t, model.StatusPending, stderrNode.Status)
+	assert.Equal(t, model.FailureKindNone, stderrNode.FailureKind)
+	assert.Equal(t, 1, app.tree.FailedCount)
 }
 
 func TestCacheCleanedMessagesResetAndRestart(t *testing.T) {

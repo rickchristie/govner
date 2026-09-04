@@ -93,7 +93,9 @@ type App struct {
 	clipboard Clipboard
 
 	// Stderr package tracking
-	stderrPkg string // Current package for stderr output
+	stderrPkg           string          // Current package for stderr output
+	stderrPackages      map[string]bool // Packages that received raw stderr in this run
+	stderrBuildPackages map[string]bool // Packages identified by a Go "# package" build header
 
 	// Quit confirmation modal
 	showQuitModal   bool
@@ -139,13 +141,15 @@ func newApp(tree *model.TestTree, clipboard Clipboard) App {
 	hv := view.NewHelpView().SetClipboardHint(clipboard.Hint()).SetRerunEnabled(false)
 
 	return App{
-		screen:    ScreenTree,
-		treeView:  tv,
-		logView:   view.NewLogView().SetRerunEnabled(false),
-		helpView:  hv,
-		tree:      tree,
-		running:   false,
-		clipboard: clipboard,
+		screen:              ScreenTree,
+		treeView:            tv,
+		logView:             view.NewLogView().SetRerunEnabled(false),
+		helpView:            hv,
+		tree:                tree,
+		running:             false,
+		clipboard:           clipboard,
+		stderrPackages:      make(map[string]bool),
+		stderrBuildPackages: make(map[string]bool),
 	}
 }
 
@@ -165,16 +169,18 @@ func newLiveApp(args []string, runner TestRunner, clipboard Clipboard) App {
 
 	hv := view.NewHelpView().SetClipboardHint(clipboard.Hint())
 	return App{
-		screen:    ScreenTree,
-		treeView:  tv,
-		logView:   view.NewLogView(),
-		helpView:  hv,
-		tree:      tree,
-		running:   true,
-		testArgs:  args,
-		startTime: time.Now(),
-		runner:    runner,
-		clipboard: clipboard,
+		screen:              ScreenTree,
+		treeView:            tv,
+		logView:             view.NewLogView(),
+		helpView:            hv,
+		tree:                tree,
+		running:             true,
+		testArgs:            args,
+		startTime:           time.Now(),
+		runner:              runner,
+		clipboard:           clipboard,
+		stderrPackages:      make(map[string]bool),
+		stderrBuildPackages: make(map[string]bool),
 	}
 }
 
@@ -405,6 +411,15 @@ func (a *App) processTestEvent(event model.TestEvent) {
 		return
 	}
 	node := a.logView.GetNode()
+	if node != nil && node.FullPath != event.Package && event.FailedBuild == node.FullPath {
+		if owner := a.tree.GetNode(event.Package); owner != nil {
+			// A linker build can first appear under the synthetic package.test
+			// build ID. Keep an already-open log on the owning package when the
+			// final event provides that association.
+			a.logView = a.logView.SetData(owner, a.tree.ProcessedLogBuffer, a.tree.RawLogBuffer)
+		}
+		return
+	}
 	if node == nil || !isEventRelevantToNode(event, node) {
 		return
 	}
@@ -415,18 +430,63 @@ func (a *App) processTestEvent(event model.TestEvent) {
 
 func (a *App) processStderrLine(line string) {
 	if strings.HasPrefix(line, "# ") {
-		a.stderrPkg = strings.TrimSpace(strings.TrimPrefix(line, "# "))
+		buildID := strings.TrimSpace(strings.TrimPrefix(line, "# "))
+		a.stderrPkg = model.PackagePathForEvent(model.TestEvent{ImportPath: buildID})
+		a.stderrBuildPackages[a.stderrPkg] = true
 	}
 	pkg := a.stderrPkg
 	if pkg == "" {
 		pkg = "go test"
 	}
+	a.stderrPackages[pkg] = true
 	a.processTestEvent(model.TestEvent{
 		Time:    time.Now(),
 		Action:  "output",
 		Package: pkg,
 		Output:  line,
 	})
+}
+
+// markCommandFailureIfNeeded preserves failures that do not have a test2json
+// result event. An operational read error is always a separate Gowt failure.
+// Plain stderr is promoted only when no structured package already failed.
+func (a *App) markCommandFailureIfNeeded(exitCode int, err error) {
+	if err != nil {
+		const pkg = "go test"
+		a.processTestEvent(model.TestEvent{
+			Action:  "output",
+			Package: pkg,
+			Output:  "gowt could not read the complete go test result: " + err.Error() + "\n",
+		})
+		a.tree.MarkCommandFailure(pkg)
+		return
+	}
+
+	if a.tree.HasFailedPackage() {
+		for pkg := range a.stderrBuildPackages {
+			a.tree.MarkBuildFailure(pkg)
+		}
+		return
+	}
+
+	if len(a.stderrPackages) == 0 {
+		const pkg = "go test"
+		a.processTestEvent(model.TestEvent{
+			Action:  "output",
+			Package: pkg,
+			Output:  fmt.Sprintf("go test exited with status %d without diagnostic output\n", exitCode),
+		})
+		a.tree.MarkCommandFailure(pkg)
+		return
+	}
+
+	for pkg := range a.stderrPackages {
+		if a.stderrBuildPackages[pkg] {
+			a.tree.MarkBuildFailure(pkg)
+			continue
+		}
+		a.tree.MarkCommandFailure(pkg)
+	}
 }
 
 func (a *App) copyLogs(text string) tea.Cmd {
@@ -634,11 +694,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// other Gowt operational failure into shell success.
 			a.exitCode = 1
 		}
+		failedRun := msg.Err != nil || msg.ExitCode != 0
+		if failedRun {
+			a.markCommandFailureIfNeeded(a.exitCode, msg.Err)
+		}
 		// Update elapsed time one final time
 		a.tree.Elapsed = time.Since(a.startTime).Seconds()
 		a.treeView = a.treeView.SetData(a.tree)
 		a.treeView = a.treeView.SetRunning(false)
-		failedRun := msg.Err != nil || msg.ExitCode != 0
 		a.treeView = a.treeView.SetErrored(failedRun)
 		if msg.Err != nil {
 			a.showOperationalError("Test run failed", msg.Err)
@@ -710,6 +773,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.startTime = time.Now()
 		a.running = true
 		a.stderrPkg = ""
+		a.stderrPackages = make(map[string]bool)
+		a.stderrBuildPackages = make(map[string]bool)
 		cmds = append(cmds, a.startTests(), a.tickCmd())
 
 	case LogCacheCleanedMsg:
@@ -735,6 +800,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.startTime = time.Now()
 		a.running = true
 		a.stderrPkg = ""
+		a.stderrPackages = make(map[string]bool)
+		a.stderrBuildPackages = make(map[string]bool)
 		// Start tests with specific package and test name
 		cmds = append(cmds, a.startSingleTest(msg.Package, msg.Test), a.tickCmd())
 		// Go back to tree view to see the test running
@@ -942,10 +1009,7 @@ func (a App) View() string {
 // - For a test node: events for this exact test or its subtests
 func isEventRelevantToNode(event model.TestEvent, node *model.TestNode) bool {
 	// Must be same package
-	eventPackage := event.Package
-	if eventPackage == "" {
-		eventPackage = event.ImportPath
-	}
+	eventPackage := model.PackagePathForEvent(event)
 	if eventPackage != node.Package {
 		return false
 	}
