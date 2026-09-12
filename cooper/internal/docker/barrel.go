@@ -2,13 +2,19 @@ package docker
 
 import (
 	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/runtimefs"
+	"github.com/rickchristie/govner/cooper/internal/workload"
 )
 
 // BarrelInfo holds status information about a running barrel container.
@@ -16,6 +22,7 @@ type BarrelInfo struct {
 	Name         string
 	Status       string
 	WorkspaceDir string
+	ToolName     string
 }
 
 // BarrelContainerName returns the container name for a barrel based on the
@@ -43,8 +50,12 @@ func BarrelContainerName(workspaceDir, toolName string) string {
 // containerWorkspacePath returns the workspace path label of an existing
 // container, or empty string if the container does not exist.
 func containerWorkspacePath(name string) string {
+	return containerLabel(name, "cooper.workspace")
+}
+
+func containerLabel(name, label string) string {
 	cmd := exec.Command("docker", "inspect",
-		"--format", "{{index .Config.Labels \"cooper.workspace\"}}",
+		"--format", fmt.Sprintf("{{index .Config.Labels %q}}", label),
 		name,
 	)
 	output, err := cmd.Output()
@@ -67,27 +78,44 @@ func containerWorkspacePath(name string) string {
 //
 // cooperDir is the path to ~/.cooper.
 func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home directory: %w", err)
+	}
+	return StartBarrelWithHomeDir(cfg, workspaceDir, cooperDir, homeDir, toolName)
+}
+
+// StartBarrelWithHomeDir starts a barrel with an explicit host home. Runtime
+// tests use a temporary home that is visible to both the Docker client and its
+// daemon. Production callers use StartBarrel and the real user home.
+func StartBarrelWithHomeDir(cfg *config.Config, workspaceDir, cooperDir, homeDir, toolName string) error {
+	if !filepath.IsAbs(homeDir) {
+		return errors.New("barrel host home directory must be absolute")
+	}
 	name := BarrelContainerName(workspaceDir, toolName)
 	absWorkspace, err := filepath.Abs(workspaceDir)
 	if err != nil {
 		return fmt.Errorf("resolve workspace path: %w", err)
 	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("get home directory: %w", err)
-	}
-	if toolName == "grok" {
-		if err := ValidateGrokHostStateRoot(homeDir, cooperDir); err != nil {
-			return fmt.Errorf("validate Grok state root before mount: %w", err)
-		}
-	}
-
-	// Create host directories that may not exist yet.
-	if err := ensureBarrelMountDirs(toolName, cooperDir, name, cfg); err != nil {
+	mountInput := barrelMountInput(absWorkspace, homeDir, cfg, cooperDir, toolName, name)
+	// Create only the known host state, cache, and runtime directories before
+	// the pure plan detects optional directory mounts such as live config.
+	if err := workload.EnsureDirectories(mountInput); err != nil {
 		return fmt.Errorf("create mount directories: %w", err)
 	}
-	if _, err := SyncBarrelTimezoneFile(cooperDir, name); err != nil {
+	// Write the startup timezone snapshot before the mount plan checks which
+	// optional files exist. This order makes the host timezone snapshot part of
+	// every new barrel instead of only barrels that reuse an old snapshot.
+	if _, err := runtimefs.SyncTimezoneFile(cooperDir, name); err != nil {
 		return fmt.Errorf("sync barrel timezone: %w", err)
+	}
+	mounts, err := workload.BuildMountPlan(mountInput)
+	if err != nil {
+		return fmt.Errorf("build mount plan: %w", err)
+	}
+	clipboardMode, err := ToolClipboardMode(toolName)
+	if err != nil {
+		return err
 	}
 
 	// Ensure seccomp profile is written to disk.
@@ -98,6 +126,7 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 
 	// Remove existing container with the same name.
 	_ = exec.Command("docker", "rm", "-f", name).Run()
+	_ = os.Remove(filepath.Join(cooperDir, "tmp", name, filepath.Base(workload.EntrypointReadyPath)))
 
 	args := []string{
 		"run", "-d",
@@ -115,43 +144,20 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 
 		// Label for workspace path tracking (used by collision detection).
 		"--label", fmt.Sprintf("cooper.workspace=%s", absWorkspace),
+		"--label", "cooper.kind=cli",
+		"--label", "cooper.runtime-id=" + name,
+		"--label", "cooper.tool=" + toolName,
+		"--label", "cooper.clipboard-mode=" + clipboardMode,
 	}
 
 	// Volume mounts.
-	args = appendVolumeMounts(args, absWorkspace, homeDir, cfg, cooperDir, toolName, name)
+	args = appendDockerMounts(args, mounts)
 
-	// Proxy environment variables -- all traffic goes through cooper-proxy.
-	args = append(args,
-		"-e", fmt.Sprintf("HTTP_PROXY=http://%s:%d", ProxyHost(), cfg.ProxyPort),
-		"-e", fmt.Sprintf("HTTPS_PROXY=http://%s:%d", ProxyHost(), cfg.ProxyPort),
-		"-e", "NO_PROXY=localhost,127.0.0.1",
-		"-e", "TZ=:/etc/localtime",
-		"-e", fmt.Sprintf("COOPER_PROXY_HOST=%s", ProxyHost()),
-		"-e", fmt.Sprintf("COOPER_INTERNAL_NETWORK=%s", InternalNetworkName()),
-	)
-
-	// X11 display env vars — set for ALL barrels so Playwright and clipboard
-	// bridge both have a consistent display. The entrypoint starts a shared
-	// Xvfb instance that these point to.
-	args = append(args,
-		"-e", "DISPLAY=127.0.0.1:99",
-		"-e", "XAUTHORITY=/home/user/.cooper-clipboard.xauth",
-		"-e", "COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99",
-		"-e", "COOPER_CLIPBOARD_XAUTHORITY=/home/user/.cooper-clipboard.xauth",
-	)
-
-	// Playwright browser cache path.
-	args = append(args,
-		"-e", "PLAYWRIGHT_BROWSERS_PATH=/home/user/.cache/ms-playwright",
-	)
-
-	// Clipboard bridge env vars.
-	args = append(args,
-		"-e", "COOPER_CLIPBOARD_ENABLED=1",
-		"-e", fmt.Sprintf("COOPER_CLIPBOARD_BRIDGE_URL=http://127.0.0.1:%d", cfg.BridgePort),
-		"-e", "COOPER_CLIPBOARD_TOKEN_FILE=/etc/cooper/clipboard-token",
-		"-e", "COOPER_CLIPBOARD_SHIMS=xclip,xsel",
-	)
+	// Render the shared non-secret environment with this back end's proxy.
+	for _, environment := range workload.RenderEnvironment(workload.RuntimeEnvironment(cfg, ProxyHost(), InternalNetworkName())) {
+		args = append(args, "-e", environment)
+	}
+	args = append(args, "-e", "COOPER_CLIPBOARD_MODE="+clipboardMode)
 
 	// Working directory inside the container matches host workspace.
 	args = append(args, "-w", absWorkspace)
@@ -164,159 +170,74 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 	if err != nil {
 		return fmt.Errorf("docker run %s failed: %w\n%s", name, err, string(output))
 	}
-
+	if err := WaitBarrelReady(name, 60*time.Second); err != nil {
+		logs, _ := exec.Command("docker", "logs", name).CombinedOutput()
+		_ = StopBarrel(name)
+		return fmt.Errorf("start barrel %s: %w\n%s", name, err, strings.TrimSpace(string(logs)))
+	}
 	return nil
 }
 
-// appendVolumeMounts adds all volume mount flags to the docker run args.
-// cooperDir provides Cooper-managed mounts such as language caches, CA,
-// socat rules, clipboard shims/tokens, Playwright support dirs, and the
-// per-barrel host-backed /tmp directory.
-// toolName scopes which AI tool state directories are mounted.
-// containerName identifies per-barrel mounts such as the clipboard token
-// file and ~/.cooper/tmp/{containerName}.
-func appendVolumeMounts(args []string, absWorkspace, homeDir string, cfg *config.Config, cooperDir, toolName, containerName string) []string {
-	// Workspace directory (read-write) -- symmetrical mount so IDE
-	// integration (e.g. VS Code) can resolve paths correctly.
-	args = append(args, "-v", fmt.Sprintf("%s:%s:rw", absWorkspace, absWorkspace))
-
-	// .git/hooks overlay (read-only) to prevent hook injection.
-	// Symmetrical mount so git inside the container finds hooks at the
-	// expected path relative to the workspace.
-	gitHooksDir := filepath.Join(absWorkspace, ".git", "hooks")
-	if dirExists(gitHooksDir) {
-		args = append(args, "-v", fmt.Sprintf("%s:%s:ro", gitHooksDir, gitHooksDir))
+// ToolClipboardMode returns the effective clipboard mode of an agent image.
+// Built-in tools use the reviewed catalog value. A custom image can select a
+// stricter mode through COOPER_CLIPBOARD_MODE in its image environment.
+func ToolClipboardMode(toolName string) (string, error) {
+	if _, ok := aitool.Lookup(toolName); ok {
+		return aitool.ClipboardMode(toolName), nil
 	}
 
-	// Per-tool state directories (read-write).
-	// Only mount state for the specific tool.
-	switch toolName {
-	case "claude":
-		mountRW(homeDir, ".claude", &args)
-		claudeJSON := filepath.Join(homeDir, ".claude.json")
-		if fileExists(claudeJSON) {
-			args = append(args, "-v", fmt.Sprintf("%s:%s:rw", claudeJSON, filepath.Join(BarrelHomeDir, ".claude.json")))
-		}
-	case "copilot":
-		mountRW(homeDir, ".copilot", &args)
-	case "codex":
-		mountRW(homeDir, ".codex", &args)
-	case "opencode":
-		mountRW(homeDir, filepath.Join(".cache", "opencode"), &args)
-		mountRW(homeDir, filepath.Join(".config", "opencode"), &args)
-		mountRW(homeDir, filepath.Join(".local", "share", "opencode"), &args)
-		mountRW(homeDir, filepath.Join(".local", "state", "opencode"), &args)
-		mountRW(homeDir, ".opencode", &args)
-	case "grok":
-		// One read-write root keeps host and barrel auth, configuration,
-		// sessions, history, memory, skills, locks, and future Grok state in
-		// sync. Do not split children into Cooper-owned state directories.
-		args = append(args, "-v", fmt.Sprintf("%s:%s:rw", GrokHostStateRoot(homeDir), BarrelGrokStateRoot))
-	}
-
-	// Git config (read-only).
-	gitconfig := filepath.Join(homeDir, ".gitconfig")
-	if fileExists(gitconfig) {
-		args = append(args, "-v", fmt.Sprintf("%s:%s:ro", gitconfig, filepath.Join(BarrelHomeDir, ".gitconfig")))
-	}
-
-	// Language-specific caches (Cooper-managed, under cooperDir/cache/).
-	args = appendLanguageCacheMounts(args, cooperDir, cfg)
-
-	// CA certificate for SSL bump trust. Volume-mounted so the barrel always
-	// uses the same CA as the running proxy, even if the CA was regenerated
-	// after the barrel image was built.
-	caCert := filepath.Join(cooperDir, "ca", "cooper-ca.pem")
-	if fileExists(caCert) {
-		args = append(args, "-v", fmt.Sprintf("%s:/etc/cooper/cooper-ca.pem:ro", caCert))
-	}
-
-	// Socat port forwarding rules (live-reloadable via SIGHUP).
-	socatRules := filepath.Join(cooperDir, socatRulesFile)
-	if fileExists(socatRules) {
-		args = append(args, "-v", fmt.Sprintf("%s:/etc/cooper/socat-rules.json:ro", socatRules))
-	}
-
-	// Mount clipboard token file if it exists.
-	tokenFile := filepath.Join(cooperDir, "tokens", containerName)
-	if fileExists(tokenFile) {
-		args = append(args, "-v", tokenFile+":/etc/cooper/clipboard-token:ro")
-	}
-
-	// Mount clipboard shim scripts.
-	shimsDir := filepath.Join(cooperDir, "base", "shims")
-	if dirExists(shimsDir) {
-		args = append(args, "-v", shimsDir+":/etc/cooper/shims:ro")
-	}
-
-	// Playwright support mounts: Cooper-managed fonts (read-only) and
-	// Playwright browser cache (read-write).
-	fontsDir := filepath.Join(cooperDir, "fonts")
-	args = append(args, "-v", fontsDir+":"+BarrelFontsDir+":ro")
-
-	pwCacheDir := filepath.Join(cooperDir, "cache", "ms-playwright")
-	args = append(args, "-v", pwCacheDir+":"+BarrelPlaywrightCacheDir+":rw")
-
-	// Per-barrel /tmp directory. Each barrel gets its own host-backed /tmp
-	// under ~/.cooper/tmp/{containerName}/ to avoid collisions between
-	// barrels. Cooper clears the shared tmp root when cooper up starts and
-	// when it shuts down, so each control-plane session begins pristine.
-	barrelTmpDir := BarrelTmpDir(cooperDir, containerName)
-	args = append(args, "-v", barrelTmpDir+":/tmp:rw")
-
-	// Per-barrel session directory. Cooper writes host-controlled runtime
-	// files here and mounts them read-only into the barrel so the barrel
-	// cannot pre-create symlinks or modify the files after creation.
-	barrelSessionDir := BarrelSessionDir(cooperDir, containerName)
-	args = append(args, "-v", barrelSessionDir+":"+BarrelSessionContainerDir+":ro")
-
-	// Bind the latest host timezone snapshot into /etc/localtime so startup
-	// paths and background processes share the same local time view as the CLI.
-	timezoneFile := filepath.Join(barrelSessionDir, barrelTimezoneFilename)
-	if fileExists(timezoneFile) {
-		args = append(args, "-v", timezoneFile+":"+barrelTimezoneContainerPath+":ro")
-	}
-
-	return args
-}
-
-// mountRW appends a read-write volume mount for a directory relative to home.
-func mountRW(homeDir, relPath string, args *[]string) {
-	hostPath := filepath.Join(homeDir, relPath)
-	containerPath := filepath.Join(BarrelHomeDir, relPath)
-	*args = append(*args, "-v", fmt.Sprintf("%s:%s:rw", hostPath, containerPath))
-}
-
-// appendLanguageCacheMounts adds Cooper-managed cache volume mounts based
-// on which programming tools are enabled. All caches live under
-// cooperDir/cache/ and are mounted read-write — no host caches are used.
-func appendLanguageCacheMounts(args []string, cooperDir string, cfg *config.Config) []string {
-	for _, spec := range languageCacheSpecs(cooperDir, cfg) {
-		args = append(args, "-v", fmt.Sprintf("%s:%s:rw", spec.HostPath, spec.ContainerPath))
-	}
-	return args
-}
-
-// ensureBarrelMountDirs creates directories on the host that must exist
-// before Docker can bind-mount them into a barrel. The directory list
-// comes from barrelMountDirs (pure helper); this function is the thin
-// I/O wrapper that calls os.MkdirAll.
-func ensureBarrelMountDirs(toolName, cooperDir, containerName string, cfg *config.Config) error {
-	homeDir, err := os.UserHomeDir()
+	output, err := exec.Command("docker", "image", "inspect", "--format", "{{json .Config.Env}}", GetImageCLI(toolName)).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("get home dir: %w", err)
+		return "", fmt.Errorf("inspect clipboard mode for custom tool %s: %w: %s", toolName, err, strings.TrimSpace(string(output)))
 	}
+	var environment []string
+	if err := json.Unmarshal(output, &environment); err != nil {
+		return "", fmt.Errorf("parse clipboard mode for custom tool %s: %w", toolName, err)
+	}
+	mode, err := clipboardModeFromEnvironment(environment)
+	if err != nil {
+		return "", fmt.Errorf("custom tool %s: %w", toolName, err)
+	}
+	return mode, nil
+}
 
-	for _, dir := range barrelMountDirs(homeDir, toolName, cooperDir, containerName, cfg) {
-		mode := os.FileMode(0o755)
-		if toolName == "grok" && dir == GrokHostStateRoot(homeDir) {
-			mode = 0o700
-		}
-		if err := os.MkdirAll(dir, mode); err != nil {
-			return fmt.Errorf("mkdir %s: %w", dir, err)
+func clipboardModeFromEnvironment(environment []string) (string, error) {
+	mode := aitool.ClipboardAuto
+	for _, entry := range environment {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok && name == "COOPER_CLIPBOARD_MODE" {
+			mode = strings.ToLower(strings.TrimSpace(value))
 		}
 	}
-	return nil
+	switch mode {
+	case "off", aitool.ClipboardShim, aitool.ClipboardX11, aitool.ClipboardAuto:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid COOPER_CLIPBOARD_MODE %q", mode)
+	}
+}
+
+func appendDockerMounts(args []string, mounts []workload.MountSpec) []string {
+	for _, mount := range mounts {
+		value := fmt.Sprintf("type=bind,src=%s,dst=%s", mount.Source, mount.Target)
+		if mount.Access == workload.ReadOnly {
+			value += ",readonly"
+		}
+		args = append(args, "--mount", value)
+	}
+	return args
+}
+
+func barrelMountInput(absWorkspace, homeDir string, cfg *config.Config, cooperDir, toolName, containerName string) workload.MountInput {
+	return workload.MountInput{
+		WorkspaceDir:  absWorkspace,
+		HomeDir:       homeDir,
+		CooperDir:     cooperDir,
+		RuntimeID:     containerName,
+		ToolName:      toolName,
+		GrokStateRoot: GrokHostStateRoot(homeDir),
+		Config:        cfg,
+	}
 }
 
 // StopBarrel stops and removes a barrel container by name.
@@ -328,14 +249,29 @@ func StopBarrel(name string) error {
 // docker restart which preserves the container (unlike StopBarrel which
 // also removes it).
 func RestartBarrel(name string) error {
+	_ = exec.Command("docker", "exec", name, "rm", "-f", workload.EntrypointReadyPath).Run()
 	cmd := exec.Command("docker", "restart", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		if !strings.Contains(string(output), "No such container") {
-			return fmt.Errorf("docker restart %s failed: %w\n%s", name, err, string(output))
+		if strings.Contains(string(output), "No such container") {
+			return nil
 		}
+		return fmt.Errorf("docker restart %s failed: %w\n%s", name, err, string(output))
 	}
-	return nil
+	return WaitBarrelReady(name, 60*time.Second)
+}
+
+// WaitBarrelReady waits until the shared entrypoint has installed all runtime
+// support. Docker's running state alone is too early for an exec session.
+func WaitBarrelReady(name string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := exec.Command("docker", "exec", name, "test", "-f", workload.EntrypointReadyPath).Run(); err == nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("barrel %s did not become ready in %s", name, timeout)
 }
 
 // ExecBarrel executes a command inside a running barrel container.
@@ -411,6 +347,7 @@ func ListBarrels() ([]BarrelInfo, error) {
 			Name:         name,
 			Status:       status,
 			WorkspaceDir: workspace,
+			ToolName:     containerLabel(name, "cooper.tool"),
 		})
 	}
 	return barrels, nil
@@ -443,7 +380,7 @@ func BarrelHasSessionMount(name string) (bool, error) {
 		return false, fmt.Errorf("inspect barrel mounts for %s: %w\n%s", name, err, string(output))
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		if strings.TrimSpace(line) == BarrelSessionContainerDir {
+		if strings.TrimSpace(line) == workload.SessionContainerDir {
 			return true, nil
 		}
 	}
@@ -492,22 +429,4 @@ func sameHostPath(left, right string) bool {
 	leftResolved, leftErr := filepath.EvalSymlinks(left)
 	rightResolved, rightErr := filepath.EvalSymlinks(right)
 	return leftErr == nil && rightErr == nil && filepath.Clean(leftResolved) == filepath.Clean(rightResolved)
-}
-
-// dirExists returns true if the path exists and is a directory.
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	return info.IsDir()
-}
-
-// fileExists returns true if the path exists and is a regular file.
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	return !info.IsDir()
 }

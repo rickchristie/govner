@@ -38,7 +38,7 @@ func TestRootFrameClampsOversizedScreenAndRoutesMouse(t *testing.T) {
 	child := &overflowingSubModel{}
 	m := NewModel(nil)
 	m.SetSize(100, 12)
-	m.SetContainersModel(child)
+	m.SetRuntimesModel(child)
 
 	rendered := m.View()
 	lines := strings.Split(rendered, "\n")

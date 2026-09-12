@@ -8,6 +8,7 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/workload"
 )
 
 // testConfig returns a fully populated test config with all tools enabled.
@@ -96,6 +97,21 @@ func assertNotContains(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if strings.Contains(haystack, needle) {
 		t.Errorf("expected output NOT to contain %q, but it did.\nOutput (first 500 chars):\n%s", needle, truncate(haystack, 500))
+	}
+}
+
+func assertOrder(t *testing.T, text string, values ...string) {
+	t.Helper()
+	position := -1
+	for _, value := range values {
+		next := strings.Index(text, value)
+		if next < 0 {
+			t.Fatalf("output does not contain %q", value)
+		}
+		if next <= position {
+			t.Fatalf("%q is not after the prior value", value)
+		}
+		position = next
 	}
 }
 
@@ -196,6 +212,7 @@ func TestRenderBaseDockerfile_DefaultConfig(t *testing.T) {
 	// Should have entrypoint
 	assertContains(t, result, "COPY entrypoint.sh")
 	assertContains(t, result, "ENTRYPOINT")
+	assertContains(t, result, "LABEL "+workload.VMImageContractLabel+"=\""+workload.VMImageContractVersion+"\"")
 
 	// Should have doctor script
 	assertContains(t, result, "COPY doctor.sh")
@@ -606,6 +623,11 @@ func TestRenderCLIToolDockerfile_Claude(t *testing.T) {
 
 	assertContains(t, result, "FROM "+docker.GetImageBase())
 	assertContains(t, result, "claude.ai/install.sh")
+	assertContains(t, result, "for attempt in 1 2 3 4 5")
+	assertContains(t, result, "CURL_HOME=/tmp/claude-curl")
+	assertContains(t, result, "'http1.1'")
+	assertContains(t, result, "'retry-all-errors'")
+	assertNotContains(t, result, "/home/user/.local/bin/claude install")
 	assertContains(t, result, "COOPER_CLI_TOOL=claude")
 	assertContains(t, result, "--dangerously-skip-permissions")
 	assertContains(t, result, "/home/user/.claude")
@@ -627,6 +649,8 @@ func TestRenderCLIToolDockerfile_ClaudeVersionPinned(t *testing.T) {
 
 	assertContains(t, result, "--output /tmp/claude-install.sh")
 	assertContains(t, result, "bash /tmp/claude-install.sh 2.1.87")
+	assertContains(t, result, "for attempt in 1 2 3 4 5")
+	assertContains(t, result, "CURL_HOME=/tmp/claude-curl")
 	assertNotContains(t, result, "install.sh | bash")
 }
 
@@ -724,6 +748,7 @@ func TestRenderCLIToolDockerfile_OpenCode(t *testing.T) {
 	assertContains(t, result, "/home/user/.local/share/opencode")
 	assertContains(t, result, "/home/user/.local/state/opencode")
 	assertContains(t, result, "/home/user/.opencode")
+	assertContains(t, result, "case \"${TARGETARCH:-}\"")
 	assertContains(t, result, "amd64) oc_arch=x64")
 	assertContains(t, result, "arm64) oc_arch=arm64")
 	assertNotContains(t, result, "opencode.ai/install")
@@ -823,7 +848,7 @@ func TestRenderCLIToolDockerfile_Grok(t *testing.T) {
 	assertContains(t, result, "https://x.ai/cli/grok-1.0.4-linux-${grok_arch}")
 	assertContains(t, result, "/home/user/.local/bin/grok")
 	assertContains(t, result, "chmod 0755 /home/user/.local/bin/grok")
-	assertContains(t, result, "case \"${TARGETARCH}\"")
+	assertContains(t, result, "case \"${TARGETARCH:-}\"")
 	assertContains(t, result, "amd64) grok_arch=x86_64")
 	assertContains(t, result, "arm64) grok_arch=aarch64")
 	assertContains(t, result, "uname -m")
@@ -917,6 +942,15 @@ func TestRenderEntrypoint(t *testing.T) {
 
 	// Should run command in background and wait (not exec, to preserve signal traps)
 	assertContains(t, result, `"$@" &`)
+
+	// A container is not ready for exec until all shared setup is complete.
+	assertContains(t, result, `COOPER_READY_FILE="/tmp/.cooper-entrypoint-ready"`)
+	removeIndex := strings.Index(result, `rm -f "$COOPER_READY_FILE"`)
+	shimIndex := strings.Index(result, `cp /etc/cooper/shims/xclip`)
+	readyIndex := strings.LastIndex(result, `: > "$COOPER_READY_FILE"`)
+	if removeIndex < 0 || shimIndex < 0 || readyIndex < 0 || removeIndex >= shimIndex || shimIndex >= readyIndex {
+		t.Fatalf("entrypoint readiness order is invalid: remove=%d shim=%d ready=%d", removeIndex, shimIndex, readyIndex)
+	}
 }
 
 func TestRenderEntrypoint_DynamicAutoApprove(t *testing.T) {
@@ -1169,15 +1203,18 @@ func TestWriteAllTemplates_FileContents(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderProxyDockerfile(t *testing.T) {
+	usePhysicalHostTemplateContext(t)
 	cfg := testConfig()
 	result, err := RenderProxyDockerfile(cfg)
 	if err != nil {
 		t.Fatalf("RenderProxyDockerfile failed: %v", err)
 	}
 
-	// Should build Squid from source with SSL bump support
+	// Squid must include support for selective TLS inspection.
 	assertContains(t, result, "--enable-ssl-crtd")
 	assertContains(t, result, "--with-openssl")
+	assertContains(t, result, "https://www.squid-cache.org/Versions/v6/squid-${SQUID_VERSION}.tar.xz")
+	assertContains(t, result, "f3df3abb2603a513266f24a5d4699a9f0d76b9f554d1848b67f9c51cd3b3cb50")
 
 	// Should have security_file_certgen for dynamic cert generation
 	assertContains(t, result, "security_file_certgen")
@@ -1207,15 +1244,18 @@ func TestRenderProxyDockerfile(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderSquidConf(t *testing.T) {
+	usePhysicalHostTemplateContext(t)
 	cfg := testConfig()
 	result, err := RenderSquidConf(cfg)
 	if err != nil {
 		t.Fatalf("RenderSquidConf failed: %v", err)
 	}
 
-	// Should have SSL bump configuration
+	// The policy must select inspected and end-to-end TLS routes.
 	assertContains(t, result, "ssl-bump")
 	assertContains(t, result, "ssl_bump peek")
+	assertContains(t, result, "ssl_bump bump grok_inference_host")
+	assertContains(t, result, "ssl_bump splice allowed_domains")
 	assertContains(t, result, "ssl_bump bump all")
 	assertContains(t, result, "security_file_certgen")
 	assertContains(t, result, "generate-host-certificates=on")
@@ -1253,11 +1293,16 @@ func TestRenderSquidConf(t *testing.T) {
 
 	// Port should match config
 	assertContains(t, result, "http_port 3128")
+	assertContains(t, result, "acl Safe_ports port 80")
+	assertContains(t, result, "acl Safe_ports port 443")
 
 	assertGrokPathPolicy(t, result)
+	assertOrder(t, result, "acl allowed_domains", "ssl_bump splice allowed_domains", "http_access allow CONNECT SSL_ports allowed_domains")
+	assertOrder(t, result, "ssl_bump bump grok_inference_host", "ssl_bump splice allowed_domains", "ssl_bump bump all")
 }
 
 func TestRenderSquidConf_EmptyWhitelist(t *testing.T) {
+	usePhysicalHostTemplateContext(t)
 	cfg := &config.Config{
 		WhitelistedDomains: []config.DomainEntry{},
 		ProxyPort:          3128,
@@ -1275,6 +1320,7 @@ func TestRenderSquidConf_EmptyWhitelist(t *testing.T) {
 }
 
 func TestRenderSquidConf_CustomPort(t *testing.T) {
+	usePhysicalHostTemplateContext(t)
 	cfg := &config.Config{
 		WhitelistedDomains: []config.DomainEntry{
 			{Domain: ".anthropic.com"},
@@ -1291,6 +1337,7 @@ func TestRenderSquidConf_CustomPort(t *testing.T) {
 }
 
 func TestRenderSquidConf_CustomDomains(t *testing.T) {
+	usePhysicalHostTemplateContext(t)
 	cfg := &config.Config{
 		WhitelistedDomains: []config.DomainEntry{
 			{Domain: ".example.com", IncludeSubdomains: true, Source: "user"},
@@ -1315,6 +1362,7 @@ func TestRenderSquidConf_CustomDomains(t *testing.T) {
 }
 
 func TestRenderSquidConf_SingleDomain(t *testing.T) {
+	usePhysicalHostTemplateContext(t)
 	cfg := &config.Config{
 		WhitelistedDomains: []config.DomainEntry{
 			{Domain: "registry.npmjs.org", IncludeSubdomains: false, Source: "user"},
@@ -1333,6 +1381,7 @@ func TestRenderSquidConf_SingleDomain(t *testing.T) {
 }
 
 func TestRenderSquidConf_MixedDefaultAndUserDomains(t *testing.T) {
+	usePhysicalHostTemplateContext(t)
 	cfg := &config.Config{
 		WhitelistedDomains: []config.DomainEntry{
 			{Domain: ".anthropic.com", IncludeSubdomains: true, Source: "default"},
@@ -1356,6 +1405,7 @@ func TestRenderSquidConf_MixedDefaultAndUserDomains(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRenderProxyEntrypoint(t *testing.T) {
+	usePhysicalHostTemplateContext(t)
 	cfg := testConfig()
 	result, err := RenderProxyEntrypoint(cfg)
 	if err != nil {
@@ -1391,6 +1441,7 @@ func TestRenderProxyEntrypoint(t *testing.T) {
 }
 
 func TestRenderProxyEntrypoint_NoPortForwards(t *testing.T) {
+	usePhysicalHostTemplateContext(t)
 	cfg := &config.Config{
 		PortForwardRules: []config.PortForwardRule{},
 		BridgePort:       4343,
@@ -1412,6 +1463,7 @@ func TestRenderProxyEntrypoint_NoPortForwards(t *testing.T) {
 }
 
 func TestRenderProxyEntrypoint_ConfigDriven(t *testing.T) {
+	usePhysicalHostTemplateContext(t)
 	// Port forwarding rules are now read from socat-rules.json at runtime.
 	// The template should NOT contain specific port numbers from rules.
 	cfg := &config.Config{
@@ -1436,7 +1488,13 @@ func TestRenderProxyEntrypoint_ConfigDriven(t *testing.T) {
 	assertNotContains(t, result, "run_socat 3000")
 }
 
+func usePhysicalHostTemplateContext(t *testing.T) {
+	t.Helper()
+	t.Setenv("COOPER_VM_CONTEXT", filepath.Join(t.TempDir(), "missing-vm-context.json"))
+}
+
 func TestRenderProxyEntrypoint_CustomBridgePort(t *testing.T) {
+	usePhysicalHostTemplateContext(t)
 	cfg := &config.Config{
 		PortForwardRules: []config.PortForwardRule{},
 		BridgePort:       5555,
@@ -1453,6 +1511,7 @@ func TestRenderProxyEntrypoint_CustomBridgePort(t *testing.T) {
 }
 
 func TestRenderProxyEntrypoint_ReloadSupport(t *testing.T) {
+	usePhysicalHostTemplateContext(t)
 	cfg := &config.Config{
 		PortForwardRules: []config.PortForwardRule{},
 		BridgePort:       4343,
@@ -1475,6 +1534,7 @@ func TestRenderProxyEntrypoint_ReloadSupport(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWriteProxyTemplates(t *testing.T) {
+	usePhysicalHostTemplateContext(t)
 	cfg := testConfig()
 	dir := t.TempDir()
 

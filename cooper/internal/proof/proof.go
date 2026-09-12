@@ -367,7 +367,8 @@ func (ctx *ProofContext) phaseNetworkSecurity() {
 
 	proxyAddr := fmt.Sprintf("cooper-proxy:%d", ctx.Cfg.ProxyPort)
 
-	// SSL bump — HTTPS through proxy without --insecure.
+	// A static allowed host keeps its public end-to-end TLS connection. This
+	// check proves the HTTPS proxy route, not selective TLS inspection.
 	sslTarget := "https://api.anthropic.com"
 	for _, d := range ctx.Cfg.WhitelistedDomains {
 		if strings.Contains(d.Domain, "anthropic.com") && !strings.HasPrefix(d.Domain, ".") {
@@ -381,13 +382,13 @@ func (ctx *ProofContext) phaseNetworkSecurity() {
 	)
 	out, err := dockerExec(barrelName, shellCmd)
 	if err == nil && out != "" && out != "000" {
-		ctx.pass("SSL bump (CA chain)", fmt.Sprintf("%s -> HTTP %s", sslTarget, out))
+		ctx.pass("HTTPS proxy route", fmt.Sprintf("%s -> HTTP %s", sslTarget, out))
 	} else {
 		detail := fmt.Sprintf("HTTPS failed for %s", sslTarget)
 		if out != "" {
 			detail += fmt.Sprintf(" (output: %s)", truncate(out, 120))
 		}
-		ctx.fail("SSL bump (CA chain)", detail)
+		ctx.fail("HTTPS proxy route", detail)
 	}
 
 	// Blocked domains.
@@ -842,10 +843,10 @@ func (ctx *ProofContext) phaseBarrelEnv() {
 	} else {
 		ctx.fail("Protected DISPLAY", fmt.Sprintf("expected %q, got %q", "127.0.0.1:99", got))
 	}
-	if got := observed["http_proxy"]; got == "" {
-		ctx.pass("Protected http_proxy", "unset")
+	if got := observed["http_proxy"]; got == expectedProxy {
+		ctx.pass("Protected http_proxy", expectedProxy)
 	} else {
-		ctx.fail("Protected http_proxy", fmt.Sprintf("expected unset, got %q", got))
+		ctx.fail("Protected http_proxy", fmt.Sprintf("expected %q, got %q", expectedProxy, got))
 	}
 }
 

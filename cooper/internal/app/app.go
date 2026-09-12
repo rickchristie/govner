@@ -44,11 +44,11 @@ type App interface {
 	IsDomainAllowedForSession(domain string) bool
 	SessionAllowedDomains() []string
 
-	// Container management
-	ContainerStats() ([]ContainerStat, error)
-	StopContainer(name string) error
-	RestartContainer(name string) error
-	ListContainers() ([]ContainerInfo, error)
+	// Workload management
+	WorkloadStats() ([]WorkloadStat, error)
+	StopWorkload(id string) error
+	RestartWorkload(id string) error
+	ListWorkloads() ([]WorkloadInfo, error)
 	IsProxyRunning() bool
 	HeaderHealth() HeaderHealth
 
@@ -73,26 +73,37 @@ type App interface {
 	StartupWarnings() []string
 }
 
-// ContainerProxy is the well-known name for the proxy container.
-// The TUI uses this for sorting (proxy always first) without importing docker.
-const ContainerProxy = "cooper-proxy"
+// WorkloadKind identifies the execution role without exposing Docker or QEMU
+// details to the TUI.
+type WorkloadKind string
 
-// ContainerStat holds resource usage statistics for a running container.
-// This is the app-level type; it is mapped from docker.ContainerStat
-// internally so the TUI never imports the docker package.
-type ContainerStat struct {
-	Name       string
-	Status     string
-	ShellCount int
-	CPUPercent string
-	MemUsage   string
-	TmpUsage   string
+const (
+	WorkloadProxy WorkloadKind = "proxy"
+	WorkloadCLI   WorkloadKind = "cli"
+	WorkloadVM    WorkloadKind = "vm"
+)
+
+// WorkloadStat is one runtime-neutral resource and health snapshot.
+type WorkloadStat struct {
+	ID           string
+	Kind         WorkloadKind
+	Tool         string
+	Workspace    string
+	Depth        int
+	Status       string
+	HealthReason string
+	ShellCount   int
+	CPUPercent   string
+	MemUsage     string
+	StorageUsage string
 }
 
-// ContainerInfo holds identification and status for a container.
-// Mapped from docker.BarrelInfo internally.
-type ContainerInfo struct {
-	Name         string
+// WorkloadInfo holds stable identity and status without resource samples.
+type WorkloadInfo struct {
+	ID           string
+	Kind         WorkloadKind
+	Tool         string
+	Depth        int
 	Status       string
 	WorkspaceDir string
 }

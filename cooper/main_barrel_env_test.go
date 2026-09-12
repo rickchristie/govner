@@ -13,6 +13,7 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/runtimefs"
 	"github.com/rickchristie/govner/cooper/internal/testdriver"
 )
 
@@ -179,7 +180,8 @@ func TestRunCLIWarningsDoNotBlockSessionAndProtectedValuesWin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig() failed: %v", err)
 	}
-	expected := "1|" + "http://" + docker.ProxyHost() + ":" + strconv.Itoa(proxyCfg.ProxyPort) + "||127.0.0.1:99"
+	proxyURL := "http://" + docker.ProxyHost() + ":" + strconv.Itoa(proxyCfg.ProxyPort)
+	expected := "1|" + proxyURL + "|" + proxyURL + "|127.0.0.1:99"
 	if got := stripTerminalTitleEscapes(stdout); got != expected {
 		t.Fatalf("stdout = %q, want %q", got, expected)
 	}
@@ -262,7 +264,7 @@ func TestRunCLISessionTimezoneFollowsSyncedHostTimezoneOnReuse(t *testing.T) {
 	utcPath := requireZoneinfoFile(t, filepath.Join("Etc", "UTC"))
 	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
 
-	restoreTokyo := docker.SetHostLocaltimePathForTesting(tokyoPath)
+	restoreTokyo := runtimefs.SetHostLocaltimePathForTesting(tokyoPath)
 	t.Cleanup(restoreTokyo)
 	cliOneShot = `printf '%s|%s' "${TZ-}" "$(date +%z)"`
 	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
@@ -274,7 +276,7 @@ func TestRunCLISessionTimezoneFollowsSyncedHostTimezoneOnReuse(t *testing.T) {
 	if len(firstParts) != 2 {
 		t.Fatalf("first stdout = %q, want TZ|offset", first)
 	}
-	if !strings.HasPrefix(firstParts[0], ":"+docker.BarrelSessionContainerDir+"/cooper-cli-tz-") || !strings.HasSuffix(firstParts[0], ".tz") {
+	if !strings.HasPrefix(firstParts[0], ":"+runtimefs.SessionContainerDir+"/cooper-session-tz-") || !strings.HasSuffix(firstParts[0], ".tz") {
 		t.Fatalf("first TZ = %q, want cooper session timezone file", firstParts[0])
 	}
 	if firstParts[1] != "+0900" {
@@ -285,7 +287,7 @@ func TestRunCLISessionTimezoneFollowsSyncedHostTimezoneOnReuse(t *testing.T) {
 	}
 
 	restoreTokyo()
-	restoreUTC := docker.SetHostLocaltimePathForTesting(utcPath)
+	restoreUTC := runtimefs.SetHostLocaltimePathForTesting(utcPath)
 	t.Cleanup(restoreUTC)
 	stdout, stderr, err = captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
 	if err != nil {
@@ -296,7 +298,7 @@ func TestRunCLISessionTimezoneFollowsSyncedHostTimezoneOnReuse(t *testing.T) {
 	if len(secondParts) != 2 {
 		t.Fatalf("second stdout = %q, want TZ|offset", second)
 	}
-	if !strings.HasPrefix(secondParts[0], ":"+docker.BarrelSessionContainerDir+"/cooper-cli-tz-") || !strings.HasSuffix(secondParts[0], ".tz") {
+	if !strings.HasPrefix(secondParts[0], ":"+runtimefs.SessionContainerDir+"/cooper-session-tz-") || !strings.HasSuffix(secondParts[0], ".tz") {
 		t.Fatalf("second TZ = %q, want cooper session timezone file", secondParts[0])
 	}
 	if secondParts[0] == firstParts[0] {
@@ -315,7 +317,7 @@ func TestRunCLITimezoneCannotBeOverriddenByBadConfig(t *testing.T) {
 		cfg.BarrelEnvVars = []config.BarrelEnvVar{{Name: "TZ", Value: "UTC"}}
 	})
 	tokyoPath := requireZoneinfoFile(t, filepath.Join("Asia", "Tokyo"))
-	restore := docker.SetHostLocaltimePathForTesting(tokyoPath)
+	restore := runtimefs.SetHostLocaltimePathForTesting(tokyoPath)
 	t.Cleanup(restore)
 
 	cliOneShot = `printf '%s|%s' "${TZ-}" "$(date +%z)"`
@@ -327,7 +329,7 @@ func TestRunCLITimezoneCannotBeOverriddenByBadConfig(t *testing.T) {
 	if len(parts) != 2 {
 		t.Fatalf("stdout = %q, want TZ|offset", stdout)
 	}
-	if !strings.HasPrefix(parts[0], ":"+docker.BarrelSessionContainerDir+"/cooper-cli-tz-") || !strings.HasSuffix(parts[0], ".tz") {
+	if !strings.HasPrefix(parts[0], ":"+runtimefs.SessionContainerDir+"/cooper-session-tz-") || !strings.HasSuffix(parts[0], ".tz") {
 		t.Fatalf("TZ = %q, want cooper session timezone file", parts[0])
 	}
 	if parts[1] != "+0900" {
@@ -341,7 +343,7 @@ func TestRunCLITimezoneCannotBeOverriddenByBadConfig(t *testing.T) {
 func TestStartBarrelUsesSyncedHostTimezoneAtContainerStart(t *testing.T) {
 	driver := setupCommandDriver(t, nil)
 	tokyoPath := requireZoneinfoFile(t, filepath.Join("Asia", "Tokyo"))
-	restore := docker.SetHostLocaltimePathForTesting(tokyoPath)
+	restore := runtimefs.SetHostLocaltimePathForTesting(tokyoPath)
 	t.Cleanup(restore)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -354,19 +356,22 @@ func TestStartBarrelUsesSyncedHostTimezoneAtContainerStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartBarrel() failed: %v", err)
 	}
-	out, err := driver.ExecBarrel(barrel.Name, `printf '%s|%s' "${TZ-}" "$(date +%z)"`)
+	out, err := driver.ExecBarrel(barrel.Name, `printf '%s|%s|%s' "${TZ-}" "$(date +%z)" "$(TZ=Etc/UTC date +%z)"`)
 	if err != nil {
 		t.Fatalf("ExecBarrel() failed: %v", err)
 	}
 	parts := strings.Split(strings.TrimSpace(out), "|")
-	if len(parts) != 2 {
-		t.Fatalf("output = %q, want TZ|offset", out)
+	if len(parts) != 3 {
+		t.Fatalf("output = %q, want TZ|host-offset|UTC-offset", out)
 	}
-	if parts[0] != ":/etc/localtime" {
-		t.Fatalf("TZ = %q, want %q", parts[0], ":/etc/localtime")
+	if parts[0] != ":/run/cooper/host-localtime" {
+		t.Fatalf("TZ = %q, want %q", parts[0], ":/run/cooper/host-localtime")
 	}
 	if parts[1] != "+0900" {
 		t.Fatalf("offset = %q, want %q", parts[1], "+0900")
+	}
+	if parts[2] != "+0000" {
+		t.Fatalf("Etc/UTC offset = %q, want +0000; timezone mount hid the named zoneinfo file", parts[2])
 	}
 }
 
@@ -381,15 +386,15 @@ func TestRunCLISessionEnvFileIsCleanedUp(t *testing.T) {
 	}
 
 	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
-	entries, err := os.ReadDir(docker.BarrelSessionDir(driver.CooperDir(), barrelName))
+	entries, err := os.ReadDir(runtimefs.SessionDir(driver.CooperDir(), barrelName))
 	if err != nil {
 		t.Fatalf("ReadDir() failed: %v", err)
 	}
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "cooper-cli-env-") && strings.HasSuffix(entry.Name(), ".sh") {
+		if strings.HasPrefix(entry.Name(), "cooper-session-env-") && strings.HasSuffix(entry.Name(), ".sh") {
 			t.Fatalf("unexpected leftover session env file: %s", entry.Name())
 		}
-		if strings.HasPrefix(entry.Name(), "cooper-cli-tz-") && strings.HasSuffix(entry.Name(), ".tz") {
+		if strings.HasPrefix(entry.Name(), "cooper-session-tz-") && strings.HasSuffix(entry.Name(), ".tz") {
 			t.Fatalf("unexpected leftover session timezone file: %s", entry.Name())
 		}
 	}
@@ -399,7 +404,7 @@ func TestRunCLISessionMountIsReadOnlyAndTmpRemainsWritable(t *testing.T) {
 	driver, workspaceDir := setupCLIBarrelEnvTest(t, nil)
 	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
 
-	cliOneShot = `if touch '` + docker.BarrelSessionContainerDir + `/should-not-write' 2>/dev/null; then printf 'session-rw'; elif touch /tmp/cooper-tmp-write-check 2>/dev/null; then printf 'session-ro|tmp-rw'; else printf 'session-ro|tmp-blocked'; fi`
+	cliOneShot = `if touch '` + runtimefs.SessionContainerDir + `/should-not-write' 2>/dev/null; then printf 'session-rw'; elif touch /tmp/cooper-tmp-write-check 2>/dev/null; then printf 'session-ro|tmp-rw'; else printf 'session-ro|tmp-blocked'; fi`
 	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
 	if err != nil {
 		t.Fatalf("runCLI() failed: %v", err)
@@ -410,7 +415,7 @@ func TestRunCLISessionMountIsReadOnlyAndTmpRemainsWritable(t *testing.T) {
 	if !strings.Contains(stderr, "Starting barrel container "+barrelName) {
 		t.Fatalf("expected barrel startup message, got %q", stderr)
 	}
-	if _, err := os.Stat(filepath.Join(docker.BarrelSessionDir(driver.CooperDir(), barrelName), "should-not-write")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(runtimefs.SessionDir(driver.CooperDir(), barrelName), "should-not-write")); !os.IsNotExist(err) {
 		t.Fatalf("expected no host session write artifact, stat err=%v", err)
 	}
 }
@@ -420,7 +425,7 @@ func TestRunCLIRecreatesLegacyBarrelWithoutSessionMount(t *testing.T) {
 		cfg.BarrelEnvVars = []config.BarrelEnvVar{{Name: "LEGACY_FIX", Value: "restored"}}
 	})
 	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
-	legacyTmpDir := docker.BarrelTmpDir(driver.CooperDir(), barrelName)
+	legacyTmpDir := runtimefs.TempDir(driver.CooperDir(), barrelName)
 	if err := os.MkdirAll(legacyTmpDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(legacyTmpDir) failed: %v", err)
 	}

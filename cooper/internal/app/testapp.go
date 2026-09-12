@@ -24,6 +24,7 @@ type TestApp struct {
 	proxyUp    bool
 	socatUp    bool
 	bridgeUp   bool
+	workloads  []WorkloadStat
 
 	sessionMu      sync.Mutex
 	sessionDomains map[string]struct{}
@@ -33,14 +34,19 @@ type TestApp struct {
 // The caller populates the channels with test data as needed.
 func NewTestApp(cfg *config.Config, aclCh chan ACLRequest, bridgeCh chan ExecutionLog) *TestApp {
 	return &TestApp{
-		cfg:            cfg,
-		aclCh:          aclCh,
-		decisionCh:     make(chan DecisionEvent),
-		bridgeCh:       bridgeCh,
-		squidLogCh:     make(chan string, 1024),
-		proxyUp:        true,
-		socatUp:        true,
-		bridgeUp:       true,
+		cfg:        cfg,
+		aclCh:      aclCh,
+		decisionCh: make(chan DecisionEvent),
+		bridgeCh:   bridgeCh,
+		squidLogCh: make(chan string, 1024),
+		proxyUp:    true,
+		socatUp:    true,
+		bridgeUp:   true,
+		workloads: []WorkloadStat{
+			{ID: "cooper-proxy", Kind: WorkloadProxy, Status: "Running", CPUPercent: "0.4%", MemUsage: "42MiB / 256MiB", StorageUsage: "--"},
+			{ID: "barrel-demo-claude", Kind: WorkloadCLI, Tool: "claude", Workspace: "/work/demo", Status: "Running", ShellCount: 2, CPUPercent: "1.2%", MemUsage: "380MiB / 4GiB", StorageUsage: "18MiB"},
+			{ID: "cooper-vm-govner-codex-aabbccddeeff", Kind: WorkloadVM, Tool: "codex", Workspace: "/work/govner", Depth: 1, Status: "Running", ShellCount: 1, CPUPercent: "7.8%", MemUsage: "4.2GiB / 12.8GiB", StorageUsage: "3.1GiB"},
+		},
 		sessionDomains: make(map[string]struct{}),
 	}
 }
@@ -90,11 +96,37 @@ func (t *TestApp) SessionAllowedDomains() []string {
 	return domains
 }
 
-func (t *TestApp) ContainerStats() ([]ContainerStat, error) { return nil, nil }
-func (t *TestApp) StopContainer(_ string) error             { return nil }
-func (t *TestApp) RestartContainer(_ string) error          { return nil }
-func (t *TestApp) ListContainers() ([]ContainerInfo, error) { return nil, nil }
-func (t *TestApp) IsProxyRunning() bool                     { return t.proxyUp }
+func (t *TestApp) WorkloadStats() ([]WorkloadStat, error) {
+	t.sessionMu.Lock()
+	defer t.sessionMu.Unlock()
+	return append([]WorkloadStat(nil), t.workloads...), nil
+}
+func (t *TestApp) StopWorkload(id string) error {
+	t.sessionMu.Lock()
+	defer t.sessionMu.Unlock()
+	filtered := t.workloads[:0]
+	for _, workload := range t.workloads {
+		if workload.ID != id {
+			filtered = append(filtered, workload)
+		}
+	}
+	t.workloads = filtered
+	return nil
+}
+func (t *TestApp) RestartWorkload(_ string) error { return nil }
+func (t *TestApp) ListWorkloads() ([]WorkloadInfo, error) {
+	t.sessionMu.Lock()
+	defer t.sessionMu.Unlock()
+	result := make([]WorkloadInfo, 0, len(t.workloads))
+	for _, workload := range t.workloads {
+		result = append(result, WorkloadInfo{
+			ID: workload.ID, Kind: workload.Kind, Tool: workload.Tool,
+			Depth: workload.Depth, Status: workload.Status, WorkspaceDir: workload.Workspace,
+		})
+	}
+	return result, nil
+}
+func (t *TestApp) IsProxyRunning() bool { return t.proxyUp }
 func (t *TestApp) HeaderHealth() HeaderHealth {
 	return HeaderHealth{Proxy: t.proxyUp, Socat: t.socatUp, Bridge: t.bridgeUp}
 }

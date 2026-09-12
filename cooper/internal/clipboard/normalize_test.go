@@ -69,7 +69,7 @@ func makeGIF(t *testing.T, w, h int) []byte {
 
 	palette := color.Palette{
 		color.RGBA{R: 0, G: 0, B: 255, A: 255},   // blue
-		color.RGBA{R: 255, G: 255, B: 0, A: 255},  // yellow
+		color.RGBA{R: 255, G: 255, B: 0, A: 255}, // yellow
 	}
 
 	frame0 := image.NewPaletted(image.Rect(0, 0, w, h), palette)
@@ -113,22 +113,22 @@ func makeBMP(t *testing.T, w, h int) []byte {
 	buf.WriteByte('B')
 	buf.WriteByte('M')
 	binary.Write(&buf, binary.LittleEndian, uint32(fileSize))
-	binary.Write(&buf, binary.LittleEndian, uint16(0)) // reserved
-	binary.Write(&buf, binary.LittleEndian, uint16(0)) // reserved
+	binary.Write(&buf, binary.LittleEndian, uint16(0))     // reserved
+	binary.Write(&buf, binary.LittleEndian, uint16(0))     // reserved
 	binary.Write(&buf, binary.LittleEndian, uint32(14+40)) // pixel data offset
 
 	// --- DIB header (BITMAPINFOHEADER, 40 bytes) ---
-	binary.Write(&buf, binary.LittleEndian, uint32(40))       // header size
-	binary.Write(&buf, binary.LittleEndian, int32(w))          // width
-	binary.Write(&buf, binary.LittleEndian, int32(h))          // height (positive = bottom-up)
-	binary.Write(&buf, binary.LittleEndian, uint16(1))         // color planes
-	binary.Write(&buf, binary.LittleEndian, uint16(24))        // bits per pixel
-	binary.Write(&buf, binary.LittleEndian, uint32(0))         // compression (BI_RGB)
+	binary.Write(&buf, binary.LittleEndian, uint32(40)) // header size
+	binary.Write(&buf, binary.LittleEndian, int32(w))   // width
+	binary.Write(&buf, binary.LittleEndian, int32(h))   // height (positive = bottom-up)
+	binary.Write(&buf, binary.LittleEndian, uint16(1))  // color planes
+	binary.Write(&buf, binary.LittleEndian, uint16(24)) // bits per pixel
+	binary.Write(&buf, binary.LittleEndian, uint32(0))  // compression (BI_RGB)
 	binary.Write(&buf, binary.LittleEndian, uint32(pixelDataSize))
-	binary.Write(&buf, binary.LittleEndian, int32(2835))       // horizontal resolution
-	binary.Write(&buf, binary.LittleEndian, int32(2835))       // vertical resolution
-	binary.Write(&buf, binary.LittleEndian, uint32(0))         // colors in palette
-	binary.Write(&buf, binary.LittleEndian, uint32(0))         // important colors
+	binary.Write(&buf, binary.LittleEndian, int32(2835)) // horizontal resolution
+	binary.Write(&buf, binary.LittleEndian, int32(2835)) // vertical resolution
+	binary.Write(&buf, binary.LittleEndian, uint32(0))   // colors in palette
+	binary.Write(&buf, binary.LittleEndian, uint32(0))   // important colors
 
 	// --- Pixel data (bottom-up rows, BGR order) ---
 	row := make([]byte, rowSize)

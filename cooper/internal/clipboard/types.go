@@ -75,10 +75,12 @@ type CaptureResult struct {
 	OriginalTargets []string
 }
 
-// BarrelSession tracks a running barrel's clipboard eligibility and token.
-type BarrelSession struct {
+// RuntimeSession tracks clipboard eligibility and the token for a running
+// workload.
+type RuntimeSession struct {
 	Token         string
-	ContainerName string
+	RuntimeID     string
+	RuntimeKind   string
 	ToolName      string
 	ClipboardMode string // auto, shim, x11, off
 	Eligible      bool
@@ -88,7 +90,7 @@ type BarrelSession struct {
 type ClipboardState int
 
 const (
-	ClipboardEmpty   ClipboardState = iota
+	ClipboardEmpty ClipboardState = iota
 	ClipboardStaged
 	ClipboardExpired
 	ClipboardFailed
@@ -112,7 +114,7 @@ func (s ClipboardState) String() string {
 
 // ClipboardEvent is emitted to the TUI when clipboard state changes.
 type ClipboardEvent struct {
-	State   ClipboardState
-	Error   string // non-empty on ClipboardFailed
+	State    ClipboardState
+	Error    string          // non-empty on ClipboardFailed
 	Snapshot *StagedSnapshot // non-nil on ClipboardStaged
 }

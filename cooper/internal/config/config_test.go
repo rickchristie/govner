@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -211,6 +212,43 @@ func TestValidatePortForwardRangeInvalid(t *testing.T) {
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected validation error for invalid port range")
+	}
+}
+
+func TestValidatePortForwardsRejectsOverlapAndUnboundedExpansion(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		rules []PortForwardRule
+		want  string
+	}{
+		{
+			name: "overlap",
+			rules: []PortForwardRule{
+				{ContainerPort: 5000, HostPort: 5000, Description: "first", IsRange: true, RangeEnd: 5002},
+				{ContainerPort: 5002, HostPort: 6000, Description: "second"},
+			},
+			want: "both use container port 5002",
+		},
+		{
+			name: "too many expanded ports",
+			rules: []PortForwardRule{
+				{ContainerPort: 10000, HostPort: 10000, Description: "large", IsRange: true, RangeEnd: 10000 + MaxExpandedPortForwards},
+			},
+			want: "more than 4096",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := DefaultConfig()
+			cfg.PortForwardRules = test.rules
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

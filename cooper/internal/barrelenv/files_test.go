@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/rickchristie/govner/cooper/internal/config"
-	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/runtimefs"
 )
 
 func TestPrepareSessionEnvFileWritesFileWithExpectedMode(t *testing.T) {
@@ -25,11 +25,11 @@ func TestPrepareSessionEnvFileWritesFileWithExpectedMode(t *testing.T) {
 	if file.HostPath == "" {
 		t.Fatal("expected HostPath to be populated")
 	}
-	if !strings.HasPrefix(file.ContainerPath, docker.BarrelSessionContainerDir+"/cooper-cli-env-") || !strings.HasSuffix(file.ContainerPath, ".sh") {
-		t.Fatalf("ContainerPath = %q, want path under %q", file.ContainerPath, docker.BarrelSessionContainerDir)
+	if !strings.HasPrefix(file.ContainerPath, runtimefs.SessionContainerDir+"/cooper-session-env-") || !strings.HasSuffix(file.ContainerPath, ".sh") {
+		t.Fatalf("ContainerPath = %q, want path under %q", file.ContainerPath, runtimefs.SessionContainerDir)
 	}
-	if !strings.HasPrefix(file.HostPath, docker.BarrelSessionDir(cooperDir, containerName)+string(filepath.Separator)) {
-		t.Fatalf("HostPath = %q, want path under %q", file.HostPath, docker.BarrelSessionDir(cooperDir, containerName))
+	if !strings.HasPrefix(file.HostPath, runtimefs.SessionDir(cooperDir, containerName)+string(filepath.Separator)) {
+		t.Fatalf("HostPath = %q, want path under %q", file.HostPath, runtimefs.SessionDir(cooperDir, containerName))
 	}
 	info, err := os.Stat(file.HostPath)
 	if err != nil {

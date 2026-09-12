@@ -2,12 +2,14 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/bridge"
@@ -16,7 +18,9 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/fontsync"
 	"github.com/rickchristie/govner/cooper/internal/logging"
+	"github.com/rickchristie/govner/cooper/internal/runtimefs"
 	"github.com/rickchristie/govner/cooper/internal/squidlog"
+	"github.com/rickchristie/govner/cooper/internal/vm"
 
 	"github.com/rickchristie/govner/cooper/internal/proxy"
 )
@@ -31,12 +35,14 @@ type CooperApp struct {
 	cfg       *config.Config
 	cooperDir string
 
-	aclListener      *proxy.ACLListener
-	bridgeServer     *bridge.BridgeServer
-	hostRelay        *docker.HostRelay
-	clipboardManager *clipboard.Manager
-	clipboardReader  clipboard.Reader
-	clipboardWriter  clipboard.Writer
+	aclListener       *proxy.ACLListener
+	bridgeServer      *bridge.BridgeServer
+	hostRelay         *docker.HostRelay
+	clipboardManager  *clipboard.Manager
+	clipboardReader   clipboard.Reader
+	clipboardWriter   clipboard.Writer
+	fontSync          func(string, string) (fontsync.Result, error)
+	vmManagerOverride *vm.Manager
 
 	aclLogger    *logging.Logger
 	bridgeLogger *logging.Logger
@@ -50,13 +56,13 @@ type CooperApp struct {
 	// Squid access log tailer.
 	squidTailer *squidlog.Tailer
 
-	tmpUsageMu    sync.Mutex
-	tmpUsageCache map[string]tmpUsageSnapshot
+	storageUsageMu    sync.Mutex
+	storageUsageCache map[string]storageUsageSnapshot
 
 	startupWarnings []string
 }
 
-type tmpUsageSnapshot struct {
+type storageUsageSnapshot struct {
 	Value      string
 	MeasuredAt time.Time
 }
@@ -69,17 +75,18 @@ func NewCooperApp(cfg *config.Config, cooperDir string) *CooperApp {
 	mgr := clipboard.NewManager(ttl, cfg.ClipboardMaxBytes)
 	mgr.SetCooperDir(cooperDir)
 	return &CooperApp{
-		cfg:              cfg,
-		cooperDir:        cooperDir,
-		clipboardManager: mgr,
-		clipboardReader:  clipboard.NewHostReader(os.Getenv),
-		clipboardWriter:  clipboard.NewHostWriter(os.Getenv),
-		aclLogger:        logging.NewLogger(logDir, "acl", 10*1024*1024, 10),
-		bridgeLogger:     logging.NewLogger(logDir, "bridge", 10*1024*1024, 10),
-		aclFwd:           make(chan proxy.ACLRequest, 256),
-		decisionFwd:      make(chan proxy.DecisionEvent, 1024),
-		bridgeFwd:        make(chan bridge.ExecutionLog, 256),
-		tmpUsageCache:    make(map[string]tmpUsageSnapshot),
+		cfg:               cfg,
+		cooperDir:         cooperDir,
+		clipboardManager:  mgr,
+		clipboardReader:   clipboard.NewHostReader(os.Getenv),
+		clipboardWriter:   clipboard.NewHostWriter(os.Getenv),
+		fontSync:          fontsync.SyncHostFonts,
+		aclLogger:         logging.NewLogger(logDir, "acl", 10*1024*1024, 10),
+		bridgeLogger:      logging.NewLogger(logDir, "bridge", 10*1024*1024, 10),
+		aclFwd:            make(chan proxy.ACLRequest, 256),
+		decisionFwd:       make(chan proxy.DecisionEvent, 1024),
+		bridgeFwd:         make(chan bridge.ExecutionLog, 256),
+		storageUsageCache: make(map[string]storageUsageSnapshot),
 	}
 }
 
@@ -99,11 +106,11 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 
 	homeDir, _ := os.UserHomeDir()
 
-	if err := docker.ResetBarrelTmpRoot(a.cooperDir); err != nil {
-		return fmt.Errorf("reset barrel tmp root: %w", err)
+	if err := docker.ResetRuntimeTempRoot(a.cooperDir); err != nil {
+		return fmt.Errorf("reset runtime temporary root: %w", err)
 	}
-	if err := docker.ResetBarrelSessionRoot(a.cooperDir); err != nil {
-		return fmt.Errorf("reset barrel session root: %w", err)
+	if err := docker.ResetRuntimeSessionRoot(a.cooperDir); err != nil {
+		return fmt.Errorf("reset runtime session root: %w", err)
 	}
 
 	// Pre-check: verify clipboard prerequisites before anything else.
@@ -184,7 +191,7 @@ func (a *CooperApp) Start(ctx context.Context, onProgress func(step int, total i
 		report(4, "Playwright support ready", err)
 		return err
 	}
-	fontResult, fontErr := fontsync.SyncHostFonts(homeDir, a.cooperDir)
+	fontResult, fontErr := a.fontSync(homeDir, a.cooperDir)
 	if fontErr != nil {
 		// Font sync failure is non-fatal — add to warnings.
 		a.startupWarnings = append(a.startupWarnings, fmt.Sprintf("Font sync failed: %v", fontErr))
@@ -323,7 +330,13 @@ func (a *CooperApp) StopWithProgress(onStep func(int)) error {
 	}
 	onStep(1)
 
-	// Step 2: Stop all barrel containers.
+	// Step 2: Stop all VM workloads before the shared proxy, then stop barrels.
+	manager := a.vmManager()
+	vmsStopped := true
+	if err := manager.StopAll(context.Background()); err != nil {
+		vmsStopped = false
+		errs = append(errs, fmt.Sprintf("stop Cooper VMs: %v", err))
+	}
 	barrels, _ := docker.ListBarrels()
 	for _, b := range barrels {
 		if err := docker.StopBarrel(b.Name); err == nil {
@@ -340,12 +353,16 @@ func (a *CooperApp) StopWithProgress(onStep func(int)) error {
 	}
 	onStep(3)
 
-	// Step 4: Reset barrel runtime state and close loggers.
-	if err := docker.ResetBarrelTmpRoot(a.cooperDir); err != nil {
-		errs = append(errs, fmt.Sprintf("reset barrel tmp root: %v", err))
-	}
-	if err := docker.ResetBarrelSessionRoot(a.cooperDir); err != nil {
-		errs = append(errs, fmt.Sprintf("reset barrel session root: %v", err))
+	// Step 4: Reset shared runtime state and close loggers.
+	if vmsStopped {
+		if err := docker.ResetRuntimeTempRoot(a.cooperDir); err != nil {
+			errs = append(errs, fmt.Sprintf("reset runtime temporary root: %v", err))
+		}
+		if err := docker.ResetRuntimeSessionRoot(a.cooperDir); err != nil {
+			errs = append(errs, fmt.Sprintf("reset runtime session root: %v", err))
+		}
+	} else {
+		errs = append(errs, "preserved VM-backed temporary and session files because a VM did not stop")
 	}
 	if a.squidTailer != nil {
 		a.squidTailer.Stop()
@@ -443,12 +460,12 @@ func (a *CooperApp) SessionAllowedDomains() []string {
 	return a.aclListener.SessionAllowedDomains()
 }
 
-// ----- Container management -----
+// ----- Workload management -----
 
-// ContainerStats returns resource and session statistics for all running
-// cooper containers (proxy + barrels).
-func (a *CooperApp) ContainerStats() ([]ContainerStat, error) {
-	var stats []ContainerStat
+// WorkloadStats returns resource, session, and health data for the proxy,
+// Docker barrels, and VM supervisors.
+func (a *CooperApp) WorkloadStats() ([]WorkloadStat, error) {
+	var stats []WorkloadStat
 
 	proxyRunning, err := docker.IsProxyRunning()
 	if err != nil {
@@ -457,13 +474,14 @@ func (a *CooperApp) ContainerStats() ([]ContainerStat, error) {
 	if proxyRunning {
 		proxyStats, err := docker.ContainerStats(docker.ProxyContainerName())
 		if err == nil {
-			stats = append(stats, ContainerStat{
-				Name:       proxyStats.Name,
-				Status:     "Running",
-				ShellCount: 0,
-				CPUPercent: proxyStats.CPUPercent,
-				MemUsage:   proxyStats.MemUsage,
-				TmpUsage:   "--",
+			stats = append(stats, WorkloadStat{
+				ID:           proxyStats.Name,
+				Kind:         WorkloadProxy,
+				Status:       "Running",
+				ShellCount:   0,
+				CPUPercent:   proxyStats.CPUPercent,
+				MemUsage:     proxyStats.MemUsage,
+				StorageUsage: "--",
 			})
 		}
 	}
@@ -477,43 +495,108 @@ func (a *CooperApp) ContainerStats() ([]ContainerStat, error) {
 		if err != nil {
 			continue
 		}
-		shellCount, err := docker.CountActiveShellSessions(a.cooperDir, barrel.Name)
+		shellCount, err := runtimefs.CountActiveShells(a.cooperDir, barrel.Name)
 		if err != nil {
 			shellCount = 0
 		}
-		stats = append(stats, ContainerStat{
-			Name:       barrelStats.Name,
-			Status:     "Running",
-			ShellCount: shellCount,
-			CPUPercent: barrelStats.CPUPercent,
-			MemUsage:   barrelStats.MemUsage,
-			TmpUsage:   a.cachedBarrelTmpUsage(barrel.Name),
+		stats = append(stats, WorkloadStat{
+			ID:           barrelStats.Name,
+			Kind:         WorkloadCLI,
+			Tool:         barrel.ToolName,
+			Workspace:    barrel.WorkspaceDir,
+			Status:       "Running",
+			ShellCount:   shellCount,
+			CPUPercent:   barrelStats.CPUPercent,
+			MemUsage:     barrelStats.MemUsage,
+			StorageUsage: a.cachedBarrelStorageUsage(barrel.Name),
+		})
+	}
+
+	vmInfos, err := vm.ListInfo(context.Background(), docker.RuntimeNamespace(), nil)
+	if err != nil {
+		return nil, err
+	}
+	manager := a.vmManager()
+	for _, info := range vmInfos {
+		resource, resourceErr := docker.ContainerStats(info.ID)
+		cpu, memory := "--", "--"
+		if resourceErr == nil {
+			cpu, memory = resource.CPUPercent, resource.MemUsage
+		}
+		shellCount, shellErr := runtimefs.CountActiveShells(a.cooperDir, info.ID)
+		if shellErr != nil {
+			shellCount = 0
+		}
+		healthy, healthErr := manager.Healthy(vmRuntime(a.cooperDir, info))
+		healthReason := ""
+		status := info.Status
+		if healthErr != nil {
+			healthReason = healthErr.Error()
+			status = "Unhealthy"
+		} else if !healthy {
+			healthReason = "Guest is not ready"
+			status = "Unhealthy"
+		}
+		stats = append(stats, WorkloadStat{
+			ID: info.ID, Kind: WorkloadVM, Tool: info.ToolName, Workspace: info.WorkspaceDir,
+			Depth: info.Depth, Status: status, HealthReason: healthReason,
+			ShellCount: shellCount, CPUPercent: cpu, MemUsage: memory,
+			StorageUsage: a.cachedVMStorageUsage(info.ID),
 		})
 	}
 
 	return stats, nil
 }
 
-func (a *CooperApp) cachedBarrelTmpUsage(containerName string) string {
+func (a *CooperApp) cachedBarrelStorageUsage(containerName string) string {
 	const refreshInterval = 5 * time.Second
 
-	a.tmpUsageMu.Lock()
-	if snapshot, ok := a.tmpUsageCache[containerName]; ok && time.Since(snapshot.MeasuredAt) < refreshInterval {
+	a.storageUsageMu.Lock()
+	if snapshot, ok := a.storageUsageCache[containerName]; ok && time.Since(snapshot.MeasuredAt) < refreshInterval {
 		value := snapshot.Value
-		a.tmpUsageMu.Unlock()
+		a.storageUsageMu.Unlock()
 		return value
 	}
-	a.tmpUsageMu.Unlock()
+	a.storageUsageMu.Unlock()
 
-	bytes, err := docker.DirSizeBytes(docker.BarrelTmpDir(a.cooperDir, containerName))
+	bytes, err := docker.DirSizeBytes(runtimefs.TempDir(a.cooperDir, containerName))
 	value := "--"
 	if err == nil {
 		value = humanizeBytes(bytes)
 	}
 
-	a.tmpUsageMu.Lock()
-	a.tmpUsageCache[containerName] = tmpUsageSnapshot{Value: value, MeasuredAt: time.Now()}
-	a.tmpUsageMu.Unlock()
+	a.storageUsageMu.Lock()
+	a.storageUsageCache[containerName] = storageUsageSnapshot{Value: value, MeasuredAt: time.Now()}
+	a.storageUsageMu.Unlock()
+	return value
+}
+
+func (a *CooperApp) cachedVMStorageUsage(runtimeID string) string {
+	const refreshInterval = 5 * time.Second
+	cacheID := "vm:" + runtimeID
+	a.storageUsageMu.Lock()
+	if snapshot, ok := a.storageUsageCache[cacheID]; ok && time.Since(snapshot.MeasuredAt) < refreshInterval {
+		value := snapshot.Value
+		a.storageUsageMu.Unlock()
+		return value
+	}
+	a.storageUsageMu.Unlock()
+
+	bytes, err := docker.DirSizeBytes(runtimefs.TempDir(a.cooperDir, runtimeID))
+	if err == nil {
+		if info, statErr := os.Stat(vm.RuntimeDiskPath(a.cooperDir, runtimeID)); statErr == nil {
+			if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+				bytes += stat.Blocks * 512
+			}
+		}
+	}
+	value := "--"
+	if err == nil {
+		value = humanizeBytes(bytes)
+	}
+	a.storageUsageMu.Lock()
+	a.storageUsageCache[cacheID] = storageUsageSnapshot{Value: value, MeasuredAt: time.Now()}
+	a.storageUsageMu.Unlock()
 	return value
 }
 
@@ -534,46 +617,140 @@ func humanizeBytes(size int64) string {
 	return fmt.Sprintf("%.1f%cB", value, "KMGTPE"[exp])
 }
 
-func (a *CooperApp) clearTmpUsageCache(containerName string) {
-	a.tmpUsageMu.Lock()
-	defer a.tmpUsageMu.Unlock()
-	delete(a.tmpUsageCache, containerName)
+func (a *CooperApp) clearStorageUsageCache(containerName string) {
+	a.storageUsageMu.Lock()
+	defer a.storageUsageMu.Unlock()
+	delete(a.storageUsageCache, containerName)
 }
 
-// StopContainer stops and removes a barrel container by name.
-func (a *CooperApp) StopContainer(name string) error {
-	if err := docker.StopBarrel(name); err != nil {
+// StopWorkload stops one proxy, CLI barrel, or VM by its verified identity.
+func (a *CooperApp) StopWorkload(id string) error {
+	if id == docker.ProxyContainerName() {
+		return docker.StopProxy()
+	}
+	info, isVM, err := a.findVM(id)
+	if err != nil {
 		return err
 	}
-	a.clearTmpUsageCache(name)
-	a.revokeClipboardToken(name)
+	if isVM {
+		if err := a.vmManager().Stop(context.Background(), vmRuntime(a.cooperDir, info)); err != nil {
+			return err
+		}
+	} else if err := docker.StopBarrel(id); err != nil {
+		return err
+	}
+	a.clearStorageUsageCache(id)
+	a.clearStorageUsageCache("vm:" + id)
+	a.revokeClipboardToken(id)
 	return nil
 }
 
-// RestartContainer restarts a barrel container by name.
-func (a *CooperApp) RestartContainer(name string) error {
-	if err := docker.RestartBarrel(name); err != nil {
+// RestartWorkload restarts one runtime through its owning back end.
+func (a *CooperApp) RestartWorkload(id string) error {
+	if id == docker.ProxyContainerName() {
+		return docker.RestartProxy()
+	}
+	_, isVM, err := a.findVM(id)
+	if err != nil {
 		return err
 	}
-	a.clearTmpUsageCache(name)
-	return a.rotateClipboardToken(name)
+	if isVM {
+		if _, err := a.vmManager().Restart(context.Background(), id); err != nil {
+			return err
+		}
+	} else if err := docker.RestartBarrel(id); err != nil {
+		return err
+	}
+	a.clearStorageUsageCache(id)
+	a.clearStorageUsageCache("vm:" + id)
+	if isVM {
+		return nil
+	}
+	return a.rotateClipboardToken(id)
 }
 
-// ListContainers returns information about all running barrel containers.
-func (a *CooperApp) ListContainers() ([]ContainerInfo, error) {
+// ListWorkloads returns proxy, CLI, and VM identities.
+func (a *CooperApp) ListWorkloads() ([]WorkloadInfo, error) {
+	var infos []WorkloadInfo
+	proxyRunning, err := docker.IsProxyRunning()
+	if err != nil {
+		return nil, err
+	}
+	if proxyRunning {
+		infos = append(infos, WorkloadInfo{ID: docker.ProxyContainerName(), Kind: WorkloadProxy, Status: "Running"})
+	}
 	barrels, err := docker.ListBarrels()
 	if err != nil {
 		return nil, err
 	}
-	infos := make([]ContainerInfo, len(barrels))
-	for i, b := range barrels {
-		infos[i] = ContainerInfo{
-			Name:         b.Name,
-			Status:       b.Status,
-			WorkspaceDir: b.WorkspaceDir,
-		}
+	for _, barrel := range barrels {
+		infos = append(infos, WorkloadInfo{
+			ID:           barrel.Name,
+			Kind:         WorkloadCLI,
+			Tool:         barrel.ToolName,
+			Status:       barrel.Status,
+			WorkspaceDir: barrel.WorkspaceDir,
+		})
+	}
+	vmInfos, err := vm.ListInfo(context.Background(), docker.RuntimeNamespace(), nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, info := range vmInfos {
+		infos = append(infos, WorkloadInfo{
+			ID:           info.ID,
+			Kind:         WorkloadVM,
+			Tool:         info.ToolName,
+			Depth:        info.Depth,
+			Status:       info.Status,
+			WorkspaceDir: info.WorkspaceDir,
+		})
 	}
 	return infos, nil
+}
+
+func (a *CooperApp) findVM(id string) (vm.Info, bool, error) {
+	infos, err := vm.ListInfo(context.Background(), docker.RuntimeNamespace(), nil)
+	if err != nil {
+		return vm.Info{}, false, err
+	}
+	for _, info := range infos {
+		if info.ID == id {
+			return info, true, nil
+		}
+	}
+	return vm.Info{}, false, nil
+}
+
+func (a *CooperApp) vmManager() vm.Manager {
+	if a.vmManagerOverride != nil {
+		manager := *a.vmManagerOverride
+		manager.Config = a.cfg
+		return manager
+	}
+	homeDir, _ := os.UserHomeDir()
+	return vm.Manager{
+		CooperDir: a.cooperDir, HomeDir: homeDir, Namespace: docker.RuntimeNamespace(),
+		ImagePrefix: docker.ImagePrefix(), ProxyName: docker.ProxyContainerName(), Config: a.cfg,
+	}
+}
+
+// AdoptVMManager installs the VM back end used by lifecycle and live-policy
+// operations. Runtime drivers use it to keep exact prepared assets and helper
+// binaries consistent with the VM that they started.
+func (a *CooperApp) AdoptVMManager(manager vm.Manager) {
+	a.vmManagerOverride = &manager
+}
+
+func vmRuntime(cooperDir string, info vm.Info) vm.Runtime {
+	runtimeDir := vm.RuntimeDir(cooperDir, info.ID)
+	controlDir := vm.ControlDir(cooperDir, info.ID)
+	return vm.Runtime{
+		ID: info.ID, ToolName: info.ToolName, WorkspaceDir: info.WorkspaceDir,
+		ContainerName: info.ID, RelayName: vm.RelayContainerName(info.ID),
+		RelayNetwork: vm.RelayNetworkName(info.ID), RuntimeDir: runtimeDir,
+		ControlDir: controlDir, ControlSocket: filepath.Join(controlDir, "control.sock"), Depth: info.Depth,
+	}
 }
 
 // IsProxyRunning checks whether the proxy container is currently running.
@@ -618,9 +795,19 @@ func (a *CooperApp) UpdatePortForwards(rules []config.PortForwardRule) error {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	// Reload socat (writes socat-rules.json + signals containers).
+	oldRules := append([]config.PortForwardRule(nil), a.cfg.PortForwardRules...)
+	// Update Docker listeners first. A new VM guest listener cannot bypass the
+	// host relay policy, and a removed Docker listener fails closed while the
+	// guest applies the same change.
 	if err := docker.ReloadSocat(a.cooperDir, a.cfg.BridgePort, rules); err != nil {
-		return fmt.Errorf("reload failed: %w", err)
+		rollbackErr := docker.ReloadSocat(a.cooperDir, a.cfg.BridgePort, oldRules)
+		return portReloadError("reload Docker runtimes", err, rollbackErr)
+	}
+	manager := a.vmManager()
+	if err := manager.ReloadPortForwards(context.Background(), rules); err != nil {
+		dockerRollbackErr := docker.ReloadSocat(a.cooperDir, a.cfg.BridgePort, oldRules)
+		vmRollbackErr := manager.ReloadPortForwards(context.Background(), oldRules)
+		return portReloadError("reload VM runtimes", err, errors.Join(dockerRollbackErr, vmRollbackErr))
 	}
 
 	// Persist config.json.
@@ -628,7 +815,9 @@ func (a *CooperApp) UpdatePortForwards(rules []config.PortForwardRule) error {
 	cfgCopy.PortForwardRules = rules
 	cfgPath := filepath.Join(a.cooperDir, "config.json")
 	if err := config.SaveConfig(cfgPath, &cfgCopy); err != nil {
-		return fmt.Errorf("config save failed: %w", err)
+		dockerRollbackErr := docker.ReloadSocat(a.cooperDir, a.cfg.BridgePort, oldRules)
+		vmRollbackErr := manager.ReloadPortForwards(context.Background(), oldRules)
+		return portReloadError("save port configuration", err, errors.Join(dockerRollbackErr, vmRollbackErr))
 	}
 
 	// Update in-memory config on success.
@@ -640,6 +829,13 @@ func (a *CooperApp) UpdatePortForwards(rules []config.PortForwardRule) error {
 	}
 
 	return nil
+}
+
+func portReloadError(operation string, cause, rollback error) error {
+	if rollback == nil {
+		return fmt.Errorf("%s: %w", operation, cause)
+	}
+	return fmt.Errorf("%s: %w; rollback failed: %v", operation, cause, rollback)
 }
 
 // ----- Bridge routes -----
@@ -763,7 +959,7 @@ func (a *CooperApp) BridgeServer() *bridge.BridgeServer {
 // ----- Clipboard bridge -----
 
 // CaptureClipboard reads the host clipboard, normalizes the image to PNG,
-// and stages it for authenticated barrel access.
+// and stages it for authenticated runtime access.
 func (a *CooperApp) CaptureClipboard() (*clipboard.ClipboardEvent, error) {
 	if a.clipboardReader == nil || a.clipboardManager == nil {
 		return &clipboard.ClipboardEvent{
@@ -887,7 +1083,7 @@ func (a *CooperApp) ClipboardSnapshot() *clipboard.StagedSnapshot {
 }
 
 // ClipboardManager returns the underlying clipboard manager for direct
-// access by components that need token registration (barrel startup).
+// access by components that need token registration by a separate workload process.
 func (a *CooperApp) ClipboardManager() *clipboard.Manager {
 	return a.clipboardManager
 }
@@ -899,6 +1095,15 @@ func (a *CooperApp) DisableClipboardReader() {
 	a.clipboardReader = nil
 }
 
+// DisableHostFontSync keeps runtime-driver tests independent of the machine's
+// font set. The font package tests and the shell E2E test cover real font sync.
+// Playwright support directories are still created by the normal startup path.
+func (a *CooperApp) DisableHostFontSync() {
+	a.fontSync = func(string, string) (fontsync.Result, error) {
+		return fontsync.Result{}, nil
+	}
+}
+
 // SetClipboardWriter replaces the host clipboard writer. Tests use this to
 // verify bridge writes without touching the real host clipboard.
 func (a *CooperApp) SetClipboardWriter(writer clipboard.Writer) {
@@ -908,7 +1113,7 @@ func (a *CooperApp) SetClipboardWriter(writer clipboard.Writer) {
 // ----- Internal helpers -----
 
 // ensurePlaywrightSupportDirs creates the host directories for Playwright
-// support before any barrel start, so Docker does not create them as root-owned.
+// support before any workload starts, so Docker does not create them as root-owned.
 func ensurePlaywrightSupportDirs(cooperDir string) error {
 	dirs := []string{
 		filepath.Join(cooperDir, "fonts"),
@@ -922,20 +1127,20 @@ func ensurePlaywrightSupportDirs(cooperDir string) error {
 	return nil
 }
 
-func (a *CooperApp) revokeClipboardToken(containerName string) {
+func (a *CooperApp) revokeClipboardToken(runtimeID string) {
 	if a.clipboardManager != nil {
-		a.clipboardManager.UnregisterBarrel(containerName)
+		a.clipboardManager.UnregisterRuntime(runtimeID)
 	}
 	if strings.TrimSpace(a.cooperDir) == "" {
 		return
 	}
-	_ = clipboard.RemoveTokenFile(a.cooperDir, containerName)
+	_ = clipboard.RemoveTokenFile(a.cooperDir, runtimeID)
 }
 
-func (a *CooperApp) rotateClipboardToken(containerName string) error {
+func (a *CooperApp) rotateClipboardToken(runtimeID string) error {
 	if strings.TrimSpace(a.cooperDir) == "" {
 		if a.clipboardManager != nil {
-			a.clipboardManager.UnregisterBarrel(containerName)
+			a.clipboardManager.UnregisterRuntime(runtimeID)
 		}
 		return nil
 	}
@@ -944,11 +1149,11 @@ func (a *CooperApp) rotateClipboardToken(containerName string) error {
 	if err != nil {
 		return fmt.Errorf("generate clipboard token: %w", err)
 	}
-	if _, err := clipboard.WriteTokenFile(a.cooperDir, containerName, token); err != nil {
+	if _, err := clipboard.RotateRuntimeToken(a.cooperDir, runtimeID, token); err != nil {
 		return fmt.Errorf("write clipboard token: %w", err)
 	}
 	if a.clipboardManager != nil {
-		a.clipboardManager.UnregisterBarrel(containerName)
+		a.clipboardManager.UnregisterRuntime(runtimeID)
 	}
 	return nil
 }

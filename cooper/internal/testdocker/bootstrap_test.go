@@ -45,6 +45,31 @@ func TestStageSharedTestCAReusesStableCAAcrossBuildDirResets(t *testing.T) {
 	}
 }
 
+func TestStageSharedTestCAInstallsRuntimeCertificate(t *testing.T) {
+	t.Parallel()
+	first := t.TempDir()
+	second := t.TempDir()
+	if err := StageSharedTestCA(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := StageSharedTestCA(second); err != nil {
+		t.Fatal(err)
+	}
+	firstCertificate := readSharedCATestFile(t, filepath.Join(first, "ca", "cooper-ca.pem"))
+	secondCertificate := readSharedCATestFile(t, filepath.Join(second, "ca", "cooper-ca.pem"))
+	if !bytes.Equal(firstCertificate, secondCertificate) {
+		t.Fatal("shared test CA changed between temporary runtimes")
+	}
+	keyPath := filepath.Join(first, "ca", "cooper-ca-key.pem")
+	info, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("shared test CA key mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
 func mkdirAllForSharedCATest(t *testing.T, buildDir string) {
 	t.Helper()
 	for _, dir := range []string{

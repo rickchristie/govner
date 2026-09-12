@@ -1,8 +1,24 @@
 package docker
 
-import "strings"
+import (
+	"fmt"
+	"regexp"
+	"strings"
+)
 
 var runtimeNamespace = "cooper"
+
+var runtimeNamespacePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,62}$`)
+
+// ValidateRuntimeNamespace rejects values that Docker cannot use as a short,
+// predictable resource-name prefix.
+func ValidateRuntimeNamespace(namespace string) error {
+	namespace = strings.TrimSuffix(strings.TrimSpace(namespace), "-")
+	if !runtimeNamespacePattern.MatchString(namespace) {
+		return fmt.Errorf("runtime namespace %q must match %s", namespace, runtimeNamespacePattern.String())
+	}
+	return nil
+}
 
 // SetRuntimeNamespace sets the namespace used for Docker runtime resources
 // such as proxy containers, networks, and barrel container names.

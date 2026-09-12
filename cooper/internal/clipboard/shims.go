@@ -8,9 +8,14 @@ import "fmt"
 // stdout. The mktemp+curl+cat pattern avoids piping binary data through shell
 // variables, which would corrupt NUL bytes.
 const cooperClipFetchFunc = `
+_cooper_clip_token() {
+    jq -er '.token | strings | select(length > 0)' \
+        "${COOPER_CLIPBOARD_TOKEN_FILE}" 2>/dev/null
+}
+
 _cooper_clip_fetch() {
     local token
-    token=$(cat "${COOPER_CLIPBOARD_TOKEN_FILE}" 2>/dev/null) || return 1
+    token=$(_cooper_clip_token) || return 1
     [ -n "$token" ] || return 1
     local bridge="${COOPER_CLIPBOARD_BRIDGE_URL}"
     [ -n "$bridge" ] || return 1
@@ -36,7 +41,7 @@ _cooper_clip_post_text_file() {
     local text_file="$1"
     [ -f "$text_file" ] || return 1
     local token
-    token=$(cat "${COOPER_CLIPBOARD_TOKEN_FILE}" 2>/dev/null) || return 1
+    token=$(_cooper_clip_token) || return 1
     [ -n "$token" ] || return 1
     local bridge="${COOPER_CLIPBOARD_BRIDGE_URL}"
     [ -n "$bridge" ] || return 1
@@ -141,7 +146,7 @@ fi
 # Only advertise image/png if the bridge actually has a staged image.
 case "$args" in
     *-selection*clipboard*-t*TARGETS*-o*|-selection*clipboard*-o*-t*TARGETS*)
-        _clip_token=$(cat "${COOPER_CLIPBOARD_TOKEN_FILE}" 2>/dev/null) || true
+        _clip_token=$(_cooper_clip_token) || true
         _clip_bridge="${COOPER_CLIPBOARD_BRIDGE_URL}"
         if [ -n "$_clip_token" ] && [ -n "$_clip_bridge" ]; then
             _type_resp=$(curl -fsS --max-time 2 \
@@ -300,7 +305,7 @@ args="$*"
 # Only advertise image/png if the bridge actually has a staged image.
 case "$args" in
     *--list-types*)
-        _clip_token=$(cat "${COOPER_CLIPBOARD_TOKEN_FILE}" 2>/dev/null) || true
+        _clip_token=$(_cooper_clip_token) || true
         _clip_bridge="${COOPER_CLIPBOARD_BRIDGE_URL}"
         if [ -n "$_clip_token" ] && [ -n "$_clip_bridge" ]; then
             _type_resp=$(curl -fsS --max-time 2 \

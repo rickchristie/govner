@@ -25,7 +25,7 @@ type SubModel interface {
 type TabID int
 
 const (
-	TabContainers TabID = iota
+	TabRuntimes TabID = iota
 	TabMonitor
 	TabBlocked
 	TabAllowed
@@ -43,8 +43,8 @@ type ModalType int
 const (
 	ModalExit ModalType = iota
 	ModalDeleteRoute
-	ModalStopContainer
-	ModalRestartContainer
+	ModalStopWorkload
+	ModalRestartWorkload
 	ModalUpdateInfo
 	ModalReloadSocat
 	ModalSessionAllowDomain
@@ -60,7 +60,7 @@ type TabInfo struct {
 
 // AllTabs is the ordered list of all top-level tabs with their metadata.
 var AllTabs = []TabInfo{
-	{ID: TabContainers, Label: "Containers", Icon: CaskEmoji, ShortcutKey: "1"},
+	{ID: TabRuntimes, Label: "Runtimes", Icon: CaskEmoji, ShortcutKey: "1"},
 	{ID: TabMonitor, Label: "Monitor", Icon: "🔍", ShortcutKey: "2"},
 	{ID: TabBlocked, Label: "Blocked", Icon: IconCross, ShortcutKey: "3"},
 	{ID: TabAllowed, Label: "Allowed", Icon: IconCheck, ShortcutKey: "4"},

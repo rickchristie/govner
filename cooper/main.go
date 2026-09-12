@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -18,8 +17,6 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/alertsound"
 	"github.com/rickchristie/govner/cooper/internal/app"
-	"github.com/rickchristie/govner/cooper/internal/auth"
-	"github.com/rickchristie/govner/cooper/internal/barrelenv"
 	"github.com/rickchristie/govner/cooper/internal/bridge"
 	"github.com/rickchristie/govner/cooper/internal/buildflow"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
@@ -27,10 +24,11 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/configure"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/fontsync"
+	"github.com/rickchristie/govner/cooper/internal/launch"
 	"github.com/rickchristie/govner/cooper/internal/logging"
-	"github.com/rickchristie/govner/cooper/internal/names"
 	"github.com/rickchristie/govner/cooper/internal/proof"
 	"github.com/rickchristie/govner/cooper/internal/proxy"
+	"github.com/rickchristie/govner/cooper/internal/runtimefs"
 	"github.com/rickchristie/govner/cooper/internal/templates"
 	"github.com/rickchristie/govner/cooper/internal/tui"
 	"github.com/rickchristie/govner/cooper/internal/tui/about"
@@ -44,29 +42,35 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tui/settings"
 	squidlogui "github.com/rickchristie/govner/cooper/internal/tui/squidlog"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
+	"github.com/rickchristie/govner/cooper/internal/vm"
+	"github.com/rickchristie/govner/cooper/internal/workload"
 	"github.com/rickchristie/govner/cooper/meta"
 )
 
 var configDir string
 var imagePrefix string
+var runtimeNamespace string
 
 var rootCmd = &cobra.Command{
 	Use:   "cooper",
 	Short: "Barrel-proof containers for undiluted AI",
 	Long: `cooper - Barrel-proof containers for undiluted AI
 
-Network-isolated Docker containers for AI coding assistants, with a Squid
-SSL-bump proxy for network control and a real-time TUI for request approval.
+Network-isolated Docker barrels and KVM virtual machines for AI coding
+assistants. A Squid destination and selective TLS policy controls network
+access. A real-time TUI lets you approve requests and manage workloads.
 
 Quick Start:
   cooper configure        Run interactive configuration wizard
   cooper build            Build proxy and CLI container images
   cooper up               Start proxy and open control panel TUI
   cooper down             Stop the Cooper runtime after an interrupted TUI
-  cooper cli              Open a CLI container for the current workspace
+  cooper cli <tool>       Open a Docker barrel for the current workspace
+  cooper vm <tool>        Open a KVM VM with its own Docker daemon
 
 Management:
   cooper update           Regenerate Dockerfile and rebuild CLI container
+  cooper vm doctor        Check VM host, asset, and runtime health
   cooper proof            Run diagnostics inside a CLI container
   cooper cleanup          Remove all cooper containers and images`,
 	Version: meta.Version,
@@ -161,7 +165,7 @@ visually inspect every screen without needing Docker or a running proxy.
 
 Use --screen to jump directly to a specific tab:
   cooper tui-test --screen monitor
-  cooper tui-test --screen containers
+  cooper tui-test --screen runtimes
   cooper tui-test --screen configure
   cooper tui-test --screen build
   cooper tui-test --screen ports`,
@@ -172,13 +176,18 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&configDir, "config", "~/.cooper",
 		"Path to cooper configuration directory")
 	rootCmd.PersistentFlags().StringVar(&imagePrefix, "prefix", "",
-		"Prefix for Docker image/container names (for testing)")
+		"Prefix for Docker image names (for testing)")
+	rootCmd.PersistentFlags().StringVar(&runtimeNamespace, "runtime-namespace", "cooper",
+		"Docker runtime namespace (for isolated testing)")
 
 	// Apply prefix early via PersistentPreRun so all commands see it.
-	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
-		if imagePrefix != "" {
-			docker.SetImagePrefix(imagePrefix)
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if err := docker.ValidateRuntimeNamespace(runtimeNamespace); err != nil {
+			return err
 		}
+		docker.SetRuntimeNamespace(runtimeNamespace)
+		docker.SetImagePrefix(imagePrefix)
+		return nil
 	}
 
 	cliCmd.Flags().StringVarP(&cliOneShot, "command", "c", "",
@@ -199,9 +208,10 @@ func init() {
 	rootCmd.AddCommand(proofCmd)
 	rootCmd.AddCommand(cleanupCmd)
 	rootCmd.AddCommand(tuiTestCmd)
+	initVMCommands()
 
 	tuiTestCmd.Flags().StringVar(&tuiTestScreen, "screen", "",
-		"Jump to a specific screen: containers, monitor, blocked, allowed, bridge-logs, bridge-routes, settings, ports, about, loading, configure, build")
+		"Jump to a specific screen: runtimes, monitor, blocked, allowed, bridge-logs, bridge-routes, settings, ports, about, loading, configure, build")
 }
 
 func main() {
@@ -371,7 +381,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := docker.ResetBarrelTmpRoot(cooperDir); err != nil {
+	if err := docker.ResetRuntimeTempRoot(cooperDir); err != nil {
 		err = fmt.Errorf("reset barrel tmp root: %w", err)
 		ul.LogDone(err)
 		return err
@@ -598,8 +608,8 @@ func runUp(cmd *cobra.Command, args []string) error {
 	mainModel.SetAlertPlayer(alertPlayer)
 
 	// Wire all tab sub-models.
-	containersModel := containers.New(cooperApp)
-	mainModel.SetContainersModel(containersModel)
+	runtimesModel := containers.New(cooperApp)
+	mainModel.SetRuntimesModel(runtimesModel)
 
 	timeout := time.Duration(cfg.MonitorTimeoutSecs) * time.Second
 	proxyMonModel := proxymon.New(cooperApp, timeout)
@@ -819,21 +829,31 @@ func runCLI(cmd *cobra.Command, args []string) error {
 		grokStateRoot = docker.GrokHostStateRoot(homeDir)
 	}
 
-	// 5. Resolve tokens (only for the specified tool).
+	// 5. Resolve the current workspace.
 	workspaceDir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get working directory: %w", err)
 	}
 
-	tokens, err := auth.ResolveTokens(workspaceDir, cooperDir, []string{toolName})
-	if err != nil {
-		return fmt.Errorf("resolve tokens: %w", err)
-	}
-
 	// 6. Determine barrel container name (includes tool name).
 	containerName := docker.BarrelContainerName(workspaceDir, toolName)
-	if _, err := docker.SyncBarrelTimezoneFile(cooperDir, containerName); err != nil {
+	if _, err := runtimefs.SyncTimezoneFile(cooperDir, containerName); err != nil {
 		return fmt.Errorf("sync barrel timezone: %w", err)
+	}
+	preparedSession, warnings, err := launch.PrepareSession(launch.SessionRequest{
+		Config: cfg, CooperDir: cooperDir, RuntimeID: containerName,
+		ToolName: toolName, WorkspaceDir: workspaceDir, OneShot: cliOneShot,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := preparedSession.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: clean session files: %v\n", closeErr)
+		}
+	}()
+	for _, warning := range warnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
 	}
 
 	// 7. If barrel not running, start it and wait for entrypoint readiness.
@@ -875,7 +895,11 @@ func runCLI(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("generate clipboard token: %w", err)
 		}
-		if _, err := clipboard.WriteTokenFile(cooperDir, containerName, clipToken); err != nil {
+		clipboardMode, err := docker.ToolClipboardMode(toolName)
+		if err != nil {
+			return err
+		}
+		if _, err := clipboard.WriteRuntimeToken(cooperDir, containerName, clipToken, clipboard.RuntimeCLI, toolName, clipboardMode); err != nil {
 			return fmt.Errorf("write clipboard token: %w", err)
 		}
 
@@ -885,94 +909,17 @@ func runCLI(cmd *cobra.Command, args []string) error {
 			clipboard.RemoveTokenFile(cooperDir, containerName)
 			return fmt.Errorf("start barrel: %w", err)
 		}
-		// Wait for entrypoint to finish writing .bashrc (welcome banner).
-		// The entrypoint writes "Cooper: Welcome" to .bashrc as one of its last steps.
-		for i := 0; i < 50; i++ {
-			out, err := exec.Command("docker", "exec", containerName, "grep", "-q", "Cooper: Welcome", "/home/user/.bashrc").CombinedOutput()
-			_ = out
-			if err == nil {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
 	}
 
-	// 8. Generate random name.
-	sessionName := names.Generate(workspaceDir)
-	defer names.Release(sessionName)
-	sessionTimezoneFile, err := docker.PrepareSessionTimezoneFile(cooperDir, containerName, sessionName)
-	if err != nil {
-		return fmt.Errorf("prepare barrel timezone session file: %w", err)
+	// 8. Execute the common session through the Docker back end.
+	if preparedSession.Interactive {
+		fmt.Fprintf(os.Stdout, "\033]0;%s\007", preparedSession.Title)
 	}
-	if sessionTimezoneFile.HostPath != "" {
-		defer func() {
-			if removeErr := docker.RemoveSessionTimezoneFile(sessionTimezoneFile.HostPath); removeErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: %v\n", removeErr)
-			}
-		}()
-	}
-	sessionEnvFile, warnings, err := barrelenv.PrepareSessionEnvFileForTool(cooperDir, containerName, sessionName, cfg.BarrelEnvVars, toolName)
-	if err != nil {
-		return fmt.Errorf("prepare barrel env session file: %w", err)
-	}
-	if sessionEnvFile.HostPath != "" {
-		defer func() {
-			if removeErr := barrelenv.RemoveSessionEnvFile(sessionEnvFile.HostPath); removeErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: %v\n", removeErr)
-			}
-		}()
-	}
-
-	// 9. Set terminal title.
-	dirName := filepath.Base(workspaceDir)
-	termTitle := fmt.Sprintf("%s-%s-%s", dirName, toolName, sessionName)
-	fmt.Fprintf(os.Stdout, "\033]0;%s\007", termTitle)
-
-	// 10. Build environment variables for the exec.
-	var envArgs []string
-	if sessionTimezoneFile.ContainerPath != "" {
-		envArgs = append(envArgs, "TZ=:"+sessionTimezoneFile.ContainerPath)
-	}
-	var tokenNames []string
-	for _, t := range tokens {
-		envArgs = append(envArgs, fmt.Sprintf("%s=%s", t.Name, t.Value))
-		tokenNames = append(tokenNames, t.Name)
-	}
-	for _, warning := range warnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
-	}
-
-	// 11. Execute: one-shot command or interactive shell.
-	targetCmd := []string{"bash", "-l"}
-	if cliOneShot != "" {
-		targetCmd = []string{"bash", "-c", cliOneShot}
-	}
-	execCmd, err := barrelenv.BuildExecWrapperCommand(
-		sessionEnvFile.ContainerPath,
-		barrelenv.ProtectedRuntimeEnvNamesForTool(toolName, tokenNames),
-		targetCmd,
-	)
-	if err != nil {
-		return fmt.Errorf("build barrel env exec command: %w", err)
-	}
-
-	interactive := cliOneShot == ""
-	if interactive {
-		shellMarker, err := docker.CreateShellSessionMarker(cooperDir, containerName, sessionName)
-		if err != nil {
-			return fmt.Errorf("create shell session marker: %w", err)
-		}
-		defer func() {
-			if removeErr := docker.RemoveShellSessionMarker(shellMarker.HostPath); removeErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: %v\n", removeErr)
-			}
-		}()
-	}
-	if err := docker.ExecBarrel(containerName, execCmd, envArgs, interactive); err != nil {
+	if err := docker.ExecBarrel(containerName, preparedSession.Command, preparedSession.Environment, preparedSession.Interactive); err != nil {
 		return fmt.Errorf("exec barrel: %w", err)
 	}
 
-	if interactive {
+	if preparedSession.Interactive {
 		// Reset terminal title and print exit message.
 		fmt.Fprint(os.Stdout, "\033]0;\007")
 		fmt.Print("\n  \033[38;5;130m🥃 Barrel sealed. Back on host.\033[0m\n\n")
@@ -994,19 +941,34 @@ func runProof(cmd *cobra.Command, args []string) error {
 // ---------- cooper cleanup ----------
 
 func runCleanup(cmd *cobra.Command, args []string) error {
-	// Load cooperDir for token cleanup. Non-fatal if it fails.
-	_, cooperDir, _ := loadConfig()
-	if cooperDir != "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("get home directory before cleanup: %w", err)
-		}
-		if err := docker.ValidateGrokHostStateRoot(homeDir, cooperDir); err != nil {
-			return fmt.Errorf("refuse Cooper cleanup: %w", err)
-		}
+	cooperDir, err := resolveCooperDir()
+	if err != nil {
+		return err
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home directory before cleanup: %w", err)
+	}
+	if err := workload.ValidateAllHostAgentStateRoots(homeDir, cooperDir); err != nil {
+		return fmt.Errorf("refuse Cooper cleanup: %w", err)
 	}
 
-	// 1. List and stop all barrels.
+	// 1. Stop VM workloads before the shared proxy and runtime directories.
+	cfg, _, configErr := loadConfig()
+	if configErr != nil {
+		cfg = config.DefaultConfig()
+	}
+	manager := vm.Manager{
+		CooperDir: cooperDir,
+		Namespace: docker.RuntimeNamespace(),
+		ProxyName: docker.ProxyContainerName(),
+		Config:    cfg,
+	}
+	if err := manager.StopAll(cmd.Context()); err != nil {
+		return fmt.Errorf("stop Cooper VMs before cleanup: %w", err)
+	}
+
+	// 2. List and stop all barrels.
 	fmt.Fprintln(os.Stderr, "Stopping barrel containers...")
 	barrels, err := docker.ListBarrels()
 	if err != nil {
@@ -1023,13 +985,13 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 2. Stop proxy.
+	// 3. Stop proxy.
 	fmt.Fprintln(os.Stderr, "Stopping proxy...")
 	if err := docker.StopProxy(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not stop proxy: %v\n", err)
 	}
 
-	// 3. Remove all CLI images.
+	// 4. Remove all CLI and VM infrastructure images.
 	fmt.Fprintln(os.Stderr, "Removing Docker images...")
 	cliImages, _ := docker.ListCLIImages()
 	for _, img := range cliImages {
@@ -1052,43 +1014,57 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
+	for _, img := range []string{vm.SupervisorImageName(docker.ImagePrefix()), vm.RelayImageName(docker.ImagePrefix())} {
+		exists, checkErr := docker.ImageExists(img)
+		if checkErr != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: could not check image %s: %v\n", img, checkErr)
+			continue
+		}
+		if exists {
+			fmt.Fprintf(os.Stderr, "  Removing %s...\n", img)
+			if err := docker.RemoveImage(img); err != nil {
+				fmt.Fprintf(os.Stderr, "  Warning: %v\n", err)
+			}
+		}
+	}
+	fmt.Fprintln(os.Stderr, "Removing Cooper VM assets and image archives...")
+	if err := vm.RemoveCache(cooperDir); err != nil {
+		return err
+	}
 
-	// 4. Remove networks.
+	// 5. Remove networks.
 	fmt.Fprintln(os.Stderr, "Removing networks...")
 	if err := docker.RemoveNetworks(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not remove networks: %v\n", err)
 	}
 
-	// 5. Optionally remove ~/.cooper.
-	cooperDir, err = resolveCooperDir()
-	if err == nil {
-		fmt.Fprintf(os.Stderr, "\nRemove configuration directory %s? [y/N] ", cooperDir)
-		reader := bufio.NewReader(os.Stdin)
-		answer, _ := reader.ReadString('\n')
-		answer = strings.TrimSpace(strings.ToLower(answer))
-		if answer == "y" || answer == "yes" {
-			if err := removeCooperConfigDir(cooperDir); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: could not remove %s: %v\n", cooperDir, err)
-			} else {
-				fmt.Fprintf(os.Stderr, "Removed %s\n", cooperDir)
-			}
+	// 6. Optionally remove ~/.cooper.
+	fmt.Fprintf(os.Stderr, "\nRemove configuration directory %s? [y/N] ", cooperDir)
+	reader := bufio.NewReader(os.Stdin)
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(strings.ToLower(answer))
+	if answer == "y" || answer == "yes" {
+		if err := removeCooperConfigDir(cooperDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not remove %s: %v\n", cooperDir, err)
 		} else {
-			fmt.Fprintln(os.Stderr, "Keeping configuration directory.")
+			fmt.Fprintf(os.Stderr, "Removed %s\n", cooperDir)
 		}
+	} else {
+		fmt.Fprintln(os.Stderr, "Keeping configuration directory.")
 	}
 
 	fmt.Fprintln(os.Stderr, "Cleanup complete.")
 	return nil
 }
 
-// removeCooperConfigDir keeps the host-owned Grok state root outside the
+// removeCooperConfigDir keeps every host-owned agent state root outside the
 // recursive Cooper configuration deletion boundary.
 func removeCooperConfigDir(cooperDir string) error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("get home directory before Cooper directory removal: %w", err)
 	}
-	if err := docker.ValidateGrokHostStateRoot(homeDir, cooperDir); err != nil {
+	if err := workload.ValidateAllHostAgentStateRoots(homeDir, cooperDir); err != nil {
 		return err
 	}
 	return os.RemoveAll(cooperDir)
@@ -1386,7 +1362,7 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 	mainModel.SetAlertPlayer(alertsound.NewController())
 
 	// Wire sub-models.
-	mainModel.SetContainersModel(containers.New(testApp))
+	mainModel.SetRuntimesModel(containers.New(testApp))
 	mainModel.SetProxyMonModel(proxymon.New(testApp, time.Duration(cfg.MonitorTimeoutSecs)*time.Second))
 	mainModel.SetBlockedModel(history.NewWithCapacity(history.ModeBlocked, cfg.BlockedHistoryLimit))
 	mainModel.SetAllowedModel(history.NewWithCapacity(history.ModeAllowed, cfg.AllowedHistoryLimit))
@@ -1419,8 +1395,8 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 	// Jump to requested screen if --screen flag is set.
 	if tuiTestScreen != "" {
 		switch strings.ToLower(tuiTestScreen) {
-		case "containers":
-			mainModel.SetActiveTab(theme.TabContainers)
+		case "runtimes", "containers":
+			mainModel.SetActiveTab(theme.TabRuntimes)
 		case "monitor":
 			mainModel.SetActiveTab(theme.TabMonitor)
 		case "blocked":
@@ -1458,7 +1434,7 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 			_, err := p.Run()
 			return err
 		default:
-			return fmt.Errorf("unknown screen: %s\nAvailable: containers, monitor, blocked, allowed, squid-logs, bridge-logs, bridge-routes, settings, ports, about, loading, configure, build", tuiTestScreen)
+			return fmt.Errorf("unknown screen: %s\nAvailable: runtimes, monitor, blocked, allowed, squid-logs, bridge-logs, bridge-routes, settings, ports, about, loading, configure, build", tuiTestScreen)
 		}
 	}
 

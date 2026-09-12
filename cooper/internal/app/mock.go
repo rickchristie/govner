@@ -28,17 +28,17 @@ type MockApp struct {
 	squidLogs    chan string
 
 	// Controllable return values.
-	StartErr            error
-	StopErr             error
-	ContainerStatsVal   []ContainerStat
-	ContainerStatsErr   error
-	ListContainersVal   []ContainerInfo
-	ListContainersErr   error
-	StopContainerErr    error
-	RestartContainerErr error
-	ProxyRunning        bool
-	HeaderHealthVal     HeaderHealth
-	SessionAllowErr     error
+	StartErr           error
+	StopErr            error
+	WorkloadStatsVal   []WorkloadStat
+	WorkloadStatsErr   error
+	ListWorkloadsVal   []WorkloadInfo
+	ListWorkloadsErr   error
+	StopWorkloadErr    error
+	RestartWorkloadErr error
+	ProxyRunning       bool
+	HeaderHealthVal    HeaderHealth
+	SessionAllowErr    error
 
 	// Clipboard controllable return values.
 	CaptureClipboardResult *clipboard.ClipboardEvent
@@ -52,8 +52,8 @@ type MockApp struct {
 	DeniedIDs           []string
 	SessionAllowedCalls []string
 	SessionRevokedCalls []string
-	StoppedContainers   []string
-	RestartedContainers []string
+	StoppedWorkloads    []string
+	RestartedWorkloads  []string
 	UpdatedPortForwards []config.PortForwardRule
 	UpdatedBridgeRoutes []config.BridgeRoute
 	UpdatedSettings     []SettingsUpdate
@@ -217,26 +217,26 @@ func normalizeSessionDomainForTestApp(domain string) string {
 
 // ----- Container management -----
 
-func (m *MockApp) ContainerStats() ([]ContainerStat, error) {
-	return m.ContainerStatsVal, m.ContainerStatsErr
+func (m *MockApp) WorkloadStats() ([]WorkloadStat, error) {
+	return m.WorkloadStatsVal, m.WorkloadStatsErr
 }
 
-func (m *MockApp) StopContainer(name string) error {
+func (m *MockApp) StopWorkload(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.StoppedContainers = append(m.StoppedContainers, name)
-	return m.StopContainerErr
+	m.StoppedWorkloads = append(m.StoppedWorkloads, name)
+	return m.StopWorkloadErr
 }
 
-func (m *MockApp) RestartContainer(name string) error {
+func (m *MockApp) RestartWorkload(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.RestartedContainers = append(m.RestartedContainers, name)
-	return m.RestartContainerErr
+	m.RestartedWorkloads = append(m.RestartedWorkloads, name)
+	return m.RestartWorkloadErr
 }
 
-func (m *MockApp) ListContainers() ([]ContainerInfo, error) {
-	return m.ListContainersVal, m.ListContainersErr
+func (m *MockApp) ListWorkloads() ([]WorkloadInfo, error) {
+	return m.ListWorkloadsVal, m.ListWorkloadsErr
 }
 
 func (m *MockApp) IsProxyRunning() bool {

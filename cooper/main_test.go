@@ -21,6 +21,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/templates"
 	"github.com/rickchristie/govner/cooper/internal/testdocker"
 	"github.com/rickchristie/govner/cooper/internal/testdriver"
+	"github.com/spf13/cobra"
 )
 
 func setupCommandDriver(t *testing.T, mutator func(*config.Config)) *testdriver.Driver {
@@ -44,6 +45,11 @@ func setupCommandDriver(t *testing.T, mutator func(*config.Config)) *testdriver.
 	if err != nil {
 		t.Fatalf("create command test driver: %v", err)
 	}
+	// Direct runCLI tests use the production home lookup. Point it at the
+	// driver's /tmp home so the Docker daemon can see each bind source. This
+	// also prevents command tests from reading or changing real agent state.
+	t.Setenv("HOME", driver.HomeDir())
+	t.Setenv("GROK_HOME", "")
 	t.Cleanup(func() {
 		if err := driver.Close(); err != nil {
 			t.Errorf("close command test driver: %v", err)
@@ -57,11 +63,13 @@ func withCommandGlobals(t *testing.T, cooperDir string) {
 
 	prevConfigDir := configDir
 	prevImagePrefix := imagePrefix
+	prevRuntimeNamespaceFlag := runtimeNamespace
 	prevRuntimeNamespace := docker.RuntimeNamespace()
 	prevCliOneShot := cliOneShot
 
 	configDir = cooperDir
 	imagePrefix = testdocker.ImagePrefix
+	runtimeNamespace = testdocker.RuntimeNamespace
 	cliOneShot = ""
 	docker.SetImagePrefix(imagePrefix)
 	docker.SetRuntimeNamespace(testdocker.RuntimeNamespace)
@@ -70,6 +78,7 @@ func withCommandGlobals(t *testing.T, cooperDir string) {
 	t.Cleanup(func() {
 		configDir = prevConfigDir
 		imagePrefix = prevImagePrefix
+		runtimeNamespace = prevRuntimeNamespaceFlag
 		cliOneShot = prevCliOneShot
 		docker.SetImagePrefix(prevImagePrefix)
 		docker.SetRuntimeNamespace(prevRuntimeNamespace)
@@ -134,6 +143,19 @@ func captureCommandIO(t *testing.T, stdin string, fn func() error) (string, stri
 	os.Stdin = origStdin
 
 	return string(stdoutBytes), string(stderrBytes), runErr
+}
+
+func TestRootHelpDescribesBothRuntimeModes(t *testing.T) {
+	for _, want := range []string{
+		"Docker barrels and KVM virtual machines",
+		"cooper cli <tool>",
+		"cooper vm <tool>",
+		"cooper vm doctor",
+	} {
+		if !strings.Contains(rootCmd.Long, want) {
+			t.Fatalf("root help does not contain %q:\n%s", want, rootCmd.Long)
+		}
+	}
 }
 
 func TestCollectUpdatePlan(t *testing.T) {
@@ -318,9 +340,11 @@ func TestStopRunningUpSignalsActiveLockOwner(t *testing.T) {
 	waitForUpLockHolder(t, cooperDir, cmd.Process.Pid)
 
 	var out bytes.Buffer
-	lock, err := stopRunningUp(cooperDir, &out)
+	defaults := config.DefaultVMConfig()
+	shutdownTimeout := time.Duration(defaults.StopTimeoutS)*time.Second + cooperUpShutdownGrace
+	lock, err := stopRunningUpWithin(cooperDir, &out, shutdownTimeout)
 	if err != nil {
-		t.Fatalf("stopRunningUp() failed: %v", err)
+		t.Fatalf("stopRunningUpWithin() failed: %v", err)
 	}
 	if !strings.Contains(out.String(), fmt.Sprintf("Stopping cooper up process %d", cmd.Process.Pid)) {
 		t.Fatalf("expected process stop message, got %q", out.String())
@@ -688,8 +712,10 @@ func TestRunCleanupRemovesRuntimeArtifacts(t *testing.T) {
 		t.Fatalf("expected token file before cleanup: %v", err)
 	}
 
+	cleanupCommand := &cobra.Command{}
+	cleanupCommand.SetContext(context.Background())
 	_, stderr, err := captureCommandIO(t, "n\n", func() error {
-		return runCleanup(nil, nil)
+		return runCleanup(cleanupCommand, nil)
 	})
 	if err != nil {
 		t.Fatalf("runCleanup() failed: %v", err)
@@ -765,8 +791,10 @@ func TestRunDownRemovesRuntimeArtifactsWithoutRemovingConfigOrImages(t *testing.
 		t.Fatalf("expected active runtime guard before down, got %v", err)
 	}
 
+	downCommand := &cobra.Command{}
+	downCommand.SetContext(context.Background())
 	_, stderr, err := captureCommandIO(t, "", func() error {
-		return runDown(nil, nil)
+		return runDown(downCommand, nil)
 	})
 	if err != nil {
 		t.Fatalf("runDown() failed: %v", err)
@@ -918,29 +946,6 @@ func TestRunUpdateReloadsRunningProxyAfterGrokIsDisabled(t *testing.T) {
 		t.Fatalf("expected Squid reload after Grok disable, got %q", stderr)
 	}
 
-	target, err := testdocker.StartHTTPSTarget("auth.x.ai", "api.anthropic.com")
-	if err != nil {
-		t.Fatalf("start local Grok authorization target: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := target.Remove(); err != nil {
-			t.Errorf("remove local Grok authorization target: %v", err)
-		}
-	})
-
-	certPEM, err := exec.Command("docker", "exec", target.ContainerName, "cat", "/tmp/target.crt").Output()
-	if err != nil {
-		t.Fatalf("read local Grok target certificate: %v", err)
-	}
-	trustTarget := exec.Command(
-		"docker", "exec", "-i", "-u", "root", docker.ProxyContainerName(),
-		"sh", "-lc", "cat >/usr/local/share/ca-certificates/cooper-grok-test-target.crt && update-ca-certificates >/tmp/cooper-grok-test-target-ca.log 2>&1",
-	)
-	trustTarget.Stdin = bytes.NewReader(certPEM)
-	if output, err := trustTarget.CombinedOutput(); err != nil {
-		t.Fatalf("trust local Grok target certificate: %v\n%s", err, output)
-	}
-
 	barrel, err := driver.StartBarrel("claude")
 	if err != nil {
 		t.Fatalf("start local proxy probe barrel: %v", err)
@@ -951,17 +956,17 @@ func TestRunUpdateReloadsRunningProxyAfterGrokIsDisabled(t *testing.T) {
 	for time.Now().Before(readinessDeadline) {
 		output, probeErr := driver.ExecBarrel(
 			barrel.Name,
-			fmt.Sprintf("curl -k -sS --connect-timeout 2 --max-time 4 -o /dev/null -w '%%{http_code}' -x http://%s:%d https://api.anthropic.com/", docker.ProxyHost(), cfg.ProxyPort),
+			fmt.Sprintf("timeout 2 bash -lc 'exec 3<>/dev/tcp/%s/%d'", docker.ProxyHost(), cfg.ProxyPort),
 		)
 		lastReadinessResult = fmt.Sprintf("output=%q err=%v", strings.TrimSpace(output), probeErr)
-		if probeErr == nil && strings.TrimSpace(output) == "200" {
+		if probeErr == nil {
 			proxyReady = true
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	if !proxyReady {
-		t.Fatalf("barrel could not reach the reloaded proxy and local HTTPS target: %s", lastReadinessResult)
+		t.Fatalf("barrel could not reach the reloaded proxy listener: %s", lastReadinessResult)
 	}
 	type requestResult struct {
 		output string
@@ -1007,5 +1012,74 @@ func TestRemoveCooperConfigDirPreservesOverlappingGrokState(t *testing.T) {
 	}
 	if data, readErr := os.ReadFile(marker); readErr != nil || string(data) != "host-owned" {
 		t.Fatalf("host-owned Grok state changed: data=%q err=%v", data, readErr)
+	}
+}
+
+func TestRemoveCooperConfigDirPreservesEveryBuiltInAgentState(t *testing.T) {
+	t.Setenv("GROK_HOME", "")
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	for _, stateRoot := range []string{
+		filepath.Join(homeDir, ".claude"),
+		filepath.Join(homeDir, ".copilot"),
+		filepath.Join(homeDir, ".codex"),
+		filepath.Join(homeDir, ".cache", "opencode"),
+	} {
+		stateRoot := stateRoot
+		t.Run(filepath.Base(stateRoot), func(t *testing.T) {
+			cooperDir := filepath.Join(stateRoot, "cooper")
+			marker := filepath.Join(cooperDir, "host-state.txt")
+			if err := os.MkdirAll(cooperDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := removeCooperConfigDir(cooperDir); err == nil {
+				t.Fatal("removeCooperConfigDir() removed a directory inside host agent state")
+			}
+			if data, err := os.ReadFile(marker); err != nil || string(data) != "keep" {
+				t.Fatalf("host state changed: data=%q err=%v", data, err)
+			}
+		})
+	}
+}
+
+func TestCleanupRuntimeStatePreservesVMBackedPathsAfterStopFailure(t *testing.T) {
+	t.Setenv("GROK_HOME", "")
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	cooperDir := filepath.Join(t.TempDir(), "cooper")
+	runtimeID := docker.RuntimeNamespace() + "-vm-project-codex-aabbccddeeff"
+	preserved := []string{
+		filepath.Join(cooperDir, "tmp", runtimeID, "value"),
+		filepath.Join(cooperDir, "session", runtimeID, "value"),
+		filepath.Join(cooperDir, "vm", "run", runtimeID, "supervisor", "value"),
+	}
+	removed := []string{
+		filepath.Join(cooperDir, "tokens", runtimeID),
+		filepath.Join(cooperDir, "run", "acl.sock"),
+	}
+	for _, path := range append(append([]string(nil), preserved...), removed...) {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := cleanupRuntimeState(cooperDir, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range preserved {
+		if data, err := os.ReadFile(path); err != nil || string(data) != "keep" {
+			t.Fatalf("VM-backed path %s changed: data=%q err=%v", path, data, err)
+		}
+	}
+	for _, path := range removed {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("revoked runtime path %s remains: %v", path, err)
+		}
 	}
 }

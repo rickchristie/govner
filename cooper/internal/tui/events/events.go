@@ -18,9 +18,9 @@ type ACLRequestMsg struct {
 // animation updates (countdown bars, status pulses, barrel roll, etc.).
 type AnimTickMsg struct{}
 
-// ContainerStatsMsg carries a periodic snapshot of container resource usage.
-type ContainerStatsMsg struct {
-	Stats []app.ContainerStat
+// WorkloadStatsMsg carries a periodic snapshot of runtime resources.
+type WorkloadStatsMsg struct {
+	Stats []app.WorkloadStat
 }
 
 // HeaderHealthMsg carries the latest runtime health badges for the header.
@@ -35,16 +35,16 @@ type ExternalSignalMsg struct {
 	Signal string
 }
 
-// ContainerActionRequestMsg asks the root model to show a confirmation modal
-// before a container stop/restart action runs.
-type ContainerActionRequestMsg struct {
+// WorkloadActionRequestMsg asks the root model to show a confirmation modal
+// before a workload stop or restart action runs.
+type WorkloadActionRequestMsg struct {
 	Action string
 	Name   string
 }
 
-// ContainerActionConfirmMsg tells the containers screen to execute a confirmed
-// stop/restart action.
-type ContainerActionConfirmMsg struct {
+// WorkloadActionConfirmMsg tells the runtimes screen to execute a confirmed
+// stop or restart action.
+type WorkloadActionConfirmMsg struct {
 	Action string
 	Name   string
 }

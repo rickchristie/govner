@@ -74,8 +74,8 @@ func setupTestManager(t *testing.T) *Manager {
 
 func registerEligibleToken(t *testing.T, m *Manager) string {
 	t.Helper()
-	if err := m.RegisterBarrel(BarrelSession{
-		ContainerName: "barrel-test",
+	if err := m.RegisterRuntime(RuntimeSession{
+		RuntimeID:     "barrel-test",
 		ToolName:      "claude",
 		ClipboardMode: "shim",
 		Eligible:      true,
@@ -260,8 +260,8 @@ func TestHandleIneligibleBarrel(t *testing.T) {
 	m := setupTestManager(t)
 	h := NewHandler(m, nil)
 
-	if err := m.RegisterBarrel(BarrelSession{
-		ContainerName: "barrel-off",
+	if err := m.RegisterRuntime(RuntimeSession{
+		RuntimeID:     "barrel-off",
 		ToolName:      "custom",
 		ClipboardMode: "off",
 		Eligible:      false,

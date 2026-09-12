@@ -6,7 +6,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
+
+	"github.com/rickchristie/govner/cooper/internal/vmcontext"
 )
 
 var (
@@ -75,7 +78,10 @@ const (
 // Dockerfile and context directory. Build arguments are passed as --build-arg
 // flags. Output is streamed to stderr for visibility during builds.
 func BuildImage(name, dockerfilePath, contextDir string, buildArgs map[string]string, noCache bool) error {
-	args := buildDockerArgs(name, dockerfilePath, contextDir, buildArgs, noCache)
+	args, err := buildDockerArgs(name, dockerfilePath, contextDir, buildArgs, noCache)
+	if err != nil {
+		return err
+	}
 
 	cmd := exec.Command("docker", args...)
 	cmd.Stdout = os.Stderr
@@ -98,7 +104,12 @@ func BuildImageWithOutput(name, dockerfilePath, contextDir string, buildArgs map
 	go func() {
 		defer close(errc)
 
-		args := buildDockerArgs(name, dockerfilePath, contextDir, buildArgs, noCache)
+		args, buildErr := buildDockerArgs(name, dockerfilePath, contextDir, buildArgs, noCache)
+		if buildErr != nil {
+			errc <- buildErr
+			close(lines)
+			return
+		}
 		cmd := exec.Command("docker", args...)
 
 		// Combine stdout and stderr into a single pipe for streaming.
@@ -196,14 +207,55 @@ func TagImage(source, target string) error {
 }
 
 // buildDockerArgs constructs the docker build argument list.
-func buildDockerArgs(name, dockerfilePath, contextDir string, buildArgs map[string]string, noCache bool) []string {
+func buildDockerArgs(name, dockerfilePath, contextDir string, buildArgs map[string]string, noCache bool) ([]string, error) {
 	args := []string{"build", "-t", name, "-f", dockerfilePath}
 	if noCache {
 		args = append(args, "--no-cache")
 	}
-	for k, v := range buildArgs {
+	keys := make([]string, 0, len(buildArgs))
+	for key := range buildArgs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := buildArgs[k]
 		args = append(args, "--build-arg", fmt.Sprintf("%s=%s", k, v))
 	}
+	proxyArgs, err := NestedBuildProxyArgs()
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, proxyArgs...)
 	args = append(args, contextDir)
-	return args
+	return args, nil
+}
+
+// NestedBuildProxyArgs returns fixed predefined proxy arguments when Cooper
+// runs inside a Cooper VM. It does not read normal proxy environment values.
+func NestedBuildProxyArgs() ([]string, error) {
+	context, err := vmcontext.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load Cooper VM build context: %w", err)
+	}
+	if context == nil {
+		return nil, nil
+	}
+	proxyURL := context.ProxyURL()
+	noProxy := "localhost,127.0.0.1," + context.ParentProxy
+	values := []struct {
+		name  string
+		value string
+	}{
+		{"HTTP_PROXY", proxyURL},
+		{"HTTPS_PROXY", proxyURL},
+		{"NO_PROXY", noProxy},
+		{"http_proxy", proxyURL},
+		{"https_proxy", proxyURL},
+		{"no_proxy", noProxy},
+	}
+	args := make([]string, 0, len(values)*2)
+	for _, value := range values {
+		args = append(args, "--build-arg", value.name+"="+value.value)
+	}
+	return args, nil
 }

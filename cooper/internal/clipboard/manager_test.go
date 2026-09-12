@@ -9,12 +9,12 @@ import (
 	"time"
 )
 
-func withMockInspectContainerSession(t *testing.T, fn func(string) (*BarrelSession, error)) {
+func withMockInspectContainerSession(t *testing.T, fn func(string, string) (*RuntimeSession, error)) {
 	t.Helper()
-	original := inspectContainerSession
-	inspectContainerSession = fn
+	original := inspectRuntimeSession
+	inspectRuntimeSession = fn
 	t.Cleanup(func() {
-		inspectContainerSession = original
+		inspectRuntimeSession = original
 	})
 }
 
@@ -253,15 +253,15 @@ func TestGenerateTokenUnique(t *testing.T) {
 func TestRegisterAndValidateToken(t *testing.T) {
 	mgr := NewManager(5*time.Second, 1024)
 
-	sess := BarrelSession{
-		ContainerName: "barrel-test",
+	sess := RuntimeSession{
+		RuntimeID:     "barrel-test",
 		ToolName:      "claude-code",
 		ClipboardMode: "auto",
 		Eligible:      true,
 	}
 
-	if err := mgr.RegisterBarrel(sess); err != nil {
-		t.Fatalf("RegisterBarrel: %v", err)
+	if err := mgr.RegisterRuntime(sess); err != nil {
+		t.Fatalf("RegisterRuntime: %v", err)
 	}
 
 	sessions := mgr.ActiveSessions()
@@ -278,8 +278,8 @@ func TestRegisterAndValidateToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ValidateToken: %v", err)
 	}
-	if validated.ContainerName != "barrel-test" {
-		t.Errorf("ContainerName = %q, want %q", validated.ContainerName, "barrel-test")
+	if validated.RuntimeID != "barrel-test" {
+		t.Errorf("RuntimeID = %q, want %q", validated.RuntimeID, "barrel-test")
 	}
 	if validated.ToolName != "claude-code" {
 		t.Errorf("ToolName = %q, want %q", validated.ToolName, "claude-code")
@@ -295,28 +295,28 @@ func TestValidateTokenRejectsUnknown(t *testing.T) {
 	}
 }
 
-func TestUnregisterBarrelInvalidatesToken(t *testing.T) {
+func TestUnregisterRuntimeInvalidatesToken(t *testing.T) {
 	mgr := NewManager(5*time.Second, 1024)
 
-	sess := BarrelSession{
-		ContainerName: "barrel-remove",
+	sess := RuntimeSession{
+		RuntimeID:     "barrel-remove",
 		ToolName:      "tool",
 		ClipboardMode: "auto",
 		Eligible:      true,
 	}
 
-	if err := mgr.RegisterBarrel(sess); err != nil {
-		t.Fatalf("RegisterBarrel: %v", err)
+	if err := mgr.RegisterRuntime(sess); err != nil {
+		t.Fatalf("RegisterRuntime: %v", err)
 	}
 
 	sessions := mgr.ActiveSessions()
 	token := sessions[0].Token
 
-	mgr.UnregisterBarrel("barrel-remove")
+	mgr.UnregisterRuntime("barrel-remove")
 
 	_, err := mgr.ValidateToken(token)
 	if err == nil {
-		t.Error("ValidateToken should fail after UnregisterBarrel")
+		t.Error("ValidateToken should fail after UnregisterRuntime")
 	}
 
 	sessions = mgr.ActiveSessions()
@@ -325,24 +325,24 @@ func TestUnregisterBarrelInvalidatesToken(t *testing.T) {
 	}
 }
 
-func TestRegisterBarrelReplacesExisting(t *testing.T) {
+func TestRegisterRuntimeReplacesExisting(t *testing.T) {
 	mgr := NewManager(5*time.Second, 1024)
 
-	sess := BarrelSession{
-		ContainerName: "barrel-replace",
+	sess := RuntimeSession{
+		RuntimeID:     "barrel-replace",
 		ToolName:      "tool-v1",
 		ClipboardMode: "auto",
 		Eligible:      true,
 	}
-	if err := mgr.RegisterBarrel(sess); err != nil {
-		t.Fatalf("RegisterBarrel 1: %v", err)
+	if err := mgr.RegisterRuntime(sess); err != nil {
+		t.Fatalf("RegisterRuntime 1: %v", err)
 	}
 
 	oldToken := mgr.ActiveSessions()[0].Token
 
 	sess.ToolName = "tool-v2"
-	if err := mgr.RegisterBarrel(sess); err != nil {
-		t.Fatalf("RegisterBarrel 2: %v", err)
+	if err := mgr.RegisterRuntime(sess); err != nil {
+		t.Fatalf("RegisterRuntime 2: %v", err)
 	}
 
 	// Old token should be invalid.
@@ -365,10 +365,10 @@ func TestRegisterBarrelReplacesExisting(t *testing.T) {
 	}
 }
 
-func TestUnregisterBarrelNoOpForUnknown(t *testing.T) {
+func TestUnregisterRuntimeNoOpForUnknown(t *testing.T) {
 	mgr := NewManager(5*time.Second, 1024)
 	// Should not panic.
-	mgr.UnregisterBarrel("does-not-exist")
+	mgr.UnregisterRuntime("does-not-exist")
 }
 
 // --- Token file management ---
@@ -376,7 +376,7 @@ func TestUnregisterBarrelNoOpForUnknown(t *testing.T) {
 func TestWriteAndRemoveTokenFile(t *testing.T) {
 	dir := t.TempDir()
 
-	path, err := WriteTokenFile(dir, "my-barrel", "secret-token-value")
+	path, err := WriteRuntimeToken(dir, "my-barrel", "secret-token-value", RuntimeCLI, "codex", "x11")
 	if err != nil {
 		t.Fatalf("WriteTokenFile: %v", err)
 	}
@@ -386,12 +386,12 @@ func TestWriteAndRemoveTokenFile(t *testing.T) {
 		t.Errorf("path = %q, want %q", path, expectedPath)
 	}
 
-	data, err := os.ReadFile(path)
+	metadata, err := ReadTokenMetadata(path)
 	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
+		t.Fatalf("ReadTokenMetadata: %v", err)
 	}
-	if string(data) != "secret-token-value" {
-		t.Errorf("token file content = %q, want %q", string(data), "secret-token-value")
+	if metadata.Token != "secret-token-value" || metadata.RuntimeID != "my-barrel" || metadata.RuntimeKind != RuntimeCLI || metadata.ToolName != "codex" || metadata.ClipboardMode != "x11" {
+		t.Errorf("token metadata = %#v", metadata)
 	}
 
 	info, err := os.Stat(path)
@@ -432,15 +432,20 @@ func TestValidateTokenFromDiskUsesContainerInspection(t *testing.T) {
 	mgr.SetCooperDir(dir)
 
 	token := "disk-token"
-	if _, err := WriteTokenFile(dir, "barrel-custom-off", token); err != nil {
+	if _, err := WriteRuntimeToken(dir, "barrel-custom-off", token, RuntimeCLI, "custom-off", "off"); err != nil {
 		t.Fatalf("WriteTokenFile: %v", err)
 	}
 
-	withMockInspectContainerSession(t, func(containerName string) (*BarrelSession, error) {
+	withMockInspectContainerSession(t, func(cooperDir, containerName string) (*RuntimeSession, error) {
+		if cooperDir != dir {
+			t.Fatalf("inspection Cooper directory = %s, want %s", cooperDir, dir)
+		}
 		if containerName != "barrel-custom-off" {
 			t.Fatalf("unexpected container inspection: %s", containerName)
 		}
-		return &BarrelSession{
+		return &RuntimeSession{
+			RuntimeID:     containerName,
+			RuntimeKind:   RuntimeCLI,
 			ToolName:      "custom-off",
 			ClipboardMode: "off",
 			Eligible:      false,
@@ -468,11 +473,11 @@ func TestValidateTokenFromDiskRejectsStoppedContainer(t *testing.T) {
 	mgr.SetCooperDir(dir)
 
 	token := "stopped-token"
-	if _, err := WriteTokenFile(dir, "barrel-stopped", token); err != nil {
+	if _, err := WriteRuntimeToken(dir, "barrel-stopped", token, RuntimeCLI, "stopped", "auto"); err != nil {
 		t.Fatalf("WriteTokenFile: %v", err)
 	}
 
-	withMockInspectContainerSession(t, func(containerName string) (*BarrelSession, error) {
+	withMockInspectContainerSession(t, func(_ string, containerName string) (*RuntimeSession, error) {
 		if containerName != "barrel-stopped" {
 			t.Fatalf("unexpected container inspection: %s", containerName)
 		}
@@ -489,22 +494,24 @@ func TestValidateTokenFromDiskRejectsRotatedToken(t *testing.T) {
 	mgr := NewManager(5*time.Second, 1024)
 	mgr.SetCooperDir(dir)
 
-	withMockInspectContainerSession(t, func(containerName string) (*BarrelSession, error) {
-		return &BarrelSession{
-			ToolName:      containerName,
+	withMockInspectContainerSession(t, func(_ string, containerName string) (*RuntimeSession, error) {
+		return &RuntimeSession{
+			RuntimeID:     containerName,
+			RuntimeKind:   RuntimeCLI,
+			ToolName:      "rotate",
 			ClipboardMode: "auto",
 			Eligible:      true,
 		}, nil
 	})
 
-	if _, err := WriteTokenFile(dir, "barrel-rotate", "token-one"); err != nil {
+	if _, err := WriteRuntimeToken(dir, "barrel-rotate", "token-one", RuntimeCLI, "rotate", "auto"); err != nil {
 		t.Fatalf("WriteTokenFile token-one: %v", err)
 	}
 	if _, err := mgr.ValidateToken("token-one"); err != nil {
 		t.Fatalf("ValidateToken token-one: %v", err)
 	}
 
-	if _, err := WriteTokenFile(dir, "barrel-rotate", "token-two"); err != nil {
+	if _, err := RotateRuntimeToken(dir, "barrel-rotate", "token-two"); err != nil {
 		t.Fatalf("WriteTokenFile token-two: %v", err)
 	}
 
@@ -571,13 +578,13 @@ func TestConcurrentRegisterValidate(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			sess := BarrelSession{
-				ContainerName: fmt.Sprintf("barrel-%d", n),
+			sess := RuntimeSession{
+				RuntimeID:     fmt.Sprintf("barrel-%d", n),
 				ToolName:      "tool",
 				ClipboardMode: "auto",
 				Eligible:      true,
 			}
-			mgr.RegisterBarrel(sess)
+			mgr.RegisterRuntime(sess)
 		}(i)
 	}
 
@@ -594,7 +601,7 @@ func TestConcurrentRegisterValidate(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			mgr.UnregisterBarrel(fmt.Sprintf("barrel-%d", n))
+			mgr.UnregisterRuntime(fmt.Sprintf("barrel-%d", n))
 		}(i)
 	}
 

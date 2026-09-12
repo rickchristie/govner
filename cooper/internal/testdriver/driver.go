@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/app"
+	"github.com/rickchristie/govner/cooper/internal/buildflow"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
@@ -46,6 +47,7 @@ type Barrel struct {
 type Driver struct {
 	cfg           *config.Config
 	cooperDir     string
+	homeDir       string
 	app           *app.CooperApp
 	imagePrefix   string
 	keepArtifacts bool
@@ -75,8 +77,17 @@ func New(opts Options) (*Driver, error) {
 		lock.Release()
 		return nil, err
 	}
+	homeDir, err := os.MkdirTemp("", "cooper-driver-home-*")
+	if err != nil {
+		os.RemoveAll(cooperDir)
+		lock.Release()
+		return nil, fmt.Errorf("create temporary test home: %w", err)
+	}
 
 	appInstance := app.NewCooperApp(cfg, cooperDir)
+	// A runtime test must not copy an arbitrary machine font tree into its
+	// temporary directory. Font sync has focused unit and shell E2E coverage.
+	appInstance.DisableHostFontSync()
 	if opts.DisableHostClipboard {
 		appInstance.DisableClipboardReader()
 	}
@@ -84,6 +95,7 @@ func New(opts Options) (*Driver, error) {
 	return &Driver{
 		cfg:           cfg,
 		cooperDir:     cooperDir,
+		homeDir:       homeDir,
 		app:           appInstance,
 		imagePrefix:   prefix,
 		keepArtifacts: opts.KeepArtifactsOnClose,
@@ -103,6 +115,16 @@ func (d *Driver) Config() *config.Config {
 // CooperDir returns the temporary Cooper directory backing this runtime.
 func (d *Driver) CooperDir() string {
 	return d.cooperDir
+}
+
+// HomeDir returns the isolated host-state root used by this runtime driver.
+func (d *Driver) HomeDir() string {
+	return d.homeDir
+}
+
+// ImagePrefix returns the isolated Docker image prefix used by the driver.
+func (d *Driver) ImagePrefix() string {
+	return d.imagePrefix
 }
 
 // App exposes the real CooperApp for advanced scenarios that need the
@@ -144,6 +166,7 @@ func (d *Driver) Close() error {
 
 	cleanupDocker()
 	fixCooperDirPermissions(d.cooperDir)
+	_ = testdocker.FixOwnership(d.homeDir)
 
 	if !d.keepArtifacts {
 		for _, workspaceDir := range d.workspaces {
@@ -157,6 +180,9 @@ func (d *Driver) Close() error {
 	if !d.keepArtifacts {
 		if err := os.RemoveAll(d.cooperDir); err != nil {
 			errs = append(errs, fmt.Sprintf("remove cooper dir: %v", err))
+		}
+		if err := os.RemoveAll(d.homeDir); err != nil {
+			errs = append(errs, fmt.Sprintf("remove test home: %v", err))
 		}
 	}
 
@@ -203,19 +229,19 @@ func (d *Driver) RequireBaseImage() error {
 	return nil
 }
 
-// RegisterBarrelSession registers an in-memory barrel session and returns the
+// RegisterRuntimeSession registers an in-memory runtime session and returns the
 // generated bearer token. This is useful for exercising the clipboard bridge
 // without starting a real container.
-func (d *Driver) RegisterBarrelSession(session clipboard.BarrelSession) (string, error) {
-	if err := d.app.ClipboardManager().RegisterBarrel(session); err != nil {
-		return "", fmt.Errorf("register barrel session: %w", err)
+func (d *Driver) RegisterRuntimeSession(session clipboard.RuntimeSession) (string, error) {
+	if err := d.app.ClipboardManager().RegisterRuntime(session); err != nil {
+		return "", fmt.Errorf("register runtime session: %w", err)
 	}
 	for _, candidate := range d.app.ClipboardManager().ActiveSessions() {
-		if candidate.ContainerName == session.ContainerName {
+		if candidate.RuntimeID == session.RuntimeID {
 			return candidate.Token, nil
 		}
 	}
-	return "", fmt.Errorf("registered barrel session %s not found", session.ContainerName)
+	return "", fmt.Errorf("registered runtime session %s not found", session.RuntimeID)
 }
 
 // StageClipboard stages a clipboard object through the real clipboard manager.
@@ -260,11 +286,11 @@ func (d *Driver) StartBarrel(toolName string) (*Barrel, error) {
 // StartBarrelInWorkspace starts a barrel in the provided workspace.
 func (d *Driver) StartBarrelInWorkspace(toolName, workspaceDir string) (*Barrel, error) {
 	name := docker.BarrelContainerName(workspaceDir, toolName)
-	token, err := d.WriteClipboardToken(name)
+	token, err := d.WriteClipboardToken(name, toolName)
 	if err != nil {
 		return nil, err
 	}
-	if err := docker.StartBarrel(d.cfg, workspaceDir, d.cooperDir, toolName); err != nil {
+	if err := docker.StartBarrelWithHomeDir(d.cfg, workspaceDir, d.cooperDir, d.homeDir, toolName); err != nil {
 		return nil, fmt.Errorf("start barrel %s: %w", name, err)
 	}
 	if err := d.WaitForContainer(name, 15*time.Second); err != nil {
@@ -281,22 +307,26 @@ func (d *Driver) StartBarrelInWorkspace(toolName, workspaceDir string) (*Barrel,
 // StopBarrel stops a barrel through the app boundary so token revocation is
 // exercised as part of the runtime behavior.
 func (d *Driver) StopBarrel(name string) error {
-	return d.app.StopContainer(name)
+	return d.app.StopWorkload(name)
 }
 
 // RestartBarrel restarts a barrel through the app boundary so token rotation
 // is exercised as part of the runtime behavior.
 func (d *Driver) RestartBarrel(name string) error {
-	return d.app.RestartContainer(name)
+	return d.app.RestartWorkload(name)
 }
 
 // WriteClipboardToken writes a clipboard token file for a barrel.
-func (d *Driver) WriteClipboardToken(containerName string) (string, error) {
+func (d *Driver) WriteClipboardToken(containerName, toolName string) (string, error) {
 	token, err := clipboard.GenerateToken()
 	if err != nil {
 		return "", fmt.Errorf("generate clipboard token: %w", err)
 	}
-	if _, err := clipboard.WriteTokenFile(d.cooperDir, containerName, token); err != nil {
+	clipboardMode, err := docker.ToolClipboardMode(toolName)
+	if err != nil {
+		return "", err
+	}
+	if _, err := clipboard.WriteRuntimeToken(d.cooperDir, containerName, token, clipboard.RuntimeCLI, toolName, clipboardMode); err != nil {
 		return "", fmt.Errorf("write clipboard token for %s: %w", containerName, err)
 	}
 	return token, nil
@@ -304,11 +334,11 @@ func (d *Driver) WriteClipboardToken(containerName string) (string, error) {
 
 // ReadClipboardToken reloads a barrel's token file from disk.
 func (d *Driver) ReadClipboardToken(containerName string) (string, error) {
-	data, err := os.ReadFile(clipboard.TokenFilePath(d.cooperDir, containerName))
+	metadata, err := clipboard.ReadTokenMetadata(clipboard.TokenFilePath(d.cooperDir, containerName))
 	if err != nil {
 		return "", fmt.Errorf("read clipboard token for %s: %w", containerName, err)
 	}
-	return strings.TrimSpace(string(data)), nil
+	return metadata.Token, nil
 }
 
 // WaitForContainer polls docker inspect until the container reports running.
@@ -357,6 +387,32 @@ func (d *Driver) BuildCustomToolImage(toolName, dockerfile string) error {
 	return nil
 }
 
+// BuildConfiguredImages builds the proxy, base, and selected agent images
+// from this driver's config. It records every possible output before the build
+// so Close can also remove images from a partially failed build.
+func (d *Driver) BuildConfiguredImages(out io.Writer) error {
+	docker.SetImagePrefix(d.imagePrefix)
+	imageNames := []string{docker.GetImageProxy(), docker.GetImageBase()}
+	for _, tool := range d.cfg.AITools {
+		if tool.Enabled {
+			imageNames = append(imageNames, docker.GetImageCLI(tool.Name))
+		}
+	}
+	customNames, err := buildflow.DiscoverCustomImageNames(filepath.Join(d.cooperDir, "cli"))
+	if err != nil {
+		return err
+	}
+	for _, name := range customNames {
+		imageNames = append(imageNames, docker.GetImageCLI(name))
+	}
+	for _, imageName := range imageNames {
+		if !containsString(d.builtImages, imageName) {
+			d.builtImages = append(d.builtImages, imageName)
+		}
+	}
+	return buildflow.Run(d.cfg, d.cooperDir, buildflow.Options{Out: out})
+}
+
 func setupCooperDir(configMutator func(*config.Config)) (string, *config.Config, error) {
 	cooperDir, err := os.MkdirTemp("", "cooper-driver-*")
 	if err != nil {
@@ -376,8 +432,8 @@ func setupCooperDir(configMutator func(*config.Config)) (string, *config.Config,
 		return "", nil, fmt.Errorf("save config: %w", err)
 	}
 
-	if _, _, err := config.EnsureCA(cooperDir); err != nil {
-		return "", nil, fmt.Errorf("ensure CA: %w", err)
+	if err := testdocker.StageSharedTestCA(cooperDir); err != nil {
+		return "", nil, fmt.Errorf("stage shared test CA: %w", err)
 	}
 
 	baseDir := filepath.Join(cooperDir, "base")

@@ -13,6 +13,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
@@ -171,12 +172,24 @@ func withRejectToken() mockBridgeOpt {
 	}
 }
 
-// writeTokenFile creates a temp file containing the given token and returns
-// its path.
+// writeTokenFile creates a complete runtime metadata file and returns its
+// path. The integration bridge must read the same format as a real workload.
 func writeTokenFile(t *testing.T, token string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "clipboard-token")
-	if err := os.WriteFile(path, []byte(token), 0600); err != nil {
+	metadata, err := json.Marshal(map[string]any{
+		"version":        1,
+		"token":          token,
+		"runtime_id":     "barrel-x11-integration",
+		"runtime_kind":   "cli",
+		"tool_name":      "codex",
+		"clipboard_mode": "x11",
+		"created_at":     "2026-09-12T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("encode token metadata: %v", err)
+	}
+	if err := os.WriteFile(path, metadata, 0o600); err != nil {
 		t.Fatalf("failed to write token file: %v", err)
 	}
 	return path

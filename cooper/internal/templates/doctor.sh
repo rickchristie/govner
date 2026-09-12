@@ -1,6 +1,6 @@
 #!/bin/bash
 # Cooper barrel diagnostic script — run inside a CLI container.
-# Tests proxy connectivity, SSL bump, network isolation, and tool installations.
+# Tests proxy connectivity, selective TLS support, network isolation, and tools.
 #
 # Usage: bash /etc/cooper/test-inside-barrel.sh
 #    or: cooper cli -c "bash test-inside-barrel.sh"
@@ -98,7 +98,7 @@ else
 fi
 
 # ============================================================================
-section "SSL Bump / CA Trust"
+section "HTTPS Proxy / Selective TLS CA"
 # ============================================================================
 
 # Check CA cert is installed
@@ -117,34 +117,33 @@ if [ -n "${NODE_EXTRA_CA_CERTS:-}" ]; then
         fail "NODE_EXTRA_CA_CERTS set but file missing: ${NODE_EXTRA_CA_CERTS}"
     fi
 else
-    warn "NODE_EXTRA_CA_CERTS not set — Node.js tools may get cert errors through SSL bump"
+    warn "NODE_EXTRA_CA_CERTS not set — Node.js may reject inspected TLS traffic"
 fi
 
-# Test actual HTTPS through proxy (this validates the full SSL bump chain)
+# Static allowed domains keep end-to-end TLS. This request proves that the
+# HTTPS proxy route works. Grok path tests separately prove TLS inspection.
 ssl_test=$(curl -s -o /dev/null -w "%{http_code}" \
     --connect-timeout 10 \
     --max-time 15 \
-    https://api.github.com 2>&1) || true
+    https://api.github.com 2>&1)
 ssl_exit=$?
-if [ "$ssl_test" = "200" ] || [ "$ssl_test" = "301" ] || [ "$ssl_test" = "302" ]; then
-    pass "HTTPS through SSL bump works (api.github.com → HTTP ${ssl_test})"
+if [ "$ssl_exit" = "0" ] && echo "$ssl_test" | grep -qE '^[1-5][0-9][0-9]$'; then
+    pass "Static HTTPS proxy route works (api.github.com → HTTP ${ssl_test})"
 elif [ "$ssl_exit" = "60" ] || [ "$ssl_exit" = "77" ]; then
-    fail "SSL certificate error (curl exit ${ssl_exit}) — CA not trusted"
-    info "  The Cooper CA cert must be in the system CA store."
+    fail "TLS certificate error on the HTTPS proxy route (curl exit ${ssl_exit})"
+    info "  Check the system CA store and the destination certificate."
     info "  Check: ls -la /usr/local/share/ca-certificates/"
-    info "  Check: update-ca-certificates was run during image build"
-    # Show the actual error
+    info "  Check: update-ca-certificates ran during the image build"
     curl_err=$(curl -v https://api.github.com 2>&1 | grep -i "ssl\|cert\|error" | head -5)
     info "  curl details:"
     echo "$curl_err" | while IFS= read -r line; do info "    $line"; done
 elif [ "$ssl_exit" = "56" ] || [ "$ssl_exit" = "35" ]; then
-    fail "SSL handshake failed (curl exit ${ssl_exit})"
-    info "  Possible causes: Squid SSL bump misconfigured, cert gen failed"
+    fail "TLS handshake failed on the HTTPS proxy route (curl exit ${ssl_exit})"
     curl_err=$(curl -v https://api.github.com 2>&1 | grep -i "ssl\|tls\|error" | head -5)
     info "  curl details:"
     echo "$curl_err" | while IFS= read -r line; do info "    $line"; done
 else
-    fail "HTTPS test failed: HTTP ${ssl_test}, curl exit ${ssl_exit}"
+    fail "HTTPS proxy-route test failed: HTTP ${ssl_test}, curl exit ${ssl_exit}"
     info "  Full curl output:"
     curl -v https://api.github.com 2>&1 | tail -10 | while IFS= read -r line; do info "    $line"; done
 fi
@@ -226,14 +225,14 @@ section "Port Forwarding (socat)"
 # ============================================================================
 
 # Check if socat config exists
-if [ -f /etc/cooper/socat-rules.json ]; then
+if [ -f /etc/cooper/live/socat-rules.json ]; then
     pass "socat-rules.json mounted"
-    rules=$(jq -r '.rules | length' /etc/cooper/socat-rules.json 2>/dev/null || echo "0")
+    rules=$(jq -r '.rules | length' /etc/cooper/live/socat-rules.json 2>/dev/null || echo "0")
     info "Port forwarding rules: ${rules}"
 
     # Test each configured port
     if command -v jq &>/dev/null; then
-        jq -r '.rules[] | "\(.container_port) \(.description)"' /etc/cooper/socat-rules.json 2>/dev/null | \
+        jq -r '.rules[] | "\(.container_port) \(.description)"' /etc/cooper/live/socat-rules.json 2>/dev/null | \
         while IFS=' ' read -r port desc; do
             if timeout 2 bash -c "echo > /dev/tcp/localhost/${port}" 2>/dev/null; then
                 pass "Port ${port} (${desc}) — connected"
@@ -243,11 +242,11 @@ if [ -f /etc/cooper/socat-rules.json ]; then
         done
     fi
 else
-    warn "socat-rules.json not mounted at /etc/cooper/socat-rules.json"
+    warn "socat-rules.json not mounted at /etc/cooper/live/socat-rules.json"
 fi
 
 # Check bridge port
-bridge_port=$(jq -r '.bridge_port // 4343' /etc/cooper/socat-rules.json 2>/dev/null || echo "4343")
+bridge_port=$(jq -r '.bridge_port // 4343' /etc/cooper/live/socat-rules.json 2>/dev/null || echo "4343")
 if timeout 2 bash -c "echo > /dev/tcp/localhost/${bridge_port}" 2>/dev/null; then
     pass "Bridge port ${bridge_port} reachable"
     # Try the health endpoint
@@ -477,7 +476,7 @@ fi
 
 # Test bridge clipboard endpoint (if token and bridge URL are available)
 if [ -n "${COOPER_CLIPBOARD_TOKEN_FILE:-}" ] && [ -f "${COOPER_CLIPBOARD_TOKEN_FILE}" ] && [ -n "${COOPER_CLIPBOARD_BRIDGE_URL:-}" ]; then
-    token=$(cat "${COOPER_CLIPBOARD_TOKEN_FILE}" 2>/dev/null)
+    token=$(jq -er '.token | strings | select(length > 0)' "${COOPER_CLIPBOARD_TOKEN_FILE}" 2>/dev/null || true)
     if [ -n "$token" ]; then
         clip_status=$(curl -sf -o /dev/null -w "%{http_code}" \
             -H "Authorization: Bearer ${token}" \

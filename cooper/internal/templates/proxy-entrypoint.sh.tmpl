@@ -4,7 +4,7 @@
 #
 # Starts Squid, socat relays for port forwarding and bridge, and logrotate cron.
 
-SOCAT_RULES="/etc/cooper/socat-rules.json"
+SOCAT_RULES="/etc/cooper/live/socat-rules.json"
 SOCAT_SUPERVISORS=()
 LOGROTATE_PID=""
 SQUID_PID=""
@@ -56,9 +56,8 @@ LOGROTATE_PID=$!
 # ============================================================================
 # SOCAT PORT FORWARDING RELAYS (live-reloadable via SIGHUP)
 # ============================================================================
-# Relay traffic from barrel containers (on internal network) to the host
-# via host.docker.internal.
-# Rules are read from /etc/cooper/socat-rules.json (volume-mounted from host).
+# Relay traffic from barrel containers to the reviewed outer boundary.
+# Rules are read from the host-mounted live configuration directory.
 
 # Parent tracks supervisor PIDs. Each supervisor manages one socat process
 # with auto-restart. On reload, parent TERMs supervisors; each supervisor
@@ -106,7 +105,7 @@ start_socat_from_config() {
     if [ ! -f "$SOCAT_RULES" ]; then
         echo "[socat] WARNING: $SOCAT_RULES not found, using template defaults"
         # Fallback: bridge port from template
-        run_socat {{.BridgePort}} "bridge" host.docker.internal {{.BridgePort}}
+        run_socat {{.BridgePort}} "bridge" {{.RelayHost}} {{.BridgePort}}
         return
     fi
 
@@ -118,7 +117,7 @@ start_socat_from_config() {
     fi
 
     # Start bridge port relay
-    run_socat "$bridge_port" "bridge" host.docker.internal "$bridge_port"
+    run_socat "$bridge_port" "bridge" {{.RelayHost}} "$bridge_port"
 
     # Read and start port forwarding rules
     local rule_count
@@ -135,10 +134,18 @@ start_socat_from_config() {
         if [ "$is_range" = "true" ] && [ "$range_end" -gt "$container_port" ]; then
             for port in $(seq "$container_port" "$range_end"); do
                 local hp=$((port - container_port + host_port))
-                run_socat "$port" "${desc}-${port}" host.docker.internal "$hp"
+                {{if .Nested -}}
+                run_socat "$port" "${desc}-${port}" {{.RelayHost}} "$port"
+                {{else -}}
+                run_socat "$port" "${desc}-${port}" {{.RelayHost}} "$hp"
+                {{end -}}
             done
         else
-            run_socat "$container_port" "$desc" host.docker.internal "$host_port"
+            {{if .Nested -}}
+            run_socat "$container_port" "$desc" {{.RelayHost}} "$container_port"
+            {{else -}}
+            run_socat "$container_port" "$desc" {{.RelayHost}} "$host_port"
+            {{end -}}
         fi
     done
 

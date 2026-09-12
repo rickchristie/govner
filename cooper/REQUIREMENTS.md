@@ -9,11 +9,14 @@ The original direction was to replace that copy-paste sandbox workflow with some
 ## High level goals
 - Build and start one proxy container, the proxy can be configured and rebuild easily.
   - Change whitelists, which domain is allowed or not.
-  - Change socat rules, which ports in CLI containers are forwarded to which ports on the host machine.
+  - Change port-forward rules that map workload ports to host ports.
 - Livestream of the proxy logs in the TUI, shows requests that are coming in.
   - On-the-fly approve/deny for non-whitelisted domains.
 - Easily change configuration
 - Same ease of use as pgflock.
+- Run the same selected-agent workload in a KVM VM when development needs a
+  private Docker daemon or a stronger kernel boundary.
+- Let Cooper develop and test Cooper VM from inside one outer Cooper VM.
 
 ## Supported Platforms
 
@@ -25,26 +28,29 @@ The original direction was to replace that copy-paste sandbox workflow with some
   Docker Desktop runs Docker Engine inside a Linux VM, so Cooper's container-side security model still applies.
   Host requirements: Docker Desktop, bash or zsh.
 - **macOS (Intel)**: Expected to work with Docker Desktop 4.x+, but untested.
+- **VM mode**: Linux x86-64 only. The host must have Docker Engine, hardware
+  virtualization, read-write `/dev/kvm` access, and nested KVM. VM mode does
+  not support macOS in this release.
 - **Windows**: Not supported in v1.
 
 ## New Features (Next Steps)
-- Request/response body inspection in the proxy monitor via ICAP server integration. v1 has SSL bump which gives URL, method,
-  headers, and status code. Full body inspection (seeing what the AI is sending/receiving) requires an ICAP server that Squid
-  forwards decrypted traffic to for deep inspection. This is significantly more complex but enables the richest visibility.
+- Request/response body inspection in the proxy monitor via ICAP server integration. Current selective TLS inspection gives
+  URL, method, headers, and status information only for inspected traffic. Full body inspection requires an ICAP server that
+  Squid can send decrypted traffic to for deep inspection. This is significantly more complex but gives the richest visibility.
 
 ## Playwright Support (Built-in Runtime Capability)
 
-Playwright support is a built-in barrel capability, not a configurable programming tool. Cooper provides the Linux runtime
+Playwright support is a built-in workload capability, not a configurable programming tool. Cooper provides the Linux runtime
 environment that Playwright needs; the repo provides the Playwright package; Playwright itself provides browser binaries.
 
-What Cooper provides (always, in every barrel):
+What Cooper provides in every selected-agent container:
 - Chromium/Chrome OS shared-library dependencies in `cooper-base`
-- `Xvfb` virtual display (1920x1080x24) started for every barrel, with authenticated X11
+- `Xvfb` virtual display (1920x1080x24) started for every selected-agent container, with authenticated X11
 - `fontconfig` plus a baseline font set (DejaVu, Roboto, Noto, Noto CJK, FreeFont, Liberation, Noto Color Emoji)
 - Cooper-managed host font directory (`~/.cooper/fonts`) mounted read-only into `/home/user/.local/share/fonts`
 - Cooper-managed Playwright browser cache (`~/.cooper/cache/ms-playwright`) mounted read-write into `/home/user/.cache/ms-playwright`
-- `PLAYWRIGHT_BROWSERS_PATH` environment variable set in every barrel
-- `DISPLAY` and `XAUTHORITY` set for every barrel (shared with clipboard-bridge X11)
+- `PLAYWRIGHT_BROWSERS_PATH` environment variable set in every selected-agent container
+- `DISPLAY` and `XAUTHORITY` set for every selected-agent container (shared with clipboard-bridge X11)
 - Configurable barrel shared memory (`barrel_shm_size`, default `1g`) via `--shm-size`
 - Best-effort host font sync on `cooper up` (copies .ttf/.otf/.ttc/.otc from standard host font dirs for the current OS)
 
@@ -78,15 +84,15 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
     inspection.
   - Cooper detects that Docker Engine is installed and is the appropriate version.
   - Creates `~/.cooper` folder to contain all cooper files.
-  - Generates a Cooper CA certificate (`~/.cooper/ca/cooper-ca.pem`) for TLS interception (SSL bump),
-    only if one doesn't already exist. This CA is local-only, generated per-installation, never shared.
-    It allows the proxy to decrypt HTTPS traffic so the monitor can show full URL, method, and headers.
+  - Generates a Cooper CA certificate (`~/.cooper/ca/cooper-ca.pem`) for selective TLS inspection,
+    only if one does not already exist. This CA is local-only, generated per installation, and never shared.
+    Cooper uses it for traffic that needs path policy or live review. Static allowed domains keep end-to-end TLS.
     - If the CA already exists, `cooper configure` reuses it (no regeneration). This avoids invalidating
-      existing barrel images that have the old CA baked in.
+      existing agent images that have the old CA baked in.
     - If regeneration is needed (CA deleted, corrupted, or expired), user can run `cooper configure --regenerate-ca`.
       This regenerates the CA and warns that `cooper build` must be run afterward to inject the new CA into images.
   - Creates Dockerfile for the proxy container. The proxy image must include Squid built with
-    `--enable-ssl-crtd --with-openssl` for SSL bump support (may require building Squid from source
+    `--enable-ssl-crtd --with-openssl` for selective TLS inspection (may require building Squid from source
     instead of using the Alpine package).
   - Creates proxy configuration file that is loaded when cooper starts the proxy container.
   - Creates configuration that is used to generate Dockerfile for the CLI container:
@@ -192,18 +198,19 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
             - Trusted metrics companies, such as your company's grafana or sentry domain.
           - (UI) User is told that requests to package manager registries, such as gopkg, npm registry, pypi, etc. are not allowed by default.
             This is to prevent supply-chain attacks, AIs can be tricked to download malicious dependencies, and could even exfiltrate data through these requests.
-            User is told that Cooper mounts its own managed cache directories (`~/.cooper/cache/`) into the barrel as read-write volumes.
-            Dependencies are installed inside the barrel through the proxy. Package manager registries must be explicitly whitelisted.
+            User is told that Cooper mounts its own managed cache directories (`~/.cooper/cache/`) into each workload as read-write volumes.
+            Dependencies are installed inside the workload through the proxy. Package manager registries must be explicitly whitelisted.
           - (UI) User is recommended to be as strict as possible, because control panel at `cooper up` allows the user to take a look at live network request
             and allow them on the fly. This is the recommended way, so any requests to the web are monitored.
         - Back to main screen, user can select "Save & Continue" button to save the configuration file.
      - Port Forwarding Setup Flow:
        - Port forwarding is configured as its own dedicated screen (separate from Proxy Whitelist).
-       - Port forwarding uses a two-hop socat relay (see Network Architecture): socat inside the CLI container
+       - CLI mode uses a two-hop socat relay (see Network Architecture): socat inside the CLI container
         forwards `localhost:{port}` to `cooper-proxy:{port}` on the internal network, then socat inside the
-        proxy container forwards to `host.docker.internal:{port}` on the external network to reach host services.
-        Rules are configured centrally here and applied to both container entrypoints when `cooper cli` launches.
-      - Shows list of port forwarding rules, each rule is like "localhost:X in CLI container is forwarded to Port Y on host machine".
+        proxy container forwards to `host.docker.internal:{port}` on the external network.
+        VM mode sends the same local port through its bounded VM relay. Rules are configured centrally and apply
+        live to both modes.
+      - Shows port forwarding rules. Each rule maps local port X in a Cooper workload to port Y on the host.
       - User can add/edit/delete port forwarding rules.
       - User can self-forward in range, for example, forward port 8000-8100 to host 8000-8100, useful when development needs many ports.
       - (UI) Port-forwarding guidance is platform-aware:
@@ -219,12 +226,12 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
     - Barrel Environment Setup Flow:
       - Barrel environment is configured as its own dedicated screen in `cooper configure`.
       - User can add/edit/delete key/value environment variables.
-      - These values are global across all Cooper barrels, tools, and workspaces because they live in global `~/.cooper/config.json`.
-      - Values are loaded at `cooper cli` session start, not at image build time and not at `docker run` time.
+      - These values are global across all Cooper workloads, tools, and workspaces because they live in global `~/.cooper/config.json`.
+      - Values are loaded at `cooper cli` or `cooper vm` session start, not at image build time and not at `docker run` time.
       - Cooper restores protected runtime env after loading user env so user config cannot override infrastructure env such as proxy, display, PATH, token env, IDE integration env, or `COOPER_*` names.
-      - Protected names cannot be configured, including `HTTP_PROXY`, `PATH`, `OPENAI_API_KEY`, and all `COOPER_*` variables.
+      - Protected names cannot be configured, including upper- and lower-case proxy values, `PATH`, `OPENAI_API_KEY`, and all `COOPER_*` variables.
       - Values are stored in plain text in `~/.cooper/config.json`; this feature is not a secret store.
-      - This is runtime-only: changes apply on the next `cooper cli` session and do not require `cooper build` or a barrel restart.
+      - This is runtime-only: changes apply on the next `cooper cli` or `cooper vm` session. They do not require `cooper build` or a running workload restart.
     - Proxy Setup:
       - Users can set-up:
         - Which port is used by the Squid proxy. Default: 3128 (Squid standard).
@@ -264,10 +271,10 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
     - For example, user have both python and Go project in the same PC, then currently user would have to set up CLI supporting both python and Go.
 
 - `cooper up` starts the proxy container and opens the control panel with live updates and configuration.
-  - `cooper up` must be running before `cooper cli` can be used. `cooper cli` checks for a running proxy and refuses
-    to start if `cooper up` is not active. The TUI is the control plane; CLI containers are the data plane.
-  - The TUI must always be active, and just like `pgflock` when user exits the TUI, it also stops all cooper containers.
-  - (UI) Exiting always pops up an exit confirmation dialog (like pgflock). This is intentional — keeping barrels running
+  - `cooper up` must be running before `cooper cli` or `cooper vm` can be used. Both commands check for a running proxy and refuse
+    to start if `cooper up` is not active. The TUI is the control plane; Cooper workloads are the data plane.
+  - The TUI must always be active. As with `pgflock`, exiting the TUI stops all Cooper workloads.
+  - (UI) Exiting always pops up an exit confirmation dialog (like pgflock). This is intentional — keeping workloads running
     without proxy/bridge is unsafe, and an explicit visible TUI is preferred over a background daemon.
   - When starting, checks host clipboard prerequisites and warns if missing.
     - Linux: `xclip` or `wl-paste`
@@ -281,13 +288,13 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
   - **Clipboard header bar** — always visible at the top of TUI, shows clipboard state with TTL countdown.
     User presses `c` to capture host clipboard, `x` to clear. See "Clipboard Bridge" section for full details.
   - Control panel TUI tabs (Tab/Shift+Tab navigation, each tab is its own BubbleTea sub-model):
-    - **Containers** tab:
-      - List all live cooper containers (proxy and CLI containers), their CPU and memory usage, status.
-      - Stop (s), restart (r) containers.
+    - **Runtimes** tab:
+      - List the proxy, CLI barrels, and VMs with CPU, memory, disk, status, and health data.
+      - Stop (`s`), restart (`r`), and inspect (`Enter`) a runtime.
     - **Monitor** tab (Proxy Monitor):
-      - Cooper uses Squid SSL bump (TLS interception) to decrypt HTTPS traffic. This allows the monitor to show
-        full request details, not just the domain name. A Cooper CA certificate is generated during `cooper configure`
-        and injected into CLI containers at build time (system CA store + `NODE_EXTRA_CA_CERTS` for Node.js tools).
+      - Squid checks each HTTPS destination. It keeps end-to-end TLS for static allowed domains and inspects TLS when
+        a path policy or live review requires complete request details. `cooper configure` generates the local Cooper CA,
+        and Cooper installs its public certificate in CLI and VM agent environments.
       - Each new pending approval can trigger one short host-side alert phrase at request arrival time, not on allow/deny outcome.
         This is controlled by a persisted Runtime-tab checkbox and defaults to off.
         The progression is stateful for the current `cooper up` session: plays 1-8 use the home phrase, plays 9-16 use the
@@ -297,8 +304,8 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - Two-pane UI (40% left, 60% right): left pane shows a scrolling list of pending requests to non-whitelisted domains,
         right pane shows details of the currently selected request.
       - Each request to a non-whitelisted domain appears in the left pane with a countdown timer, sorted by time remaining (most urgent at top).
-      - User navigates with up/down arrow keys; the right detail pane shows request-side data only (response doesn't
-        exist yet while pending): full URL, HTTP method, request headers, destination domain, which container sent it, timestamp.
+      - User navigates with up/down arrow keys. For inspected pending traffic, the right detail pane shows request-side
+        data only because no response exists yet: URL, HTTP method, request headers, destination domain, runtime, and timestamp.
       - User can press 'a' or Enter to allow, 'd' to deny, 'A' to approve all pending requests.
         If timer runs out, the request is denied automatically.
       - By default each approval applies to that single request. If the same domain is requested again, it appears as a new pending request.
@@ -316,7 +323,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
     - **Blocked** tab:
       - Shows history of blocked requests, including which container sent it.
       - User can navigate up and down the history, select request to view more details.
-      - Detail view shows: full URL, method, request headers, domain, container, timestamp, reason (timeout/manual deny).
+      - Detail view shows all recorded request data: URL and headers when inspected, domain, runtime, timestamp, and deny reason.
       - Blocked history viewer is capped at max N lines (See: Runtime Settings).
     - **Allowed** tab:
       - Shows history of allowed requests (whitelist, manual, and session), including which container sent it.
@@ -442,8 +449,8 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
     - `--init` — proper PID 1 process for signal handling
     - `--network cooper-internal` — internal Docker network with NO internet gateway. Even raw sockets and proxy-ignoring
       tools cannot reach the internet. This is the core isolation mechanism (see Network Architecture).
-    - Cooper CA certificate injected into container at build time (system CA store + `NODE_EXTRA_CA_CERTS` env var) to
-      enable SSL bump. This is transparent to AI tools — they see valid certificates signed by a trusted CA.
+    - Cooper CA public certificate installed in each agent environment and mounted at runtime. It permits selective TLS
+      inspection for path policy and live review. Static allowed domains keep their public end-to-end certificate chain.
     - Auto-approve aliases configured in container's `.bashrc` via the entrypoint script (safe because container is already
       sandboxed by Cooper's network isolation, seccomp, and capability restrictions). Cooper sets an alias only when the
       tool has a supported auto-approve flag:
@@ -462,7 +469,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
   - **Phase 2 — Startup**: Creates Docker networks, starts proxy, starts bridge, starts ACL listener, resolves auth tokens.
   - **Phase 3 — Container**: Starts barrel container per enabled AI tool, tests DNS resolution and proxy connectivity.
   - **Phase 4 — Network Security**:
-    - **SSL bump verification**: HTTPS request through proxy without `--insecure`, validates entire CA chain.
+    - **TLS policy verification**: HTTPS requests through both splice and inspected routes succeed without `--insecure`.
     - Tests blocked domains are actually blocked (example.com, google.com).
     - Tests direct internet access is blocked (no route bypassing proxy).
   - **Phase 5 — Tools**: Verifies Go/Node/Python installations and versions (based on enabled tools).
@@ -475,9 +482,9 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
   - Usage: `cooper proof` (from the workspace directory).
 
 - `cooper cleanup` removes all resources created by cooper:
-  - Stops and removes all running cooper containers (proxy and all CLI barrels).
-  - Removes cooper Docker images (`cooper-proxy`, `cooper-base`, and all `cooper-cli-*` tool images).
-  - Removes Docker networks (`cooper-external`, `cooper-internal`).
+  - Stops and removes all Cooper workloads: proxy, CLI barrels, VM supervisors, and VM relays.
+  - Removes Cooper Docker images, including proxy, base, tool, VM supervisor, and VM relay images.
+  - Removes shared and private Cooper Docker networks.
   - Optionally removes `~/.cooper` directory (config, logs, Dockerfiles). Prompts for confirmation before deleting config.
   - Does NOT remove host state directories (`~/.claude`, `~/.copilot`, `~/.grok`, etc.) — these belong to the AI tools, not cooper.
     The complete Grok state root is host-owned and must never be part of Cooper cleanup.
@@ -489,26 +496,163 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
 - Latest/pin use xAI's native CLI channel, never npm. Empty versions cannot be rendered into a Dockerfile.
 - Cooper mounts the effective host Grok state root read-write at `/home/user/.grok`. The source is a nonempty host `GROK_HOME`, or `~/.grok` when it is unset.
 - The root mount includes all current and future Grok auth, config, session, history, memory, skill, plugin, log, lock, and update state. Do not split its children into Cooper-owned mounts.
-- Cooper sets `GROK_HOME=/home/user/.grok`. It sets `GROK_LEADER_SOCKET=/tmp/cooper-grok-leader.sock` so a barrel cannot attach to a host Grok process through the shared root. Grok uses this override for both the client and its paired leader lock. Cooper does not install `/etc/grok/requirements.toml` or set behavior-related `GROK_*` values that override host config.
+- Cooper sets `GROK_HOME=/home/user/.grok`. It sets `GROK_LEADER_SOCKET=/tmp/cooper-grok-leader.sock` so a workload cannot attach to a host Grok process through the shared root. Grok uses this override for both the client and its paired leader lock. Cooper does not install `/etc/grok/requirements.toml` or set behavior-related `GROK_*` values that override host config.
 - Host OAuth and API-key auth are both valid. A set host `XAI_API_KEY` is forwarded for the Grok session.
 - Cooper cleanup never removes or changes the host Grok state root.
 - Cooper rejects direct overlap and overlap after existing symlinks are resolved. The Grok state root cannot contain or be inside the Cooper configuration directory.
 - Default proxy hosts while Grok is enabled are exact `auth.x.ai` and `cli-chat-proxy.grok.com`. Inference paths are a positive allowlist; unknown paths fail closed before dynamic approval.
-- Shared proxy caveat: other agents' global defaults (including GitHub) remain visible to every barrel. This is not per-tool network identity.
+- Shared proxy caveat: other agents' global defaults (including GitHub) remain visible to every workload. This is not per-tool network identity.
+
+## Cooper VM
+
+### User Contract
+
+- `cooper vm <tool>` starts or reuses one KVM workload for the current absolute
+  workspace path and selected tool.
+- `cooper vm <tool> -c <command>` runs a one-shot command. Without `-c`, the
+  command opens an interactive login shell.
+- `cooper vm list`, `cooper vm stop <runtime-id>`, `cooper vm restart
+  <runtime-id>`, `cooper vm doctor`, and `cooper vm prepare` manage VM work.
+- `cooper up` and the selected tool image must exist before a VM agent starts.
+- `cooper cli <tool>` and `cooper vm <tool>` use the same workspace path,
+  selected-agent mounts, tool image, environment policy, language caches,
+  clipboard mode, bridge routes, port rules, proxy policy, and tool version.
+- `cooper cli` is the normal mode because it starts faster and uses fewer
+  resources. `cooper vm` is for Docker development or a stronger kernel
+  boundary.
+
+### Host and Asset Requirements
+
+- VM mode supports Linux x86-64 with Docker Engine and read-write `/dev/kvm`.
+- The host must enable nested KVM because Cooper self-development is a release
+  acceptance case.
+- The VM implementation must not require libvirt, a TAP device, TUN access,
+  vhost-vsock, a host QEMU package, or a GUI viewer.
+- Cooper uses pinned, digest-checked Ubuntu and Docker assets. It builds pinned
+  supervisor and relay images that contain the current Cooper helper binary.
+- Cooper embeds a static Linux x86-64 `virtiofsd` 1.14.0 executable. Its
+  reproducible build fixes the upstream source, build image, dependency lock,
+  size, and SHA-256 value. Cooper verifies the executable before it puts it in
+  the supervisor image.
+- Downloads use an exclusive lock, a bounded size, SHA-256 verification, and
+  an atomic rename. A digest or size mismatch must fail closed.
+- A prepared guest base has its own schema and metadata. A schema change makes
+  a new immutable base; it does not change an old base in place.
+- Each running workload uses a private qcow2 overlay. Cooper removes the
+  overlay after shutdown and keeps verified shared caches until explicit cache
+  cleanup.
+
+### Isolation Boundary
+
+- QEMU runs in an unprivileged supervisor container with `--network none`, a
+  read-only root file system, no capabilities, `no-new-privileges`, a reviewed
+  seccomp profile, resource limits, and only `/dev/kvm` from the host device
+  set.
+- QEMU must use KVM, an explicit device model, `-nodefaults`, the QEMU process
+  sandbox, and `-nic none`.
+- The guest has no physical network interface or default route. Guest root
+  cannot add a QEMU network device.
+- The supervisor receives only VM-owned files and sources from the shared
+  workload mount plan. It must never receive the physical-host Docker socket.
+- A separate unprivileged relay container has no workspace, agent state, KVM
+  device, or host Docker socket. It accepts a private Unix socket and has one
+  internal Docker network shared only with the Cooper proxy.
+- The relay service header selects only proxy, bridge, or a configured forward
+  port. Guest data cannot supply a destination host or arbitrary port.
+- The guest Docker socket gives the selected agent root-equivalent control of
+  the guest only. It must never control physical-host Docker.
+
+### Mount and Runtime Policy
+
+- The VM back end consumes the same pure mount and environment plans as the
+  CLI back end.
+- Each approved mount uses a separate virtiofs export. Read-only targets stay
+  read-only in `virtiofsd`, the supervisor export, the guest mount, and the
+  agent container.
+- `virtiofsd` runs as the invoking numeric user with no capabilities. It uses
+  soft UID and GID translation to map every guest identity to that user. Guest
+  root must not create a root-owned file or change the owner of host data.
+- The workspace is at the same absolute path as on the host. Its `.git/hooks`
+  directory has a read-only overlay that guest root cannot avoid by mounting
+  the workspace virtiofs tag at another path.
+- Only the selected agent's complete state roots enter the VM. They are
+  read-write host-owned data. Cooper must not copy, split, migrate, or remove
+  them.
+- The VM uses one private host-backed `/tmp`. Shared host paths use a virtiofs
+  cache policy that keeps host and guest changes visible. The private `/tmp`
+  can use a stronger cache policy so compilers can use memory-mapped temporary
+  files.
+- The selected agent image is exported once per image ID, loaded into guest
+  Docker, and verified against that exact ID before the agent starts.
+- A healthy VM can serve concurrent shells. Reuse is valid only when image,
+  mount-plan, resources, workspace, tool, clipboard mode, and depth still
+  match its host-owned metadata.
+
+### Network and Proxy Policy
+
+- All guest processes, guest Docker pulls, Docker build steps, guest
+  containers, and nested Cooper components use the Cooper proxy route.
+- Docker pull proxy values are part of the guest daemon environment. Cooper
+  adds predefined upper-case and lower-case proxy build arguments to `docker
+  build` and `docker image build`.
+- Ports 80 and 443 are eligible proxy transport ports. Squid must still deny a
+  destination that is not statically allowed or explicitly approved.
+- Static domains without a path policy can use end-to-end TLS after Squid
+  checks the CONNECT destination. Grok inference traffic stays inspected so
+  its positive path allowlist remains effective. Unknown and dynamically
+  reviewed destinations stay inspected.
+- Bridge and port-forward changes update host relay policy and guest listeners
+  as one transaction. A failed update keeps or restores the prior complete
+  policy.
+- If the VM relay, Cooper proxy, guest control channel, or parent proxy stops,
+  affected traffic must fail closed.
+
+### Clipboard and Lifecycle
+
+- Each VM gets a random clipboard token with runtime metadata. Stop revokes it
+  before shutdown starts. Restart rotates it before the new guest is usable.
+- The TUI Runtimes view lists proxy, CLI, and VM workloads. Stop and restart
+  use the same application lifecycle interface.
+- `cooper down` stops all VM workloads before it removes runtime directories.
+- Cleanup validates Cooper ownership and namespace before it removes a VM
+  container, relay, network, socket, overlay, or cache.
+- Normal shutdown, a failed start, a process crash, and stale recovery must not
+  leave QEMU, virtiofsd, relay containers, private VM networks, control
+  sockets, or transient disks.
+
+### Managed Nesting
+
+- Cooper supports a maximum managed depth of two.
+- A depth-1 guest gets `/dev/kvm` and the host virtualization CPU feature so it
+  can build and test Cooper VM.
+- A managed depth-2 guest gets no `/dev/kvm`. QEMU removes both `vmx` and `svm`
+  as applicable. Cooper rejects a depth-3 request before it creates resources.
+- Nested traffic follows `inner guest -> inner Squid -> outer Cooper proxy ->
+  internet`. Nested Squid uses the outer relay as a mandatory parent and must
+  never use a direct route.
+- The release gate must build Cooper, run all Go tests, build Cooper Docker
+  images, run a Docker-backed test, and start a depth-2 Cooper VM from inside
+  a depth-1 Cooper VM.
+- The depth-2 check must prove workspace and selected-state access, guest
+  Docker operation, approved proxy access, direct and unapproved network
+  denial, hidden nested KVM, depth-3 rejection, and complete resource cleanup.
+
+For the detailed threat model and remaining risks, see
+[`docs/vm-security.md`](docs/vm-security.md).
 
 ## Clipboard Bridge
 
-The clipboard bridge solves the Docker/host clipboard gap for image paste support across all AI CLIs.
-Docker containers have no access to the host clipboard — AI tools running inside barrels cannot paste images.
+The clipboard bridge solves the isolated-workload and host clipboard gap for image paste support across all AI CLIs.
+CLI barrels and VMs have no direct access to the host clipboard.
 The clipboard bridge provides a controlled, user-initiated mechanism to stage host clipboard images and
-make them available to AI tools inside containers.
+make them available to AI tools inside Cooper workloads.
 
 ### Design Principles
 - **Explicit user consent**: User must press `c` in the TUI to stage a clipboard image. The host clipboard
   is never passively or automatically exposed to containers.
 - **Time-limited access**: Staged images expire after a configurable TTL (default 5 minutes). Expired images
   are inaccessible — the system is fail-closed.
-- **Per-barrel authentication**: Each running barrel receives a unique cryptographic token (32-byte random,
+- **Per-runtime authentication**: Each running workload receives a unique cryptographic token (32-byte random,
   hex-encoded to 64 chars). Tokens are mounted as read-only files, never passed as environment variables or CLI args.
 - **Two delivery strategies**: Shim scripts (for tools that call xclip/xsel/wl-paste helper binaries) and
   X11 selection ownership (for tools with native clipboard integration like Rust's `arboard` crate).
@@ -528,13 +672,13 @@ Host clipboard (xclip/wl-paste)
          ↓
    Bridge HTTP server          — serves /clipboard/* endpoints with bearer token auth
          ↓
-   [socat relay: barrel → cooper-proxy → host bridge]
+   [runtime relay: workload → Cooper proxy or VM relay → host bridge]
          ↓
    Shim intercept              — xclip/xsel/wl-paste wrapper fetches from bridge
      OR
    X11 Bridge                  — owns CLIPBOARD selection on Xvfb, serves PNG via X11 protocol
          ↓
-   AI CLI inside barrel        — sees standard clipboard image, pastes normally
+   AI CLI inside workload      — sees standard clipboard image, pastes normally
 ```
 
 ### Delivery Strategies Per Tool
@@ -582,15 +726,15 @@ reserved `/clipboard/*` namespace. User bridge routes cannot use this namespace.
 
 ### Token Management
 - `clipboard.GenerateToken()` creates 32-byte random tokens (64-char hex strings).
-- Tokens are written to `~/.cooper/tokens/{containerName}` with mode 0600 on barrel start.
-- Token files are mounted into barrels at `/etc/cooper/clipboard-token` (read-only).
-- Tokens are removed when barrels stop (`clipboard.RemoveTokenFile()`).
-- In-memory token validation in the Manager, with disk-scan fallback for `cooper cli` barrels
-  (started as separate processes).
+- Tokens are written to `~/.cooper/tokens/{runtimeID}` with mode 0600 when a workload starts.
+- Token files are mounted into selected-agent containers at `/etc/cooper/clipboard-token` (read-only).
+- Tokens are removed when workloads stop. VM restart rotates its token before the new guest is ready.
+- In-memory token validation in the Manager, with a disk-scan fallback
+  when a separate `cooper cli` or `cooper vm` process starts a workload.
 
-### Container Integration
+### Workload Integration
 
-**Environment variables set in barrel containers:**
+**Environment variables set in selected-agent containers:**
 - `COOPER_CLIPBOARD_ENABLED=1`
 - `COOPER_CLIPBOARD_BRIDGE_URL=http://127.0.0.1:{bridge_port}`
 - `COOPER_CLIPBOARD_TOKEN_FILE=/etc/cooper/clipboard-token`
@@ -598,12 +742,12 @@ reserved `/clipboard/*` namespace. User bridge routes cannot use this namespace.
 - `COOPER_CLIPBOARD_SHIMS=xclip,xsel` — which shim scripts to install
 - `COOPER_CLIPBOARD_XAUTHORITY=/home/user/.cooper-clipboard.xauth` — X11 auth file path (x11/auto modes)
 - `COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99` — X11 display address (x11/auto modes)
-- `TZ=:/etc/localtime` — barrel startup and background processes use the host timezone snapshot from the current `cooper cli` session
+- `TZ=:/run/cooper/host-localtime` — workload startup and background processes use the host timezone snapshot from the current `cooper cli` or `cooper vm` session without hiding a named zoneinfo file through the image's `/etc/localtime` symlink
 
 **Volume mounts:**
-- `~/.cooper/tokens/{containerName}` → `/etc/cooper/clipboard-token` (read-only) — per-barrel auth token
+- `~/.cooper/tokens/{runtimeID}` → `/etc/cooper/clipboard-token` (read-only) — per-runtime auth token
 - `~/.cooper/base/shims/` → `/etc/cooper/shims/` (read-only) — pre-generated shim scripts
-- `~/.cooper/tmp/{containerName}/cooper-localtime` → `/etc/localtime` (read-only) — host timezone snapshot refreshed on each `cooper cli` session
+- `~/.cooper/session/{runtimeID}/cooper-localtime` → `/run/cooper/host-localtime` (read-only) — host timezone snapshot refreshed on each `cooper cli` or `cooper vm` session
 
 **Base image additions:**
 - Packages: `xclip`, `xsel`, `xauth`, `xvfb` (installed unconditionally in base image)
@@ -672,15 +816,20 @@ they use sensible defaults and are editable at runtime via the TUI Runtime Setti
 
 ## Scope Model
 
-- **Global** (`~/.cooper/`): config.json, generated Dockerfiles, images (`cooper-proxy`, `cooper-base`, `cooper-cli-*`),
-  proxy container (`cooper-proxy`), secrets cache (`~/.cooper/secrets/`), logs (`~/.cooper/logs/`),
+- **Global** (`~/.cooper/`): config.json, generated Dockerfiles, images (`cooper-proxy`, `cooper-base`, `cooper-cli-*`, `cooper-vm-*`),
+  proxy container (`cooper-proxy`), verified VM assets and image archives (`~/.cooper/vm/`), secrets cache (`~/.cooper/secrets/`), logs (`~/.cooper/logs/`),
   clipboard tokens (`~/.cooper/tokens/`), generated shim scripts (`~/.cooper/base/shims/`).
-- **Per-workspace**: CLI containers (`barrel-{dirname}-{tool}`), volume mounts (workspace dir rw, Cooper-managed caches rw), socat port forwarding,
-  token resolution (per-workspace secret cache keyed by path hash).
+- **Per-workspace and tool**: CLI barrels and VM workloads, shared mount and
+  environment plans, port forwarding, and token resolution. VM identity uses
+  the runtime namespace plus a hash of the absolute workspace and tool.
+- **VM shared persistent cache**: verified guest assets, prepared base metadata,
+  infrastructure images, and agent image archives keyed by exact image ID.
+- **Per-VM transient**: qcow2 overlay, supervisor and relay containers, one
+  private relay network, control sockets, logs, and clipboard token.
 - **Per-workspace persisted** (`~/.cooper/config.json`): execution bridge route mappings (API path → script path), configured
   via the Bridges tab in the Execution Bridge screen.
 - **Runtime-only** (not persisted): proxy monitor pending queue, approval decisions, TUI state, bridge API server process,
-  staged clipboard snapshots (in-memory with TTL), per-barrel clipboard tokens.
+  staged clipboard snapshots (in-memory with TTL), per-runtime clipboard tokens.
 
 ## Config Change → Required Action Matrix
 
@@ -697,12 +846,14 @@ Different config types are editable in different places and require different ac
 | Domain whitelist add/remove | Validated proxy hot reload | squid.conf is volume-mounted, not baked in |
 | AI tool enabled/disabled | `cooper update` (CLI image rebuild + proxy hot-reload) | Tool installed in image; proxy domains change |
 | Programming tool version | `cooper update` (CLI image rebuild) | Tool version baked into image |
-| Port forwarding rule add/remove | Live reload via SIGHUP | socat rules file is volume-mounted; SIGHUP triggers re-read in proxy + barrels |
+| Port forwarding rule add/remove | Live transactional reload | The proxy reloads its rules; running VMs update relay policy and listeners |
 | Execution bridge route add/remove | Immediate (runtime) | Bridge runs in `cooper up` host process, routes held in memory + persisted |
 | Bridge/proxy port change | `cooper up` restart | Port is bound at process/container start |
 | CA certificate regeneration | `cooper build` (full rebuild) | CA baked into CLI image at build time |
 | Monitor timeout / log limits | Immediate (runtime) | TUI-side config, no container changes |
 | Clipboard TTL / max size | Immediate (runtime) | Manager holds config in memory, no container changes |
+| VM CPU, memory, or disk defaults | Next VM start or explicit restart | QEMU resources are fixed at process start |
+| VM port forward add/remove | Live transactional reload | Host relay policy and guest listeners change together |
 
 `cooper configure` and the TUI Configure tab should tell the user which action is needed after each change.
 
@@ -746,7 +897,7 @@ host machine's network interfaces. This is enforced at the network layer, not by
 │  │  │ cooper-proxy container                        │            │   │
 │  │  │ (on BOTH cooper-external AND cooper-internal) │            │   │
 │  │  │                                               │            │   │
-│  │  │  Squid Proxy (SSL bump)                       │            │   │
+│  │  │  Squid Proxy (TLS policy)                     │            │   │
 │  │  │    listens on 0.0.0.0:3128                    │            │   │
 │  │  │                                               │            │   │
 │  │  │  External ACL Helper                          │            │   │
@@ -780,7 +931,8 @@ host machine's network interfaces. This is enforced at the network layer, not by
 │  │  │  AI tools see:                                │            │   │
 │  │  │    localhost:4343 = execution bridge           │            │   │
 │  │  │    localhost:5432 = PostgreSQL                 │            │   │
-│  │  │    HTTPS via proxy = SSL-bumped, monitored    │            │   │
+│  │  │    HTTPS via proxy = destination policy;      │            │   │
+│  │  │      selective TLS inspection                 │            │   │
 │  │  │    Direct internet = IMPOSSIBLE (no route)    │            │   │
 │  │  └──────────────────────────────────────────────┘            │   │
 │  │                                                               │   │
@@ -816,7 +968,7 @@ Internet:
 - Connected to `cooper-internal` ONLY — physically isolated from the internet
 - All HTTP/HTTPS traffic goes through `cooper-proxy:3128` (Docker DNS resolution on internal network)
 - Host services accessed via two-hop socat: CLI socat → `cooper-proxy:{port}` → proxy socat → `host.docker.internal:{port}`
-- `HTTP_PROXY`/`HTTPS_PROXY` env vars point to `cooper-proxy:3128` (not `host.docker.internal`)
+- Upper- and lower-case HTTP/HTTPS proxy env vars point to `cooper-proxy:3128` (not `host.docker.internal`)
 
 **Execution bridge (runs on the host, inside `cooper up` process):**
 - Always binds to `127.0.0.1:4343`
@@ -849,7 +1001,7 @@ Internet:
 
 | Feature | Network path |
 |---|---|
-| AI tool API calls | CLI → `cooper-proxy:3128` (internal) → Squid (SSL bump, whitelist) → internet (external) |
+| AI tool API calls | CLI → `cooper-proxy:3128` (internal) → Squid (destination and selective TLS policy) → internet (external) |
 | Proxy monitor (approve/deny) | Squid → external ACL helper (stdin/stdout) → Unix socket → `cooper up` on host → TUI → user decision |
 | Execution bridge | CLI socat → `cooper-proxy:4343` (internal) → proxy socat → `host.docker.internal:4343` (external) → host |
 | Clipboard bridge | CLI shim/x11-bridge → socat → `cooper-proxy:{bridge_port}` → proxy socat → host bridge `/clipboard/*` |
@@ -857,6 +1009,9 @@ Internet:
 | Package registry blocking | CLI → `cooper-proxy:3128` → Squid → denied (not in whitelist) |
 | Direct internet bypass | IMPOSSIBLE — `cooper-internal` has no gateway, no route to any external network |
 | Raw socket bypass | IMPOSSIBLE — even without proxy env vars, no network route exists to the internet |
+| VM agent API calls | VM guest listener → virtio serial → supervisor Unix socket → VM relay → Squid → approved internet destination |
+| Guest Docker pull/build | guest Docker → VM guest listener → VM relay → Squid; direct guest egress is impossible because QEMU has no NIC |
+| Nested Cooper | depth-2 guest → inner Squid → outer VM relay → outer Squid → approved internet destination |
 
 # Implementation Notes
 
@@ -941,13 +1096,28 @@ Tests are organized by layer, each with clear scope:
   - **Direct egress impossible**: from inside a CLI container, attempt `curl --noproxy '*' https://example.com` (raw socket,
     bypassing proxy env vars). Must fail with "no route to host" or connection refused — NOT a proxy error.
     This validates the `--internal` network has no gateway.
-  - **SSL bump works end-to-end**: from inside a CLI container, make an HTTPS request through the proxy to a whitelisted
-    domain. Must succeed without certificate errors. Validates the full CA chain: generated → injected → trusted → SSL bump decryption.
+  - **TLS policy works end-to-end**: from inside a CLI container, make HTTPS requests through static splice and inspected
+    routes. Both must succeed without certificate errors. The inspected route validates the generated and installed Cooper CA.
   - **Host services reachable via two-hop relay**: from inside a CLI container, connect to a forwarded port (e.g., `localhost:5432`).
     Must successfully reach the host service. Validates: CLI socat → proxy (internal) → proxy socat → host (external).
   - **Execution bridge reachable**: from inside a CLI container, call `localhost:4343` bridge API. Must get a valid response.
     Validates the full bridge relay path.
   - These tests are part of `cooper proof` AND are standalone integration tests tagged `//go:build integration`.
+
+- **VM Release Gate** (`test-vm.sh`, Linux x86-64 with KVM):
+  - Tests the supervisor container security settings, no-NIC guest, private
+    guest Docker daemon, exact image import, shared mount policy, all built-in
+    agent images, clipboard, bridge, live ports, reuse, restart, token
+    rotation, fail-closed relay behavior, and cleanup.
+  - Runs Cooper's build, full Go test suite, Docker image build, and a
+    Docker-backed test inside an outer Cooper VM.
+  - Starts a depth-2 Cooper VM and proves the two-level KVM boundary, nested
+    proxy chain, state and workspace writes through two virtiofs levels,
+    direct-network denial, and complete nested resource cleanup.
+  - Uses a test agent and local HTTPS target. It must not require provider
+    credentials or make a real AI request.
+  - Protocol, lifecycle, clipboard, and workload packages also run with the Go
+    race detector.
 
 ## Module Structure
 
@@ -1029,6 +1199,19 @@ cooper/
 │   │   ├── seccomp.go               # Custom seccomp profile loader
 │   │   └── seccomp-bwrap.json       # Seccomp profile allowing bubblewrap syscalls
 │   │
+│   ├── workload/                    # Shared CLI and VM mount/environment policy
+│   ├── runtimefs/                   # Shared temporary, session, marker, and timezone files
+│   ├── launch/                      # Shared credential and shell session preparation
+│   ├── vm/                          # Host VM assets, lifecycle, images, cache, and client
+│   ├── vmcontext/                   # Verified context for nested Cooper
+│   ├── vmstate/                     # VM control paths without lifecycle dependencies
+│   ├── vmhost/                      # Networkless QEMU supervisor and gateway
+│   ├── vmguest/                     # Guest mounts, Docker daemon, agent, and relay listeners
+│   ├── vmpayload/                   # Embedded guest, supervisor, relay, and virtiofsd payloads
+│   ├── vmproto/                     # Bounded VM control and service protocol
+│   ├── vmrelay/                     # Minimal host-network service allow-map
+│   ├── vme2e/                       # KVM feature matrix and self-hosting tests
+│   │
 │   ├── proxy/                       # Squid proxy interaction
 │   │   ├── acl.go                   # ACL listener: Unix socket server, pending queue, timeout, approve/deny
 │   │   ├── acl_test.go              # ACL decision logic tests
@@ -1056,8 +1239,8 @@ cooper/
 │   │   └── resolve_test.go
 │   │
 │   ├── clipboard/                   # Clipboard bridge for image paste support
-│   │   ├── types.go                 # ClipboardObject, StagedSnapshot, BarrelSession, ClipboardState
-│   │   ├── manager.go               # Staged clipboard manager with TTL, per-barrel token auth
+│   │   ├── types.go                 # ClipboardObject, StagedSnapshot, RuntimeSession, ClipboardState
+│   │   ├── manager.go               # Staged clipboard manager with TTL and per-runtime token auth
 │   │   ├── manager_test.go
 │   │   ├── reader_linux.go          # Host clipboard reader (Wayland wl-paste / X11 xclip detection)
 │   │   ├── reader_linux_test.go
@@ -1102,7 +1285,7 @@ cooper/
 │       │   ├── types.go             # SubModel interface, tab constants, event types
 │       │   └── styles.go            # Lipgloss styling, cooper color palette
 │       │
-│       ├── containers/              # Containers tab (list, CPU/mem, stop/restart)
+│       ├── containers/              # Runtimes tab (CLI/VM list, health, stop/restart)
 │       │   ├── model.go
 │       │   └── view.go
 │       │

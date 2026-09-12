@@ -2,34 +2,35 @@
 
 ### Barrel-proof containers for undiluted AI
 
-Run AI coding assistants in network-isolated Docker containers where every outbound request is visible, controllable, and reversible -- from a real-time TUI.
+Run AI coding assistants in network-isolated containers or virtual machines. Control outbound access and runtime lifecycle from a real-time TUI.
 
 ## Why Cooper?
 
-AI coding assistants need broad system access to be useful -- but that access is a liability. They can be prompt-injected into exfiltrating code through package registries, downloading malicious dependencies, or making unexpected network requests. Cooper solves this by running each AI tool in its own Docker container on a network that **physically cannot reach the internet**, with a Squid SSL-bump proxy as the only exit and a TUI control panel where you approve every non-whitelisted request in real time.
+AI coding assistants need broad system access to be useful -- but that access is a liability. They can be prompt-injected into exfiltrating code through package registries, downloading malicious dependencies, or making unexpected network requests. Cooper solves this by running each AI tool in an isolated workload that **physically cannot reach the internet directly**, with a Squid policy proxy as the only exit and a TUI control panel where you approve every non-whitelisted request in real time.
 
 **What you get:**
 
-- **No internet escape** -- Containers run on a Docker `--internal` network with no gateway. Even raw sockets and `curl --noproxy '*'` can't get out. The [Security Model](#security-model) enforces this at the Linux networking layer -- there is simply no route.
-- **See every HTTPS request** -- SSL bump decrypts TLS traffic so the [Proxy Monitor](#tui-control-panel) shows complete URLs, methods, and headers -- not just domain names.
+- **No internet escape** -- CLI barrels run on a Docker `--internal` network with no external route. VMs have no network device. Even raw sockets and `curl --noproxy '*'` can't get out. The [Security Model](#security-model) enforces this at the Linux networking layer -- there is simply no route.
+- **See and control every HTTPS destination** -- Squid checks each destination. Cooper inspects full request details when a path rule or live approval requires TLS inspection. Static allowed domains keep end-to-end TLS.
 - **Approve requests in real time** -- Non-whitelisted requests appear in the [TUI Control Panel](#tui-control-panel) with a countdown timer and a short host-side alert phrase. Approve or deny once, or explicitly allow one exact hostname until the current `cooper up` exits.
-- **Access local host ports** -- Forward PostgreSQL, Redis, dev servers, or any host service into barrels through [Port Forwarding](#port-forwarding). Uses a two-hop socat relay so containers reach host services without any internet access.
+- **Access local host ports** -- Forward PostgreSQL, Redis, dev servers, or any host service into CLI and VM workloads through [Port Forwarding](#port-forwarding). Cooper exposes only the configured ports.
 - **Run scripts on host** -- Let AI tools trigger deploy, restart, or test scripts through the [Execution Bridge](#execution-bridge) -- a controlled HTTP API that returns stdout/stderr without giving shell access to your machine.
-- **Copy-paste images** -- Paste screenshots and images into AI tools running inside containers with the [Clipboard Bridge](#clipboard-bridge). Press `c` in the TUI to stage your clipboard -- AI tools inside barrels see it as a normal paste. Time-limited, per-barrel authenticated.
-- **Run headed browsers** -- Built-in Xvfb virtual display, Chromium dependencies, host font sync, and shared memory configuration for [Playwright](#playwright-support) testing inside barrels -- headed mode works out of the box.
-- **Multi-tool, multi-workspace** -- Each AI tool gets its own [container image](#configuration). Open multiple barrels across different project directories, all monitored from one TUI.
+- **Copy-paste images** -- Paste screenshots and images into AI tools with the [Clipboard Bridge](#clipboard-bridge). Press `c` in the TUI to stage your clipboard. AI tools in CLI and VM workloads see it as a normal paste. Access is time-limited and authenticated for each workload.
+- **Run headed browsers** -- Built-in Xvfb virtual display, Chromium dependencies, host font sync, and shared memory configuration support [Playwright](#playwright-support) testing in CLI and VM workloads.
+- **Develop Docker projects in a VM** -- `cooper vm` gives the agent its own Docker daemon. The guest has no network device, and all guest and nested-container traffic must use the same Cooper proxy policy.
+- **Multi-tool, multi-workspace** -- Each AI tool gets its own [container image](#configuration). Open multiple CLI and VM workloads across different project directories. Monitor all of them from one TUI.
 
 ## Supported AI Tools
 
-| Tool | Command | Auto-approve flag |
+| Tool | Commands | Auto-approve flag |
 |------|---------|-------------------|
-| **Claude Code** | `cooper cli claude` | `--dangerously-skip-permissions` |
-| **GitHub Copilot CLI** | `cooper cli copilot` | `--allow-all-tools` |
-| **OpenAI Codex CLI** | `cooper cli codex` | `--dangerously-bypass-approvals-and-sandbox` |
-| **OpenCode** | `cooper cli opencode` | None |
-| **Grok Build** | `cooper cli grok` | `--always-approve` |
+| **Claude Code** | `cooper cli claude`, `cooper vm claude` | `--dangerously-skip-permissions` |
+| **GitHub Copilot CLI** | `cooper cli copilot`, `cooper vm copilot` | `--allow-all-tools` |
+| **OpenAI Codex CLI** | `cooper cli codex`, `cooper vm codex` | `--dangerously-bypass-approvals-and-sandbox` |
+| **OpenCode** | `cooper cli opencode`, `cooper vm opencode` | None |
+| **Grok Build** | `cooper cli grok`, `cooper vm grok` | `--always-approve` |
 
-The listed auto-approve flags are safe because the container is already sandboxed -- Cooper's network isolation, seccomp profile, and capability restrictions replace each tool's built-in permission system.
+The listed auto-approve flags are safe because Cooper isolates the workload before it starts the agent -- Cooper's network policy and runtime isolation replace each tool's built-in permission system.
 
 Custom tools can be added by placing a Dockerfile in `~/.cooper/cli/{tool-name}/`. The name `grok` is reserved for built-in Grok Build. If you already have a custom `~/.cooper/cli/grok` directory, rename it and update any `cooper cli` invocation before configuring Grok.
 
@@ -37,7 +38,7 @@ Custom tools can be added by placing a Dockerfile in `~/.cooper/cli/{tool-name}/
 
 Grok is installed from xAI's native CLI release channel, not npm. Mirror, latest, and pin all resolve to an exact `grok-<version>-linux-<arch>` artifact that Cooper copies into `/home/user/.local/bin/grok`.
 
-Sign in with Grok on the host before you start a Grok barrel:
+Sign in with Grok on the host before you start a Grok session:
 
 ```bash
 grok login --oauth
@@ -47,13 +48,13 @@ Cooper mounts the complete host Grok state root read-write at `/home/user/.grok`
 
 The Grok state root and the Cooper configuration directory must not contain each other. Cooper checks the direct paths and the paths after existing symlinks are resolved. It refuses an overlap before it resets runtime data, mounts Grok state, or removes Cooper configuration. This rule prevents Cooper cleanup from deleting host-owned Grok auth or sessions.
 
-One root mount includes `auth.json`, `config.toml`, managed config, requirements, sessions, conversation search indexes, history, memory, rules, skills, plugins, logs, locks, downloads, and future Grok state. Cooper does not keep a separate OAuth store or per-barrel session store. A state file that Grok adds below this root is shared without a Cooper update.
+One root mount includes `auth.json`, `config.toml`, managed config, requirements, sessions, conversation search indexes, history, memory, rules, skills, plugins, logs, locks, downloads, and future Grok state. Cooper does not keep a separate OAuth store or per-workload session store. A state file that Grok adds below this root is shared without a Cooper update.
 
-The Grok leader socket is transient process transport, not durable state. Cooper sets `GROK_LEADER_SOCKET=/tmp/cooper-grok-leader.sock`. Grok uses this path for the socket and its paired lock. Each barrel has a separate `/tmp` mount. Thus, a Grok process in a barrel cannot attach to a Grok leader process on the host or in another barrel.
+The Grok leader socket is transient process transport, not durable state. Cooper sets `GROK_LEADER_SOCKET=/tmp/cooper-grok-leader.sock`. Grok uses this path for the socket and its paired lock. Each workload has a separate `/tmp` mount. Thus, a Grok process in Cooper cannot attach to a Grok leader process on the host or in another workload.
 
-The workspace also has the same absolute path on the host and in the barrel. Thus, Grok uses the same workspace session key in both places. Exit a Grok conversation before you resume it in the other environment. Grok lock files protect shared files, but they do not make one conversation safe to use from two terminals at the same time.
+The workspace also has the same absolute path on the host and in the workload. Thus, Grok uses the same workspace session key in both places. Exit a Grok conversation before you resume it in the other environment. Grok lock files protect shared files, but they do not make one conversation safe to use from two terminals at the same time.
 
-Cooper does not install a Grok requirements file and does not set behavior-related `GROK_*` variables. The state-root and leader-socket variables only map paths. Host Grok settings, including memory settings, apply in the barrel. A host `XAI_API_KEY` is also forwarded when it is set. Cooper's network policy is separate from Grok settings. Default proxy hosts while Grok is enabled are exact `auth.x.ai` and `cli-chat-proxy.grok.com`. The inference host has a fixed path allowlist (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/models`, `/v1/user`, `/v1/privacy/coding-data-retention`). Storage, traces, settings, and unknown paths are denied even after dynamic approval. A Grok feature that needs another host remains blocked until the user allows that host. All barrels share one proxy, so domains required by other agents, including GitHub for Copilot, remain reachable from a Grok barrel.
+Cooper does not install a Grok requirements file and does not set behavior-related `GROK_*` variables. The state-root and leader-socket variables only map paths. Host Grok settings, including memory settings, apply in the workload. A host `XAI_API_KEY` is also forwarded when it is set. Cooper's network policy is separate from Grok settings. Default proxy hosts while Grok is enabled are exact `auth.x.ai` and `cli-chat-proxy.grok.com`. The inference host has a fixed path allowlist (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/models`, `/v1/user`, `/v1/privacy/coding-data-retention`). Storage, traces, settings, and unknown paths are denied even after dynamic approval. A Grok feature that needs another host remains blocked until the user allows that host. All workloads share one proxy, so domains required by other agents, including GitHub for Copilot, remain reachable from a Grok workload.
 
 Clipboard paste uses Cooper's X11 bridge.
 
@@ -67,9 +68,10 @@ The binary is placed in `/home/user/.local/bin/opencode` so the runtime `~/.open
 
 ## Supported Platforms
 
-- **Linux**: Any distro with Docker Engine 20.10+ and bash or zsh.
-- **macOS (Apple Silicon)**: Docker Desktop 4.x+. Requires macOS 12+.
-- **macOS (Intel)**: Docker Desktop 4.x+. Untested but expected to work.
+- **CLI mode on Linux**: A distribution with Docker Engine 20.10+ and bash or zsh.
+- **CLI mode on macOS (Apple Silicon)**: Docker Desktop 4.x+ and macOS 12+.
+- **CLI mode on macOS (Intel)**: Docker Desktop 4.x+. This mode is not tested.
+- **VM mode**: Linux x86-64 with Docker Engine, KVM access, and nested KVM. Run `./cooper/dev/setup.sh --check` in a source checkout. VM mode does not support macOS at this time.
 - **Windows**: Not supported.
 
 ## How It Works
@@ -94,7 +96,7 @@ flowchart TB
     subgraph external["<b>cooper-external</b> &mdash; bridge network <i>(has internet)</i>"]
         subgraph proxy_box["<b>cooper-proxy</b>"]
             direction TB
-            squid["<b>Squid Proxy</b><br/>SSL bump on :3128"]
+            squid["<b>Squid Policy Proxy</b><br/>TLS splice or inspection on :3128"]
             socat_proxy["<b>socat relays</b><br/>port forwarding to host"]
         end
     end
@@ -132,13 +134,31 @@ flowchart TB
 
 The proxy container sits on **both** networks -- it receives traffic from barrels on the internal network and forwards whitelisted requests to the internet via the external network. Non-whitelisted requests are held pending in the TUI for your real-time approval.
 
+### VM Mode
+
+Use `cooper vm <tool>` when an agent must run Docker or when you want a kernel boundary. Use `cooper cli <tool>` for most work because it starts faster and uses less memory. Both commands use the same workspace path, selected-agent state, tool image, environment, clipboard, port rules, and proxy policy.
+
+The VM runs under KVM in an unprivileged, networkless supervisor container. QEMU starts with `-nic none`, so guest root cannot enable a missing network device. Cooper uses an embedded, checksum-locked `virtiofsd` 1.14.0 helper. It maps guest file operations to the invoking host user and cannot create root-owned host files. A small relay accepts only proxy, bridge, and configured port-forward services. The VM has its own Docker daemon. Cooper never mounts the physical-host Docker socket in the guest.
+
+The traffic path is:
+
+```text
+guest or guest container -> VM relay -> Cooper Squid proxy -> approved host
+```
+
+The first VM start downloads pinned Ubuntu and Docker assets and prepares an immutable guest base. Run `cooper vm prepare` in advance if you do not want this work during the first session. Later sessions use a small qcow2 overlay and reuse a healthy VM for the same workspace and agent.
+
+VM mode checks that the selected agent image has the current VM runtime contract. If an image was built by an older Cooper release, `cooper vm` stops before guest startup and tells you to run `cooper build`.
+
+Cooper supports one nested VM for self-development. A depth-1 VM has `/dev/kvm`; a managed depth-2 VM does not. Thus, an agent can build Cooper, run its Docker tests, and test `cooper vm` from inside `cooper vm`. See [VM security](docs/vm-security.md) for the boundary and remaining risks.
+
 ## Quick Start
 
 ### Prerequisites
 
 - **Linux**: Docker Engine 20.10+
 - **macOS**: Docker Desktop 4.x+ (Docker Engine runs inside a Linux VM)
-- **Go 1.21+** (for installation via `go install`)
+- **Go 1.25+** (for installation via `go install`)
 - bash or zsh
 
 ### Install
@@ -164,11 +184,16 @@ cooper configure
 # 2. Build container images (proxy + base + per-tool CLI images)
 cooper build
 
-# 3. Start the control panel TUI (must be running before using barrels)
+# 3. Start the control panel TUI (must be running before using Cooper workloads)
 cooper up
 
 # 4. Open a barrel (from your project directory)
 cooper cli claude
+
+# Optional: prepare and open a VM when the work needs Docker
+# Source checkouts can first run ./cooper/dev/setup.sh --check.
+cooper vm prepare
+cooper vm codex
 ```
 
 ### Day-to-day usage
@@ -180,6 +205,9 @@ cooper up
 # Open barrels from any project directory
 cd ~/myproject && cooper cli claude
 cd ~/other-project && cooper cli codex
+
+# Open a VM with its own Docker daemon
+cd ~/docker-project && cooper vm codex
 
 # Update tool versions (mirrors host or fetches latest, based on your config)
 cooper update
@@ -194,11 +222,12 @@ cooper proof
 |---------|-------------|
 | `cooper configure` | Interactive TUI wizard -- programming tools, AI tools, whitelist, ports, barrel env, bridge |
 | `cooper build` | Build proxy and all CLI container images. `--clean` for no-cache rebuild |
-| `cooper up` | Start proxy, bridge, and TUI control panel. Must be running for barrels to work |
+| `cooper up` | Start proxy, bridge, and TUI control panel. Must be running for CLI and VM sessions |
 | `cooper update` | Regenerate templates, reload a running proxy, and rebuild only images with desired-vs-built drift |
 | `cooper cli <tool>` | Launch a barrel. `-c "cmd"` for one-shot execution. `list` to show available tools |
+| `cooper vm <tool>` | Launch or reuse a KVM workload with guest Docker. Supports `-c`, `list`, `stop`, `restart`, `doctor`, and `prepare` |
 | `cooper proof` | Full lifecycle integration test -- preflight through AI smoke test, then teardown |
-| `cooper cleanup` | Remove all containers, images, and networks. Optionally remove `~/.cooper` |
+| `cooper cleanup` | Remove all workloads, images, networks, and VM caches. Optionally remove `~/.cooper` |
 
 ## TUI Control Panel
 
@@ -206,7 +235,7 @@ The control panel (`cooper up`) is the nerve center. It has these tabs:
 
 | Tab | What it does |
 |-----|-------------|
-| **Containers** | Live CPU/memory stats for all barrels and proxy. Stop/restart containers |
+| **Runtimes** | Live CPU, memory, disk, and health data for the proxy, barrels, and VMs. Stop or restart workloads |
 | **Monitor** | Real-time pending requests with countdown. Approve/deny once, or allow an exact hostname for this `cooper up` session |
 | **Blocked** | History of denied requests with full details |
 | **Allowed** | History of approved requests with response status codes and headers |
@@ -279,7 +308,7 @@ These are implicit defaults attached to the language tool, not separate top-leve
 `cooper configure` save-only is allowed to reuse last-built implicit tool versions only when the relevant built runtime still matches the current desired runtime. If Cooper cannot prove that match, it fails instead of generating misleading Dockerfiles.
 
 Run `cooper update` to apply Mirror/Latest changes after host upgrades.
-When built language-server versions or the effective base Node runtime drift from the current desired versions, startup warnings and the About tab surface that mismatch before you open barrels.
+When built language-server versions or the effective base Node runtime drift from the current desired versions, startup warnings and the About tab surface that mismatch before you open a CLI or VM workload.
 
 Every `cooper update` also regenerates the volume-mounted proxy configuration. If Squid is running, Cooper reloads it even when no image needs a rebuild. This prevents save-only tool selection and whitelist changes from leaving Squid on an older authorization set.
 
@@ -299,11 +328,11 @@ All traffic is blocked by default except:
 
 Package registries (npm, PyPI, Go proxy, crates.io) are **blocked by default** to prevent supply-chain attacks where an AI could be tricked into downloading malicious packages or exfiltrating data through registry requests. You can whitelist specific registries if needed, approve an individual request, or press `w` on a pending request to allow only that exact hostname until the current `cooper up` exits.
 
-Persistent trusted domains still belong in `cooper configure` (company APIs, staging servers, metrics dashboards). Session access is held only in memory, applies to every barrel attached to that Cooper proxy, remains visible and revocable under `s` in the Monitor tab, and is cleared without editing proxy settings when Cooper exits.
+Persistent trusted domains still belong in `cooper configure` (company APIs, staging servers, metrics dashboards). Session access is held only in memory, applies to every workload attached to that Cooper proxy, remains visible and revocable under `s` in the Monitor tab, and is cleared without editing proxy settings when Cooper exits.
 
 ### Port Forwarding
 
-Forward host service ports into barrels (e.g., PostgreSQL, Redis, dev servers). Uses a two-hop socat relay: barrel -> proxy -> host.
+Forward host service ports into barrels and VMs (e.g., PostgreSQL, Redis, dev servers). Cooper applies live rule changes to both execution modes. A VM can reach only the configured ports through its service relay.
 
 **Note (Linux):** Host services must bind to `0.0.0.0` or the Docker gateway IP to be reachable from containers. Services bound to `127.0.0.1` are handled by Cooper's HostRelay, which transparently proxies connections from the gateway IP to localhost.
 
@@ -311,7 +340,7 @@ Forward host service ports into barrels (e.g., PostgreSQL, Redis, dev servers). 
 
 ### Barrel Environment
 
-Use the `Barrel Environment` screen in `cooper configure` to define global env vars that are loaded into every later `cooper cli` session.
+Use the `Barrel Environment` screen in `cooper configure` to define global env vars that are loaded into every later `cooper cli` and `cooper vm` session.
 
 Example values:
 
@@ -321,10 +350,10 @@ FEATURE_FLAG=1
 EMPTY=
 ```
 
-- Scope is global: the values live in `~/.cooper/config.json` and apply to all barrels, tools, and workspaces.
-- Runtime-only: changes apply on the next `cooper cli` session. No `cooper build` is needed.
-- Precedence is safe: Cooper loads user env first, then restores protected runtime env such as `HTTP_PROXY`, `PATH`, `TZ`, `DISPLAY`, token env, terminal color/hyperlink policy and metadata env, IDE env, and `COOPER_*` names.
-- Protected names cannot be configured, including `HTTP_PROXY`, `PATH`, `TZ`, `TERM`, `COLORTERM`, `NO_COLOR`, `FORCE_COLOR`, `OPENAI_API_KEY`, and any `COOPER_*` variable.
+- Scope is global: the values live in `~/.cooper/config.json` and apply to all Cooper workloads, tools, and workspaces.
+- Runtime-only: changes apply on the next `cooper cli` or `cooper vm` session. No `cooper build` is needed.
+- Precedence is safe: Cooper loads user env first, then restores protected runtime env such as upper- and lower-case proxy values, `PATH`, `TZ`, `DISPLAY`, token env, terminal color/hyperlink policy and metadata env, IDE env, and `COOPER_*` names.
+- Protected names cannot be configured, including `HTTP_PROXY`, `http_proxy`, `PATH`, `TZ`, `TERM`, `COLORTERM`, `NO_COLOR`, `FORCE_COLOR`, `OPENAI_API_KEY`, and any `COOPER_*` variable.
 - Values are stored in plain text in `~/.cooper/config.json`. This is not a secret store.
 
 ### Execution Bridge
@@ -341,11 +370,11 @@ Scripts should take no input and handle concurrency. Stdout/stderr is returned i
 
 ### Clipboard Bridge
 
-Press `c` in the TUI to capture an image from your host clipboard. AI tools inside barrels see it as a normal paste -- no special commands needed.
+Press `c` in the TUI to capture an image from your host clipboard. AI tools inside barrels and VMs see it as a normal paste -- no special commands needed.
 
 - **User-initiated** -- your clipboard is never passively exposed. You choose when to share.
 - **Time-limited** -- staged images expire after a configurable TTL (default 5 minutes).
-- **Per-barrel authenticated** -- each barrel gets a unique cryptographic token. No cross-barrel access.
+- **Per-runtime authenticated** -- each barrel or VM gets a unique cryptographic token. No cross-runtime access.
 - **Format support** -- PNG, JPEG, GIF, BMP, TIFF, WebP, SVG (via ImageMagick). All converted to PNG.
 
 Works transparently with every supported AI tool. Claude Code and OpenCode use shim scripts that intercept clipboard helper calls. Codex, Copilot, and Grok Build use an X11 bridge that owns the virtual display clipboard. Custom tools get both strategies.
@@ -354,18 +383,20 @@ Configure TTL and max image size in the TUI Runtime Settings tab.
 
 ### Playwright Support
 
-Every barrel comes with the runtime environment Playwright needs for headless browser testing:
+Every barrel and VM agent container has the runtime environment that Playwright needs for headless browser testing:
 
 - Chromium shared-library dependencies pre-installed
 - Xvfb virtual display (1920x1080) with authenticated X11
 - Baseline font set (DejaVu, Roboto, Noto, Noto CJK, Liberation, Noto Color Emoji)
-- Host fonts synced to `~/.cooper/fonts` (mounted read-only into barrels)
+- Host fonts synced to `~/.cooper/fonts` (mounted read-only into workloads)
 - Shared Playwright browser cache (`~/.cooper/cache/ms-playwright`, mounted read-write)
 - Configurable shared memory (`barrel_shm_size`, default `1g`) -- Docker's default 64m is too small for browsers
 
 Cooper does **not** install Playwright itself or download browsers. Your project provides `npm install playwright` and `playwright install`. When Playwright downloads browsers, the requests appear in the TUI monitor for approval.
 
 ## Volume Mounts
+
+CLI and VM mode use one shared mount policy. The VM supervisor can see only the approved mount sources that it must export with virtiofs. Inside the guest, the selected agent container receives the same targets as a CLI barrel.
 
 | Host Path | Container Path | Mode | Purpose |
 |-----------|---------------|------|---------|
@@ -381,28 +412,31 @@ Cooper does **not** install Playwright itself or download browsers. Your project
 | `~/.cooper/cache/go-build` | `/home/user/.cache/go-build` | read-write | Go build cache |
 | `~/.cooper/cache/npm` | `/home/user/.npm` | read-write | npm cache |
 | `~/.cooper/cache/pip` | `/home/user/.cache/pip` | read-write | pip cache |
-| `~/.cooper/tmp/{container}` | `/tmp` | read-write | Per-barrel temp directory |
+| `~/.cooper/tmp/{runtime}` | `/tmp` | read-write | Per-workload temporary directory |
 
-Language caches are Cooper-managed under `~/.cooper/cache/`, auto-configured based on which programming tools are enabled. They start empty and fill naturally during normal package-manager usage. Each barrel gets its own host-backed `/tmp` directory, isolated per container to avoid collisions between barrels sharing a workspace. Cooper clears the entire `~/.cooper/tmp/` tree whenever `cooper up` starts and whenever it shuts down, so every control-plane session begins and ends with a pristine temp area.
+Language caches are Cooper-managed under `~/.cooper/cache/`, auto-configured based on which programming tools are enabled. They start empty and fill naturally during normal package-manager use. Each workload gets its own host-backed `/tmp` directory. Cooper clears the complete `~/.cooper/tmp/` tree when `cooper up` starts and when it stops.
 
 ## Security Model
 
 | Layer | Mechanism |
 |-------|-----------|
-| **Network** | `--internal` Docker network -- no gateway, no route to internet |
-| **Proxy** | Squid SSL bump with domain whitelist and real-time approval |
+| **CLI network** | `--internal` Docker network -- no external route |
+| **Proxy** | Squid destination policy with selective TLS inspection and real-time approval |
 | **Capabilities** | `--cap-drop=ALL` -- all Linux capabilities dropped |
 | **Privileges** | `--security-opt=no-new-privileges` |
 | **Seccomp** | Custom profile allowing bubblewrap (for Codex) while restricting everything else |
 | **Process** | `--init` for proper PID 1 signal handling |
-| **CA** | Per-installation local CA for TLS interception, never shared |
+| **CA** | Per-installation CA for requests that require TLS inspection, never shared |
 | **Git hooks** | `.git/hooks` mounted read-only to prevent injection |
 | **Dependencies** | Package registries blocked by default; caches Cooper-managed under `~/.cooper/cache/` |
-| **Clipboard** | User-initiated, time-limited, per-barrel authenticated, fail-closed |
+| **Clipboard** | User-initiated, time-limited, per-runtime authenticated, fail-closed |
+| **VM network** | QEMU has no NIC; a service allow-map outside the guest controls all proxy, bridge, and forward traffic |
+| **VM runtime** | An unprivileged, read-only supervisor has no Docker network and receives only `/dev/kvm` plus approved mount sources |
+| **Guest Docker** | The socket gives root only in the guest; the physical-host Docker socket is never mounted |
 
 ## Adding Dependencies
 
-Package registries are blocked by default. To install dependencies inside a barrel, either whitelist the needed registries in `cooper configure` or approve individual requests through the TUI monitor.
+Package registries are blocked by default. To install dependencies inside a barrel, VM, nested container, or Docker build, whitelist the needed registries in `cooper configure` or approve individual requests through the TUI monitor.
 
 ```bash
 # Inside a barrel (after whitelisting registries or approving via monitor):
@@ -411,7 +445,9 @@ npm install              # cached in ~/.cooper/cache/npm
 pip install -r req.txt   # cached in ~/.cooper/cache/pip
 ```
 
-Caches persist across barrel runs under `~/.cooper/cache/`, so subsequent installs are fast.
+Caches persist across workload runs under `~/.cooper/cache/`, so subsequent installs are fast.
+
+Inside a VM, Docker pulls use the Cooper proxy automatically. Cooper also sends the proxy settings as predefined Docker build arguments. A Dockerfile does not have to declare `ARG HTTP_PROXY` or `ARG HTTPS_PROXY`.
 
 ## Troubleshooting
 
@@ -423,10 +459,18 @@ cooper proof
 
 This stands up the entire stack, tests SSL, proxy, tools, AI CLI connectivity, port forwarding, and bridge -- then tears everything down. Output is designed to be copy-pasted into a GitHub issue.
 
+For VM-specific diagnostics, use:
+
+```bash
+cooper vm doctor
+```
+
+The report distinguishes an unsupported host, missing prepared assets, missing infrastructure images, no running VM, and an unhealthy running VM. A source checkout can also run `./cooper/dev/setup.sh --check` and the KVM release gate `timeout 90m ./cooper/test-vm.sh`.
+
 ### Grok login, versions, or custom-directory collisions
 
-- Missing or expired login: stop active Grok sessions and run `grok login --oauth` on the host. The next barrel uses the updated shared `auth.json`.
-- Unexpected state root: start Cooper from the same host environment as Grok. If you use `GROK_HOME`, make sure that it is set before `cooper cli grok` starts.
+- Missing or expired login: stop active Grok sessions and run `grok login --oauth` on the host. The next Grok session uses the updated shared `auth.json`.
+- Unexpected state root: start Cooper from the same host environment as Grok. If you use `GROK_HOME`, make sure that it is set before a Grok session starts.
 - Unsafe state root: move `GROK_HOME` outside the Cooper configuration directory. Neither path can contain the other, including through a symlink.
 - A conversation is not available: use the same workspace path, and exit the first Grok process before you resume the conversation.
 - A new Grok API path is blocked: Squid denies unknown `cli-chat-proxy.grok.com` paths with 403. That is fail-closed until Cooper reviews the path.

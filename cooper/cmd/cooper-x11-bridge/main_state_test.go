@@ -2,11 +2,50 @@ package main
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/jezek/xgb/xproto"
 )
+
+func TestFetchImageReadsTokenFromCompleteRuntimeMetadata(t *testing.T) {
+	t.Parallel()
+	const token = "runtime-token"
+	const image = "image-bytes"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(writer, "invalid token", http.StatusUnauthorized)
+			return
+		}
+		_, _ = writer.Write([]byte(image))
+	}))
+	defer server.Close()
+
+	tokenFile := filepath.Join(t.TempDir(), "clipboard-token")
+	metadata := `{
+  "version": 1,
+  "token": "runtime-token",
+  "runtime_id": "barrel-project-codex",
+  "runtime_kind": "cli",
+  "tool_name": "codex",
+  "clipboard_mode": "x11",
+  "created_at": "2026-09-12T00:00:00Z"
+}`
+	if err := os.WriteFile(tokenFile, []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := fetchImage(server.Client(), server.URL, tokenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != image {
+		t.Fatalf("fetchImage() = %q, want %q", got, image)
+	}
+}
 
 func TestINCRTransferSetWaitsForFinalChunkAcknowledgement(t *testing.T) {
 	tests := []struct {

@@ -21,6 +21,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/names"
+	"github.com/rickchristie/govner/cooper/internal/runtimefs"
 	"github.com/rickchristie/govner/cooper/internal/testdocker"
 
 	"github.com/rickchristie/govner/cooper/internal/templates"
@@ -32,8 +33,9 @@ const testImagePrefix = testdocker.ImagePrefix
 const (
 	// Use Docker-network aliases instead of the public internet so proxy tests
 	// exercise the real allow/deny rules against deterministic local targets.
-	proxyAllowedTestDomain = "api.anthropic.com"
-	proxyBlockedTestDomain = "example.com"
+	proxyAllowedTestDomain   = "api.anthropic.com"
+	proxyBlockedTestDomain   = "example.com"
+	proxyInspectedTestDomain = "cli-chat-proxy.grok.com"
 )
 
 // skipIfNoDocker verifies the docker CLI is available for default test runs.
@@ -65,6 +67,17 @@ func skipIfNoProxyImage(t *testing.T) {
 func setupCooperDir(t *testing.T) (string, *config.Config) {
 	t.Helper()
 	cooperDir := t.TempDir()
+	homeDir := t.TempDir()
+
+	// Docker-backed tests must not read or change the developer's agent state.
+	// Keep the test home below /tmp so a Docker daemon on the same host can see
+	// each bind source. This also makes the tests valid inside a Cooper VM,
+	// where /home/user is the selected agent container's private file system.
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GROK_HOME", "")
+	t.Cleanup(func() {
+		_ = testdocker.FixOwnership(homeDir)
+	})
 
 	cfg := config.DefaultConfig()
 	if err := testdocker.AssignDynamicPorts(cfg); err != nil {
@@ -180,7 +193,11 @@ func assertDirEmpty(t *testing.T, path string) {
 func startProxyHTTPSTarget(t *testing.T) *testdocker.HTTPSTarget {
 	t.Helper()
 
-	target, err := testdocker.StartHTTPSTarget(proxyAllowedTestDomain, proxyBlockedTestDomain)
+	target, err := testdocker.StartHTTPSTarget(
+		proxyAllowedTestDomain,
+		proxyBlockedTestDomain,
+		proxyInspectedTestDomain,
+	)
 	if err != nil {
 		t.Fatalf("start local proxy HTTPS target: %v", err)
 	}
@@ -190,26 +207,6 @@ func startProxyHTTPSTarget(t *testing.T) *testdocker.HTTPSTarget {
 		}
 	})
 	return target
-}
-
-func trustProxyHTTPSTarget(t *testing.T, target *testdocker.HTTPSTarget) {
-	t.Helper()
-
-	certPEM, err := exec.Command("docker", "exec", target.ContainerName, "cat", "/tmp/target.crt").Output()
-	if err != nil {
-		t.Fatalf("read HTTPS target certificate from %s: %v", target.ContainerName, err)
-	}
-
-	cmd := exec.Command(
-		"docker", "exec", "-i", "-u", "root",
-		docker.ProxyContainerName(),
-		"sh", "-lc",
-		"cat >/usr/local/share/ca-certificates/cooper-test-target.crt && update-ca-certificates >/tmp/cooper-test-target-ca.log 2>&1",
-	)
-	cmd.Stdin = bytes.NewReader(certPEM)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("install HTTPS target certificate into proxy trust store: %v\n%s", err, string(out))
-	}
 }
 
 func waitForCondition(t *testing.T, desc string, timeout, interval time.Duration, check func(attempt int) (bool, string, error)) string {
@@ -388,7 +385,7 @@ func TestCooperApp_StartStop(t *testing.T) {
 	}
 }
 
-func TestCooperApp_StartClearsBarrelTmpRoot(t *testing.T) {
+func TestCooperAppStartClearsRuntimeTempRoot(t *testing.T) {
 	skipIfNoDocker(t)
 	skipIfNoProxyImage(t)
 	docker.SetImagePrefix(testImagePrefix)
@@ -396,7 +393,7 @@ func TestCooperApp_StartClearsBarrelTmpRoot(t *testing.T) {
 	cooperDir, cfg := setupCooperDir(t)
 	t.Cleanup(func() { cleanupDocker(t) })
 
-	staleFile := filepath.Join(docker.BarrelTmpRoot(cooperDir), "barrel-stale", "nested", "stale.txt")
+	staleFile := filepath.Join(runtimefs.TempRoot(cooperDir), "barrel-stale", "nested", "stale.txt")
 	if err := os.MkdirAll(filepath.Dir(staleFile), 0o755); err != nil {
 		t.Fatalf("mkdir stale tmp dir: %v", err)
 	}
@@ -413,10 +410,10 @@ func TestCooperApp_StartClearsBarrelTmpRoot(t *testing.T) {
 	}
 	defer app.Stop()
 
-	assertDirEmpty(t, docker.BarrelTmpRoot(cooperDir))
+	assertDirEmpty(t, runtimefs.TempRoot(cooperDir))
 }
 
-func TestCooperApp_StartClearsBarrelSessionRoot(t *testing.T) {
+func TestCooperAppStartClearsRuntimeSessionRoot(t *testing.T) {
 	skipIfNoDocker(t)
 	skipIfNoProxyImage(t)
 	docker.SetImagePrefix(testImagePrefix)
@@ -424,7 +421,7 @@ func TestCooperApp_StartClearsBarrelSessionRoot(t *testing.T) {
 	cooperDir, cfg := setupCooperDir(t)
 	t.Cleanup(func() { cleanupDocker(t) })
 
-	staleFile := filepath.Join(docker.BarrelSessionRoot(cooperDir), "barrel-stale", "stale.txt")
+	staleFile := filepath.Join(runtimefs.SessionRoot(cooperDir), "barrel-stale", "stale.txt")
 	if err := os.MkdirAll(filepath.Dir(staleFile), 0o755); err != nil {
 		t.Fatalf("mkdir stale session dir: %v", err)
 	}
@@ -441,7 +438,7 @@ func TestCooperApp_StartClearsBarrelSessionRoot(t *testing.T) {
 	}
 	defer app.Stop()
 
-	assertDirEmpty(t, docker.BarrelSessionRoot(cooperDir))
+	assertDirEmpty(t, runtimefs.SessionRoot(cooperDir))
 }
 
 func TestCooperApp_StopWithBarrelReturnsQuickly(t *testing.T) {
@@ -477,7 +474,7 @@ func TestCooperApp_StopWithBarrelReturnsQuickly(t *testing.T) {
 	}
 }
 
-func TestCooperApp_StopClearsBarrelTmpRoot(t *testing.T) {
+func TestCooperAppStopClearsRuntimeTempRoot(t *testing.T) {
 	skipIfNoDocker(t)
 	skipIfNoProxyImage(t)
 	skipIfNoBarrelImage(t)
@@ -490,7 +487,7 @@ func TestCooperApp_StopClearsBarrelTmpRoot(t *testing.T) {
 		cleanupDocker(t)
 	})
 
-	hostTmpFile := filepath.Join(docker.BarrelTmpRoot(cooperDir), barrelName, "cooper-stop-tmp.txt")
+	hostTmpFile := filepath.Join(runtimefs.TempRoot(cooperDir), barrelName, "cooper-stop-tmp.txt")
 	if _, err := barrelExec(barrelName, "printf stop-test > /tmp/cooper-stop-tmp.txt"); err != nil {
 		t.Fatalf("write tmp file inside barrel: %v", err)
 	}
@@ -502,10 +499,10 @@ func TestCooperApp_StopClearsBarrelTmpRoot(t *testing.T) {
 		t.Fatalf("Stop() failed: %v", err)
 	}
 
-	assertDirEmpty(t, docker.BarrelTmpRoot(cooperDir))
+	assertDirEmpty(t, runtimefs.TempRoot(cooperDir))
 }
 
-func TestCooperApp_StopClearsBarrelSessionRoot(t *testing.T) {
+func TestCooperAppStopClearsRuntimeSessionRoot(t *testing.T) {
 	skipIfNoDocker(t)
 	skipIfNoProxyImage(t)
 	skipIfNoBarrelImage(t)
@@ -518,7 +515,7 @@ func TestCooperApp_StopClearsBarrelSessionRoot(t *testing.T) {
 		cleanupDocker(t)
 	})
 
-	hostSessionFile := filepath.Join(docker.BarrelSessionRoot(cooperDir), barrelName, "cooper-stop-session.txt")
+	hostSessionFile := filepath.Join(runtimefs.SessionRoot(cooperDir), barrelName, "cooper-stop-session.txt")
 	if err := os.MkdirAll(filepath.Dir(hostSessionFile), 0o755); err != nil {
 		t.Fatalf("mkdir session dir: %v", err)
 	}
@@ -530,7 +527,7 @@ func TestCooperApp_StopClearsBarrelSessionRoot(t *testing.T) {
 		t.Fatalf("Stop() failed: %v", err)
 	}
 
-	assertDirEmpty(t, docker.BarrelSessionRoot(cooperDir))
+	assertDirEmpty(t, runtimefs.SessionRoot(cooperDir))
 }
 
 // TestCooperApp_ACLFlow starts the app, subscribes to ACL channels, simulates
@@ -646,7 +643,12 @@ func TestCooperApp_BridgeHealth(t *testing.T) {
 	// The bridge binds to 127.0.0.1:{BridgePort}.
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", cfg.BridgePort)
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	// These requests measure local bind addresses. Do not let an inherited
+	// HTTP proxy turn a local-network probe into a proxy request.
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{Proxy: nil},
+	}
 	resp, err := client.Get(healthURL)
 	if err != nil {
 		t.Fatalf("GET %s failed: %v", healthURL, err)
@@ -786,7 +788,7 @@ func TestCooperApp_UpdatePortForwards(t *testing.T) {
 	}
 
 	// Verify socat-rules.json was written.
-	socatPath := filepath.Join(cooperDir, "socat-rules.json")
+	socatPath := docker.PortForwardConfigPath(cooperDir)
 	data, err := os.ReadFile(socatPath)
 	if err != nil {
 		t.Fatalf("read socat-rules.json: %v", err)
@@ -1313,10 +1315,10 @@ func TestCooperApp_BridgeLogging(t *testing.T) {
 	}
 }
 
-// TestCooperApp_ContainerStats starts the app and calls ContainerStats.
+// TestCooperApp_WorkloadStats starts the app and calls WorkloadStats.
 // Verifies it returns without error. The result may contain only the proxy
 // stats (no barrels are running in tests).
-func TestCooperApp_ContainerStats(t *testing.T) {
+func TestCooperApp_WorkloadStats(t *testing.T) {
 	skipIfNoDocker(t)
 	skipIfNoProxyImage(t)
 	docker.SetImagePrefix(testImagePrefix)
@@ -1334,27 +1336,27 @@ func TestCooperApp_ContainerStats(t *testing.T) {
 	}
 	defer app.Stop()
 
-	stats, err := app.ContainerStats()
+	stats, err := app.WorkloadStats()
 	if err != nil {
-		t.Fatalf("ContainerStats() failed: %v", err)
+		t.Fatalf("WorkloadStats() failed: %v", err)
 	}
 
 	// The proxy container should appear in the stats.
 	found := false
 	for _, s := range stats {
-		t.Logf("container stat: name=%s cpu=%s mem=%s", s.Name, s.CPUPercent, s.MemUsage)
-		if s.Name == docker.ProxyContainerName() {
+		t.Logf("workload stat: id=%s cpu=%s mem=%s", s.ID, s.CPUPercent, s.MemUsage)
+		if s.ID == docker.ProxyContainerName() {
 			found = true
 			if s.Status != "Running" {
 				t.Fatalf("proxy status = %q, want Running", s.Status)
 			}
-			if s.TmpUsage != "--" {
-				t.Fatalf("proxy tmp usage = %q, want --", s.TmpUsage)
+			if s.StorageUsage != "--" {
+				t.Fatalf("proxy storage usage = %q, want --", s.StorageUsage)
 			}
 		}
 	}
 	if !found {
-		t.Error("ContainerStats() did not include the proxy container")
+		t.Error("WorkloadStats() did not include the proxy container")
 	}
 }
 
@@ -1388,7 +1390,7 @@ func TestCooperApp_HeaderHealth(t *testing.T) {
 	}
 }
 
-func TestCooperApp_ContainerStatsIncludesShellCountAndTmpUsage(t *testing.T) {
+func TestCooperApp_WorkloadStatsIncludesShellCountAndStorageUsage(t *testing.T) {
 	skipIfNoDocker(t)
 	skipIfNoProxyImage(t)
 	skipIfNoBarrelImage(t)
@@ -1401,23 +1403,23 @@ func TestCooperApp_ContainerStatsIncludesShellCountAndTmpUsage(t *testing.T) {
 	defer app.Stop()
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", barrelName).Run() })
 
-	marker, err := docker.CreateShellSessionMarker(cooperDir, barrelName, "stats")
+	marker, err := runtimefs.CreateShellMarker(cooperDir, barrelName)
 	if err != nil {
-		t.Fatalf("CreateShellSessionMarker() failed: %v", err)
+		t.Fatalf("CreateShellMarker() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = docker.RemoveShellSessionMarker(marker.HostPath) })
+	t.Cleanup(func() { _ = runtimefs.RemoveShellMarker(marker.HostPath) })
 
 	if _, err := barrelExec(barrelName, "printf container-stats > /tmp/cooper-container-stats.txt"); err != nil {
 		t.Fatalf("write /tmp file in barrel: %v", err)
 	}
 
-	stats, err := app.ContainerStats()
+	stats, err := app.WorkloadStats()
 	if err != nil {
-		t.Fatalf("ContainerStats() failed: %v", err)
+		t.Fatalf("WorkloadStats() failed: %v", err)
 	}
 
 	for _, s := range stats {
-		if s.Name != barrelName {
+		if s.ID != barrelName {
 			continue
 		}
 		if s.Status != "Running" {
@@ -1426,8 +1428,8 @@ func TestCooperApp_ContainerStatsIncludesShellCountAndTmpUsage(t *testing.T) {
 		if s.ShellCount != 1 {
 			t.Fatalf("barrel shell count = %d, want 1", s.ShellCount)
 		}
-		if s.TmpUsage == "--" || s.TmpUsage == "0B" {
-			t.Fatalf("barrel tmp usage = %q, want non-zero value", s.TmpUsage)
+		if s.StorageUsage == "--" || s.StorageUsage == "0B" {
+			t.Fatalf("barrel storage usage = %q, want non-zero value", s.StorageUsage)
 		}
 		return
 	}
@@ -1626,25 +1628,20 @@ func waitForContainer(t *testing.T, name string, timeout time.Duration) {
 	t.Fatalf("container %s did not become running within %v", name, timeout)
 }
 
-// waitForProxyFromBarrel polls until the proxy is reachable from inside the
-// barrel container. This waits for Docker DNS propagation and the barrel's
-// entrypoint to finish initializing.
+// waitForProxyFromBarrel polls until the proxy TCP listener is reachable from
+// inside the barrel. Do not send an HTTP request to an unapproved destination
+// here. Squid must hold that request for approval, which does not test proxy
+// readiness.
 func waitForProxyFromBarrel(t *testing.T, barrelName string, proxyPort int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	attempt := 0
 	for time.Now().Before(deadline) {
 		attempt++
-		proxyAddr := fmt.Sprintf("http://%s:%d", docker.ProxyHost(), proxyPort)
-		// Use a separate curl call that only outputs the HTTP status code.
-		// Avoid `|| echo 000` which concatenates with curl's output on failure.
-		out, _ := exec.Command("docker", "exec", barrelName, "bash", "-c",
-			fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --connect-timeout 2 --max-time 3 -x %s http://example.com 2>/dev/null", proxyAddr)).CombinedOutput()
-		status := strings.TrimSpace(string(out))
-
-		// A valid HTTP status is exactly 3 digits and not "000".
-		if len(status) == 3 && status != "000" && status >= "100" && status <= "599" {
-			t.Logf("proxy reachable from barrel (status=%s, attempt=%d)", status, attempt)
+		probe := fmt.Sprintf("exec 3<>/dev/tcp/%s/%d", docker.ProxyHost(), proxyPort)
+		out, probeErr := exec.Command("docker", "exec", barrelName, "timeout", "2", "bash", "-c", probe).CombinedOutput()
+		if probeErr == nil {
+			t.Logf("proxy TCP listener is reachable from barrel (attempt=%d)", attempt)
 			return
 		}
 
@@ -1653,8 +1650,8 @@ func waitForProxyFromBarrel(t *testing.T, barrelName string, proxyPort int, time
 		// Check if both are on the same network.
 		netMembers, _ := exec.Command("docker", "network", "inspect", docker.InternalNetworkName(),
 			"--format", "{{range .Containers}}{{.Name}} {{end}}").CombinedOutput()
-		t.Logf("waitForProxy attempt=%d status=%q proxy=%s internal_members=[%s]",
-			attempt, status, strings.TrimSpace(string(proxyState)), strings.TrimSpace(string(netMembers)))
+		t.Logf("waitForProxy attempt=%d probe_error=%v output=%q proxy=%s internal_members=[%s]",
+			attempt, probeErr, strings.TrimSpace(string(out)), strings.TrimSpace(string(proxyState)), strings.TrimSpace(string(netMembers)))
 
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -1672,6 +1669,33 @@ func TestCooperApp_ProxyRuntimeScenarios(t *testing.T) {
 
 	cooperDir, cfg := setupCooperDir(t)
 	cfg.MonitorTimeoutSecs = 1
+	// Add the exact path-controlled host to this local integration runtime.
+	// DefaultConfig has no selected agents, so it does not add Grok domains.
+	cfg.WhitelistedDomains = append(cfg.WhitelistedDomains, config.DomainEntry{
+		Domain:            proxyInspectedTestDomain,
+		IncludeSubdomains: false,
+		Source:            "user",
+	})
+	if err := config.SaveConfig(filepath.Join(cooperDir, "config.json"), cfg); err != nil {
+		t.Fatalf("save inspected-domain test config: %v", err)
+	}
+	if err := templates.WriteProxyTemplates(filepath.Join(cooperDir, "proxy"), cfg); err != nil {
+		t.Fatalf("write inspected-domain proxy templates: %v", err)
+	}
+	// The local HTTPS fixture uses a self-signed upstream certificate. Permit
+	// that test-only upstream error so Squid can reach the fixture. The barrel
+	// still uses -k for these requests because Squid preserves upstream trust
+	// errors in the generated certificate. Production configuration does not
+	// contain this exception.
+	squidPath := filepath.Join(cooperDir, "proxy", "squid.conf")
+	squidConfig, err := os.ReadFile(squidPath)
+	if err != nil {
+		t.Fatalf("read inspected-domain Squid config: %v", err)
+	}
+	squidConfig = append(squidConfig, []byte("\n# Local integration fixture only.\nsslproxy_cert_error allow all\n")...)
+	if err := os.WriteFile(squidPath, squidConfig, 0o644); err != nil {
+		t.Fatalf("write inspected-domain Squid config: %v", err)
+	}
 	app, barrelName := startAppAndBarrel(t, cfg, cooperDir)
 	t.Cleanup(func() {
 		exec.Command("docker", "rm", "-f", barrelName).Run()
@@ -1680,7 +1704,6 @@ func TestCooperApp_ProxyRuntimeScenarios(t *testing.T) {
 	})
 
 	target := startProxyHTTPSTarget(t)
-	trustProxyHTTPSTarget(t, target)
 	t.Logf("local proxy HTTPS target %s ready at %s for domains %s", target.ContainerName, target.IP, strings.Join(target.Domains, ", "))
 
 	t.Run("WhitelistedDomainPassthrough", func(t *testing.T) {
@@ -1806,22 +1829,33 @@ func TestCooperApp_ProxyRuntimeScenarios(t *testing.T) {
 		}
 	})
 
-	t.Run("SSLBumpWorks", func(t *testing.T) {
+	// The local target uses a self-signed certificate. Use -k only for these two
+	// fixture requests. The allowed and denied paths prove that Squid decrypts
+	// the request before it applies the Grok path policy. The public Grok E2E
+	// check separately verifies the Cooper CA trust path without -k.
+	t.Run("SelectiveTLSInspectionAllowsReviewedPath", func(t *testing.T) {
 		out, err := barrelExec(barrelName,
-			"curl --cacert /usr/local/share/ca-certificates/cooper-ca.crt "+
-				fmt.Sprintf("-s -o /dev/null -w '%%{http_code}' --connect-timeout 2 --max-time 5 -x http://%s:%d https://%s",
-					docker.ProxyHost(), cfg.ProxyPort, proxyAllowedTestDomain))
+			fmt.Sprintf("curl -k -sS -o /dev/null -w '%%{http_code}' --connect-timeout 2 --max-time 5 -x http://%s:%d https://%s/v1/models",
+				docker.ProxyHost(), cfg.ProxyPort, proxyInspectedTestDomain))
 		if err != nil {
-			t.Fatalf("curl with CA cert failed: %v\noutput: %s", err, out)
+			t.Fatalf("curl through inspected TLS route failed: %v\noutput: %s", err, out)
 		}
 
 		statusCode := strings.TrimSpace(out)
-		t.Logf("SSL bump status code: %s", statusCode)
-		if statusCode == "000" {
-			t.Errorf("curl returned 000 — likely a certificate error; SSL bump may not be working")
+		t.Logf("selective TLS inspection status code: %s", statusCode)
+		if statusCode != "200" {
+			t.Errorf("inspected allowed path status = %q, want 200", statusCode)
 		}
-		if statusCode == "403" {
-			t.Errorf("proxy denied the request (403) — %s should be whitelisted", proxyAllowedTestDomain)
+	})
+
+	t.Run("SelectiveTLSInspectionDeniesUnknownPath", func(t *testing.T) {
+		out, err := barrelExec(barrelName,
+			fmt.Sprintf("curl -k -sS -o /dev/null -w '%%{http_code}' --connect-timeout 2 --max-time 5 -x http://%s:%d https://%s/v1/storage",
+				docker.ProxyHost(), cfg.ProxyPort, proxyInspectedTestDomain))
+		statusCode := strings.TrimSpace(out)
+		t.Logf("unknown inspected path status code: %s (err: %v)", statusCode, err)
+		if statusCode != "403" {
+			t.Errorf("unknown inspected path status = %q, want 403", statusCode)
 		}
 	})
 
@@ -1865,6 +1899,13 @@ func TestCooperApp_ProxyRuntimeScenarios(t *testing.T) {
 		if statusCode == "000" || statusCode == "" {
 			t.Errorf("barrel could not reach proxy: status=%q — DNS resolution or TCP connectivity failed", statusCode)
 		}
+	})
+
+	t.Run("ProxyRestartUsesProxyReadiness", func(t *testing.T) {
+		if err := app.RestartWorkload(docker.ProxyContainerName()); err != nil {
+			t.Fatalf("RestartWorkload(proxy) failed: %v", err)
+		}
+		waitForProxyFromBarrel(t, barrelName, cfg.ProxyPort, 10*time.Second)
 	})
 }
 
@@ -2164,7 +2205,7 @@ func TestCooperApp_SocatLiveReload(t *testing.T) {
 	}
 
 	// Verify socat-rules.json was updated.
-	socatPath := filepath.Join(cooperDir, "socat-rules.json")
+	socatPath := docker.PortForwardConfigPath(cooperDir)
 	data, err := os.ReadFile(socatPath)
 	if err != nil {
 		t.Fatalf("read socat-rules.json: %v", err)
@@ -2211,7 +2252,12 @@ func TestCooperApp_BridgeBindAddress(t *testing.T) {
 	}
 	defer app.Stop()
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	// These requests measure local bind addresses. Do not let an inherited
+	// HTTP proxy turn a local-network probe into a proxy request.
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{Proxy: nil},
+	}
 
 	// Verify bridge is reachable on 127.0.0.1.
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", cfg.BridgePort)
@@ -3041,7 +3087,7 @@ func TestCooperApp_CustomToolClipboardModeOffRespected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateToken() failed: %v", err)
 	}
-	if _, err := clipboard.WriteTokenFile(cooperDir, barrelName, token); err != nil {
+	if _, err := clipboard.WriteRuntimeToken(cooperDir, barrelName, token, clipboard.RuntimeCLI, testdocker.SharedClipboardOffToolName, "off"); err != nil {
 		t.Fatalf("WriteTokenFile() failed: %v", err)
 	}
 	t.Cleanup(func() { _ = clipboard.RemoveTokenFile(cooperDir, barrelName) })
@@ -3094,29 +3140,29 @@ func startClipboardApp(t *testing.T, cfg *config.Config, cooperDir string) *Coop
 
 // writeTestToken writes a token file to {cooperDir}/tokens/{name} and
 // returns the token string.
-func writeTestToken(t *testing.T, cooperDir, name string) string {
+func writeTestToken(t *testing.T, cooperDir, name, toolName, clipboardMode string) string {
 	t.Helper()
 	token, err := clipboard.GenerateToken()
 	if err != nil {
 		t.Fatalf("GenerateToken() failed: %v", err)
 	}
-	if _, err := clipboard.WriteTokenFile(cooperDir, name, token); err != nil {
+	if _, err := clipboard.WriteRuntimeToken(cooperDir, name, token, clipboard.RuntimeCLI, toolName, clipboardMode); err != nil {
 		t.Fatalf("WriteTokenFile() failed: %v", err)
 	}
 	return token
 }
 
-func registerTestBarrelSession(t *testing.T, app *CooperApp, session clipboard.BarrelSession) string {
+func registerTestRuntimeSession(t *testing.T, app *CooperApp, session clipboard.RuntimeSession) string {
 	t.Helper()
-	if err := app.ClipboardManager().RegisterBarrel(session); err != nil {
-		t.Fatalf("RegisterBarrel() failed: %v", err)
+	if err := app.ClipboardManager().RegisterRuntime(session); err != nil {
+		t.Fatalf("RegisterRuntime() failed: %v", err)
 	}
 	for _, s := range app.ClipboardManager().ActiveSessions() {
-		if s.ContainerName == session.ContainerName {
+		if s.RuntimeID == session.RuntimeID {
 			return s.Token
 		}
 	}
-	t.Fatalf("could not find token for registered barrel %s", session.ContainerName)
+	t.Fatalf("could not find token for registered barrel %s", session.RuntimeID)
 	return ""
 }
 
@@ -3154,8 +3200,8 @@ func TestCooperApp_ClipboardEndpointAuth(t *testing.T) {
 	app := startClipboardApp(t, cfg, cooperDir)
 	defer app.Stop()
 
-	validToken := registerTestBarrelSession(t, app, clipboard.BarrelSession{
-		ContainerName: "barrel-auth-test",
+	validToken := registerTestRuntimeSession(t, app, clipboard.RuntimeSession{
+		RuntimeID:     "barrel-auth-test",
 		ToolName:      "claude",
 		ClipboardMode: "shim",
 		Eligible:      true,
@@ -3197,8 +3243,8 @@ func TestCooperApp_ClipboardStageAndFetch(t *testing.T) {
 	app := startClipboardApp(t, cfg, cooperDir)
 	defer app.Stop()
 
-	token := registerTestBarrelSession(t, app, clipboard.BarrelSession{
-		ContainerName: "barrel-stage-test",
+	token := registerTestRuntimeSession(t, app, clipboard.RuntimeSession{
+		RuntimeID:     "barrel-stage-test",
 		ToolName:      "claude",
 		ClipboardMode: "shim",
 		Eligible:      true,
@@ -3287,20 +3333,20 @@ func TestCooperApp_ClipboardIneligibleBarrel(t *testing.T) {
 
 	// Register a barrel with Eligible=false via the Manager.
 	mgr := app.ClipboardManager()
-	if err := mgr.RegisterBarrel(clipboard.BarrelSession{
-		ContainerName: "barrel-ineligible",
+	if err := mgr.RegisterRuntime(clipboard.RuntimeSession{
+		RuntimeID:     "barrel-ineligible",
 		ToolName:      "test-tool",
 		ClipboardMode: "off",
 		Eligible:      false,
 	}); err != nil {
-		t.Fatalf("RegisterBarrel() failed: %v", err)
+		t.Fatalf("RegisterRuntime() failed: %v", err)
 	}
 
 	// Retrieve the token assigned to this barrel session.
 	sessions := mgr.ActiveSessions()
 	var token string
 	for _, s := range sessions {
-		if s.ContainerName == "barrel-ineligible" {
+		if s.RuntimeID == "barrel-ineligible" {
 			token = s.Token
 			break
 		}
@@ -3333,7 +3379,7 @@ func TestCooperApp_ClipboardTokenFromDisk(t *testing.T) {
 
 	workspaceDir := t.TempDir()
 	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
-	token := writeTestToken(t, cooperDir, barrelName)
+	token := writeTestToken(t, cooperDir, barrelName, "claude", "shim")
 	t.Cleanup(func() { _ = clipboard.RemoveTokenFile(cooperDir, barrelName) })
 	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "claude"); err != nil {
 		t.Fatalf("StartBarrel(claude) failed: %v", err)
@@ -3362,8 +3408,8 @@ func TestCooperApp_ClipboardTTLExpiry(t *testing.T) {
 	app := startClipboardApp(t, cfg, cooperDir)
 	defer app.Stop()
 
-	token := registerTestBarrelSession(t, app, clipboard.BarrelSession{
-		ContainerName: "barrel-ttl-test",
+	token := registerTestRuntimeSession(t, app, clipboard.RuntimeSession{
+		RuntimeID:     "barrel-ttl-test",
 		ToolName:      "claude",
 		ClipboardMode: "shim",
 		Eligible:      true,
@@ -3442,7 +3488,7 @@ func TestCooperApp_OpenCodeClipboardWritesReachHostWriter(t *testing.T) {
 
 	workspaceDir := t.TempDir()
 	barrelName := docker.BarrelContainerName(workspaceDir, "opencode")
-	writeTestToken(t, cooperDir, barrelName)
+	writeTestToken(t, cooperDir, barrelName, "opencode", "shim")
 	t.Cleanup(func() { _ = clipboard.RemoveTokenFile(cooperDir, barrelName) })
 	if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, "opencode"); err != nil {
 		t.Fatalf("StartBarrel(opencode) failed: %v", err)

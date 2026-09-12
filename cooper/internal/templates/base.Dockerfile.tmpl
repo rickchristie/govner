@@ -15,6 +15,10 @@ FROM golang:{{.GoVersion}}-bookworm
 FROM debian:bookworm-slim
 {{- end}}
 
+# A VM session needs the current shared entrypoint contract. Cooper checks this
+# label before it exports an agent image into the guest.
+LABEL {{.VMImageContractLabel}}="{{.VMImageContractVersion}}"
+
 # ============================================================================
 # Base tools installation (must come before Node.js — provides curl, xz-utils)
 # ============================================================================
@@ -140,7 +144,7 @@ COPY doctor.sh /usr/local/bin/doctor.sh
 RUN chmod +x /entrypoint.sh /usr/local/bin/doctor.sh
 
 # ============================================================================
-# CA certificate injection for SSL bump proxy
+# CA certificate injection for selectively inspected TLS traffic
 # ============================================================================
 COPY cooper-ca.pem /usr/local/share/ca-certificates/cooper-ca.crt
 RUN update-ca-certificates && \

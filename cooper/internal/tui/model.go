@@ -41,13 +41,13 @@ type Model struct {
 	// Modal overlay (nil when no modal is active).
 	modal *components.Modal
 
-	// Pending confirmed container action while the shared root modal is open.
-	pendingContainerAction string
-	pendingContainerName   string
+	// Pending confirmed workload action while the shared root modal is open.
+	pendingWorkloadAction string
+	pendingWorkloadName   string
 
 	// Sub-models, one per tab. These are nil until the corresponding tab
 	// package supplies a concrete implementation (Work Packages 4C-4I).
-	containersModel   SubModel
+	runtimesModel     SubModel
 	proxyMonModel     SubModel
 	blockedModel      SubModel
 	allowedModel      SubModel
@@ -90,14 +90,14 @@ type Model struct {
 // NewModel creates the root model. Sub-models are nil by default;
 // call the Set* methods to wire them up before running the program.
 func NewModel(a app.App) *Model {
-	tb := components.NewTabBar(theme.AllTabs, theme.TabContainers)
+	tb := components.NewTabBar(theme.AllTabs, theme.TabRuntimes)
 	health := app.HeaderHealth{}
 	if a != nil {
 		health = a.HeaderHealth()
 	}
 	return &Model{
 		app:                         a,
-		activeTab:                   theme.TabContainers,
+		activeTab:                   theme.TabRuntimes,
 		tabBar:                      tb,
 		headerHealth:                health,
 		seenPromptedACLRequests:     make(map[string]struct{}),
@@ -125,8 +125,8 @@ func (m *Model) SetSize(w, h int) {
 	m.tabBar.Width = w
 }
 
-// SetContainersModel wires the containers tab.
-func (m *Model) SetContainersModel(sm SubModel) { m.containersModel = sm }
+// SetRuntimesModel wires the runtimes tab.
+func (m *Model) SetRuntimesModel(sm SubModel) { m.runtimesModel = sm }
 
 // SetProxyMonModel wires the proxy monitor tab.
 func (m *Model) SetProxyMonModel(sm SubModel) { m.proxyMonModel = sm }
@@ -187,8 +187,8 @@ func (m *Model) ExitReason() string { return m.exitReason }
 // or nil if the tab has not been wired yet.
 func (m *Model) activeSubModel() SubModel {
 	switch m.activeTab {
-	case theme.TabContainers:
-		return m.containersModel
+	case theme.TabRuntimes:
+		return m.runtimesModel
 	case theme.TabMonitor:
 		return m.proxyMonModel
 	case theme.TabBlocked:

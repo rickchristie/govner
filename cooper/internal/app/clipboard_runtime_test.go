@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -84,27 +83,27 @@ func TestCooperAppClipboardTokenLifecycleHelpers(t *testing.T) {
 	containerName := "barrel-token-test"
 	tokenPath := clipboard.TokenFilePath(cooperDir, containerName)
 
-	if _, err := clipboard.WriteTokenFile(cooperDir, containerName, "old-token"); err != nil {
+	if _, err := clipboard.WriteRuntimeToken(cooperDir, containerName, "old-token", clipboard.RuntimeCLI, "claude", "shim"); err != nil {
 		t.Fatalf("WriteTokenFile old-token: %v", err)
 	}
-	if err := app.ClipboardManager().RegisterBarrel(clipboard.BarrelSession{
-		ContainerName: containerName,
+	if err := app.ClipboardManager().RegisterRuntime(clipboard.RuntimeSession{
+		RuntimeID:     containerName,
 		ToolName:      "claude",
 		ClipboardMode: "shim",
 		Eligible:      true,
 	}); err != nil {
-		t.Fatalf("RegisterBarrel: %v", err)
+		t.Fatalf("RegisterRuntime: %v", err)
 	}
 
 	if err := app.rotateClipboardToken(containerName); err != nil {
 		t.Fatalf("rotateClipboardToken: %v", err)
 	}
 
-	data, err := os.ReadFile(tokenPath)
+	metadata, err := clipboard.ReadTokenMetadata(tokenPath)
 	if err != nil {
 		t.Fatalf("ReadFile rotated token: %v", err)
 	}
-	newToken := strings.TrimSpace(string(data))
+	newToken := metadata.Token
 	if newToken == "" || newToken == "old-token" {
 		t.Fatalf("rotated token = %q, want a new non-empty token", newToken)
 	}
@@ -112,13 +111,13 @@ func TestCooperAppClipboardTokenLifecycleHelpers(t *testing.T) {
 		t.Fatalf("expected rotate to unregister cached sessions, got %d", got)
 	}
 
-	if err := app.ClipboardManager().RegisterBarrel(clipboard.BarrelSession{
-		ContainerName: containerName,
+	if err := app.ClipboardManager().RegisterRuntime(clipboard.RuntimeSession{
+		RuntimeID:     containerName,
 		ToolName:      "claude",
 		ClipboardMode: "shim",
 		Eligible:      true,
 	}); err != nil {
-		t.Fatalf("RegisterBarrel second time: %v", err)
+		t.Fatalf("RegisterRuntime second time: %v", err)
 	}
 
 	app.revokeClipboardToken(containerName)

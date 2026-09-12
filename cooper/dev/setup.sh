@@ -4,6 +4,7 @@ set -Eeuo pipefail
 
 readonly PROGRAM_NAME="cooper-vm-setup"
 readonly MODULE_CONFIG_PATH="/etc/modules-load.d/cooper-vm.conf"
+readonly MODULE_OPTIONS_PATH="/etc/modprobe.d/cooper-vm.conf"
 
 MODE="install"
 TARGET_USER=""
@@ -12,11 +13,10 @@ GROUP_WAS_ADDED=0
 PROBLEM_COUNT=0
 WARNING_COUNT=0
 TEMPORARY_FILE=""
-REQUIRED_PACKAGES=()
 
 show_help() {
     cat <<'EOF'
-Install the Linux host requirements for Cooper VM development.
+Prepare a Linux host for Cooper VM.
 
 Usage:
   ./cooper/dev/setup.sh
@@ -26,23 +26,18 @@ Options:
   --check      Check the host without changing it.
   -h, --help   Show this help.
 
-Run this script as your normal user. Do not use sudo to start the script. The
-install mode uses sudo only for package installation, kernel modules, and KVM
-group membership.
+Run this script as your normal user. Do not use sudo to start it. Install mode
+uses sudo only to configure KVM and add your user to the kvm group.
 
-The script supports Ubuntu 22.04 or later on x86-64. It does not install
-libvirt, create a VM, configure a network, change firewall rules, enable IP
-forwarding, or install Docker.
+Cooper VM supports Linux on x86-64. QEMU and the guest image tools run in
+Cooper-owned containers. Cooper includes a static virtiofsd binary. These
+tools are not host requirements. Install Docker Engine before you run this
+script.
 EOF
 }
 
-info() {
-    printf '[INFO] %s\n' "$*"
-}
-
-pass() {
-    printf '[OK]   %s\n' "$*"
-}
+info() { printf '[INFO] %s\n' "$*"; }
+pass() { printf '[OK]   %s\n' "$*"; }
 
 warn() {
     WARNING_COUNT=$((WARNING_COUNT + 1))
@@ -73,38 +68,23 @@ parse_arguments() {
     fi
 
     case "${1:-}" in
-        "")
-            MODE="install"
-            ;;
-        --check)
-            MODE="check"
-            ;;
-        -h|--help)
-            show_help
-            exit 0
-            ;;
-        *)
-            fail "unknown option: $1"
-            ;;
+        "") MODE="install" ;;
+        --check) MODE="check" ;;
+        -h|--help) show_help; exit 0 ;;
+        *) fail "unknown option: $1" ;;
     esac
 }
 
 require_normal_user() {
     if [ "$(id -u)" -eq 0 ]; then
-        fail "run this script without sudo; it requests sudo only for required host changes"
+        fail "run this script without sudo"
     fi
     TARGET_USER="$(id -un)"
 }
 
-require_supported_host() {
+detect_kvm_module() {
     [ "$(uname -s)" = "Linux" ] || fail "only Linux is supported"
     [ "$(uname -m)" = "x86_64" ] || fail "only x86-64 hosts are supported"
-    [ -r /etc/os-release ] || fail "/etc/os-release is required"
-
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    [ "${ID:-}" = "ubuntu" ] || fail "only Ubuntu is supported"
-    dpkg --compare-versions "${VERSION_ID:-0}" ge "22.04" || fail "Ubuntu 22.04 or later is required"
 
     if grep -qw svm /proc/cpuinfo; then
         KVM_MODULE="kvm_amd"
@@ -117,109 +97,6 @@ require_supported_host() {
     fail "the CPU does not expose AMD-V or Intel VT-x; enable virtualization in firmware"
 }
 
-select_required_packages() {
-    REQUIRED_PACKAGES=(
-        bubblewrap
-        cloud-image-utils
-        cpu-checker
-        ovmf
-        qemu-system-common
-        qemu-system-gui
-        qemu-system-x86
-        qemu-utils
-        socat
-        virt-viewer
-    )
-
-    # Ubuntu 22.04 includes virtiofsd in qemu-system-common. Ubuntu 24.04 and
-    # later provide the Rust implementation as a separate package.
-    if apt-cache show virtiofsd 2>/dev/null | grep -q '^Package: virtiofsd$'; then
-        REQUIRED_PACKAGES+=(virtiofsd)
-    fi
-}
-
-package_is_installed() {
-    dpkg-query -W -f='${db:Status-Abbrev}' "$1" 2>/dev/null | grep -q '^ii '
-}
-
-missing_packages() {
-    local package_name
-
-    for package_name in "${REQUIRED_PACKAGES[@]}"; do
-        if ! package_is_installed "$package_name"; then
-            printf '%s\n' "$package_name"
-        fi
-    done
-}
-
-install_packages() {
-    local -a packages_to_install=()
-
-    command -v sudo >/dev/null 2>&1 || fail "sudo is required for install mode"
-    info "Refreshing Ubuntu package metadata"
-    sudo apt-get update
-
-    select_required_packages
-    mapfile -t packages_to_install < <(missing_packages)
-    if [ "${#packages_to_install[@]}" -eq 0 ]; then
-        pass "Required Ubuntu packages are already installed"
-        return
-    fi
-
-    info "Installing: ${packages_to_install[*]}"
-    sudo env DEBIAN_FRONTEND=noninteractive apt-get install \
-        --yes \
-        --no-install-recommends \
-        "${packages_to_install[@]}"
-}
-
-configure_kvm_group() {
-    if ! getent group kvm >/dev/null 2>&1; then
-        info "Creating the kvm system group"
-        sudo groupadd --system kvm
-    fi
-
-    if id -nG "$TARGET_USER" | tr ' ' '\n' | grep -qx kvm; then
-        pass "$TARGET_USER is configured as a member of kvm"
-        return
-    fi
-
-    info "Adding $TARGET_USER to the kvm group"
-    sudo usermod --append --groups kvm "$TARGET_USER"
-    GROUP_WAS_ADDED=1
-}
-
-configure_kernel_modules() {
-    TEMPORARY_FILE="$(mktemp /tmp/cooper-vm-modules.XXXXXX)"
-    printf '%s\n%s\n' "$KVM_MODULE" "vhost_vsock" >"$TEMPORARY_FILE"
-    sudo install \
-        --owner=root \
-        --group=root \
-        --mode=0644 \
-        "$TEMPORARY_FILE" \
-        "$MODULE_CONFIG_PATH"
-    rm -f -- "$TEMPORARY_FILE"
-    TEMPORARY_FILE=""
-
-    info "Loading $KVM_MODULE and vhost_vsock"
-    sudo modprobe "$KVM_MODULE"
-    sudo modprobe vhost_vsock
-}
-
-find_virtiofsd() {
-    local command_path
-    local candidate
-
-    command_path="$(command -v virtiofsd 2>/dev/null || true)"
-    for candidate in "$command_path" /usr/lib/qemu/virtiofsd /usr/libexec/virtiofsd; do
-        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
-    return 1
-}
-
 configured_user_has_kvm() {
     id -nG "$TARGET_USER" | tr ' ' '\n' | grep -qx kvm
 }
@@ -228,94 +105,110 @@ active_session_has_kvm() {
     id -nG | tr ' ' '\n' | grep -qx kvm
 }
 
-verify_package_state() {
-    local package_name
+configure_kvm() {
+    command -v sudo >/dev/null 2>&1 || fail "sudo is required for install mode"
+    command -v modprobe >/dev/null 2>&1 || fail "modprobe is required"
 
-    for package_name in "${REQUIRED_PACKAGES[@]}"; do
-        if package_is_installed "$package_name"; then
-            pass "Package installed: $package_name"
-        else
-            problem "Package missing: $package_name"
-        fi
-    done
+    if ! getent group kvm >/dev/null 2>&1; then
+        info "Creating the kvm system group"
+        sudo groupadd --system kvm
+    fi
+    if configured_user_has_kvm; then
+        pass "$TARGET_USER is configured as a member of kvm"
+    else
+        info "Adding $TARGET_USER to the kvm group"
+        sudo usermod --append --groups kvm "$TARGET_USER"
+        GROUP_WAS_ADDED=1
+    fi
+
+    TEMPORARY_FILE="$(mktemp /tmp/cooper-vm-modules.XXXXXX)"
+    printf '%s\n' "$KVM_MODULE" >"$TEMPORARY_FILE"
+    sudo install --owner=root --group=root --mode=0644 "$TEMPORARY_FILE" "$MODULE_CONFIG_PATH"
+    rm -f -- "$TEMPORARY_FILE"
+    TEMPORARY_FILE=""
+
+    TEMPORARY_FILE="$(mktemp /tmp/cooper-vm-options.XXXXXX)"
+    printf 'options %s nested=1\n' "$KVM_MODULE" >"$TEMPORARY_FILE"
+    sudo install --owner=root --group=root --mode=0644 "$TEMPORARY_FILE" "$MODULE_OPTIONS_PATH"
+    rm -f -- "$TEMPORARY_FILE"
+    TEMPORARY_FILE=""
+
+    info "Loading $KVM_MODULE"
+    sudo modprobe "$KVM_MODULE"
 }
 
-verify_command() {
-    local command_name="$1"
+verify_nested_kvm() {
+    local nested_path="/sys/module/$KVM_MODULE/parameters/nested"
+    local nested_value
 
-    if command -v "$command_name" >/dev/null 2>&1; then
-        pass "Command available: $command_name"
+    if [ ! -r "$nested_path" ]; then
+        problem "Nested KVM state is not available at $nested_path"
+        return
+    fi
+    nested_value="$(tr '[:upper:]' '[:lower:]' <"$nested_path")"
+    case "$nested_value" in
+        1|y|yes) pass "Nested KVM is enabled" ;;
+        *) problem "Nested KVM is disabled; run this setup and restart the host before the self-hosting test" ;;
+    esac
+}
+
+verify_kvm_device() {
+    if [ ! -c /dev/kvm ]; then
+        problem "Character device missing: /dev/kvm"
+        return
+    fi
+    if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+        problem "The current login cannot open /dev/kvm; log out and log in after the kvm group change"
+        return
+    fi
+    pass "The current login can access /dev/kvm"
+}
+
+verify_docker() {
+    if ! command -v docker >/dev/null 2>&1; then
+        problem "Docker Engine is not installed"
+        return
+    fi
+    pass "Docker command is available"
+    if docker info >/dev/null 2>&1; then
+        pass "Docker daemon is available to the current login"
     else
-        problem "Command missing: $command_name"
+        problem "Docker daemon is not available to the current login"
     fi
 }
 
-verify_devices() {
-    local device_path
-    local device_group
-
-    for device_path in /dev/kvm /dev/vhost-vsock; do
-        if [ ! -c "$device_path" ]; then
-            problem "Character device missing: $device_path"
-            continue
-        fi
-        device_group="$(stat -c '%G' "$device_path")"
-        if [ "$device_group" != "kvm" ]; then
-            problem "$device_path belongs to group $device_group, not kvm"
-            continue
-        fi
-        pass "Device available through kvm: $device_path"
-    done
-
-    if [ -c /dev/net/tun ]; then
-        pass "Device available: /dev/net/tun"
-    else
-        problem "Character device missing: /dev/net/tun"
-    fi
-}
-
-verify_host() {
-    local virtiofsd_path
+verify_resources() {
     local cpu_count
     local available_memory_kib
     local available_disk_kib
 
+    cpu_count="$(getconf _NPROCESSORS_ONLN)"
+    available_memory_kib="$(awk '$1 == "MemAvailable:" { print $2 }' /proc/meminfo)"
+    available_disk_kib="$(df -Pk . | awk 'NR == 2 { print $4 }')"
+    info "Available resources: ${cpu_count} CPUs, $((available_memory_kib / 1024)) MiB memory, $((available_disk_kib / 1024)) MiB workspace disk"
+
+    if [ "$cpu_count" -lt 4 ]; then
+        warn "Four or more CPUs are recommended for Cooper VM"
+    fi
+    if [ "$available_memory_kib" -lt $((16 * 1024 * 1024)) ]; then
+        warn "At least 16 GiB of available memory is recommended for the default VM profile"
+    fi
+    if [ "$available_disk_kib" -lt $((40 * 1024 * 1024)) ]; then
+        warn "At least 40 GiB of free workspace disk is recommended"
+    fi
+}
+
+verify_host() {
     PROBLEM_COUNT=0
     WARNING_COUNT=0
     info "Checking Cooper VM host requirements"
-
-    verify_package_state
-    verify_command qemu-system-x86_64
-    verify_command qemu-img
-    verify_command cloud-localds
-    verify_command remote-viewer
-    verify_command bwrap
-    verify_command socat
-
-    if virtiofsd_path="$(find_virtiofsd)"; then
-        pass "virtiofsd available: $virtiofsd_path"
-    else
-        problem "virtiofsd is missing"
-    fi
-
-    if compgen -G '/usr/share/OVMF/OVMF_CODE*.fd' >/dev/null; then
-        pass "OVMF firmware is available"
-    else
-        problem "OVMF firmware is missing"
-    fi
 
     if [ -d "/sys/module/$KVM_MODULE" ]; then
         pass "Kernel module loaded: $KVM_MODULE"
     else
         problem "Kernel module is not loaded: $KVM_MODULE"
     fi
-    if [ -d /sys/module/vhost_vsock ]; then
-        pass "Kernel module loaded: vhost_vsock"
-    else
-        problem "Kernel module is not loaded: vhost_vsock"
-    fi
-
-    verify_devices
+    verify_nested_kvm
 
     if configured_user_has_kvm; then
         pass "$TARGET_USER is configured as a member of kvm"
@@ -326,44 +219,29 @@ verify_host() {
         warn "The current login does not include kvm. Log out and log in before VM development."
     fi
 
-    if command -v docker >/dev/null 2>&1; then
-        pass "Host Docker command is available for the Cooper proxy"
-    else
-        warn "Docker is not installed. Cooper still requires its normal Docker prerequisite."
-    fi
-
-    cpu_count="$(getconf _NPROCESSORS_ONLN)"
-    available_memory_kib="$(awk '$1 == "MemAvailable:" { print $2 }' /proc/meminfo)"
-    available_disk_kib="$(df -Pk . | awk 'NR == 2 { print $4 }')"
-    info "Available resources: ${cpu_count} CPUs, $((available_memory_kib / 1024)) MiB memory, $((available_disk_kib / 1024)) MiB workspace disk"
+    verify_kvm_device
+    verify_docker
+    verify_resources
 
     if [ "$PROBLEM_COUNT" -ne 0 ]; then
         printf '\n%d host requirement(s) failed.\n' "$PROBLEM_COUNT" >&2
         return 1
     fi
-
     printf '\nCooper VM host requirements passed with %d warning(s).\n' "$WARNING_COUNT"
 }
 
 main() {
     parse_arguments "$@"
     require_normal_user
-    require_supported_host
+    detect_kvm_module
 
-    if [ "$MODE" = "check" ]; then
-        select_required_packages
-        verify_host
-        return
+    if [ "$MODE" = "install" ]; then
+        configure_kvm
     fi
-
-    install_packages
-    configure_kvm_group
-    configure_kernel_modules
     verify_host
 
     if [ "$GROUP_WAS_ADDED" -eq 1 ]; then
-        printf '\nLog out and log in once to activate kvm access in your desktop session.\n'
-        printf 'Then run: ./cooper/dev/setup.sh --check\n'
+        printf '\nLog out and log in once. Then run: ./cooper/dev/setup.sh --check\n'
     fi
 }
 

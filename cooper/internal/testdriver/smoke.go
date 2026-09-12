@@ -39,8 +39,8 @@ func RunClipboardSmoke(ctx context.Context, d *Driver) error {
 }
 
 func verifyStageFetchAndSettings(d *Driver) error {
-	token, err := d.RegisterBarrelSession(clipboard.BarrelSession{
-		ContainerName: "driver-stage",
+	token, err := d.RegisterRuntimeSession(clipboard.RuntimeSession{
+		RuntimeID:     "driver-stage",
 		ToolName:      "claude",
 		ClipboardMode: "shim",
 		Eligible:      true,

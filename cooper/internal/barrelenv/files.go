@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/rickchristie/govner/cooper/internal/config"
-	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/runtimefs"
 )
 
 // SessionEnvFile describes the host and in-container path for one prepared
@@ -35,7 +35,7 @@ func PrepareSessionEnvFileForTool(cooperDir, containerName, sessionName string, 
 		return SessionEnvFile{}, warnings, fmt.Errorf("render user env file: %w", err)
 	}
 
-	hostPath, containerPath, err := docker.CreateBarrelSessionFile(
+	hostPath, containerPath, err := runtimefs.CreateSessionFile(
 		cooperDir,
 		containerName,
 		sessionEnvPattern(sessionName),
@@ -65,5 +65,5 @@ func RemoveSessionEnvFile(path string) error {
 
 func sessionEnvPattern(sessionName string) string {
 	_ = strings.TrimSpace(sessionName)
-	return "cooper-cli-env-*.sh"
+	return "cooper-session-env-*.sh"
 }

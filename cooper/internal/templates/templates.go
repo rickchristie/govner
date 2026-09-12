@@ -13,6 +13,8 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/vmcontext"
+	"github.com/rickchristie/govner/cooper/internal/workload"
 	"github.com/rickchristie/govner/cooper/internal/x11src"
 )
 
@@ -40,6 +42,10 @@ type baseDockerfileData struct {
 	HasCodex    bool // Controls bubblewrap build
 	HasOpenCode bool // Controls xvfb/xclip install
 	ProxyPort   int
+	// VMImageContractLabel and VMImageContractVersion identify images that have
+	// the runtime support required by `cooper vm`.
+	VMImageContractLabel   string
+	VMImageContractVersion string
 
 	GoLSPVersion          string
 	NodeTSLSPVersion      string
@@ -70,17 +76,20 @@ type runtimeEnv struct {
 
 // proxyDockerfileData holds template data for the proxy Dockerfile.
 type proxyDockerfileData struct {
-	ProxyPort int
+	ProxyPort   int
+	HasParentCA bool
 }
 
 // squidConfData holds template data for the Squid configuration.
 type squidConfData struct {
 	ProxyPort          int
 	WhitelistedDomains []config.DomainEntry
+	ParentProxyHost    string
+	ParentProxyPort    int
 }
 
 // entrypointData holds template data for the CLI entrypoint script.
-// Port forwarding rules are read from /etc/cooper/socat-rules.json at runtime,
+// Port forwarding rules are read from /etc/cooper/live/socat-rules.json at runtime,
 // not baked into the template. BridgePort is kept as a fallback default.
 type entrypointData struct {
 	HasGo            bool
@@ -90,10 +99,12 @@ type entrypointData struct {
 }
 
 // proxyEntrypointData holds template data for the proxy entrypoint script.
-// Port forwarding rules are read from /etc/cooper/socat-rules.json at runtime,
+// Port forwarding rules are read from /etc/cooper/live/socat-rules.json at runtime,
 // not baked into the template. BridgePort is kept as a fallback default.
 type proxyEntrypointData struct {
 	BridgePort int
+	RelayHost  string
+	Nested     bool
 }
 
 // anyAIToolEnabled returns true if at least one AI tool is enabled.
@@ -164,18 +175,20 @@ func buildBaseDockerfileData(cfg *config.Config, implicit []config.ImplicitToolC
 	}
 
 	data := baseDockerfileData{
-		HasGo:        isToolEnabled(cfg.ProgrammingTools, "go"),
-		GoVersion:    goVersion,
-		GoPath:       docker.BarrelGoPath,
-		GoBinDir:     docker.BarrelGoBinDir,
-		GoModCache:   docker.BarrelGoModCacheDir,
-		GoBuildCache: docker.BarrelGoBuildCacheDir,
-		HasNode:      isToolEnabled(cfg.ProgrammingTools, "node"),
-		NodeVersion:  nodeVersion,
-		HasPython:    isToolEnabled(cfg.ProgrammingTools, "python"),
-		HasCodex:     isToolEnabled(cfg.AITools, "codex"),
-		HasOpenCode:  isToolEnabled(cfg.AITools, "opencode"),
-		ProxyPort:    cfg.ProxyPort,
+		HasGo:                  isToolEnabled(cfg.ProgrammingTools, "go"),
+		GoVersion:              goVersion,
+		GoPath:                 docker.BarrelGoPath,
+		GoBinDir:               docker.BarrelGoBinDir,
+		GoModCache:             docker.BarrelGoModCacheDir,
+		GoBuildCache:           docker.BarrelGoBuildCacheDir,
+		HasNode:                isToolEnabled(cfg.ProgrammingTools, "node"),
+		NodeVersion:            nodeVersion,
+		HasPython:              isToolEnabled(cfg.ProgrammingTools, "python"),
+		HasCodex:               isToolEnabled(cfg.AITools, "codex"),
+		HasOpenCode:            isToolEnabled(cfg.AITools, "opencode"),
+		ProxyPort:              cfg.ProxyPort,
+		VMImageContractLabel:   workload.VMImageContractLabel,
+		VMImageContractVersion: workload.VMImageContractVersion,
 	}
 	for _, tool := range implicit {
 		switch tool.Name {
@@ -226,13 +239,7 @@ func toolHomeDirs(def aitool.Definition) []string {
 func renderInstallCommands(toolName, version string) (string, error) {
 	switch toolName {
 	case "claude":
-		if version != "" {
-			// Do not run `claude install` for a pinned version. It upgrades to latest.
-			// Download before execution so a failed curl cannot become a successful
-			// empty shell pipeline.
-			return fmt.Sprintf("RUN curl -fsSL --http1.1 --retry 5 --retry-all-errors https://claude.ai/install.sh --output /tmp/claude-install.sh && \\\n    bash /tmp/claude-install.sh %s && \\\n    rm -f /tmp/claude-install.sh", version), nil
-		}
-		return "RUN curl -fsSL --http1.1 --retry 5 --retry-all-errors https://claude.ai/install.sh --output /tmp/claude-install.sh && \\\n    bash /tmp/claude-install.sh && \\\n    rm -f /tmp/claude-install.sh && \\\n    /home/user/.local/bin/claude install", nil
+		return renderClaudeInstallCommand(version), nil
 	case "copilot":
 		if version != "" {
 			return fmt.Sprintf("RUN npm install -g @github/copilot@%s", version), nil
@@ -253,9 +260,11 @@ func renderInstallCommands(toolName, version string) (string, error) {
 		// Docker and `curl | bash` is not fail-closed.
 		// Install into ~/.local/bin so the runtime ~/.opencode state mount
 		// cannot hide or replace the pinned binary.
+		// The empty default keeps the uname fallback valid with Docker's legacy
+		// builder, which does not inject the BuildKit TARGETARCH value.
 		return fmt.Sprintf(`ARG TARGETARCH
 RUN set -eu; \
-    case "${TARGETARCH}" in \
+    case "${TARGETARCH:-}" in \
       amd64) oc_arch=x64 ;; \
       arm64) oc_arch=arm64 ;; \
       "") case "$(uname -m)" in \
@@ -263,7 +272,7 @@ RUN set -eu; \
             aarch64|arm64) oc_arch=arm64 ;; \
             *) echo "unsupported OpenCode architecture: $(uname -m)" >&2; exit 1 ;; \
           esac ;; \
-      *) echo "unsupported OpenCode architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+      *) echo "unsupported OpenCode architecture: ${TARGETARCH:-}" >&2; exit 1 ;; \
     esac; \
     mkdir -p /home/user/.config/opencode /home/user/.local/bin /tmp/opencode-extract; \
     curl --fail --show-error --silent --location --http1.1 --retry 5 --retry-all-errors \
@@ -290,9 +299,11 @@ RUN set -eu; \
 		// Download the immutable official artifact directly into ~/.local/bin.
 		// Do not run the moving installer and do not install under ~/.grok,
 		// because the runtime state-root mount would hide that path.
+		// The empty default keeps the uname fallback valid with Docker's legacy
+		// builder, which does not inject the BuildKit TARGETARCH value.
 		return fmt.Sprintf(`ARG TARGETARCH
 RUN set -eu; \
-    case "${TARGETARCH}" in \
+    case "${TARGETARCH:-}" in \
       amd64) grok_arch=x86_64 ;; \
       arm64) grok_arch=aarch64 ;; \
       "") case "$(uname -m)" in \
@@ -300,7 +311,7 @@ RUN set -eu; \
             aarch64|arm64) grok_arch=aarch64 ;; \
             *) echo "unsupported Grok architecture: $(uname -m)" >&2; exit 1 ;; \
           esac ;; \
-      *) echo "unsupported Grok architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+      *) echo "unsupported Grok architecture: ${TARGETARCH:-}" >&2; exit 1 ;; \
     esac; \
     curl --fail --show-error --silent --location --retry 3 \
       "https://x.ai/cli/grok-%s-linux-${grok_arch}" \
@@ -310,6 +321,44 @@ RUN set -eu; \
 	default:
 		return "", fmt.Errorf("unknown tool: %s", toolName)
 	}
+}
+
+func renderClaudeInstallCommand(version string) string {
+	target := ""
+	if version != "" {
+		target = " " + version
+	}
+
+	// The official installer verifies the downloaded binary against its release
+	// manifest, but its internal curl calls do not request retries. Give
+	// all of those calls a temporary curl policy and retry the complete,
+	// idempotent install. This covers a partial binary transfer instead of only
+	// retrying the small installer-script transfer. The installer already runs
+	// `claude install`, so a second install command would add an unprotected
+	// download and can change a pinned result.
+	return fmt.Sprintf(`RUN set -eu; \
+    curl -fsSL --http1.1 --retry 5 --retry-all-errors https://claude.ai/install.sh --output /tmp/claude-install.sh; \
+    mkdir -p /tmp/claude-curl; \
+    printf '%%s\n' \
+      'http1.1' \
+      'retry = 5' \
+      'retry-all-errors' \
+      'retry-delay = 1' \
+      'connect-timeout = 30' \
+      > /tmp/claude-curl/.curlrc; \
+    installed=false; \
+    for attempt in 1 2 3 4 5; do \
+      if CURL_HOME=/tmp/claude-curl bash /tmp/claude-install.sh%s; then \
+        installed=true; \
+        break; \
+      fi; \
+      rm -rf /home/user/.claude/downloads; \
+      echo "Claude install attempt ${attempt} failed; retrying." >&2; \
+      sleep "${attempt}"; \
+    done; \
+    rm -f /tmp/claude-install.sh; \
+    rm -rf /tmp/claude-curl; \
+    test "$installed" = true`, target)
 }
 
 // RenderCLIToolDockerfile renders a per-tool Dockerfile from config and tool name.
@@ -358,9 +407,11 @@ func RenderProxyDockerfile(cfg *config.Config) (string, error) {
 		return "", fmt.Errorf("failed to parse proxy Dockerfile template: %w", err)
 	}
 
-	data := proxyDockerfileData{
-		ProxyPort: cfg.ProxyPort,
+	context, err := vmcontext.Load()
+	if err != nil {
+		return "", fmt.Errorf("load Cooper VM proxy context: %w", err)
 	}
+	data := proxyDockerfileData{ProxyPort: cfg.ProxyPort, HasParentCA: context != nil}
 
 	var buf strings.Builder
 	if err := tmpl.Execute(&buf, data); err != nil {
@@ -381,6 +432,14 @@ func RenderSquidConf(cfg *config.Config) (string, error) {
 		ProxyPort:          cfg.ProxyPort,
 		WhitelistedDomains: cfg.WhitelistedDomains,
 	}
+	context, err := vmcontext.Load()
+	if err != nil {
+		return "", fmt.Errorf("load Cooper VM proxy context: %w", err)
+	}
+	if context != nil {
+		data.ParentProxyHost = context.ParentProxy
+		data.ParentProxyPort = context.ProxyPort
+	}
 
 	var buf strings.Builder
 	if err := tmpl.Execute(&buf, data); err != nil {
@@ -399,6 +458,15 @@ func RenderProxyEntrypoint(cfg *config.Config) (string, error) {
 
 	data := proxyEntrypointData{
 		BridgePort: cfg.BridgePort,
+		RelayHost:  "host.docker.internal",
+	}
+	context, err := vmcontext.Load()
+	if err != nil {
+		return "", fmt.Errorf("load Cooper VM relay context: %w", err)
+	}
+	if context != nil {
+		data.RelayHost = context.AgentContainer
+		data.Nested = true
 	}
 
 	var buf strings.Builder
@@ -571,6 +639,21 @@ func WriteAllTemplates(baseDir, cliDir string, cfg *config.Config, implicit []co
 func WriteProxyTemplates(dir string, cfg *config.Config) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create proxy directory: %w", err)
+	}
+	parentCAPath := filepath.Join(dir, "parent-cooper-ca.pem")
+	_ = os.Remove(parentCAPath)
+	context, err := vmcontext.Load()
+	if err != nil {
+		return fmt.Errorf("load Cooper VM proxy context: %w", err)
+	}
+	if context != nil {
+		parentCA, err := os.ReadFile("/etc/cooper/cooper-ca.pem")
+		if err != nil {
+			return fmt.Errorf("read outer Cooper CA certificate: %w", err)
+		}
+		if err := os.WriteFile(parentCAPath, parentCA, 0444); err != nil {
+			return fmt.Errorf("write outer Cooper CA certificate: %w", err)
+		}
 	}
 
 	proxyDockerfile, err := RenderProxyDockerfile(cfg)

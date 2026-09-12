@@ -1,8 +1,11 @@
 package clipboard
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -41,6 +44,50 @@ func TestXclipShimUsesBinarySafeFetch(t *testing.T) {
 	assertContains(t, script, "curl", "xclip shim should use curl to fetch image")
 	assertContains(t, script, `cat "$tmpfile"`, "xclip shim should cat tmpfile to stdout")
 	assertContains(t, script, `rm -f "$tmpfile"`, "xclip shim should clean up tmpfile")
+}
+
+func TestXclipShimFetchesAnImage(t *testing.T) {
+	t.Parallel()
+	const token = "test-token"
+	const image = "deterministic-image-bytes"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/clipboard/image" || request.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(writer, "invalid request", http.StatusUnauthorized)
+			return
+		}
+		_, _ = writer.Write([]byte(image))
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	realBinary := filepath.Join(root, "real-xclip")
+	if err := os.WriteFile(realBinary, []byte("#!/bin/sh\nexit 87\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(root, "xclip")
+	if err := os.WriteFile(shim, []byte(XclipShim(realBinary)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tokenFile := filepath.Join(root, "token.json")
+	if err := os.WriteFile(tokenFile, []byte(`{"token":"`+token+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command(shim, "-selection", "clipboard", "-t", "image/png", "-o")
+	command.Env = append(os.Environ(),
+		"COOPER_CLIPBOARD_ENABLED=1",
+		"COOPER_CLIPBOARD_BRIDGE_URL="+server.URL,
+		"COOPER_CLIPBOARD_TOKEN_FILE="+tokenFile,
+		"NO_PROXY=127.0.0.1,localhost",
+		"no_proxy=127.0.0.1,localhost",
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("xclip shim failed: %v\n%s", err, output)
+	}
+	if string(output) != image {
+		t.Fatalf("xclip shim output = %q, want %q", output, image)
+	}
 }
 
 func TestXclipShimContainsTextWriteForwarding(t *testing.T) {
@@ -111,8 +158,8 @@ func TestAllShimsReferenceTokenFile(t *testing.T) {
 	for name, script := range shims {
 		assertContains(t, script, "COOPER_CLIPBOARD_TOKEN_FILE",
 			"%s shim should reference COOPER_CLIPBOARD_TOKEN_FILE", name)
-		assertContains(t, script, `cat "${COOPER_CLIPBOARD_TOKEN_FILE}"`,
-			"%s shim should read token from file with cat", name)
+		assertContains(t, script, `jq -er '.token | strings | select(length > 0)'`,
+			"%s shim should read the token field from host metadata", name)
 	}
 }
 

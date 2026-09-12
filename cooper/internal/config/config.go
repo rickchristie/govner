@@ -29,6 +29,78 @@ type Config struct {
 	ProxyAlertSound     bool                 `json:"proxy_alert_sound"`
 	BaseNodeVersion     string               `json:"base_node_version,omitempty"`
 	BarrelSHMSize       string               `json:"barrel_shm_size"`
+	VM                  VMConfig             `json:"vm"`
+}
+
+// VMConfig controls resources and bounded lifecycle waits for Cooper VMs.
+// MaxDepth stays fixed at two until the security design supports more levels.
+type VMConfig struct {
+	CPUs          int `json:"cpus"`
+	MemoryMiB     int `json:"memory_mib"`
+	DiskGiB       int `json:"disk_gib"`
+	MaxDepth      int `json:"max_depth"`
+	StartTimeoutS int `json:"start_timeout_secs"`
+	StopTimeoutS  int `json:"stop_timeout_secs"`
+}
+
+const MaxExpandedPortForwards = 4096
+
+// DefaultVMConfig returns conservative defaults for a development VM.
+func DefaultVMConfig() VMConfig {
+	return VMConfig{
+		CPUs:          8,
+		MemoryMiB:     12288,
+		DiskGiB:       32,
+		MaxDepth:      2,
+		StartTimeoutS: 300,
+		StopTimeoutS:  30,
+	}
+}
+
+// Validate checks VM resource and lifecycle bounds before Docker or KVM work
+// starts.
+func (c VMConfig) Validate() error {
+	if c.CPUs < 1 || c.CPUs > 128 {
+		return fmt.Errorf("VM CPU count %d is outside 1-128", c.CPUs)
+	}
+	if c.MemoryMiB < 2048 || c.MemoryMiB > 262144 {
+		return fmt.Errorf("VM memory %d MiB is outside 2048-262144 MiB", c.MemoryMiB)
+	}
+	if c.DiskGiB < 8 || c.DiskGiB > 2048 {
+		return fmt.Errorf("VM disk %d GiB is outside 8-2048 GiB", c.DiskGiB)
+	}
+	if c.MaxDepth != 2 {
+		return fmt.Errorf("VM maximum depth must be 2, got %d", c.MaxDepth)
+	}
+	if c.StartTimeoutS < 30 || c.StartTimeoutS > 1800 {
+		return fmt.Errorf("VM start timeout %d seconds is outside 30-1800", c.StartTimeoutS)
+	}
+	if c.StopTimeoutS < 5 || c.StopTimeoutS > 300 {
+		return fmt.Errorf("VM stop timeout %d seconds is outside 5-300", c.StopTimeoutS)
+	}
+	return nil
+}
+
+func (c *VMConfig) applyMissingDefaults() {
+	defaults := DefaultVMConfig()
+	if c.CPUs <= 0 {
+		c.CPUs = defaults.CPUs
+	}
+	if c.MemoryMiB <= 0 {
+		c.MemoryMiB = defaults.MemoryMiB
+	}
+	if c.DiskGiB <= 0 {
+		c.DiskGiB = defaults.DiskGiB
+	}
+	if c.MaxDepth <= 0 {
+		c.MaxDepth = defaults.MaxDepth
+	}
+	if c.StartTimeoutS <= 0 {
+		c.StartTimeoutS = defaults.StartTimeoutS
+	}
+	if c.StopTimeoutS <= 0 {
+		c.StopTimeoutS = defaults.StopTimeoutS
+	}
 }
 
 // LoadConfig loads configuration from a JSON file.
@@ -75,6 +147,7 @@ func (c *Config) applyMissingDefaults() {
 	if strings.TrimSpace(c.BarrelSHMSize) == "" {
 		c.BarrelSHMSize = "1g"
 	}
+	c.VM.applyMissingDefaults()
 }
 
 // shmSizeRE validates barrel SHM size: positive integer optionally followed by k, m, or g.
@@ -121,6 +194,7 @@ func DefaultConfig() *Config {
 		ClipboardMaxBytes:   20971520, // 20 MiB
 		ProxyAlertSound:     false,
 		BarrelSHMSize:       "1g",
+		VM:                  DefaultVMConfig(),
 	}
 }
 
@@ -160,6 +234,15 @@ func defaultWhitelistedDomains() []DomainEntry {
 		{Domain: "raw.githubusercontent.com", IncludeSubdomains: false, Source: "default"},
 		{Domain: "statsig.anthropic.com", IncludeSubdomains: false, Source: "default"},
 		{Domain: ".opencode.ai", IncludeSubdomains: true, Source: "default"},
+		// Cooper VM uses these exact hosts for its locked guest and Docker
+		// payloads. Nested Cooper preparation must use the parent proxy. The
+		// archive hosts are needed only while the pinned supervisor image
+		// replaces the base image's moving APT sources with Ubuntu Snapshot.
+		{Domain: "cloud-images.ubuntu.com", IncludeSubdomains: false, Source: "default"},
+		{Domain: "download.docker.com", IncludeSubdomains: false, Source: "default"},
+		{Domain: "archive.ubuntu.com", IncludeSubdomains: false, Source: "default"},
+		{Domain: "security.ubuntu.com", IncludeSubdomains: false, Source: "default"},
+		{Domain: "snapshot.ubuntu.com", IncludeSubdomains: false, Source: "default"},
 	}
 }
 
@@ -270,12 +353,18 @@ func (c *Config) Validate() error {
 	if c.ProxyPort == c.BridgePort {
 		return fmt.Errorf("proxy port (%d) and bridge port (%d) must be different", c.ProxyPort, c.BridgePort)
 	}
+	vmConfig := c.VM
+	vmConfig.applyMissingDefaults()
+	if err := vmConfig.Validate(); err != nil {
+		return err
+	}
 
 	// Check port forwarding rules don't collide with proxy or bridge ports
 	reservedPorts := map[int]string{
 		c.ProxyPort:  "proxy",
 		c.BridgePort: "bridge",
 	}
+	forwardPorts := make(map[int]string)
 
 	for _, rule := range c.PortForwardRules {
 		// Validate container port range
@@ -306,6 +395,10 @@ func (c *Config) Validate() error {
 					return fmt.Errorf("port forward rule %q: container port %d collides with %s port",
 						rule.Description, port, usage)
 				}
+				if previous, exists := forwardPorts[port]; exists {
+					return fmt.Errorf("port forward rules %q and %q both use container port %d", previous, rule.Description, port)
+				}
+				forwardPorts[port] = rule.Description
 			}
 		} else {
 			// Check single port against reserved ports
@@ -313,6 +406,13 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("port forward rule %q: container port %d collides with %s port",
 					rule.Description, rule.ContainerPort, usage)
 			}
+			if previous, exists := forwardPorts[rule.ContainerPort]; exists {
+				return fmt.Errorf("port forward rules %q and %q both use container port %d", previous, rule.Description, rule.ContainerPort)
+			}
+			forwardPorts[rule.ContainerPort] = rule.Description
+		}
+		if len(forwardPorts) > MaxExpandedPortForwards {
+			return fmt.Errorf("port forward rules expand to more than %d container ports", MaxExpandedPortForwards)
 		}
 	}
 

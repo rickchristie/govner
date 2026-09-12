@@ -14,7 +14,7 @@ var httpsTargetSeq uint64
 
 // HTTPSTarget is a deterministic upstream HTTPS server for Docker-backed tests.
 // It lives only on the Cooper external network, so proxy tests can exercise
-// Squid's allow/deny and SSL-bump paths without depending on the public internet.
+// Squid's allow, deny, and selective inspection paths without the public internet.
 type HTTPSTarget struct {
 	ContainerName string
 	Domains       []string

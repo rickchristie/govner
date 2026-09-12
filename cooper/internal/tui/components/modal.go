@@ -11,13 +11,13 @@ import (
 // Modal is a centered dialog overlay. Key handling lives in the root model;
 // the modal itself only renders.
 type Modal struct {
-	Title         string
-	Body          string
-	ConfirmLabel  string
-	CancelLabel   string
-	Active        bool
-	ModalType     theme.ModalType
-	FocusConfirm  bool // true = Confirm focused, false = Cancel focused
+	Title        string
+	Body         string
+	ConfirmLabel string
+	CancelLabel  string
+	Active       bool
+	ModalType    theme.ModalType
+	FocusConfirm bool // true = Confirm focused, false = Cancel focused
 }
 
 // NewModal creates a modal dialog of the given type.

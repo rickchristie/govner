@@ -11,6 +11,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/names"
+	"github.com/rickchristie/govner/cooper/internal/runtimefs"
 )
 
 // RunBarrelEnvSmoke starts the real runtime and verifies global barrel env vars
@@ -73,7 +74,8 @@ func verifyProtectedBarrelEnvRestore(d *Driver, barrel *Barrel) error {
 	if err != nil {
 		return fmt.Errorf("protected barrel env session: %w", err)
 	}
-	expected := fmt.Sprintf("http://%s:%d|127.0.0.1:99|", docker.ProxyHost(), d.Config().ProxyPort)
+	proxyURL := fmt.Sprintf("http://%s:%d", docker.ProxyHost(), d.Config().ProxyPort)
+	expected := fmt.Sprintf("%s|127.0.0.1:99|%s", proxyURL, proxyURL)
 	if out != expected {
 		return fmt.Errorf("protected env output=%q, want %q", out, expected)
 	}
@@ -121,15 +123,15 @@ func verifyBarrelEnvNextSessionReload(d *Driver, barrel *Barrel) error {
 }
 
 func verifySessionMountIsolation(d *Driver, barrel *Barrel) error {
-	out, err := d.ExecBarrel(barrel.Name, `if touch '`+docker.BarrelSessionContainerDir+`/blocked' 2>/dev/null; then printf 'session-rw'; elif touch /tmp/cooper-session-check 2>/dev/null; then printf 'session-ro|tmp-rw'; else printf 'session-ro|tmp-blocked'; fi`)
+	out, err := d.ExecBarrel(barrel.Name, `if touch '`+runtimefs.SessionContainerDir+`/blocked' 2>/dev/null; then printf 'session-rw'; elif touch /tmp/cooper-session-check 2>/dev/null; then printf 'session-ro|tmp-rw'; else printf 'session-ro|tmp-blocked'; fi`)
 	if err != nil {
 		return fmt.Errorf("session mount isolation exec: %w", err)
 	}
 	if strings.TrimSpace(out) != "session-ro|tmp-rw" {
 		return fmt.Errorf("session mount isolation output=%q, want %q", strings.TrimSpace(out), "session-ro|tmp-rw")
 	}
-	if _, err := exec.Command("docker", "exec", barrel.Name, "test", "-w", docker.BarrelSessionContainerDir).CombinedOutput(); err == nil {
-		return fmt.Errorf("session mount %s unexpectedly writable", docker.BarrelSessionContainerDir)
+	if _, err := exec.Command("docker", "exec", barrel.Name, "test", "-w", runtimefs.SessionContainerDir).CombinedOutput(); err == nil {
+		return fmt.Errorf("session mount %s unexpectedly writable", runtimefs.SessionContainerDir)
 	}
 	return nil
 }

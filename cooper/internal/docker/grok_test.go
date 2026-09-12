@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/workload"
 )
 
 func TestAppendVolumeMountsGrokSharesCompleteHostState(t *testing.T) {
@@ -14,15 +15,17 @@ func TestAppendVolumeMountsGrokSharesCompleteHostState(t *testing.T) {
 	homeDir := t.TempDir()
 	cooperDir := t.TempDir()
 	absWorkspace := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(absWorkspace, 0o755); err != nil {
+		t.Fatalf("create workspace fixture: %v", err)
+	}
 	containerName := "barrel-ws-grok"
 
-	got := appendVolumeMounts(nil, absWorkspace, homeDir, &config.Config{}, cooperDir, "grok", containerName)
+	got := renderedMountsForTest(t, barrelMountInput(absWorkspace, homeDir, &config.Config{}, cooperDir, "grok", containerName))
 	joined := strings.Join(got, " ")
 
 	hostState := filepath.Join(homeDir, ".grok")
-	wantState := hostState + ":" + BarrelGrokStateRoot + ":rw"
-	if !containsArg(got, wantState) {
-		t.Fatalf("missing complete Grok state mount %q\n%s", wantState, joined)
+	if !containsDockerMount(got, hostState, BarrelGrokStateRoot, false) {
+		t.Fatalf("missing complete Grok state mount from %q\n%s", hostState, joined)
 	}
 	if strings.Count(joined, BarrelGrokStateRoot) != 1 {
 		t.Fatalf("Grok state must use one mount: %s", joined)
@@ -167,30 +170,34 @@ func TestHasGrokStateMountRequiresOneCompleteReadWriteRoot(t *testing.T) {
 	}
 }
 
-func TestBarrelMountDirsGrokCreatesCompleteHostRoot(t *testing.T) {
+func TestSharedMountPolicyListsCompleteGrokRoot(t *testing.T) {
 	t.Setenv("GROK_HOME", "")
 	homeDir := t.TempDir()
 	cooperDir := t.TempDir()
-	dirs := barrelMountDirs(homeDir, "grok", cooperDir, "barrel-ws-grok", &config.Config{})
+	input := barrelMountInput(filepath.Join(t.TempDir(), "workspace"), homeDir, &config.Config{}, cooperDir, "grok", "barrel-ws-grok")
+	directorySpecs := workload.RequiredDirectories(input)
 	want := filepath.Join(homeDir, ".grok")
 	count := 0
-	for _, dir := range dirs {
-		if dir == want {
+	for _, directory := range directorySpecs {
+		if directory.Path == want {
 			count++
 		}
-		if strings.Contains(dir, filepath.Join(cooperDir, "state", "grok")) || strings.Contains(dir, filepath.Join(cooperDir, "secrets", "grok")) {
-			t.Fatalf("found legacy Cooper-owned Grok path: %s", dir)
+		if strings.Contains(directory.Path, filepath.Join(cooperDir, "state", "grok")) || strings.Contains(directory.Path, filepath.Join(cooperDir, "secrets", "grok")) {
+			t.Fatalf("found legacy Cooper-owned Grok path: %s", directory.Path)
 		}
 	}
 	if count != 1 {
-		t.Fatalf("complete host Grok root count = %d, dirs=%v", count, dirs)
+		t.Fatalf("complete host Grok root count = %d, directories=%v", count, directorySpecs)
 	}
 }
 
-func TestEnsureBarrelMountDirsCreatesPrivateGrokRoot(t *testing.T) {
+func TestSharedMountPolicyCreatesPrivateGrokRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "shared-grok")
 	t.Setenv("GROK_HOME", root)
-	if err := ensureBarrelMountDirs("grok", t.TempDir(), "barrel-ws-grok", &config.Config{}); err != nil {
+	homeDir := t.TempDir()
+	cooperDir := t.TempDir()
+	input := barrelMountInput(filepath.Join(t.TempDir(), "workspace"), homeDir, &config.Config{}, cooperDir, "grok", "barrel-ws-grok")
+	if err := workload.EnsureDirectories(input); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(root)
@@ -200,13 +207,4 @@ func TestEnsureBarrelMountDirsCreatesPrivateGrokRoot(t *testing.T) {
 	if info.Mode().Perm() != 0o700 {
 		t.Fatalf("new Grok state root mode = %o, want 0700", info.Mode().Perm())
 	}
-}
-
-func containsArg(args []string, want string) bool {
-	for _, arg := range args {
-		if arg == want {
-			return true
-		}
-	}
-	return false
 }

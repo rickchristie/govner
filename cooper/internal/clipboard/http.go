@@ -66,7 +66,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) bool {
 	if !session.Eligible {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(map[string]string{"error": "barrel not eligible for clipboard access"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "runtime not eligible for clipboard access"})
 		return true
 	}
 
@@ -86,7 +86,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // authenticate extracts and validates the bearer token from the request.
-func (h *Handler) authenticate(r *http.Request) (*BarrelSession, error) {
+func (h *Handler) authenticate(r *http.Request) (*RuntimeSession, error) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
 		return nil, ErrInvalidToken
@@ -149,7 +149,7 @@ func (h *Handler) handleImage(w http.ResponseWriter) {
 	w.Write(variant.Bytes)
 }
 
-// handleText forwards clipboard text writes from a barrel to the host clipboard.
+// handleText forwards clipboard text writes from a workload to the host clipboard.
 func (h *Handler) handleText(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

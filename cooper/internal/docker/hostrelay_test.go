@@ -20,6 +20,15 @@ func skipIfDarwinHostRelayNoOp(t *testing.T) {
 	}
 }
 
+func relayTestAddress(t *testing.T) string {
+	t.Helper()
+	addresses, err := BridgeGatewayIPs()
+	if err != nil || len(addresses) == 0 {
+		t.Skipf("no Docker relay address: %v", err)
+	}
+	return addresses[0]
+}
+
 func TestHostRelay_LoopbackService(t *testing.T) {
 	skipIfDarwinHostRelayNoOp(t)
 
@@ -38,10 +47,7 @@ func TestHostRelay_LoopbackService(t *testing.T) {
 	defer srv.Close()
 
 	// Discover a gateway IP to test with.
-	gwIP, err := GetGatewayIP("bridge")
-	if err != nil {
-		t.Skipf("no Docker bridge gateway: %v", err)
-	}
+	gwIP := relayTestAddress(t)
 
 	// Verify gateway cannot reach loopback service before relay.
 	conn, dialErr := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", gwIP, port), 500*time.Millisecond)
@@ -71,7 +77,8 @@ func TestHostRelay_LoopbackService(t *testing.T) {
 	}
 
 	// Verify gateway CAN now reach the service.
-	resp, err := http.Get(fmt.Sprintf("http://%s:%d/", gwIP, port))
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}}
+	resp, err := client.Get(fmt.Sprintf("http://%s:%d/", gwIP, port))
 	if err != nil {
 		t.Fatalf("gateway request failed after relay: %v", err)
 	}
@@ -90,10 +97,7 @@ func TestHostRelay_TearsDownOnServiceStop(t *testing.T) {
 	// (freeing the gateway IP for a wider bind).
 	const port = 18936
 
-	gwIP, err := GetGatewayIP("bridge")
-	if err != nil {
-		t.Skipf("no Docker bridge gateway: %v", err)
-	}
+	gwIP := relayTestAddress(t)
 
 	// Start a loopback-only server so the relay activates.
 	loopbackLn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
@@ -171,10 +175,7 @@ func TestHostRelay_SkipsWhenGatewayReachable(t *testing.T) {
 	}()
 	defer ln.Close()
 
-	gwIP, err := GetGatewayIP("bridge")
-	if err != nil {
-		t.Skipf("no Docker bridge gateway: %v", err)
-	}
+	gwIP := relayTestAddress(t)
 
 	logger := log.New(io.Discard, "", 0)
 	rules := []config.PortForwardRule{{ContainerPort: port, HostPort: port, Description: "test"}}
@@ -195,10 +196,7 @@ func TestHostRelay_RemovesWhenServiceStops(t *testing.T) {
 
 	const port = 18933
 
-	gwIP, err := GetGatewayIP("bridge")
-	if err != nil {
-		t.Skipf("no Docker bridge gateway: %v", err)
-	}
+	gwIP := relayTestAddress(t)
 
 	// Start a loopback-only server.
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
@@ -253,10 +251,7 @@ func TestHostRelay_UpdatePorts(t *testing.T) {
 	const port1 = 18934
 	const port2 = 18935
 
-	gwIP, err := GetGatewayIP("bridge")
-	if err != nil {
-		t.Skipf("no Docker bridge gateway: %v", err)
-	}
+	gwIP := relayTestAddress(t)
 
 	// Start servers on both ports.
 	for _, port := range []int{port1, port2} {

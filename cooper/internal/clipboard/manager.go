@@ -2,17 +2,17 @@ package clipboard
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
 
 // Manager is the staged clipboard grant manager. It holds at most one
-// immutable StagedSnapshot at a time and tracks per-barrel authentication
+// immutable StagedSnapshot at a time and tracks runtime authentication
 // sessions.
 //
 // Concurrency model:
@@ -28,17 +28,17 @@ type Manager struct {
 	maxBytes int
 
 	// cooperDir is the path to the cooper configuration directory.
-	// Used for file-based token validation (cooper cli barrels).
+	// Used for file-based validation of tokens from separate runtime processes.
 	cooperDir string
 
 	// snapshotMu guards current.
 	snapshotMu sync.RWMutex
 	current    *StagedSnapshot
 
-	// sessionMu guards tokenToSession and nameToToken.
+	// sessionMu guards tokenToSession and runtimeToToken.
 	sessionMu      sync.Mutex
-	tokenToSession map[string]*BarrelSession
-	nameToToken    map[string]string
+	tokenToSession map[string]*RuntimeSession
+	runtimeToToken map[string]string
 }
 
 // NewManager creates a Manager with the given default TTL and maximum
@@ -47,13 +47,13 @@ func NewManager(ttl time.Duration, maxBytes int) *Manager {
 	return &Manager{
 		ttl:            ttl,
 		maxBytes:       maxBytes,
-		tokenToSession: make(map[string]*BarrelSession),
-		nameToToken:    make(map[string]string),
+		tokenToSession: make(map[string]*RuntimeSession),
+		runtimeToToken: make(map[string]string),
 	}
 }
 
 // SetCooperDir sets the cooper directory for file-based token validation.
-// This enables barrels started by `cooper cli` (a separate process) to
+// This lets separate `cooper cli` and `cooper vm` processes
 // authenticate by writing token files to the shared tokens directory.
 func (m *Manager) SetCooperDir(dir string) {
 	m.sessionMu.Lock()
@@ -158,13 +158,13 @@ func (m *Manager) Touch(id string) {
 	m.current = &updated
 }
 
-// RegisterBarrel creates a new authenticated session for a barrel. A
+// RegisterRuntime creates a new authenticated session for a runtime. A
 // cryptographically random token is generated and stored. If a session
-// already exists for the container name it is replaced.
-func (m *Manager) RegisterBarrel(session BarrelSession) error {
+// already exists for the runtime ID it is replaced.
+func (m *Manager) RegisterRuntime(session RuntimeSession) error {
 	token, err := GenerateToken()
 	if err != nil {
-		return fmt.Errorf("register barrel: %w", err)
+		return fmt.Errorf("register runtime: %w", err)
 	}
 
 	session.Token = token
@@ -172,37 +172,37 @@ func (m *Manager) RegisterBarrel(session BarrelSession) error {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
 
-	// If a previous session exists for this container, remove the old token.
-	if oldToken, ok := m.nameToToken[session.ContainerName]; ok {
+	// If a previous session exists for this runtime, remove the old token.
+	if oldToken, ok := m.runtimeToToken[session.RuntimeID]; ok {
 		delete(m.tokenToSession, oldToken)
 	}
 
 	m.tokenToSession[token] = &session
-	m.nameToToken[session.ContainerName] = token
+	m.runtimeToToken[session.RuntimeID] = token
 
 	return nil
 }
 
-// UnregisterBarrel removes the session for the given container name.
+// UnregisterRuntime removes the session for the given runtime ID.
 // The associated token becomes invalid immediately.
-func (m *Manager) UnregisterBarrel(containerName string) {
+func (m *Manager) UnregisterRuntime(runtimeID string) {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
 
-	token, ok := m.nameToToken[containerName]
+	token, ok := m.runtimeToToken[runtimeID]
 	if !ok {
 		return
 	}
 
 	delete(m.tokenToSession, token)
-	delete(m.nameToToken, containerName)
+	delete(m.runtimeToToken, runtimeID)
 }
 
 // ValidateToken checks a token against registered sessions. If the token
 // is not found in memory, it falls back to scanning token files in the
-// cooperDir/tokens/ directory. This enables barrels started by `cooper cli`
-// (a separate process) to authenticate without inter-process registration.
-func (m *Manager) ValidateToken(token string) (*BarrelSession, error) {
+// cooperDir/tokens/ directory. This lets separate Cooper commands
+// authenticate without in-memory registration.
+func (m *Manager) ValidateToken(token string) (*RuntimeSession, error) {
 	m.sessionMu.Lock()
 	if sess, ok := m.tokenToSession[token]; ok {
 		cp := *sess
@@ -212,8 +212,8 @@ func (m *Manager) ValidateToken(token string) (*BarrelSession, error) {
 	cooperDir := m.cooperDir
 	m.sessionMu.Unlock()
 
-	// Slow path: scan token files on disk. This handles barrels started by
-	// `cooper cli` which writes token files but can't register in-memory
+	// Slow path: scan token files on disk. Separate Cooper commands write
+	// token files but cannot register them in memory
 	// with the `cooper up` process.
 	if cooperDir != "" {
 		if sess := m.validateTokenFromDisk(cooperDir, token); sess != nil {
@@ -225,8 +225,8 @@ func (m *Manager) ValidateToken(token string) (*BarrelSession, error) {
 }
 
 // validateTokenFromDisk scans the tokens directory for a file containing
-// the given token. Returns a BarrelSession if found, nil otherwise.
-func (m *Manager) validateTokenFromDisk(cooperDir, token string) *BarrelSession {
+// the given token. Returns a RuntimeSession if found, nil otherwise.
+func (m *Manager) validateTokenFromDisk(cooperDir, token string) *RuntimeSession {
 	tokensDir := filepath.Join(cooperDir, "tokens")
 	entries, err := os.ReadDir(tokensDir)
 	if err != nil {
@@ -237,32 +237,37 @@ func (m *Manager) validateTokenFromDisk(cooperDir, token string) *BarrelSession 
 		if entry.IsDir() {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(tokensDir, entry.Name()))
+		metadata, err := ReadTokenMetadata(filepath.Join(tokensDir, entry.Name()))
 		if err != nil {
 			continue
 		}
-		fileToken := strings.TrimSpace(string(data))
-		if fileToken == token {
-			sess, err := inspectContainerSession(entry.Name())
+		if metadata.RuntimeID != entry.Name() {
+			continue
+		}
+		if subtle.ConstantTimeCompare([]byte(metadata.Token), []byte(token)) == 1 {
+			sess, err := inspectRuntimeSession(cooperDir, entry.Name())
 			if err != nil || sess == nil {
 				continue
 			}
+			if sess.RuntimeID != metadata.RuntimeID || sess.RuntimeKind != metadata.RuntimeKind ||
+				sess.ToolName != metadata.ToolName || sess.ClipboardMode != metadata.ClipboardMode {
+				continue
+			}
 			sess.Token = token
-			sess.ContainerName = entry.Name()
 			return sess
 		}
 	}
 	return nil
 }
 
-// ActiveSessions returns a snapshot of all currently registered barrel
+// ActiveSessions returns a snapshot of all currently registered runtime
 // sessions. Tokens are included in the returned structs; callers must
 // not log them.
-func (m *Manager) ActiveSessions() []BarrelSession {
+func (m *Manager) ActiveSessions() []RuntimeSession {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
 
-	sessions := make([]BarrelSession, 0, len(m.tokenToSession))
+	sessions := make([]RuntimeSession, 0, len(m.tokenToSession))
 	for _, s := range m.tokenToSession {
 		sessions = append(sessions, *s)
 	}

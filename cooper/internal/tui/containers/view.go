@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
@@ -12,66 +13,61 @@ import (
 )
 
 const (
-	colNameFrac   = 0.28
-	colStatusFrac = 0.14
+	colKindFrac   = 0.08
+	colNameFrac   = 0.24
+	colStatusFrac = 0.15
 	colShellFrac  = 0.08
-	colCPUFrac    = 0.10
-	colMemFrac    = 0.20
-	colTmpFrac    = 0.20
+	colCPUFrac    = 0.09
+	colMemFrac    = 0.18
 )
 
 // renderHeader builds the column header line.
 func renderHeader(width int) string {
-	nameW, statusW, shellW, cpuW, memW, tmpW := columnWidths(width)
+	kindW, nameW, statusW, shellW, cpuW, memW, storageW := columnWidths(width)
 
-	name := theme.ColumnHeaderStyle.Width(nameW).Render(" NAME")
-	status := theme.ColumnHeaderStyle.Width(statusW).Render("STATUS")
-	shells := theme.ColumnHeaderStyle.Width(shellW).Render("SHELLS")
-	cpu := theme.ColumnHeaderStyle.Width(cpuW).Render("CPU")
-	mem := theme.ColumnHeaderStyle.Width(memW).Render("MEM")
-	tmp := theme.ColumnHeaderStyle.Width(tmpW).Render("TMP")
+	kind := renderFixedCell(theme.ColumnHeaderStyle.Render(" KIND"), kindW)
+	name := renderFixedCell(theme.ColumnHeaderStyle.Render(" NAME"), nameW)
+	status := renderFixedCell(theme.ColumnHeaderStyle.Render(" STATUS"), statusW)
+	shells := renderFixedCell(theme.ColumnHeaderStyle.Render(" SHELLS"), shellW)
+	cpu := renderFixedCell(theme.ColumnHeaderStyle.Render(" CPU"), cpuW)
+	mem := renderFixedCell(theme.ColumnHeaderStyle.Render(" MEM"), memW)
+	storage := renderFixedCell(theme.ColumnHeaderStyle.Render(" STORAGE"), storageW)
 
-	return name + status + shells + cpu + mem + tmp
+	return kind + name + status + shells + cpu + mem + storage
 }
 
-// renderRow formats a single container row.
+// renderRow formats a single runtime row.
 func renderRow(item components.ListItem, selected bool, width int) string {
-	ci, ok := item.Data.(containerItem)
+	workload, ok := item.Data.(workloadItem)
 	if !ok {
 		return ""
 	}
 
-	nameW, statusW, shellW, cpuW, memW, tmpW := columnWidths(width)
+	kindW, nameW, statusW, shellW, cpuW, memW, storageW := columnWidths(width)
 
 	arrow := "  "
 	if selected {
 		arrow = theme.SelectionArrowStyle.Render(theme.IconArrowRight) + " "
 	}
 
-	maxName := nameW - 3
-	if maxName < 1 {
-		maxName = 1
-	}
-	nameText := ci.Name
-	if len(nameText) > maxName {
-		nameText = nameText[:maxName]
-	}
+	kindCol := renderFixedCell(" "+theme.DimStyle.Render(workloadKindLabel(workload)), kindW)
+	nameText := workload.ID
 	nameStyled := theme.ContainerNameStyle.Render(nameText)
 	if selected {
 		nameStyled = theme.ContainerNameStyle.Bold(true).Render(nameText)
 	}
-	nameCol := lipgloss.NewStyle().Width(nameW).Render(arrow + nameStyled)
+	nameCol := renderFixedCell(arrow+nameStyled, nameW)
 
-	statusText, statusStyle := renderStatus(ci.Status)
-	statusCol := lipgloss.NewStyle().Width(statusW).Render(statusStyle.Render(statusText))
+	statusText, statusStyle := renderStatus(workload.Status)
+	statusCol := renderFixedCell(" "+statusStyle.Render(statusText), statusW)
 
 	shellText := "--"
-	if ci.Name != app.ContainerProxy {
-		shellText = fmt.Sprintf("%d", ci.ShellCount)
+	if workload.Kind != app.WorkloadProxy {
+		shellText = fmt.Sprintf("%d", workload.ShellCount)
 	}
-	shellCol := lipgloss.NewStyle().Width(shellW).Render(theme.RowNormalStyle.Render(shellText))
+	shellCol := renderFixedCell(" "+theme.RowNormalStyle.Render(shellText), shellW)
 
-	cpuText := ci.CPUPercent
+	cpuText := workload.CPUPercent
 	if cpuText == "" {
 		cpuText = "--"
 	}
@@ -79,25 +75,48 @@ func renderRow(item components.ListItem, selected bool, width int) string {
 	if cpuPercent := parseCPU(cpuText); cpuPercent > 80.0 {
 		cpuStyle = theme.CopperStyle
 	}
-	cpuCol := lipgloss.NewStyle().Width(cpuW).Render(cpuStyle.Render(cpuText))
+	cpuCol := renderFixedCell(" "+cpuStyle.Render(cpuText), cpuW)
 
-	memText := ci.MemUsage
+	memText := workload.MemUsage
 	if memText == "" {
 		memText = "--"
 	}
-	memCol := lipgloss.NewStyle().Width(memW).Render(theme.RowNormalStyle.Render(memText))
+	memCol := renderFixedCell(" "+theme.RowNormalStyle.Render(memText), memW)
 
-	tmpText := ci.TmpUsage
-	if tmpText == "" {
-		tmpText = "--"
+	storageText := workload.StorageUsage
+	if storageText == "" {
+		storageText = "--"
 	}
-	tmpCol := lipgloss.NewStyle().Width(tmpW).Render(theme.RowNormalStyle.Render(tmpText))
+	storageCol := renderFixedCell(" "+theme.RowNormalStyle.Render(storageText), storageW)
 
-	row := nameCol + statusCol + shellCol + cpuCol + memCol + tmpCol
+	row := kindCol + nameCol + statusCol + shellCol + cpuCol + memCol + storageCol
 	if selected {
 		row = theme.RowSelectedStyle.Width(width).Render(row)
 	}
 	return row
+}
+
+// renderFixedCell keeps one table value inside its assigned columns. Lipgloss
+// Width adds padding but does not truncate long content. Explicit truncation
+// prevents the terminal from wrapping one logical runtime row into two rows.
+func renderFixedCell(value string, width int) string {
+	if width < 1 {
+		return ""
+	}
+	return lipgloss.NewStyle().Width(width).Render(ansi.Truncate(value, width, "…"))
+}
+
+func workloadKindLabel(workload workloadItem) string {
+	switch workload.Kind {
+	case app.WorkloadProxy:
+		return "PROXY"
+	case app.WorkloadCLI:
+		return "CLI"
+	case app.WorkloadVM:
+		return fmt.Sprintf("VM%d", workload.Depth)
+	default:
+		return "?"
+	}
 }
 
 func renderStatus(status string) (string, lipgloss.Style) {
@@ -131,36 +150,59 @@ func renderActionStatus(state actionState, text string, width int) string {
 	return lipgloss.NewStyle().Width(width).Render(" " + style.Render(text))
 }
 
-// renderDetail renders the expanded detail pane for a container.
-func renderDetail(ci containerItem, width int) string {
+// renderDetail renders identity and health values that do not fit the table.
+func renderDetail(workload workloadItem, width int) string {
 	treeMid := theme.DividerStyle.Render("├─ ")
 	treeEnd := theme.DividerStyle.Render("└─ ")
 	shellText := "--"
-	if ci.Name != app.ContainerProxy {
-		shellText = fmt.Sprintf("%d", ci.ShellCount)
+	if workload.Kind != app.WorkloadProxy {
+		shellText = fmt.Sprintf("%d", workload.ShellCount)
 	}
 	lines := []string{
-		treeMid + theme.DetailLabelStyle.Render("Name:    ") + theme.DetailValueStyle.Render(ci.Name),
-		treeMid + theme.DetailLabelStyle.Render("Status:  ") + theme.DetailValueStyle.Render(ci.Status),
+		treeMid + theme.DetailLabelStyle.Render("ID:      ") + theme.DetailValueStyle.Render(workload.ID),
+		treeMid + theme.DetailLabelStyle.Render("Kind:    ") + theme.DetailValueStyle.Render(workloadKindLabel(workload)),
+		treeMid + theme.DetailLabelStyle.Render("Tool:    ") + theme.DetailValueStyle.Render(valueOrDash(workload.Tool)),
+		treeMid + theme.DetailLabelStyle.Render("Status:  ") + theme.DetailValueStyle.Render(workload.Status),
 		treeMid + theme.DetailLabelStyle.Render("Shells:  ") + theme.DetailValueStyle.Render(shellText),
-		treeMid + theme.DetailLabelStyle.Render("CPU:     ") + theme.DetailValueStyle.Render(ci.CPUPercent),
-		treeMid + theme.DetailLabelStyle.Render("Memory:  ") + theme.DetailValueStyle.Render(ci.MemUsage),
-		treeEnd + theme.DetailLabelStyle.Render("/tmp:    ") + theme.DetailValueStyle.Render(ci.TmpUsage),
+		treeMid + theme.DetailLabelStyle.Render("CPU:     ") + theme.DetailValueStyle.Render(valueOrDash(workload.CPUPercent)),
+		treeMid + theme.DetailLabelStyle.Render("Memory:  ") + theme.DetailValueStyle.Render(valueOrDash(workload.MemUsage)),
+		treeMid + theme.DetailLabelStyle.Render("Storage: ") + theme.DetailValueStyle.Render(valueOrDash(workload.StorageUsage)),
+		treeMid + theme.DetailLabelStyle.Render("Health:  ") + theme.DetailValueStyle.Render(valueOrDash(workload.HealthReason)),
+		treeEnd + theme.DetailLabelStyle.Render("Path:    ") + theme.DetailValueStyle.Render(valueOrDash(workload.Workspace)),
 	}
 	content := strings.Join(lines, "\n")
 	return lipgloss.NewStyle().PaddingLeft(3).Width(width).Render(content)
 }
 
+func valueOrDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "--"
+	}
+	return value
+}
+
 // columnWidths computes absolute column widths from the total width.
-func columnWidths(width int) (nameW, statusW, shellW, cpuW, memW, tmpW int) {
+func columnWidths(width int) (kindW, nameW, statusW, shellW, cpuW, memW, storageW int) {
+	kindW = int(float64(width) * colKindFrac)
 	nameW = int(float64(width) * colNameFrac)
 	statusW = int(float64(width) * colStatusFrac)
 	shellW = int(float64(width) * colShellFrac)
 	cpuW = int(float64(width) * colCPUFrac)
 	memW = int(float64(width) * colMemFrac)
-	tmpW = width - nameW - statusW - shellW - cpuW - memW
-	if tmpW < 1 {
-		tmpW = 1
+	storageW = width - kindW - nameW - statusW - shellW - cpuW - memW
+	// The leading separator and the SHELLS label need seven cells. Move one
+	// cell from the last column at narrow supported widths so headers stay
+	// visually separate.
+	if shellW < 7 && storageW > 1 {
+		delta := 7 - shellW
+		if delta >= storageW {
+			delta = storageW - 1
+		}
+		shellW += delta
+		storageW -= delta
+	}
+	if storageW < 1 {
+		storageW = 1
 	}
 	return
 }

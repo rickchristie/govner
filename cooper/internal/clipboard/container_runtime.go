@@ -4,24 +4,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/rickchristie/govner/cooper/internal/vmproto"
+	"github.com/rickchristie/govner/cooper/internal/vmstate"
 )
 
-var inspectContainerSession = inspectContainerSessionDocker
+var inspectRuntimeSession = inspectRuntimeSessionDocker
 
 type dockerContainerInspect struct {
 	Config struct {
-		Env   []string `json:"Env"`
-		Image string   `json:"Image"`
+		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
 	State struct {
 		Running bool `json:"Running"`
 	} `json:"State"`
 }
 
-func inspectContainerSessionDocker(containerName string) (*BarrelSession, error) {
+func inspectRuntimeSessionDocker(cooperDir, containerName string) (*RuntimeSession, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -47,40 +50,48 @@ func inspectContainerSessionDocker(containerName string) (*BarrelSession, error)
 		return nil, nil
 	}
 
-	env := envMap(info.Config.Env)
-	toolName := strings.TrimSpace(env["COOPER_CLI_TOOL"])
-	if toolName == "" {
-		toolName = toolNameFromImage(info.Config.Image)
+	labels := info.Config.Labels
+	runtimeID := strings.TrimSpace(labels["cooper.runtime-id"])
+	toolName := strings.TrimSpace(labels["cooper.tool"])
+	mode := strings.TrimSpace(labels["cooper.clipboard-mode"])
+	kind := ""
+	switch strings.TrimSpace(labels["cooper.kind"]) {
+	case RuntimeCLI:
+		kind = RuntimeCLI
+	case "vm-supervisor":
+		kind = RuntimeVM
 	}
-
-	mode := normalizeClipboardMode(env["COOPER_CLIPBOARD_MODE"])
-	return &BarrelSession{
-		ContainerName: containerName,
+	if runtimeID != containerName || toolName == "" || kind == "" || !validClipboardMode(mode) {
+		return nil, nil
+	}
+	if kind == RuntimeVM && !vmControlHealthy(cooperDir, runtimeID) {
+		return nil, nil
+	}
+	return &RuntimeSession{
+		RuntimeID:     containerName,
+		RuntimeKind:   kind,
 		ToolName:      toolName,
 		ClipboardMode: mode,
 		Eligible:      mode != "off",
 	}, nil
 }
 
-func envMap(entries []string) map[string]string {
-	values := make(map[string]string, len(entries))
-	for _, entry := range entries {
-		key, value, ok := strings.Cut(entry, "=")
-		if !ok {
-			continue
-		}
-		values[key] = value
+func vmControlHealthy(cooperDir, runtimeID string) bool {
+	if strings.TrimSpace(cooperDir) == "" {
+		return false
 	}
-	return values
-}
-
-func toolNameFromImage(image string) string {
-	const marker = "cooper-cli-"
-	idx := strings.LastIndex(image, marker)
-	if idx < 0 {
-		return ""
+	socket := vmstate.ControlSocketPath(cooperDir, runtimeID)
+	connection, err := net.DialTimeout("unix", socket, 250*time.Millisecond)
+	if err != nil {
+		return false
 	}
-	return image[idx+len(marker):]
+	defer connection.Close()
+	_ = connection.SetDeadline(time.Now().Add(750 * time.Millisecond))
+	if err := vmproto.WriteHeader(connection, vmproto.NewHeader(vmproto.ServiceHealth, "clipboard-health")); err != nil {
+		return false
+	}
+	frame, err := vmproto.ReadFrame(connection)
+	return err == nil && frame.Type == vmproto.FrameStdout && string(frame.Data) == "ready"
 }
 
 func normalizeClipboardMode(mode string) string {
@@ -95,5 +106,14 @@ func normalizeClipboardMode(mode string) string {
 		return "auto"
 	default:
 		return "auto"
+	}
+}
+
+func validClipboardMode(mode string) bool {
+	switch mode {
+	case "off", "shim", "x11", "auto":
+		return true
+	default:
+		return false
 	}
 }

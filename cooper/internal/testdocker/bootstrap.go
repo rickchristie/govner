@@ -186,6 +186,28 @@ func EnsureTestImages() error {
 	return lock.Release()
 }
 
+// StageSharedTestCA installs the CA that the shared test images trust into a
+// temporary Cooper runtime. HTTPS proxy tests must use this CA. A new CA for
+// each runtime would make the proxy certificate differ from the certificate
+// that is already in the shared base image.
+func StageSharedTestCA(cooperDir string) error {
+	certPath, keyPath, err := config.EnsureCA(sharedTestCADir())
+	if err != nil {
+		return fmt.Errorf("ensure shared test CA: %w", err)
+	}
+	caDir := filepath.Join(cooperDir, "ca")
+	if err := os.MkdirAll(caDir, 0o755); err != nil {
+		return fmt.Errorf("create test runtime CA directory: %w", err)
+	}
+	if err := copyFileMode(certPath, filepath.Join(caDir, "cooper-ca.pem"), 0o644); err != nil {
+		return fmt.Errorf("stage shared test CA certificate: %w", err)
+	}
+	if err := copyFileMode(keyPath, filepath.Join(caDir, "cooper-ca-key.pem"), 0o600); err != nil {
+		return fmt.Errorf("stage shared test CA key: %w", err)
+	}
+	return nil
+}
+
 // AssignDynamicPorts updates cfg with currently-free localhost ports for the
 // proxy and bridge so tests do not collide with a live `cooper up`.
 func AssignDynamicPorts(cfg *config.Config) error {
@@ -415,11 +437,15 @@ func sharedTestCADir() string {
 }
 
 func copyFile(src, dst string) error {
+	return copyFileMode(src, dst, 0o644)
+}
+
+func copyFileMode(src, dst string, mode os.FileMode) error {
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0o644)
+	return os.WriteFile(dst, data, mode)
 }
 
 // stageSharedTestCA copies a stable shared test CA into the ephemeral build
@@ -524,6 +550,11 @@ func buildFingerprint(root string) (string, error) {
 			return "", err
 		}
 	}
+	for _, tool := range sharedBuiltToolNames() {
+		if _, err := h.Write([]byte("built-in:" + tool.Name + "\x00")); err != nil {
+			return "", err
+		}
+	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
@@ -615,12 +646,15 @@ type sharedCustomImageSpec struct {
 }
 
 func sharedBuiltToolNames() []sharedToolSpec {
-	// Keep the default shared image set to the minimal barrels that the
-	// untagged Docker-backed tests actually start.
+	// The VM release gate runs one no-credential state and version check for
+	// every built-in agent. Keep this list complete so the shared image stamp
+	// cannot report a partial built-in set as ready.
 	return []sharedToolSpec{
 		{Name: "claude"},
+		{Name: "copilot"},
 		{Name: "codex"},
 		{Name: "opencode"},
+		{Name: "grok"},
 	}
 }
 

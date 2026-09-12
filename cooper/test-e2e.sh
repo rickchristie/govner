@@ -314,8 +314,9 @@ pass "Network created: ${NETWORK_EXTERNAL}"
 docker network create --internal "$NETWORK_INTERNAL" >/dev/null 2>&1
 pass "Network created: ${NETWORK_INTERNAL} (--internal, no gateway)"
 
-# Step 7: Write socat-rules.json (same as docker.WritePortForwardConfig).
-cat > "${CONFIG_DIR}/socat-rules.json" <<SOCATEOF
+# Step 7: Write live/socat-rules.json (same as docker.WritePortForwardConfig).
+mkdir -p "${CONFIG_DIR}/live"
+cat > "${CONFIG_DIR}/live/socat-rules.json" <<SOCATEOF
 {
   "bridge_port": ${BRIDGE_PORT},
   "rules": [
@@ -343,7 +344,7 @@ if proxy_run_output=$(docker run -d \
     -v "${CONFIG_DIR}/ca/cooper-ca-key.pem:/etc/squid/cooper-ca-key.pem:ro" \
     -v "${CONFIG_DIR}/run:/var/run/cooper:rw" \
     -v "${CONFIG_DIR}/logs:/var/log/squid:rw" \
-    -v "${CONFIG_DIR}/socat-rules.json:/etc/cooper/socat-rules.json:ro" \
+    -v "${CONFIG_DIR}/live:/etc/cooper/live:ro" \
     -p "127.0.0.1:${PROXY_PORT}:${PROXY_PORT}" \
     "$IMAGE_PROXY" 2>&1); then
     pass "Proxy container started"
@@ -490,6 +491,17 @@ tool_binary_for() {
     esac
 }
 
+# Keep this map aligned with internal/aitool. Clipboard authorization binds
+# each token to the selected tool and its reviewed transport mode.
+clipboard_mode_for() {
+    local tool=$1
+    case "$tool" in
+        claude|opencode) echo "shim" ;;
+        copilot|codex|grok) echo "x11" ;;
+        *) echo "auto" ;;
+    esac
+}
+
 # Helper: get expected version from config.
 get_tool_version() {
     local tool_type=$1 tool_name=$2
@@ -542,7 +554,7 @@ other_tools() {
 # the same container contract as the real application.
 BARREL_XAUTH_PATH="/home/user/.cooper-clipboard.xauth"
 BARREL_PLAYWRIGHT_CACHE="/home/user/.cache/ms-playwright"
-BARREL_LOCALTIME_PATH="/etc/localtime"
+BARREL_LOCALTIME_PATH="/run/cooper/host-localtime"
 BARREL_TIMEZONE_FILENAME="cooper-localtime"
 
 sync_barrel_timezone_file() {
@@ -556,10 +568,12 @@ sync_barrel_timezone_file() {
 
 build_barrel_run_args() {
     local barrel_name=$1
-    local tool_image=$2
-    local state_mounts_name=$3
-    local extra_mounts_name=$4
-    local extra_envs_name=$5
+    local tool_name=$2
+    local clipboard_mode=$3
+    local tool_image=$4
+    local state_mounts_name=$5
+    local extra_mounts_name=$6
+    local extra_envs_name=$7
     local -n state_mounts_ref="$state_mounts_name"
     local -n extra_mounts_ref="$extra_mounts_name"
     local -n extra_envs_ref="$extra_envs_name"
@@ -579,8 +593,13 @@ build_barrel_run_args() {
         # Shared memory size for browser workloads.
         "--shm-size" "1g"
 
-        # Label for workspace tracking.
+        # Workload identity labels. The clipboard bridge uses these labels to
+        # bind a token to one running workload.
         "--label" "cooper.workspace=${E2E_WORKSPACE}"
+        "--label" "cooper.kind=cli"
+        "--label" "cooper.runtime-id=${barrel_name}"
+        "--label" "cooper.tool=${tool_name}"
+        "--label" "cooper.clipboard-mode=${clipboard_mode}"
 
         # Workspace (read-write).
         "-v" "${E2E_WORKSPACE}:${E2E_WORKSPACE}:rw"
@@ -596,7 +615,7 @@ build_barrel_run_args() {
 
         # CA cert and socat rules (read-only).
         "-v" "${CONFIG_DIR}/ca/cooper-ca.pem:/etc/cooper/cooper-ca.pem:ro"
-        "-v" "${CONFIG_DIR}/socat-rules.json:/etc/cooper/socat-rules.json:ro"
+        "-v" "${CONFIG_DIR}/live:/etc/cooper/live:ro"
 
         # Playwright support mounts: fonts (ro), browser cache (rw), per-barrel /tmp (rw).
         "-v" "${CONFIG_DIR}/fonts:/home/user/.local/share/fonts:ro"
@@ -629,6 +648,7 @@ build_barrel_run_args() {
         "-e" "COOPER_CLIPBOARD_BRIDGE_URL=http://127.0.0.1:${BRIDGE_PORT}"
         "-e" "COOPER_CLIPBOARD_TOKEN_FILE=/etc/cooper/clipboard-token"
         "-e" "COOPER_CLIPBOARD_SHIMS=xclip,xsel"
+        "-e" "COOPER_CLIPBOARD_MODE=${clipboard_mode}"
 
         # Any scenario-specific extra env vars go here.
         "${extra_envs_ref[@]}"
@@ -794,7 +814,8 @@ for tool in "${ALL_TOOLS[@]}"; do
 
     # Start barrel container.
     info "Starting ${tool} barrel container..."
-    build_barrel_run_args "$barrel_name" "$tool_image" STATE_MOUNTS EXTRA_MOUNTS EXTRA_ENVS
+    clipboard_mode=$(clipboard_mode_for "$tool")
+    build_barrel_run_args "$barrel_name" "$tool" "$clipboard_mode" "$tool_image" STATE_MOUNTS EXTRA_MOUNTS EXTRA_ENVS
     docker "${BARREL_ARGS[@]}" >/dev/null 2>&1
     pass "${tool}: barrel container started"
 
@@ -854,12 +875,15 @@ for tool in "${ALL_TOOLS[@]}"; do
         fail "${tool}: cannot connect to cooper-proxy:${PROXY_PORT}"
     fi
 
-    ssl_status=$(barrel_exec 'curl -so /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 15 https://api.github.com 2>&1 || true')
+    # This assertion checks Cooper's static route, not the uptime of one
+    # external GitHub edge. Retry transfer errors before reporting a policy
+    # failure. Certificate and HTTP failures still remain visible.
+    ssl_status=$(barrel_exec 'curl --retry 2 --retry-all-errors --retry-delay 1 -so /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 15 https://api.github.com 2>&1 || true')
     if echo "$ssl_status" | grep -qE '^[23]'; then
-        pass "${tool}: HTTPS through SSL bump works (api.github.com -> HTTP ${ssl_status})"
+        pass "${tool}: static HTTPS proxy route works (api.github.com -> HTTP ${ssl_status})"
     else
         fail "${tool}: HTTPS through proxy failed for api.github.com (got: ${ssl_status})"
-        info "Debugging SSL bump:"
+        info "Debugging the HTTPS proxy route:"
         barrel_exec 'curl -v https://api.github.com 2>&1 | grep -iE "ssl|cert|error|subject" | head -10' | while IFS= read -r line; do info "  $line"; done
     fi
 
@@ -1107,10 +1131,10 @@ for tool in "${ALL_TOOLS[@]}"; do
     # ---- Timezone runtime environment ----
     host_tz_offset=$(date +%z | tr -d '[:space:]')
     tz_val=$(barrel_exec 'echo "$TZ"' | tr -d '[:space:]')
-    if [ "$tz_val" = ":/etc/localtime" ]; then
-        pass "${tool}: TZ points at /etc/localtime"
+    if [ "$tz_val" = ":/run/cooper/host-localtime" ]; then
+        pass "${tool}: TZ points at the Cooper host-timezone snapshot"
     else
-        fail "${tool}: TZ expected :/etc/localtime, got: ${tz_val}"
+        fail "${tool}: TZ expected :/run/cooper/host-localtime, got: ${tz_val}"
     fi
 
     barrel_tz_offset=$(barrel_exec 'date +%z' | tr -d '[:space:]')
@@ -1208,7 +1232,7 @@ info "Starting claude barrel for domain tests..."
 read -ra CLAUDE_STATE_MOUNTS <<< "$(state_mounts_for claude)"
 CLAUDE_EXTRA_MOUNTS=()
 CLAUDE_EXTRA_ENVS=()
-build_barrel_run_args "$ACTIVE_BARREL" "$ACTIVE_IMAGE" CLAUDE_STATE_MOUNTS CLAUDE_EXTRA_MOUNTS CLAUDE_EXTRA_ENVS
+build_barrel_run_args "$ACTIVE_BARREL" "$ACTIVE_TOOL" "$(clipboard_mode_for "$ACTIVE_TOOL")" "$ACTIVE_IMAGE" CLAUDE_STATE_MOUNTS CLAUDE_EXTRA_MOUNTS CLAUDE_EXTRA_ENVS
 docker "${BARREL_ARGS[@]}" >/dev/null 2>&1
 
 # Wait for it.
@@ -1296,7 +1320,7 @@ info "Starting codex barrel alongside claude barrel..."
 read -ra CODEX_STATE_MOUNTS <<< "$(state_mounts_for codex)"
 CODEX_EXTRA_MOUNTS=()
 CODEX_EXTRA_ENVS=()
-build_barrel_run_args "$CODEX_BARREL" "$IMAGE_CODEX" CODEX_STATE_MOUNTS CODEX_EXTRA_MOUNTS CODEX_EXTRA_ENVS
+build_barrel_run_args "$CODEX_BARREL" "codex" "$(clipboard_mode_for codex)" "$IMAGE_CODEX" CODEX_STATE_MOUNTS CODEX_EXTRA_MOUNTS CODEX_EXTRA_ENVS
 docker "${BARREL_ARGS[@]}" >/dev/null 2>&1
 
 # Wait for codex barrel to be running.
@@ -1368,7 +1392,7 @@ pass "Codex barrel stopped after shared workspace test"
 section "Phase 7: Port Forwarding (socat config)"
 
 # socat-rules.json mounted in barrel.
-socat_barrel=$(barrel_exec 'test -f /etc/cooper/socat-rules.json && echo found || echo missing')
+socat_barrel=$(barrel_exec 'test -f /etc/cooper/live/socat-rules.json && echo found || echo missing')
 if echo "$socat_barrel" | grep -q "found"; then
     pass "socat-rules.json mounted in barrel"
 else
@@ -1376,7 +1400,7 @@ else
 fi
 
 # socat-rules.json mounted in proxy.
-socat_proxy=$(docker exec "$PROXY_CONTAINER" bash -c 'test -f /etc/cooper/socat-rules.json && echo found || echo missing' 2>&1)
+socat_proxy=$(docker exec "$PROXY_CONTAINER" bash -c 'test -f /etc/cooper/live/socat-rules.json && echo found || echo missing' 2>&1)
 if echo "$socat_proxy" | grep -q "found"; then
     pass "socat-rules.json mounted in proxy"
 else
@@ -1384,7 +1408,7 @@ else
 fi
 
 # Validate socat-rules.json content in barrel.
-socat_content=$(barrel_exec 'cat /etc/cooper/socat-rules.json')
+socat_content=$(barrel_exec 'cat /etc/cooper/live/socat-rules.json')
 bridge_port_val=$(echo "$socat_content" | jq -r '.bridge_port' 2>/dev/null || echo "")
 rules_count=$(echo "$socat_content" | jq -r '.rules | length' 2>/dev/null || echo "0")
 if [ "$bridge_port_val" = "${BRIDGE_PORT}" ] && [ "$rules_count" = "2" ]; then
@@ -1435,7 +1459,7 @@ fi
 section "Phase 7b: Port Forwarding Live Config Change"
 
 # Remove the Redis rule (6379), keep PostgreSQL (5432).
-cat > "${CONFIG_DIR}/socat-rules.json" <<SOCAT_REMOVE_EOF
+cat > "${CONFIG_DIR}/live/socat-rules.json" <<SOCAT_REMOVE_EOF
 {
   "bridge_port": ${BRIDGE_PORT},
   "rules": [
@@ -1465,7 +1489,7 @@ else
 fi
 
 # Add Redis back.
-cat > "${CONFIG_DIR}/socat-rules.json" <<SOCAT_READD_EOF
+cat > "${CONFIG_DIR}/live/socat-rules.json" <<SOCAT_READD_EOF
 {
   "bridge_port": ${BRIDGE_PORT},
   "rules": [
@@ -1485,7 +1509,7 @@ else
 fi
 
 # Test range port forwarding.
-cat > "${CONFIG_DIR}/socat-rules.json" <<SOCAT_RANGE_EOF
+cat > "${CONFIG_DIR}/live/socat-rules.json" <<SOCAT_RANGE_EOF
 {
   "bridge_port": ${BRIDGE_PORT},
   "rules": [
@@ -1514,7 +1538,7 @@ if [ "$range_ok" = true ]; then
 fi
 
 # Restore original rules.
-cat > "${CONFIG_DIR}/socat-rules.json" <<SOCAT_RESTORE_EOF
+cat > "${CONFIG_DIR}/live/socat-rules.json" <<SOCAT_RESTORE_EOF
 {
   "bridge_port": ${BRIDGE_PORT},
   "rules": [
@@ -1680,7 +1704,7 @@ else
 fi
 
 # Add a port forwarding rule for the test port, restart barrel.
-cat > "${CONFIG_DIR}/socat-rules.json" <<SOCAT_RELAY_EOF
+cat > "${CONFIG_DIR}/live/socat-rules.json" <<SOCAT_RELAY_EOF
 {
   "bridge_port": ${BRIDGE_PORT},
   "rules": [
@@ -1723,7 +1747,7 @@ E2E_RELAY_HELPER_PID=""
 E2E_RELAY_SERVER_PID=""
 
 # Restore original rules.
-cat > "${CONFIG_DIR}/socat-rules.json" <<SOCAT_RESTORE2_EOF
+cat > "${CONFIG_DIR}/live/socat-rules.json" <<SOCAT_RESTORE2_EOF
 {
   "bridge_port": ${BRIDGE_PORT},
   "rules": [
@@ -1742,7 +1766,7 @@ pass "Host access test complete, rules restored"
 section "Phase 8: Socat Live Reload"
 
 # Write updated socat-rules.json with a new rule.
-cat > "${CONFIG_DIR}/socat-rules.json" <<SOCAT2EOF
+cat > "${CONFIG_DIR}/live/socat-rules.json" <<SOCAT2EOF
 {
   "bridge_port": ${BRIDGE_PORT},
   "rules": [
@@ -1760,7 +1784,7 @@ pass "Sent SIGHUP to proxy container PID 1"
 
 # Verify updated config is visible in proxy.
 sleep 2  # Give time for reload.
-updated_rules=$(docker exec "$PROXY_CONTAINER" cat /etc/cooper/socat-rules.json 2>&1)
+updated_rules=$(docker exec "$PROXY_CONTAINER" cat /etc/cooper/live/socat-rules.json 2>&1)
 new_rule_count=$(echo "$updated_rules" | jq -r '.rules | length' 2>/dev/null || echo "0")
 if [ "$new_rule_count" = "3" ]; then
     pass "Proxy sees updated socat-rules.json (3 rules)"
@@ -1769,7 +1793,7 @@ else
 fi
 
 # Verify barrel also sees the updated config (it's the same volume mount).
-barrel_rules=$(barrel_exec 'jq ".rules | length" /etc/cooper/socat-rules.json 2>/dev/null || echo 0')
+barrel_rules=$(barrel_exec 'jq ".rules | length" /etc/cooper/live/socat-rules.json 2>/dev/null || echo 0')
 if [ "$barrel_rules" = "3" ]; then
     pass "Barrel sees updated socat-rules.json (3 rules)"
 else
@@ -2287,6 +2311,13 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	container := flag.String("container", "", "Docker container to drive")
 	tool := flag.String("tool", "", "CLI tool: opencode or codex")
 	flag.Parse()
@@ -2299,14 +2330,15 @@ func main() {
 		// bind mount at runtime.
 		command = "exec /home/user/.local/bin/opencode"
 	case "codex":
-		command = "exec /home/user/.npm-global/bin/codex -C /tmp"
+		// Keep this clipboard test independent of Codex onboarding and online
+		// startup work. The pinned image contains this model, and Cooper uses
+		// the same allow-all flag for a normal Codex session.
+		command = "exec /home/user/.npm-global/bin/codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.4 -c check_for_update_on_startup=false -c features.plugins=false -C /tmp"
 	default:
-		fmt.Fprintf(os.Stderr, "unsupported tool %q\n", *tool)
-		os.Exit(2)
+		return fmt.Errorf("unsupported tool %q", *tool)
 	}
 	if *container == "" {
-		fmt.Fprintln(os.Stderr, "-container is required")
-		os.Exit(2)
+		return fmt.Errorf("-container is required")
 	}
 
 	sessionCtx, cancelSession := context.WithCancel(context.Background())
@@ -2316,8 +2348,7 @@ func main() {
 		Args: []string{"exec", "-it", *container, "bash", "-c", command},
 	}, tuidriver.Options{Width: 120, Height: 30})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "start %s: %v\n", *tool, err)
-		os.Exit(1)
+		return fmt.Errorf("start %s: %w", *tool, err)
 	}
 	defer session.Close()
 
@@ -2325,9 +2356,7 @@ func main() {
 		screen := snapshot.String()
 		if *tool == "codex" {
 			return strings.Contains(screen, "OpenAI Codex") &&
-				strings.Contains(screen, "model:") &&
-				!strings.Contains(screen, "loading") &&
-				!strings.Contains(screen, "Do you trust the contents")
+				strings.Contains(screen, "model:")
 		}
 		return strings.Contains(screen, "Ask anything")
 	}
@@ -2337,49 +2366,24 @@ func main() {
 		return session.WaitUntil(ctx, predicate)
 	}
 
-	// Codex can show workspace-trust and model-migration screens in either
-	// order. Consume only these known local startup prompts; the driver never
-	// submits a model prompt, so the fake E2E API key cannot incur usage.
-	startupPrompt := func(screen string) string {
-		switch {
-		case strings.Contains(screen, "Do you trust the contents"):
-			return "Do you trust the contents"
-		case strings.Contains(screen, "Choose how you'd like Codex to proceed"):
-			return "Choose how you'd like Codex to proceed"
-		default:
-			return ""
+	diagnostics := func() string {
+		transcript := session.TranscriptTail().Bytes
+		const transcriptLimit = 8 * 1024
+		if len(transcript) > transcriptLimit {
+			transcript = transcript[len(transcript)-transcriptLimit:]
 		}
+		return fmt.Sprintf(
+			"snapshot:\n%s\ntranscript tail:\n%q",
+			session.Snapshot().String(),
+			transcript,
+		)
 	}
-	for attempts := 0; attempts < 4 && !isReady(session.Snapshot()); attempts++ {
-		if err := wait(30*time.Second, func(snapshot tuidriver.Snapshot) bool {
-			return isReady(snapshot) || startupPrompt(snapshot.String()) != ""
-		}); err != nil {
-			fmt.Fprintf(os.Stderr, "%s did not start: %v\n%s\n", *tool, err, session.Snapshot().String())
-			os.Exit(1)
-		}
-		if isReady(session.Snapshot()) {
-			break
-		}
-		prompt := startupPrompt(session.Snapshot().String())
-		if err := session.SendKey(tuidriver.KeyEnter); err != nil {
-			fmt.Fprintf(os.Stderr, "accept %s startup prompt %q: %v\n", *tool, prompt, err)
-			os.Exit(1)
-		}
-		if err := wait(30*time.Second, func(snapshot tuidriver.Snapshot) bool {
-			return isReady(snapshot) || !strings.Contains(snapshot.String(), prompt)
-		}); err != nil {
-			fmt.Fprintf(os.Stderr, "%s startup prompt %q did not close: %v\n%s\n", *tool, prompt, err, session.Snapshot().String())
-			os.Exit(1)
-		}
-	}
-	if !isReady(session.Snapshot()) {
-		fmt.Fprintf(os.Stderr, "%s did not reach its prompt after startup screens\n%s\n", *tool, session.Snapshot().String())
-		os.Exit(1)
+	if err := wait(45*time.Second, isReady); err != nil {
+		return fmt.Errorf("%s did not start: %w\n%s", *tool, err, diagnostics())
 	}
 
 	if err := session.SendKey(tuidriver.KeyCtrlV); err != nil {
-		fmt.Fprintf(os.Stderr, "send Ctrl-V to %s: %v\n", *tool, err)
-		os.Exit(1)
+		return fmt.Errorf("send Ctrl-V to %s: %w", *tool, err)
 	}
 	if err := wait(20*time.Second, func(snapshot tuidriver.Snapshot) bool {
 		screen := snapshot.String()
@@ -2387,16 +2391,15 @@ func main() {
 			strings.Contains(screen, "Image #1") ||
 			strings.Contains(screen, "Failed to paste image")
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "%s did not handle the clipboard image: %v\n%s\n", *tool, err, session.Snapshot().String())
-		os.Exit(1)
+		return fmt.Errorf("%s did not handle the clipboard image: %w\n%s", *tool, err, diagnostics())
 	}
 
 	screen := session.Snapshot().String()
 	if strings.Contains(screen, "Failed to paste image") {
-		fmt.Fprintf(os.Stderr, "%s rejected the clipboard image:\n%s\n", *tool, screen)
-		os.Exit(1)
+		return fmt.Errorf("%s rejected the clipboard image:\n%s", *tool, screen)
 	}
 	fmt.Printf("%s attached clipboard image\n", *tool)
+	return nil
 }
 TUIDRIVERGO
 
@@ -2409,6 +2412,19 @@ if (
 else
     fail "E2E clipboard TUI driver build failed"
 fi
+
+# Each TUI fixture controls unrelated startup state before this helper runs.
+# One process is sufficient, and a failure keeps one clear transcript.
+run_clipboard_tui_driver() {
+    local tool=$1
+    local container=$2
+    local output_path=$3
+
+    "$E2E_TUI_DRIVER_BIN" \
+        -container "$container" \
+        -tool "$tool" \
+        > "$output_path" 2>&1
+}
 
 # Kill any existing listener on the selected bridge port (leftover from a prior cooper up).
 existing_pid=$(lsof -ti tcp:${BRIDGE_PORT} 2>/dev/null || true)
@@ -2466,8 +2482,27 @@ start_clipboard_barrel() {
 
     mkdir -p "${CONFIG_DIR}/tokens"
     TOKEN=$(head -c 32 /dev/urandom | xxd -p | tr -d '\n')
-    echo -n "$TOKEN" > "${CONFIG_DIR}/tokens/${ACTIVE_BARREL}"
-    chmod 600 "${CONFIG_DIR}/tokens/${ACTIVE_BARREL}"
+    local token_path="${CONFIG_DIR}/tokens/${ACTIVE_BARREL}"
+    local token_part="${token_path}.part"
+    local created_at
+    created_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    jq -n \
+        --arg token "$TOKEN" \
+        --arg runtime_id "$ACTIVE_BARREL" \
+        --arg tool_name "$tool" \
+        --arg clipboard_mode "$mode" \
+        --arg created_at "$created_at" \
+        '{
+            version: 1,
+            token: $token,
+            runtime_id: $runtime_id,
+            runtime_kind: "cli",
+            tool_name: $tool_name,
+            clipboard_mode: $clipboard_mode,
+            created_at: $created_at
+        }' > "$token_part"
+    chmod 600 "$token_part"
+    mv "$token_part" "$token_path"
 
     CLIPBOARD_STATE_MOUNTS=()
     read -ra CLIPBOARD_STATE_MOUNTS <<< "$(state_mounts_for "$tool")"
@@ -2479,13 +2514,13 @@ start_clipboard_barrel() {
             "-v" "${CONFIG_DIR}/base/shims:/etc/cooper/shims:ro"
         )
     fi
-    CLIPBOARD_EXTRA_ENVS=(
-        "-e" "COOPER_CLIPBOARD_MODE=${mode}"
-    )
+    CLIPBOARD_EXTRA_ENVS=()
 
     info "Starting ${tool} barrel in clipboard ${mode} mode..."
     build_barrel_run_args \
         "$ACTIVE_BARREL" \
+        "$tool" \
+        "$mode" \
         "$ACTIVE_IMAGE" \
         CLIPBOARD_STATE_MOUNTS \
         CLIPBOARD_EXTRA_MOUNTS \
@@ -2604,8 +2639,8 @@ else
     fail "Clipboard token file not mounted"
 fi
 
-# Verify the token content matches what we wrote.
-barrel_token=$(barrel_exec 'cat /etc/cooper/clipboard-token 2>/dev/null || echo EMPTY')
+# Verify the mounted authorization record contains the generated token.
+barrel_token=$(barrel_exec 'jq -er .token /etc/cooper/clipboard-token 2>/dev/null || echo EMPTY')
 if [ "$barrel_token" = "$TOKEN" ]; then
     pass "Token file content matches generated token"
 else
@@ -2728,10 +2763,10 @@ else
     fail "OpenCode shim image checksum mismatch (got ${opencode_image_sha:-empty})"
 fi
 
-if "$E2E_TUI_DRIVER_BIN" \
-    -container "$ACTIVE_BARREL" \
-    -tool opencode \
-    > /tmp/cooper-e2e-opencode-clipboard-tui.txt 2>&1; then
+if run_clipboard_tui_driver \
+    opencode \
+    "$ACTIVE_BARREL" \
+    /tmp/cooper-e2e-opencode-clipboard-tui.txt; then
     pass "OpenCode TUI attached the staged clipboard image with Ctrl-V"
 else
     fail "OpenCode TUI did not attach the staged clipboard image"
@@ -2750,19 +2785,21 @@ else
     fail "Codex X11 bridge image checksum mismatch (got ${codex_image_sha:-empty})"
 fi
 
-# Seed only the isolated E2E state mount. The TUI never submits a prompt, so
-# this fake key merely bypasses the login screen and cannot incur API usage.
+# Seed only the isolated E2E state mount. Trusting /tmp avoids a local
+# onboarding screen that uses an alternate terminal buffer. The pinned model
+# and disabled online startup work keep this test focused on clipboard paste.
+# The TUI never submits a prompt, so the fake key cannot incur API usage.
 if barrel_exec \
-    'printf "sk-e2e-clipboard-sanity\n" | /home/user/.npm-global/bin/codex login --with-api-key >/tmp/e2e-codex-login.log 2>&1'; then
-    info "Codex E2E login state prepared"
+    'printf "%s\n" "[projects.\"/tmp\"]" "trust_level = \"trusted\"" > /home/user/.codex/config.toml && printf "sk-e2e-clipboard-sanity\n" | /home/user/.npm-global/bin/codex login --with-api-key >/tmp/e2e-codex-login.log 2>&1'; then
+    info "Codex E2E startup state prepared"
 else
     fail "Codex E2E login setup failed"
 fi
 
-if "$E2E_TUI_DRIVER_BIN" \
-    -container "$ACTIVE_BARREL" \
-    -tool codex \
-    > /tmp/cooper-e2e-codex-clipboard-tui.txt 2>&1; then
+if run_clipboard_tui_driver \
+    codex \
+    "$ACTIVE_BARREL" \
+    /tmp/cooper-e2e-codex-clipboard-tui.txt; then
     pass "Codex TUI attached the staged clipboard image with Ctrl-V"
 else
     fail "Codex TUI did not attach the staged clipboard image"

@@ -13,7 +13,7 @@ import (
 // them via the tui package for convenience.
 type ACLRequestMsg = events.ACLRequestMsg
 type AnimTickMsg = events.AnimTickMsg
-type ContainerStatsMsg = events.ContainerStatsMsg
+type WorkloadStatsMsg = events.WorkloadStatsMsg
 type HeaderHealthMsg = events.HeaderHealthMsg
 type ExternalSignalMsg = events.ExternalSignalMsg
 type TickMsg = events.TickMsg
@@ -89,16 +89,16 @@ func listenSquidLogs(ch <-chan string) tea.Cmd {
 }
 
 // pollStats returns a tea.Cmd that sleeps for interval, then collects
-// container stats via the App and returns them as a ContainerStatsMsg.
+// workload stats via the App and returns them as a WorkloadStatsMsg.
 func pollStats(a app.App, interval time.Duration) tea.Cmd {
 	return func() tea.Msg {
 		time.Sleep(interval)
-		stats, err := a.ContainerStats()
+		stats, err := a.WorkloadStats()
 		if err != nil {
 			// Swallow errors; the TUI will simply show stale data.
-			return events.ContainerStatsMsg{}
+			return events.WorkloadStatsMsg{}
 		}
-		return events.ContainerStatsMsg{Stats: stats}
+		return events.WorkloadStatsMsg{Stats: stats}
 	}
 }
 

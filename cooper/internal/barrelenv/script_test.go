@@ -95,7 +95,7 @@ func countName(names []string, target string) int {
 }
 
 func TestBuildExecWrapperCommandInteractiveShape(t *testing.T) {
-	argv, err := BuildExecWrapperCommand("/tmp/cooper-cli-env-demo.sh", []string{"HTTP_PROXY", "OPENAI_API_KEY"}, []string{"bash", "-l"})
+	argv, err := BuildExecWrapperCommand("/tmp/cooper-session-env-demo.sh", []string{"HTTP_PROXY", "OPENAI_API_KEY"}, []string{"bash", "-l"})
 	if err != nil {
 		t.Fatalf("BuildExecWrapperCommand() failed: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestBuildExecWrapperCommandInteractiveShape(t *testing.T) {
 	if argv[3] != "cooper-env-wrapper" {
 		t.Fatalf("argv[3] = %q, want %q", argv[3], "cooper-env-wrapper")
 	}
-	if argv[4] != "/tmp/cooper-cli-env-demo.sh" {
+	if argv[4] != "/tmp/cooper-session-env-demo.sh" {
 		t.Fatalf("argv[4] = %q, want env file path", argv[4])
 	}
 	if argv[len(argv)-2] != "bash" || argv[len(argv)-1] != "-l" {
@@ -118,7 +118,7 @@ func TestBuildExecWrapperCommandInteractiveShape(t *testing.T) {
 
 func TestBuildExecWrapperCommandOneShotKeepsCommandAsSeparateArgv(t *testing.T) {
 	oneShot := `printf "%s" "$FOO"`
-	argv, err := BuildExecWrapperCommand("/tmp/cooper-cli-env-demo.sh", []string{"HTTP_PROXY"}, []string{"bash", "-c", oneShot})
+	argv, err := BuildExecWrapperCommand("/tmp/cooper-session-env-demo.sh", []string{"HTTP_PROXY"}, []string{"bash", "-c", oneShot})
 	if err != nil {
 		t.Fatalf("BuildExecWrapperCommand() failed: %v", err)
 	}

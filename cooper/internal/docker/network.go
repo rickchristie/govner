@@ -1,11 +1,14 @@
 package docker
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"github.com/rickchristie/govner/cooper/internal/vmcontext"
 )
 
 const (
@@ -23,7 +26,12 @@ const (
 // cooper-external is a regular bridge network (has internet access).
 // cooper-internal is created with --internal (no gateway, no internet).
 func EnsureNetworks() error {
-	if err := ensureNetwork(ExternalNetworkName(), false); err != nil {
+	outer, err := vmcontext.Load()
+	if err != nil {
+		return fmt.Errorf("load Cooper VM network context: %w", err)
+	}
+	externalIsInternal := outer != nil
+	if err := ensureNetwork(ExternalNetworkName(), externalIsInternal); err != nil {
 		return fmt.Errorf("ensure external network: %w", err)
 	}
 	if err := ensureNetwork(InternalNetworkName(), true); err != nil {
@@ -40,6 +48,13 @@ func ensureNetwork(name string, internal bool) error {
 		return err
 	}
 	if exists {
+		actual, err := networkInternal(name)
+		if err != nil {
+			return err
+		}
+		if actual != internal {
+			return fmt.Errorf("docker network %s has internal=%t; want internal=%t; run 'cooper down'", name, actual, internal)
+		}
 		return nil
 	}
 
@@ -58,6 +73,70 @@ func ensureNetwork(name string, internal bool) error {
 		return fmt.Errorf("docker network create %s failed: %w\n%s", name, err, string(output))
 	}
 	return nil
+}
+
+func networkInternal(name string) (bool, error) {
+	cmd := exec.Command("docker", "network", "inspect", "--format", "{{.Internal}}", name)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("docker network inspect %s failed: %w\n%s", name, err, string(output))
+	}
+	switch strings.TrimSpace(string(output)) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("docker network %s returned an invalid internal value", name)
+	}
+}
+
+// ValidateParentNetwork proves that a nested proxy can attach only to the
+// internal control network and gateway recorded by its host-written context.
+func ValidateParentNetwork(context vmcontext.Context) error {
+	cmd := exec.Command("docker", "network", "inspect", "--format",
+		"{{.Internal}}|{{range .IPAM.Config}}{{.Gateway}}{{end}}", context.ParentNetwork)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("inspect Cooper VM parent network %s: %w\n%s", context.ParentNetwork, err, string(output))
+	}
+	parts := strings.Split(strings.TrimSpace(string(output)), "|")
+	if len(parts) != 2 || parts[0] != "true" || parts[1] != context.ParentProxy {
+		return fmt.Errorf("cooper VM parent network %s does not match its internal gateway %s", context.ParentNetwork, context.ParentProxy)
+	}
+	if _, err := ContainerNetworkIP(context.AgentContainer, context.ParentNetwork); err != nil {
+		return fmt.Errorf("verify Cooper VM agent on parent network: %w", err)
+	}
+	return nil
+}
+
+// ContainerNetworkIP returns one container address only when Docker reports
+// that the container is attached to the named network.
+func ContainerNetworkIP(containerName, networkName string) (string, error) {
+	cmd := exec.Command("docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", containerName)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("docker inspect %s failed: %w\n%s", containerName, err, string(output))
+	}
+	return containerNetworkIPFromJSON(output, containerName, networkName)
+}
+
+func containerNetworkIPFromJSON(data []byte, containerName, networkName string) (string, error) {
+	var networks map[string]struct {
+		IPAddress string `json:"IPAddress"`
+	}
+	if err := json.Unmarshal(data, &networks); err != nil {
+		return "", fmt.Errorf("decode Docker networks for %s: %w", containerName, err)
+	}
+	attachment, ok := networks[networkName]
+	if !ok {
+		return "", fmt.Errorf("container %s is not attached to network %s", containerName, networkName)
+	}
+	ip := net.ParseIP(strings.TrimSpace(attachment.IPAddress))
+	if ip == nil || ip.To4() == nil || !ip.IsPrivate() {
+		return "", fmt.Errorf("container %s has invalid private IPv4 address on network %s", containerName, networkName)
+	}
+	return ip.String(), nil
 }
 
 // RemoveNetworks removes both cooper networks.
@@ -126,6 +205,17 @@ func GetGatewayIP(networkName string) (string, error) {
 // host.docker.internal to the host loopback, so no extra bind addresses are
 // needed or valid.
 func BridgeGatewayIPs() ([]string, error) {
+	outer, err := vmcontext.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load Cooper VM bridge context: %w", err)
+	}
+	if outer != nil {
+		ip, err := ContainerNetworkIP(outer.AgentContainer, outer.ParentNetwork)
+		if err != nil {
+			return nil, err
+		}
+		return []string{ip}, nil
+	}
 	return bridgeGatewayIPsForOS(runtime.GOOS)
 }
 

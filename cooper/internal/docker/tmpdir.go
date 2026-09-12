@@ -7,68 +7,45 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/rickchristie/govner/cooper/internal/runtimefs"
+	"github.com/rickchristie/govner/cooper/internal/workload"
 )
 
-// BarrelTmpRoot returns the Cooper-managed host directory that backs barrel
-// /tmp mounts for the current Cooper installation.
-func BarrelTmpRoot(cooperDir string) string {
-	return filepath.Join(cooperDir, "tmp")
-}
-
-// BarrelSessionRoot returns the Cooper-managed host directory that stores
-// host-controlled runtime session files for barrels.
-func BarrelSessionRoot(cooperDir string) string {
-	return filepath.Join(cooperDir, "session")
-}
-
-// BarrelTmpDir returns the host directory mounted to /tmp for a specific
-// barrel container.
-func BarrelTmpDir(cooperDir, containerName string) string {
-	return filepath.Join(BarrelTmpRoot(cooperDir), containerName)
-}
-
-// BarrelSessionDir returns the host directory mounted read-only into a
-// specific barrel for host-controlled runtime session files.
-func BarrelSessionDir(cooperDir, containerName string) string {
-	return filepath.Join(BarrelSessionRoot(cooperDir), containerName)
-}
-
-// ResetBarrelTmpRoot removes all persisted barrel /tmp contents and recreates
-// the root directory. Cooper calls this at control-plane startup and shutdown
-// so each session begins and ends with a pristine temp tree.
-func ResetBarrelTmpRoot(cooperDir string) error {
+// ResetRuntimeTempRoot removes all workload /tmp contents and recreates the
+// root. Cooper calls it at control-plane startup and shutdown.
+func ResetRuntimeTempRoot(cooperDir string) error {
 	cooperDir = strings.TrimSpace(cooperDir)
 	if cooperDir == "" {
 		return nil
 	}
-	if err := validateGrokStateOutsideCooperDir(cooperDir); err != nil {
+	if err := validateHostAgentStateOutsideCooperDir(cooperDir); err != nil {
 		return err
 	}
 
-	return resetOwnedRoot(BarrelTmpRoot(cooperDir), "barrel tmp")
+	return resetOwnedRoot(runtimefs.TempRoot(cooperDir), "runtime temporary")
 }
 
-// ResetBarrelSessionRoot removes all persisted host-controlled session files
-// and recreates the root directory. Cooper resets this alongside BarrelTmpRoot
-// so no stale session control files survive across control-plane sessions.
-func ResetBarrelSessionRoot(cooperDir string) error {
+// ResetRuntimeSessionRoot removes all host-controlled workload session files
+// and recreates the root. No stale control file survives between runs.
+func ResetRuntimeSessionRoot(cooperDir string) error {
 	cooperDir = strings.TrimSpace(cooperDir)
 	if cooperDir == "" {
 		return nil
 	}
-	if err := validateGrokStateOutsideCooperDir(cooperDir); err != nil {
+	if err := validateHostAgentStateOutsideCooperDir(cooperDir); err != nil {
 		return err
 	}
 
-	return resetOwnedRoot(BarrelSessionRoot(cooperDir), "barrel session")
+	return resetOwnedRoot(runtimefs.SessionRoot(cooperDir), "runtime session")
 }
 
-func validateGrokStateOutsideCooperDir(cooperDir string) error {
+func validateHostAgentStateOutsideCooperDir(cooperDir string) error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("get home directory before Cooper-owned cleanup: %w", err)
 	}
-	return ValidateGrokHostStateRoot(homeDir, cooperDir)
+	return workload.ValidateAllHostAgentStateRoots(homeDir, cooperDir)
 }
 
 func resetOwnedRoot(rootPath, label string) error {

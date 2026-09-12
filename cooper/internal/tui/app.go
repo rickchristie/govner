@@ -223,12 +223,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, listenCmd
 
-	case events.ContainerStatsMsg:
+	case events.WorkloadStatsMsg:
 		var cmd tea.Cmd
-		if m.containersModel != nil {
+		if m.runtimesModel != nil {
 			var sm SubModel
-			sm, cmd = m.containersModel.Update(msg)
-			m.containersModel = sm
+			sm, cmd = m.runtimesModel.Update(msg)
+			m.runtimesModel = sm
 		}
 		// Schedule next poll.
 		var pollCmd tea.Cmd
@@ -303,7 +303,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		modal := components.NewModal(
 			theme.ModalReloadSocat,
 			"Reloading Port Forwarding...",
-			"Writing rules and signaling containers.\nPlease wait.",
+			"Writing rules and signaling runtimes.\nPlease wait.",
 			"",
 			"",
 		)
@@ -336,7 +336,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			modal := components.NewModal(
 				theme.ModalReloadSocat,
 				theme.IconCheck+" Reload Successful",
-				"Port forwarding rules updated.\nAll containers reloaded.",
+				"Port forwarding rules updated.\nAll runtimes reloaded.",
 				"OK",
 				"Dismiss",
 			)
@@ -383,8 +383,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clipboardSnapshot = nil
 		return m, nil
 
-	case events.ContainerActionRequestMsg:
-		m.showContainerActionModal(msg.Action, msg.Name)
+	case events.WorkloadActionRequestMsg:
+		m.showWorkloadActionModal(msg.Action, msg.Name)
 		return m, nil
 
 	case about.RunUpdateMsg:
@@ -422,11 +422,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.executeModalConfirm(modal)
 			}
 			// Cancel focused — dismiss modal.
-			m.clearPendingContainerModal()
+			m.clearPendingWorkloadModal()
 			m.modal = nil
 			return m, nil
 		case "esc":
-			m.clearPendingContainerModal()
+			m.clearPendingWorkloadModal()
 			m.modal = nil
 			return m, nil
 		case "up", "down", "left", "right":
@@ -496,39 +496,39 @@ func (m *Model) showExitModal() {
 	modal := components.NewModal(
 		theme.ModalExit,
 		theme.BarrelEmoji+" Exit Cooper?",
-		"This will stop the proxy and all\ncontainers. AI sessions\nwill lose network access.",
+		"This will stop the proxy and all\nruntimes. AI sessions\nwill lose network access.",
 		"Confirm",
 		"Cancel",
 	)
 	m.modal = &modal
 }
 
-func (m *Model) showContainerActionModal(action, name string) {
+func (m *Model) showWorkloadActionModal(action, name string) {
 	var modalType theme.ModalType
 	var title, body, confirm string
 	switch action {
 	case "stop":
-		modalType = theme.ModalStopContainer
-		title = "Stop Container"
-		body = fmt.Sprintf("Stop and remove this barrel?\n\n  %s", name)
+		modalType = theme.ModalStopWorkload
+		title = "Stop Runtime"
+		body = fmt.Sprintf("Stop and remove this runtime?\n\n  %s", name)
 		confirm = "Stop"
 	case "restart":
-		modalType = theme.ModalRestartContainer
-		title = "Restart Container"
-		body = fmt.Sprintf("Restart this barrel now?\n\n  %s", name)
+		modalType = theme.ModalRestartWorkload
+		title = "Restart Runtime"
+		body = fmt.Sprintf("Restart this runtime now?\n\n  %s", name)
 		confirm = "Restart"
 	default:
 		return
 	}
-	m.pendingContainerAction = action
-	m.pendingContainerName = name
+	m.pendingWorkloadAction = action
+	m.pendingWorkloadName = name
 	modal := components.NewModal(modalType, title, body, confirm, "Cancel")
 	m.modal = &modal
 }
 
-func (m *Model) clearPendingContainerModal() {
-	m.pendingContainerAction = ""
-	m.pendingContainerName = ""
+func (m *Model) clearPendingWorkloadModal() {
+	m.pendingWorkloadAction = ""
+	m.pendingWorkloadName = ""
 }
 
 // isTextInputActive returns true when the active sub-model is in a text
@@ -762,15 +762,15 @@ func (m *Model) executeModalConfirm(modal *components.Modal) (tea.Model, tea.Cmd
 			m.onQuit()
 		}
 		return m, tea.Quit
-	case theme.ModalStopContainer, theme.ModalRestartContainer:
-		action := m.pendingContainerAction
-		name := m.pendingContainerName
-		m.clearPendingContainerModal()
+	case theme.ModalStopWorkload, theme.ModalRestartWorkload:
+		action := m.pendingWorkloadAction
+		name := m.pendingWorkloadName
+		m.clearPendingWorkloadModal()
 		if action == "" || name == "" {
 			return m, nil
 		}
 		return m, func() tea.Msg {
-			return events.ContainerActionConfirmMsg{Action: action, Name: name}
+			return events.WorkloadActionConfirmMsg{Action: action, Name: name}
 		}
 	}
 	return m, nil
@@ -826,8 +826,8 @@ func (m *Model) forwardToActive(msg tea.Msg) tea.Cmd {
 // setActiveSubModel writes the updated sub-model back to the correct field.
 func (m *Model) setActiveSubModel(sm SubModel) {
 	switch m.activeTab {
-	case theme.TabContainers:
-		m.containersModel = sm
+	case theme.TabRuntimes:
+		m.runtimesModel = sm
 	case theme.TabMonitor:
 		m.proxyMonModel = sm
 	case theme.TabBlocked:
@@ -1101,8 +1101,9 @@ func (m *Model) helpBar(width int) string {
 			HelpBinding{Key: "d", Desc: "Deny"},
 			HelpBinding{Key: "s", Desc: "Session access"},
 		)
-	case theme.TabContainers:
+	case theme.TabRuntimes:
 		bindings = append(bindings,
+			HelpBinding{Key: "Enter", Desc: "Details"},
 			HelpBinding{Key: "s", Desc: "Stop"},
 			HelpBinding{Key: "r", Desc: "Restart"},
 		)

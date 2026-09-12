@@ -117,6 +117,7 @@ func TestValidateGrokOutputDirNonDockerfileConflict(t *testing.T) {
 }
 
 func TestRenderSquidConf_GrokPolicyUnconditional(t *testing.T) {
+	usePhysicalHostTemplateContext(t)
 	cfg := noToolsConfig()
 	result, err := RenderSquidConf(cfg)
 	if err != nil {

@@ -13,12 +13,12 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
-// ContainerManager is the subset of app.App used by the containers tab
+// WorkloadManager is the subset of app.App used by the runtimes tab
 // for stop/restart actions. Defining a local interface keeps this package
 // decoupled from the full App interface.
-type ContainerManager interface {
-	StopContainer(name string) error
-	RestartContainer(name string) error
+type WorkloadManager interface {
+	StopWorkload(name string) error
+	RestartWorkload(name string) error
 }
 
 type actionState int
@@ -30,37 +30,41 @@ const (
 	actionFailed
 )
 
-type containerActionResultMsg struct {
+type workloadActionResultMsg struct {
 	Action string
 	Name   string
 	Err    error
 }
 
-// containerItem holds combined barrel info and optional resource stats for
-// a single container row.
-type containerItem struct {
-	Name       string
-	Status     string
-	ShellCount int
-	CPUPercent string
-	MemUsage   string
-	TmpUsage   string
+// workloadItem contains only presentation data for one runtime row.
+type workloadItem struct {
+	ID           string
+	Kind         app.WorkloadKind
+	Tool         string
+	Workspace    string
+	Depth        int
+	Status       string
+	HealthReason string
+	ShellCount   int
+	CPUPercent   string
+	MemUsage     string
+	StorageUsage string
 }
 
-// Model is the sub-model for the Containers tab. It shows a scrollable list of
-// running containers with columns for status, shells, CPU, memory, and /tmp.
+// Model is the sub-model for the Runtimes tab. It shows proxy, CLI, and VM
+// workloads through one runtime-neutral application boundary.
 type Model struct {
-	list       components.ScrollableList
-	containers []containerItem
-	expanded   bool
-	manager    ContainerManager
+	list      components.ScrollableList
+	workloads []workloadItem
+	expanded  bool
+	manager   WorkloadManager
 
 	actionState actionState
 	actionText  string
 }
 
-// New creates a new containers tab model.
-func New(mgr ContainerManager) *Model {
+// New creates a new runtimes tab model.
+func New(mgr WorkloadManager) *Model {
 	return &Model{
 		list:    components.NewScrollableList(0, 0),
 		manager: mgr,
@@ -81,21 +85,21 @@ func (m *Model) Update(msg tea.Msg) (theme.SubModel, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
-	case events.ContainerStatsMsg:
+	case events.WorkloadStatsMsg:
 		m.applyStats(msg.Stats)
 		return m, nil
-	case events.ContainerActionConfirmMsg:
+	case events.WorkloadActionConfirmMsg:
 		return m.handleConfirmedAction(msg)
-	case containerActionResultMsg:
+	case workloadActionResultMsg:
 		m.handleActionResult(msg)
 		return m, nil
 	}
 	return m, nil
 }
 
-// View satisfies SubModel. Renders the container list or empty state.
+// View satisfies SubModel. It renders the workload list or empty state.
 func (m *Model) View(width, height int) string {
-	if len(m.containers) == 0 {
+	if len(m.workloads) == 0 {
 		return m.emptyState(width, height)
 	}
 
@@ -106,6 +110,11 @@ func (m *Model) View(width, height int) string {
 	if m.actionState != actionNone && m.actionText != "" {
 		feedbackLines = 1
 	}
+	showDetail := m.expanded && height >= 14 && m.list.Selected() != nil
+	detailLines := 0
+	if showDetail {
+		detailLines = 10
+	}
 
 	var sections []string
 	header := renderHeader(width)
@@ -113,7 +122,7 @@ func (m *Model) View(width, height int) string {
 	divider := theme.DividerStyle.Render(strings.Repeat(theme.BorderH, width))
 	sections = append(sections, divider)
 
-	listHeight := height - 2 - feedbackLines
+	listHeight := height - 2 - feedbackLines - detailLines
 	if listHeight < 1 {
 		listHeight = 1
 	}
@@ -124,10 +133,10 @@ func (m *Model) View(width, height int) string {
 		sections = append(sections, renderActionStatus(m.actionState, m.actionText, width))
 	}
 
-	if m.expanded {
+	if showDetail {
 		sel := m.list.Selected()
 		if sel != nil {
-			if ci, ok := sel.Data.(containerItem); ok {
+			if ci, ok := sel.Data.(workloadItem); ok {
 				sections = append(sections, renderDetail(ci, width))
 			}
 		}
@@ -136,7 +145,7 @@ func (m *Model) View(width, height int) string {
 	return strings.Join(sections, "\n")
 }
 
-// handleKey processes key events for the containers tab.
+// handleKey processes key events for the runtimes tab.
 func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 	switch msg.String() {
 	case "up", "k":
@@ -147,60 +156,54 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 		m.expanded = false
 	case "s":
 		if sel := m.list.Selected(); sel != nil {
-			if ci, ok := sel.Data.(containerItem); ok {
-				return m, requestActionCmd("stop", ci.Name)
+			if ci, ok := sel.Data.(workloadItem); ok {
+				return m, requestActionCmd("stop", ci.ID)
 			}
 		}
 	case "r":
 		if sel := m.list.Selected(); sel != nil {
-			if ci, ok := sel.Data.(containerItem); ok {
-				return m, requestActionCmd("restart", ci.Name)
+			if ci, ok := sel.Data.(workloadItem); ok {
+				return m, requestActionCmd("restart", ci.ID)
 			}
 		}
 	case "enter":
-		// Detail pane disabled — info is already in the table columns.
+		m.expanded = !m.expanded
 	}
 	return m, nil
 }
 
-func (m *Model) handleConfirmedAction(msg events.ContainerActionConfirmMsg) (theme.SubModel, tea.Cmd) {
+func (m *Model) handleConfirmedAction(msg events.WorkloadActionConfirmMsg) (theme.SubModel, tea.Cmd) {
 	switch msg.Action {
 	case "stop":
 		m.markActionPending(msg.Name, "Stopping")
-		return m, m.stopContainerCmd(msg.Name)
+		return m, m.stopWorkloadCmd(msg.Name)
 	case "restart":
 		m.markActionPending(msg.Name, "Restarting")
-		return m, m.restartContainerCmd(msg.Name)
+		return m, m.restartWorkloadCmd(msg.Name)
 	default:
 		return m, nil
 	}
 }
 
-// applyStats merges incoming container stats into the model.
-func (m *Model) applyStats(stats []app.ContainerStat) {
-	updated := make([]containerItem, 0, len(stats))
+// applyStats replaces the screen snapshot while it preserves list selection.
+func (m *Model) applyStats(stats []app.WorkloadStat) {
+	updated := make([]workloadItem, 0, len(stats))
 	for _, s := range stats {
-		updated = append(updated, containerItem{
-			Name:       s.Name,
-			Status:     s.Status,
-			ShellCount: s.ShellCount,
-			CPUPercent: s.CPUPercent,
-			MemUsage:   s.MemUsage,
-			TmpUsage:   s.TmpUsage,
+		updated = append(updated, workloadItem{
+			ID: s.ID, Kind: s.Kind, Tool: s.Tool, Workspace: s.Workspace, Depth: s.Depth,
+			Status: s.Status, HealthReason: s.HealthReason, ShellCount: s.ShellCount,
+			CPUPercent: s.CPUPercent, MemUsage: s.MemUsage, StorageUsage: s.StorageUsage,
 		})
 	}
 
 	sort.Slice(updated, func(i, j int) bool {
-		if updated[i].Name == app.ContainerProxy {
-			return true
+		if updated[i].Kind != updated[j].Kind {
+			return workloadKindOrder(updated[i].Kind) < workloadKindOrder(updated[j].Kind)
 		}
-		if updated[j].Name == app.ContainerProxy {
-			return false
-		}
-		return updated[i].Name < updated[j].Name
+		return updated[i].ID < updated[j].ID
 	})
 
-	m.containers = updated
+	m.workloads = updated
 	m.rebuildListItems()
 	if len(updated) == 0 {
 		m.actionState = actionNone
@@ -208,11 +211,24 @@ func (m *Model) applyStats(stats []app.ContainerStat) {
 	}
 }
 
-// rebuildListItems syncs the ScrollableList items from the containers slice.
+func workloadKindOrder(kind app.WorkloadKind) int {
+	switch kind {
+	case app.WorkloadProxy:
+		return 0
+	case app.WorkloadCLI:
+		return 1
+	case app.WorkloadVM:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// rebuildListItems syncs the list from the current workload snapshot.
 func (m *Model) rebuildListItems() {
-	items := make([]components.ListItem, len(m.containers))
-	for i, c := range m.containers {
-		items[i] = components.ListItem{ID: c.Name, Data: c}
+	items := make([]components.ListItem, len(m.workloads))
+	for i, workload := range m.workloads {
+		items[i] = components.ListItem{ID: workload.ID, Data: workload}
 	}
 	m.list.SetItems(items)
 }
@@ -220,37 +236,39 @@ func (m *Model) rebuildListItems() {
 // emptyState renders the centered empty message.
 func (m *Model) emptyState(width, height int) string {
 	icon := theme.BarrelEmoji
-	msg := theme.EmptyStateStyle.Render("No containers running.")
+	msg := theme.EmptyStateStyle.Render("No runtimes are running.")
 	hint := theme.DimStyle.Render("Run ") +
 		theme.BrandStyle.Render("cooper cli") +
-		theme.DimStyle.Render(" to start a container.")
+		theme.DimStyle.Render(" or ") +
+		theme.BrandStyle.Render("cooper vm") +
+		theme.DimStyle.Render(" to start one.")
 
 	content := lipgloss.JoinVertical(lipgloss.Center, icon, "", msg, "", hint)
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, content)
 }
 
 func (m *Model) markActionPending(name, verb string) {
-	m.updateContainerStatus(name, verb+"...")
+	m.updateWorkloadStatus(name, verb+"...")
 	m.actionState = actionPending
 	m.actionText = verb + " " + name + "..."
 }
 
-func (m *Model) handleActionResult(msg containerActionResultMsg) {
+func (m *Model) handleActionResult(msg workloadActionResultMsg) {
 	verbPast := map[string]string{"stop": "Stopped", "restart": "Restarted"}
 	verbPresent := map[string]string{"stop": "Running", "restart": "Running"}
 
 	if msg.Err != nil {
-		m.updateContainerStatus(msg.Name, "Running")
+		m.updateWorkloadStatus(msg.Name, "Running")
 		m.actionState = actionFailed
 		m.actionText = msg.Err.Error()
 		return
 	}
 
 	if msg.Action == "stop" {
-		m.removeContainer(msg.Name)
+		m.removeWorkload(msg.Name)
 	}
 	if status, ok := verbPresent[msg.Action]; ok {
-		m.updateContainerStatus(msg.Name, status)
+		m.updateWorkloadStatus(msg.Name, status)
 	}
 	m.actionState = actionSuccess
 	if past, ok := verbPast[msg.Action]; ok {
@@ -258,50 +276,50 @@ func (m *Model) handleActionResult(msg containerActionResultMsg) {
 	}
 }
 
-func (m *Model) updateContainerStatus(name, status string) {
-	for i := range m.containers {
-		if m.containers[i].Name == name {
-			m.containers[i].Status = status
+func (m *Model) updateWorkloadStatus(name, status string) {
+	for i := range m.workloads {
+		if m.workloads[i].ID == name {
+			m.workloads[i].Status = status
 			return
 		}
 	}
 }
 
-func (m *Model) removeContainer(name string) {
-	filtered := m.containers[:0]
-	for _, item := range m.containers {
-		if item.Name != name {
+func (m *Model) removeWorkload(name string) {
+	filtered := m.workloads[:0]
+	for _, item := range m.workloads {
+		if item.ID != name {
 			filtered = append(filtered, item)
 		}
 	}
-	m.containers = filtered
+	m.workloads = filtered
 	m.rebuildListItems()
 }
 
-// stopContainerCmd returns a tea.Cmd that stops a container by name.
-func (m *Model) stopContainerCmd(name string) tea.Cmd {
+// stopWorkloadCmd returns a command that stops one workload by ID.
+func (m *Model) stopWorkloadCmd(name string) tea.Cmd {
 	mgr := m.manager
 	return func() tea.Msg {
 		if mgr == nil {
-			return containerActionResultMsg{Action: "stop", Name: name, Err: nil}
+			return workloadActionResultMsg{Action: "stop", Name: name, Err: nil}
 		}
-		return containerActionResultMsg{Action: "stop", Name: name, Err: mgr.StopContainer(name)}
+		return workloadActionResultMsg{Action: "stop", Name: name, Err: mgr.StopWorkload(name)}
 	}
 }
 
-// restartContainerCmd returns a tea.Cmd that restarts a container.
-func (m *Model) restartContainerCmd(name string) tea.Cmd {
+// restartWorkloadCmd returns a command that restarts one workload.
+func (m *Model) restartWorkloadCmd(name string) tea.Cmd {
 	mgr := m.manager
 	return func() tea.Msg {
 		if mgr == nil {
-			return containerActionResultMsg{Action: "restart", Name: name, Err: nil}
+			return workloadActionResultMsg{Action: "restart", Name: name, Err: nil}
 		}
-		return containerActionResultMsg{Action: "restart", Name: name, Err: mgr.RestartContainer(name)}
+		return workloadActionResultMsg{Action: "restart", Name: name, Err: mgr.RestartWorkload(name)}
 	}
 }
 
 func requestActionCmd(action, name string) tea.Cmd {
 	return func() tea.Msg {
-		return events.ContainerActionRequestMsg{Action: action, Name: name}
+		return events.WorkloadActionRequestMsg{Action: action, Name: name}
 	}
 }

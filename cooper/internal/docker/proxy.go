@@ -1,13 +1,16 @@
 package docker
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/vmcontext"
 )
 
 const (
@@ -23,7 +26,16 @@ const (
 //
 // cooperDir is the path to ~/.cooper (contains squid.conf, CA cert, run dir, logs).
 func StartProxy(cfg *config.Config, cooperDir string) error {
-	// Write socat-rules.json before starting so the volume mount has content.
+	outer, err := vmcontext.Load()
+	if err != nil {
+		return fmt.Errorf("load Cooper VM proxy context: %w", err)
+	}
+	if outer != nil {
+		if err := ValidateParentNetwork(*outer); err != nil {
+			return err
+		}
+	}
+	// Write the rules before starting so the live-directory mount has content.
 	if err := WritePortForwardConfig(cooperDir, cfg.BridgePort, cfg.PortForwardRules); err != nil {
 		return fmt.Errorf("write socat rules: %w", err)
 	}
@@ -41,13 +53,12 @@ func StartProxy(cfg *config.Config, cooperDir string) error {
 	if err := prepareProxyMountDirs(aclSocketDir, logDir); err != nil {
 		return err
 	}
-	socatRules := filepath.Join(cooperDir, socatRulesFile)
+	liveConfig := LiveConfigPath(cooperDir)
 
 	args := []string{
 		"run", "-d",
 		"--name", proxyName,
 		"--network", ExternalNetworkName(),
-		"--add-host=host.docker.internal:host-gateway",
 		"--restart", "unless-stopped",
 
 		// Volume mounts: squid config (hot-reloadable), CA cert/key, ACL socket dir, logs.
@@ -57,11 +68,16 @@ func StartProxy(cfg *config.Config, cooperDir string) error {
 		"-v", fmt.Sprintf("%s:/var/run/cooper:rw", aclSocketDir),
 		"-v", fmt.Sprintf("%s:/var/log/squid:rw", logDir),
 
-		// Socat port forwarding rules (live-reloadable via SIGHUP).
-		"-v", fmt.Sprintf("%s:/etc/cooper/socat-rules.json:ro", socatRules),
-
-		// Publish proxy port on localhost only for host access.
-		"-p", fmt.Sprintf("127.0.0.1:%d:%d", cfg.ProxyPort, cfg.ProxyPort),
+		// Public runtime rules are mounted as a directory. This makes an atomic
+		// host replacement visible without exposing the rest of Cooper state.
+		"-v", fmt.Sprintf("%s:/etc/cooper/live:ro", liveConfig),
+	}
+	if outer == nil {
+		args = append(args,
+			"--add-host=host.docker.internal:host-gateway",
+			// Publish the physical-host proxy only on loopback.
+			"-p", fmt.Sprintf("127.0.0.1:%d:%d", cfg.ProxyPort, cfg.ProxyPort),
+		)
 	}
 
 	// Port forwarding rules are handled by socat relays inside the proxy and
@@ -82,6 +98,12 @@ func StartProxy(cfg *config.Config, cooperDir string) error {
 		// If this fails, stop the container to avoid a half-configured proxy.
 		_ = exec.Command("docker", "rm", "-f", proxyName).Run()
 		return fmt.Errorf("connect proxy to internal network: %w", err)
+	}
+	if outer != nil {
+		if err := ConnectContainer(proxyName, outer.ParentNetwork); err != nil {
+			_ = exec.Command("docker", "rm", "-f", proxyName).Run()
+			return fmt.Errorf("connect nested proxy to parent control network: %w", err)
+		}
 	}
 
 	return nil
@@ -109,6 +131,22 @@ func StopProxy() error {
 	return stopAndRemoveContainer(ProxyContainerName())
 }
 
+// RestartProxy restarts the proxy and waits until the new Squid process listens.
+// A proxy does not use the barrel entrypoint readiness marker.
+func RestartProxy() error {
+	proxyName := ProxyContainerName()
+	output, err := exec.Command("docker", "restart", proxyName).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker restart %s failed: %w\n%s", proxyName, err, string(output))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := waitForProxyReady(ctx); err != nil {
+		return fmt.Errorf("wait for restarted proxy %s: %w", proxyName, err)
+	}
+	return nil
+}
+
 // IsProxyRunning checks whether the proxy container is currently running.
 func IsProxyRunning() (bool, error) {
 	proxyName := ProxyContainerName()
@@ -130,6 +168,12 @@ func IsProxyRunning() (bool, error) {
 // Squid. The polls cover that startup interval and wait until Squid confirms
 // that the new listener is active.
 func ReconfigureSquid() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := waitForProxyReady(ctx); err != nil {
+		return err
+	}
+
 	const script = `set -u
 if ! squid -k parse; then
     echo "Squid configuration validation failed." >&2
@@ -189,4 +233,28 @@ exit 1`
 		return fmt.Errorf("validate and signal Squid reconfigure: %w\n%s", err, string(output))
 	}
 	return nil
+}
+
+// waitForProxyReady retries outside the container. Docker can report a
+// restarted container as running before the entrypoint starts Squid. A bad
+// configuration can also make the restart policy replace the container while
+// a probe runs, so one long docker exec is not a stable readiness boundary.
+func waitForProxyReady(ctx context.Context) error {
+	const script = `set -u
+port="$(awk '$1 == "http_port" { print $2; exit }' /etc/squid/squid.conf)"
+pid="$(pgrep -x squid | head -n 1)"
+[ -n "$pid" ] && [ -n "$port" ] && nc -z -w 1 127.0.0.1 "$port"`
+	var lastResult string
+	for {
+		output, err := exec.CommandContext(ctx, "docker", "exec", ProxyContainerName(), "sh", "-c", script).CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		lastResult = strings.TrimSpace(string(output))
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("squid did not become ready: %w (last probe: %s)", ctx.Err(), lastResult)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }

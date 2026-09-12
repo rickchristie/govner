@@ -254,7 +254,7 @@ func TestHandleKey_PasteFallsThroughWhenNotAFile(t *testing.T) {
 	recorder := &recordingSubModel{}
 
 	model := NewModel(mockApp)
-	model.SetContainersModel(recorder)
+	model.SetRuntimesModel(recorder)
 
 	_, cmd := model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("not a file"), Paste: true})
 	if cmd != nil {
@@ -371,15 +371,16 @@ func TestUpdate_ExternalSignalMarksUnexpectedExitReason(t *testing.T) {
 func TestHandleKey_ContainersStopShowsConfirmModalAndExecutesOnConfirm(t *testing.T) {
 	mockApp := cooperapp.NewMockApp(&config.Config{}, t.TempDir())
 	model := NewModel(mockApp)
-	model.SetContainersModel(containerui.New(mockApp))
+	model.SetRuntimesModel(containerui.New(mockApp))
 
-	if _, cmd := model.Update(events.ContainerStatsMsg{Stats: []cooperapp.ContainerStat{{
-		Name:       "barrel-demo-claude",
-		Status:     "Running",
-		ShellCount: 1,
-		CPUPercent: "1%",
-		MemUsage:   "10MiB / 1GiB",
-		TmpUsage:   "12KB",
+	if _, cmd := model.Update(events.WorkloadStatsMsg{Stats: []cooperapp.WorkloadStat{{
+		ID:           "barrel-demo-claude",
+		Kind:         cooperapp.WorkloadCLI,
+		Status:       "Running",
+		ShellCount:   1,
+		CPUPercent:   "1%",
+		MemUsage:     "10MiB / 1GiB",
+		StorageUsage: "12KB",
 	}}}); cmd != nil {
 		_ = cmd
 	}
@@ -393,8 +394,8 @@ func TestHandleKey_ContainersStopShowsConfirmModalAndExecutesOnConfirm(t *testin
 	if root.modal == nil {
 		t.Fatal("expected stop confirmation modal")
 	}
-	if root.modal.ModalType != theme.ModalStopContainer {
-		t.Fatalf("modal type = %v, want ModalStopContainer", root.modal.ModalType)
+	if root.modal.ModalType != theme.ModalStopWorkload {
+		t.Fatalf("modal type = %v, want ModalStopWorkload", root.modal.ModalType)
 	}
 	if !strings.Contains(root.modal.Body, "barrel-demo-claude") {
 		t.Fatalf("modal body = %q, want container name", root.modal.Body)
@@ -408,13 +409,13 @@ func TestHandleKey_ContainersStopShowsConfirmModalAndExecutesOnConfirm(t *testin
 	updated, _ = root.Update(cmd())
 	root = updated.(*Model)
 
-	if len(mockApp.StoppedContainers) != 1 || mockApp.StoppedContainers[0] != "barrel-demo-claude" {
-		t.Fatalf("stopped containers = %#v", mockApp.StoppedContainers)
+	if len(mockApp.StoppedWorkloads) != 1 || mockApp.StoppedWorkloads[0] != "barrel-demo-claude" {
+		t.Fatalf("stopped containers = %#v", mockApp.StoppedWorkloads)
 	}
 	if root.modal != nil {
 		t.Fatal("expected modal to be dismissed after confirmation")
 	}
-	if root.pendingContainerAction != "" || root.pendingContainerName != "" {
+	if root.pendingWorkloadAction != "" || root.pendingWorkloadName != "" {
 		t.Fatal("expected pending container modal state to be cleared")
 	}
 }

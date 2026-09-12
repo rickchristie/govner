@@ -23,6 +23,7 @@ cooper/.test-e2e/
 cooper/.e2e-workspace/
 cooper/.e2e-*-config/
 cooper/.tmp/
+.cooper-vm-self-host-*/
 
 .scratch/
 

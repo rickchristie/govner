@@ -4,55 +4,25 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/rickchristie/govner/cooper/internal/runtimefs"
 )
 
-func TestBarrelTmpRoot(t *testing.T) {
-	got := BarrelTmpRoot("/tmp/cooper")
-	want := filepath.Join("/tmp/cooper", "tmp")
-	if got != want {
-		t.Fatalf("BarrelTmpRoot() = %q, want %q", got, want)
-	}
-}
-
-func TestBarrelTmpDir(t *testing.T) {
-	got := BarrelTmpDir("/tmp/cooper", "barrel-demo-claude")
-	want := filepath.Join("/tmp/cooper", "tmp", "barrel-demo-claude")
-	if got != want {
-		t.Fatalf("BarrelTmpDir() = %q, want %q", got, want)
-	}
-}
-
-func TestBarrelSessionRoot(t *testing.T) {
-	got := BarrelSessionRoot("/tmp/cooper")
-	want := filepath.Join("/tmp/cooper", "session")
-	if got != want {
-		t.Fatalf("BarrelSessionRoot() = %q, want %q", got, want)
-	}
-}
-
-func TestBarrelSessionDir(t *testing.T) {
-	got := BarrelSessionDir("/tmp/cooper", "barrel-demo-claude")
-	want := filepath.Join("/tmp/cooper", "session", "barrel-demo-claude")
-	if got != want {
-		t.Fatalf("BarrelSessionDir() = %q, want %q", got, want)
-	}
-}
-
-func TestResetBarrelTmpRoot_CreatesMissingDir(t *testing.T) {
+func TestResetRuntimeTempRootCreatesMissingDirectory(t *testing.T) {
 	t.Setenv("GROK_HOME", "")
 	cooperDir := t.TempDir()
 
-	if err := ResetBarrelTmpRoot(cooperDir); err != nil {
-		t.Fatalf("ResetBarrelTmpRoot() failed: %v", err)
+	if err := ResetRuntimeTempRoot(cooperDir); err != nil {
+		t.Fatalf("ResetRuntimeTempRoot() failed: %v", err)
 	}
 
-	assertDirExistsAndEmpty(t, BarrelTmpRoot(cooperDir))
+	assertDirExistsAndEmpty(t, runtimefs.TempRoot(cooperDir))
 }
 
-func TestResetBarrelTmpRoot_RemovesExistingContents(t *testing.T) {
+func TestResetRuntimeTempRootRemovesExistingContents(t *testing.T) {
 	t.Setenv("GROK_HOME", "")
 	cooperDir := t.TempDir()
-	tmpRoot := BarrelTmpRoot(cooperDir)
+	tmpRoot := runtimefs.TempRoot(cooperDir)
 	staleFile := filepath.Join(tmpRoot, "barrel-demo", "session", "stale.txt")
 	if err := os.MkdirAll(filepath.Dir(staleFile), 0o755); err != nil {
 		t.Fatalf("mkdir stale dir: %v", err)
@@ -61,49 +31,49 @@ func TestResetBarrelTmpRoot_RemovesExistingContents(t *testing.T) {
 		t.Fatalf("write stale file: %v", err)
 	}
 
-	if err := ResetBarrelTmpRoot(cooperDir); err != nil {
-		t.Fatalf("ResetBarrelTmpRoot() failed: %v", err)
+	if err := ResetRuntimeTempRoot(cooperDir); err != nil {
+		t.Fatalf("ResetRuntimeTempRoot() failed: %v", err)
 	}
 
 	assertDirExistsAndEmpty(t, tmpRoot)
 }
 
-func TestResetBarrelTmpRoot_ReplacesFileWithDir(t *testing.T) {
+func TestResetRuntimeTempRootReplacesFileWithDirectory(t *testing.T) {
 	t.Setenv("GROK_HOME", "")
 	cooperDir := t.TempDir()
-	tmpRoot := BarrelTmpRoot(cooperDir)
+	tmpRoot := runtimefs.TempRoot(cooperDir)
 	if err := os.WriteFile(tmpRoot, []byte("not-a-dir"), 0o644); err != nil {
 		t.Fatalf("write tmp root placeholder: %v", err)
 	}
 
-	if err := ResetBarrelTmpRoot(cooperDir); err != nil {
-		t.Fatalf("ResetBarrelTmpRoot() failed: %v", err)
+	if err := ResetRuntimeTempRoot(cooperDir); err != nil {
+		t.Fatalf("ResetRuntimeTempRoot() failed: %v", err)
 	}
 
 	assertDirExistsAndEmpty(t, tmpRoot)
 }
 
-func TestResetBarrelTmpRoot_EmptyCooperDirIsNoop(t *testing.T) {
-	if err := ResetBarrelTmpRoot(" "); err != nil {
-		t.Fatalf("ResetBarrelTmpRoot(empty) = %v, want nil", err)
+func TestResetRuntimeTempRootWithEmptyCooperDirectoryDoesNothing(t *testing.T) {
+	if err := ResetRuntimeTempRoot(" "); err != nil {
+		t.Fatalf("ResetRuntimeTempRoot(empty) = %v, want nil", err)
 	}
 }
 
-func TestResetBarrelSessionRoot_CreatesMissingDir(t *testing.T) {
+func TestResetRuntimeSessionRootCreatesMissingDirectory(t *testing.T) {
 	t.Setenv("GROK_HOME", "")
 	cooperDir := t.TempDir()
 
-	if err := ResetBarrelSessionRoot(cooperDir); err != nil {
-		t.Fatalf("ResetBarrelSessionRoot() failed: %v", err)
+	if err := ResetRuntimeSessionRoot(cooperDir); err != nil {
+		t.Fatalf("ResetRuntimeSessionRoot() failed: %v", err)
 	}
 
-	assertDirExistsAndEmpty(t, BarrelSessionRoot(cooperDir))
+	assertDirExistsAndEmpty(t, runtimefs.SessionRoot(cooperDir))
 }
 
-func TestResetBarrelSessionRoot_RemovesExistingContents(t *testing.T) {
+func TestResetRuntimeSessionRootRemovesExistingContents(t *testing.T) {
 	t.Setenv("GROK_HOME", "")
 	cooperDir := t.TempDir()
-	sessionRoot := BarrelSessionRoot(cooperDir)
+	sessionRoot := runtimefs.SessionRoot(cooperDir)
 	staleFile := filepath.Join(sessionRoot, "barrel-demo", "stale.txt")
 	if err := os.MkdirAll(filepath.Dir(staleFile), 0o755); err != nil {
 		t.Fatalf("mkdir stale dir: %v", err)
@@ -112,16 +82,16 @@ func TestResetBarrelSessionRoot_RemovesExistingContents(t *testing.T) {
 		t.Fatalf("write stale file: %v", err)
 	}
 
-	if err := ResetBarrelSessionRoot(cooperDir); err != nil {
-		t.Fatalf("ResetBarrelSessionRoot() failed: %v", err)
+	if err := ResetRuntimeSessionRoot(cooperDir); err != nil {
+		t.Fatalf("ResetRuntimeSessionRoot() failed: %v", err)
 	}
 
 	assertDirExistsAndEmpty(t, sessionRoot)
 }
 
-func TestResetBarrelTmpRootPreservesOverlappingGrokState(t *testing.T) {
+func TestResetRuntimeTempRootPreservesOverlappingGrokState(t *testing.T) {
 	cooperDir := t.TempDir()
-	stateRoot := filepath.Join(BarrelTmpRoot(cooperDir), "grok")
+	stateRoot := filepath.Join(runtimefs.TempRoot(cooperDir), "grok")
 	marker := filepath.Join(stateRoot, "auth.json")
 	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
 		t.Fatal(err)
@@ -131,8 +101,8 @@ func TestResetBarrelTmpRootPreservesOverlappingGrokState(t *testing.T) {
 	}
 	t.Setenv("GROK_HOME", stateRoot)
 
-	if err := ResetBarrelTmpRoot(cooperDir); err == nil {
-		t.Fatal("ResetBarrelTmpRoot() succeeded for overlapping Grok state")
+	if err := ResetRuntimeTempRoot(cooperDir); err == nil {
+		t.Fatal("ResetRuntimeTempRoot() succeeded for overlapping Grok state")
 	}
 	if data, err := os.ReadFile(marker); err != nil || string(data) != "host-owned" {
 		t.Fatalf("host-owned Grok state changed: data=%q err=%v", data, err)

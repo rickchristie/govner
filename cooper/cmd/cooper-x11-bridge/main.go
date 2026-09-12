@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -643,7 +644,16 @@ func fetchImage(client *http.Client, bridgeURL, tokenFile string) ([]byte, error
 	if err != nil {
 		return nil, fmt.Errorf("read token file: %w", err)
 	}
-	token := strings.TrimSpace(string(tokenBytes))
+	var metadata struct {
+		Token string `json:"token"`
+	}
+	// The host validates the complete authorization record. The guest only
+	// extracts the token that it must send back, so it accepts current and
+	// future metadata fields.
+	if err := json.Unmarshal(tokenBytes, &metadata); err != nil {
+		return nil, fmt.Errorf("decode token metadata: %w", err)
+	}
+	token := strings.TrimSpace(metadata.Token)
 	if token == "" {
 		return nil, fmt.Errorf("token file is empty")
 	}
