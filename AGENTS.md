@@ -60,6 +60,8 @@ Read README.md of the project before starting.
   Its reviewed modes are `mirror`, `latest`, `pinned`, `all`, and `clean`.
   Cleanup-only runs use
   `./cooper/test-docker-build.sh clean > /tmp/cooper-docker-build-clean.txt 2>&1`.
+- **Cooper VM E2E gate:** Before every Cooper release, run
+  `timeout 90m ./cooper/test-vm.sh > /tmp/cooper-vm-gate.txt 2>&1`.
 - **Other Go modules:** validate Gowt with
   `go test -C ./gowt ./... > /tmp/gowt-go-test.txt 2>&1` and pgflock with
   `go test -C ./pgflock ./... > /tmp/pgflock-go-test.txt 2>&1`.
