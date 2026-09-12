@@ -24,11 +24,15 @@ var templateFS embed.FS
 //go:embed doctor.sh
 var doctorScript []byte
 
+//go:embed setup-account.sh
+var setupAccountScript []byte
+
 //go:embed ERR_ACCESS_DENIED
 var errAccessDenied []byte
 
 // baseDockerfileData holds template data for the base image Dockerfile.
 type baseDockerfileData struct {
+	HasParentCA  bool
 	HasGo        bool
 	GoVersion    string
 	GoPath       string
@@ -62,7 +66,7 @@ type cliToolDockerfileData struct {
 	Version         string   // Resolved image version
 	AutoApproveFlag string   // Tool-specific auto-approve CLI flag
 	InstallCommands string   // Pre-rendered install RUN commands
-	ToolDirs        []string // Directories to create (e.g. /home/user/.claude)
+	ToolDirs        []string // Directories to create (e.g. .claude)
 	ProxyPort       int      // Proxy port to restore after install
 	ClipboardMode   string   // Clipboard bridge mode: "shim", "x11", or "auto"
 	RuntimeEnvs     []runtimeEnv
@@ -174,7 +178,12 @@ func buildBaseDockerfileData(cfg *config.Config, implicit []config.ImplicitToolC
 		return baseDockerfileData{}, err
 	}
 
+	context, err := vmcontext.Load()
+	if err != nil {
+		return baseDockerfileData{}, fmt.Errorf("load Cooper VM build context: %w", err)
+	}
 	data := baseDockerfileData{
+		HasParentCA:            context != nil,
 		HasGo:                  isToolEnabled(cfg.ProgrammingTools, "go"),
 		GoVersion:              goVersion,
 		GoPath:                 docker.BarrelGoPath,
@@ -228,11 +237,7 @@ func RenderBaseDockerfile(cfg *config.Config, implicit []config.ImplicitToolConf
 }
 
 func toolHomeDirs(def aitool.Definition) []string {
-	dirs := make([]string, 0, len(def.HomeDirs))
-	for _, rel := range def.HomeDirs {
-		dirs = append(dirs, filepath.Join(docker.BarrelHomeDir, filepath.FromSlash(rel)))
-	}
-	return dirs
+	return append([]string(nil), def.HomeDirs...)
 }
 
 // renderInstallCommands returns the Dockerfile RUN commands for installing a tool.
@@ -258,7 +263,7 @@ func renderInstallCommands(toolName, version string) (string, error) {
 		// URL https://opencode.ai/install is only a 307 to a moving raw
 		// script that then fetches this same tarball; that wrapper 429s in
 		// Docker and `curl | bash` is not fail-closed.
-		// Install into ~/.local/bin so the runtime ~/.opencode state mount
+		// Install into /opt/cooper/bin so the runtime ~/.opencode state mount
 		// cannot hide or replace the pinned binary.
 		// The empty default keeps the uname fallback valid with Docker's legacy
 		// builder, which does not inject the BuildKit TARGETARCH value.
@@ -274,7 +279,7 @@ RUN set -eu; \
           esac ;; \
       *) echo "unsupported OpenCode architecture: ${TARGETARCH:-}" >&2; exit 1 ;; \
     esac; \
-    mkdir -p /home/user/.config/opencode /home/user/.local/bin /tmp/opencode-extract; \
+    mkdir -p "$HOME/.config/opencode" /opt/cooper/bin /tmp/opencode-extract; \
     curl --fail --show-error --silent --location --http1.1 --retry 5 --retry-all-errors \
       "https://github.com/anomalyco/opencode/releases/download/%s/opencode-linux-${oc_arch}.tar.gz" \
       --output /tmp/opencode.tar.gz; \
@@ -288,15 +293,15 @@ RUN set -eu; \
       find /tmp/opencode-extract -ls >&2; \
       exit 1; \
     fi; \
-    cp "$src" /home/user/.local/bin/opencode; \
-    chmod 0755 /home/user/.local/bin/opencode; \
+    cp "$src" /opt/cooper/bin/opencode; \
+    chmod 0755 /opt/cooper/bin/opencode; \
     rm -rf /tmp/opencode.tar.gz /tmp/opencode-extract; \
-    /home/user/.local/bin/opencode --version`, opencodeReleaseTag(version)), nil
+    /opt/cooper/bin/opencode --version`, opencodeReleaseTag(version)), nil
 	case "grok":
 		if strings.TrimSpace(version) == "" {
 			return "", fmt.Errorf("Grok image requires a resolved version; mirror, latest, and pin must resolve before rendering")
 		}
-		// Download the immutable official artifact directly into ~/.local/bin.
+		// Download the immutable official artifact directly into /opt/cooper/bin.
 		// Do not run the moving installer and do not install under ~/.grok,
 		// because the runtime state-root mount would hide that path.
 		// The empty default keeps the uname fallback valid with Docker's legacy
@@ -315,9 +320,9 @@ RUN set -eu; \
     esac; \
     curl --fail --show-error --silent --location --retry 3 \
       "https://x.ai/cli/grok-%s-linux-${grok_arch}" \
-      --output /home/user/.local/bin/grok; \
-    chmod 0755 /home/user/.local/bin/grok; \
-    /home/user/.local/bin/grok --version`, version), nil
+      --output /opt/cooper/bin/grok; \
+    chmod 0755 /opt/cooper/bin/grok; \
+    /opt/cooper/bin/grok --version`, version), nil
 	default:
 		return "", fmt.Errorf("unknown tool: %s", toolName)
 	}
@@ -352,13 +357,15 @@ func renderClaudeInstallCommand(version string) string {
         installed=true; \
         break; \
       fi; \
-      rm -rf /home/user/.claude/downloads; \
+      rm -rf "$HOME/.claude/downloads"; \
       echo "Claude install attempt ${attempt} failed; retrying." >&2; \
       sleep "${attempt}"; \
     done; \
     rm -f /tmp/claude-install.sh; \
     rm -rf /tmp/claude-curl; \
-    test "$installed" = true`, target)
+    test "$installed" = true; \
+    cp -L "$HOME/.local/bin/claude" /opt/cooper/bin/claude; \
+    chmod 0755 /opt/cooper/bin/claude`, target)
 }
 
 // RenderCLIToolDockerfile renders a per-tool Dockerfile from config and tool name.
@@ -504,8 +511,6 @@ func toolRuntimeEnvs(toolName string) []runtimeEnv {
 		return nil
 	}
 	return []runtimeEnv{
-		// Map any host GROK_HOME root to one stable container path.
-		{Name: "GROK_HOME", Value: docker.BarrelGrokStateRoot},
 		// Keep transient leader transport in the per-barrel /tmp mount. This
 		// prevents a barrel from attaching to a host Grok process through the
 		// leader socket in the shared state root.
@@ -574,6 +579,10 @@ func WriteAllTemplates(baseDir, cliDir string, cfg *config.Config, implicit []co
 		return fmt.Errorf("failed to create base directory: %w", err)
 	}
 
+	if err := writeParentCA(baseDir); err != nil {
+		return err
+	}
+
 	// Generate and write base Dockerfile.
 	baseDockerfile, err := RenderBaseDockerfile(cfg, implicit)
 	if err != nil {
@@ -581,6 +590,9 @@ func WriteAllTemplates(baseDir, cliDir string, cfg *config.Config, implicit []co
 	}
 	if err := os.WriteFile(filepath.Join(baseDir, "Dockerfile"), []byte(baseDockerfile), 0644); err != nil {
 		return fmt.Errorf("failed to write base Dockerfile: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "setup-account.sh"), setupAccountScript, 0755); err != nil {
+		return fmt.Errorf("write account setup: %w", err)
 	}
 
 	// Write doctor.sh diagnostic script (embedded, not generated).
@@ -599,7 +611,7 @@ func WriteAllTemplates(baseDir, cliDir string, cfg *config.Config, implicit []co
 
 	// Write clipboard shim scripts alongside the base image templates.
 	// The shims are mounted into barrel containers at /etc/cooper/shims/ and
-	// copied to /home/user/.local/bin/ by the entrypoint at startup.
+	// copied to /opt/cooper/bin/ by the entrypoint at startup.
 	if err := WriteClipboardShims(baseDir); err != nil {
 		return fmt.Errorf("write clipboard shims: %w", err)
 	}
@@ -640,20 +652,8 @@ func WriteProxyTemplates(dir string, cfg *config.Config) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create proxy directory: %w", err)
 	}
-	parentCAPath := filepath.Join(dir, "parent-cooper-ca.pem")
-	_ = os.Remove(parentCAPath)
-	context, err := vmcontext.Load()
-	if err != nil {
-		return fmt.Errorf("load Cooper VM proxy context: %w", err)
-	}
-	if context != nil {
-		parentCA, err := os.ReadFile("/etc/cooper/cooper-ca.pem")
-		if err != nil {
-			return fmt.Errorf("read outer Cooper CA certificate: %w", err)
-		}
-		if err := os.WriteFile(parentCAPath, parentCA, 0444); err != nil {
-			return fmt.Errorf("write outer Cooper CA certificate: %w", err)
-		}
+	if err := writeParentCA(dir); err != nil {
+		return err
 	}
 
 	proxyDockerfile, err := RenderProxyDockerfile(cfg)
@@ -692,11 +692,11 @@ func WriteProxyTemplates(dir string, cfg *config.Config) error {
 // {dir}/shims/. These are shell scripts generated by the clipboard package that
 // intercept clipboard tool invocations and redirect image reads to the Cooper
 // clipboard bridge. The shims are designed to be copied into /etc/cooper/shims/
-// inside barrel containers and then installed to /home/user/.local/bin/ by the
+// inside barrel containers and then installed to /opt/cooper/bin/ by the
 // entrypoint script at startup.
 //
 // Real binary paths point to /usr/bin/ where the actual tools are installed in
-// the base image. The shims shadow these binaries in PATH via ~/.local/bin/.
+// the base image. The shims shadow these binaries in PATH via /opt/cooper/bin/.
 func WriteClipboardShims(dir string) error {
 	shimsDir := filepath.Join(dir, "shims")
 	if err := os.MkdirAll(shimsDir, 0755); err != nil {
@@ -792,6 +792,28 @@ github.com/jezek/xgb v1.3.0/go.mod h1:nrhwO0FX/enq75I7Y7G8iN1ubpSGZEiA3v9e9GyRFl
 	// main.go — exact copy embedded at compile time.
 	if err := os.WriteFile(filepath.Join(srcDir, "main.go"), x11src.MainGo, 0644); err != nil {
 		return fmt.Errorf("write main.go: %w", err)
+	}
+
+	return nil
+}
+
+// writeParentCA supplies only the outer public certificate. Each build stage
+// needs it before its first network request through the outer proxy.
+func writeParentCA(dir string) error {
+	parentCAPath := filepath.Join(dir, "parent-cooper-ca.pem")
+	_ = os.Remove(parentCAPath)
+	context, err := vmcontext.Load()
+	if err != nil {
+		return fmt.Errorf("load Cooper VM proxy context: %w", err)
+	}
+	if context != nil {
+		parentCA, err := os.ReadFile("/etc/cooper/cooper-ca.pem")
+		if err != nil {
+			return fmt.Errorf("read outer Cooper CA certificate: %w", err)
+		}
+		if err := os.WriteFile(parentCAPath, parentCA, 0444); err != nil {
+			return fmt.Errorf("write outer Cooper CA certificate: %w", err)
+		}
 	}
 
 	return nil

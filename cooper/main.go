@@ -42,6 +42,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tui/settings"
 	squidlogui "github.com/rickchristie/govner/cooper/internal/tui/squidlog"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
+	"github.com/rickchristie/govner/cooper/internal/usercontext"
 	"github.com/rickchristie/govner/cooper/internal/vm"
 	"github.com/rickchristie/govner/cooper/internal/workload"
 	"github.com/rickchristie/govner/cooper/meta"
@@ -817,16 +818,12 @@ func runCLI(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	var grokStateRoot string
-	if toolName == "grok" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("get home directory: %w", err)
-		}
-		if err := docker.ValidateGrokHostStateRoot(homeDir, cooperDir); err != nil {
-			return fmt.Errorf("validate Grok state root: %w", err)
-		}
-		grokStateRoot = docker.GrokHostStateRoot(homeDir)
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	if err := docker.ValidateImageAccount(docker.GetImageCLI(toolName), homeDir); err != nil {
+		return err
 	}
 
 	// 5. Resolve the current workspace.
@@ -862,31 +859,19 @@ func runCLI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("check barrel: %w", err)
 	}
 	if barrelRunning {
-		hasSessionMount, err := docker.BarrelHasSessionMount(containerName)
+		matches, err := docker.BarrelMatchesHost(containerName, cfg, workspaceDir, cooperDir, homeDir, toolName)
 		if err != nil {
-			return fmt.Errorf("inspect barrel session mount: %w", err)
+			return fmt.Errorf("check barrel state paths: %w", err)
 		}
-		if !hasSessionMount {
-			fmt.Fprintf(os.Stderr, "Recreating legacy barrel container %s to install secure session mount...\n", containerName)
+		if !matches {
+			fmt.Fprintf(os.Stderr, "Recreating barrel %s for the current image and host paths...\n", containerName)
 			if err := docker.StopBarrel(containerName); err != nil {
-				return fmt.Errorf("stop legacy barrel: %w", err)
+				return err
 			}
 			barrelRunning = false
 		}
 	}
-	if barrelRunning && toolName == "grok" {
-		hasGrokState, err := docker.BarrelHasGrokStateMount(containerName, grokStateRoot)
-		if err != nil {
-			return fmt.Errorf("inspect barrel Grok state mount: %w", err)
-		}
-		if !hasGrokState {
-			fmt.Fprintf(os.Stderr, "Recreating Grok barrel container %s to share the complete host Grok state...\n", containerName)
-			if err := docker.StopBarrel(containerName); err != nil {
-				return fmt.Errorf("stop legacy Grok barrel: %w", err)
-			}
-			barrelRunning = false
-		}
-	}
+
 	if !barrelRunning {
 		// Generate and write clipboard token before starting the barrel.
 		// The token file is mounted read-only into the container. The running
@@ -1158,6 +1143,13 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("collect update plan: %w", err)
 	}
 	baseChanged := plan.baseChanged
+	account, identityErr := usercontext.Current()
+	if identityErr != nil {
+		return identityErr
+	}
+	if docker.ValidateImageAccount(docker.GetImageBase(), account.Home) != nil {
+		baseChanged = true
+	}
 	toolsChanged := plan.toolsChanged
 
 	if !baseChanged && len(toolsChanged) == 0 {
@@ -1189,10 +1181,11 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	if baseChanged {
 		fmt.Fprintln(os.Stderr, "Rebuilding base image...")
 		baseDockerfile := filepath.Join(baseDir, "Dockerfile")
-		buildArgs := map[string]string{
-			"USER_UID": fmt.Sprintf("%d", os.Getuid()),
-			"USER_GID": fmt.Sprintf("%d", os.Getgid()),
+		account, err := usercontext.Current()
+		if err != nil {
+			return err
 		}
+		buildArgs := account.BuildArgs()
 		if err := docker.BuildImage(docker.GetImageBase(), baseDockerfile, baseDir, buildArgs, false); err != nil {
 			return fmt.Errorf("rebuild base image: %w", err)
 		}

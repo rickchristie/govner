@@ -53,9 +53,10 @@ type Driver struct {
 	keepArtifacts bool
 	lock          *testdocker.Lock
 
-	started     bool
-	builtImages []string
-	workspaces  []string
+	started       bool
+	builtImages   []string
+	workspaces    []string
+	restoreImages func()
 }
 
 // New creates a runtime driver with a temporary Cooper directory rendered via
@@ -84,6 +85,13 @@ func New(opts Options) (*Driver, error) {
 		return nil, fmt.Errorf("create temporary test home: %w", err)
 	}
 
+	restoreImages, err := testdocker.UseHome(homeDir)
+	if err != nil {
+		os.RemoveAll(homeDir)
+		os.RemoveAll(cooperDir)
+		lock.Release()
+		return nil, err
+	}
 	appInstance := app.NewCooperApp(cfg, cooperDir)
 	// A runtime test must not copy an arbitrary machine font tree into its
 	// temporary directory. Font sync has focused unit and shell E2E coverage.
@@ -100,6 +108,7 @@ func New(opts Options) (*Driver, error) {
 		imagePrefix:   prefix,
 		keepArtifacts: opts.KeepArtifactsOnClose,
 		lock:          lock,
+		restoreImages: restoreImages,
 	}, nil
 }
 
@@ -186,6 +195,10 @@ func (d *Driver) Close() error {
 		}
 	}
 
+	if d.restoreImages != nil {
+		d.restoreImages()
+		d.restoreImages = nil
+	}
 	if d.lock != nil {
 		if err := d.lock.Release(); err != nil {
 			errs = append(errs, fmt.Sprintf("release driver lock: %v", err))

@@ -47,8 +47,8 @@ What Cooper provides in every selected-agent container:
 - Chromium/Chrome OS shared-library dependencies in `cooper-base`
 - `Xvfb` virtual display (1920x1080x24) started for every selected-agent container, with authenticated X11
 - `fontconfig` plus a baseline font set (DejaVu, Roboto, Noto, Noto CJK, FreeFont, Liberation, Noto Color Emoji)
-- Cooper-managed host font directory (`~/.cooper/fonts`) mounted read-only into `/home/user/.local/share/fonts`
-- Cooper-managed Playwright browser cache (`~/.cooper/cache/ms-playwright`) mounted read-write into `/home/user/.cache/ms-playwright`
+- Cooper-managed host font directory (`~/.cooper/fonts`) mounted read-only into `/var/lib/cooper/fonts`
+- Cooper-managed Playwright browser cache (`~/.cooper/cache/ms-playwright`) mounted read-write into `/var/lib/cooper/cache/ms-playwright`
 - `PLAYWRIGHT_BROWSERS_PATH` environment variable set in every selected-agent container
 - `DISPLAY` and `XAUTHORITY` set for every selected-agent container (shared with clipboard-bridge X11)
 - Configurable barrel shared memory (`barrel_shm_size`, default `1g`) via `--shm-size`
@@ -404,10 +404,10 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - `~/.cooper/tokens/{containerName}` → `/etc/cooper/clipboard-token` — per-barrel auth token
       - `~/.cooper/base/shims/` → `/etc/cooper/shims/` — pre-generated clipboard shim scripts
     - Playwright support (always mounted for every barrel):
-      - `~/.cooper/fonts` → `/home/user/.local/share/fonts` (read-only) — Cooper-managed host font mirror
-      - `~/.cooper/cache/ms-playwright` → `/home/user/.cache/ms-playwright` (read-write) — Playwright browser cache
-      - `PLAYWRIGHT_BROWSERS_PATH=/home/user/.cache/ms-playwright` environment variable
-      - `DISPLAY=127.0.0.1:99` and `XAUTHORITY=/home/user/.cooper-clipboard.xauth` for Xvfb display
+      - `~/.cooper/fonts` → `/var/lib/cooper/fonts` (read-only) — Cooper-managed host font mirror
+      - `~/.cooper/cache/ms-playwright` → `/var/lib/cooper/cache/ms-playwright` (read-write) — Playwright browser cache
+      - `PLAYWRIGHT_BROWSERS_PATH=/var/lib/cooper/cache/ms-playwright` environment variable
+      - `DISPLAY=127.0.0.1:99` and `XAUTHORITY=/var/lib/cooper/clipboard/xauth` for Xvfb display
       - `--shm-size` from `barrel_shm_size` config (default `1g`)
     - Per-barrel /tmp directory:
       - `~/.cooper/tmp/{containerName}` → `/tmp` (read-write) — each barrel gets its own host-backed /tmp
@@ -415,9 +415,9 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - Cooper clears the entire `~/.cooper/tmp/` tree when `cooper up` starts and when it shuts down, so each control-plane session starts pristine.
       - Host directory is pre-created before mount (`mkdir -p`), same as other mount dirs.
     - Language-specific caches (Cooper-managed, auto-configured based on enabled programming tools):
-      - Go: `~/.cooper/cache/go-mod` → `/home/user/go/pkg/mod` (read-write), `~/.cooper/cache/go-build` → `/home/user/.cache/go-build` (read-write)
-      - Node: `~/.cooper/cache/npm` → `/home/user/.npm` (read-write)
-      - Python: `~/.cooper/cache/pip` → `/home/user/.cache/pip` (read-write)
+      - Go: `~/.cooper/cache/go-mod` → `/go/pkg/mod` (read-write), `~/.cooper/cache/go-build` → `/var/lib/cooper/cache/go-build` (read-write)
+      - Node: `~/.cooper/cache/npm` → `/var/lib/cooper/cache/npm` (read-write)
+      - Python: `~/.cooper/cache/pip` → `/var/lib/cooper/cache/pip` (read-write)
     - All cache directories live under `~/.cooper/cache/` — no host tool caches are mounted.
     - Directories are created on host if they don't exist (`mkdir -p` before mount).
     - Caches start empty and fill naturally during normal package-manager usage inside the barrel.
@@ -494,9 +494,9 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
 - Grok is a fifth built-in AI CLI (`grok` / Grok Build), after OpenCode.
 - Host detection uses `grok --version`. First-run detected Grok defaults to enabled/mirror. Existing configs gain a disabled Grok row in latest mode without changing other selections.
 - Latest/pin use xAI's native CLI channel, never npm. Empty versions cannot be rendered into a Dockerfile.
-- Cooper mounts the effective host Grok state root read-write at `/home/user/.grok`. The source is a nonempty host `GROK_HOME`, or `~/.grok` when it is unset.
+- Cooper mounts the effective host Grok state root read-write at the same absolute path. The source is a nonempty host `GROK_HOME`, or `~/.grok` when it is unset.
 - The root mount includes all current and future Grok auth, config, session, history, memory, skill, plugin, log, lock, and update state. Do not split its children into Cooper-owned mounts.
-- Cooper sets `GROK_HOME=/home/user/.grok`. It sets `GROK_LEADER_SOCKET=/tmp/cooper-grok-leader.sock` so a workload cannot attach to a host Grok process through the shared root. Grok uses this override for both the client and its paired leader lock. Cooper does not install `/etc/grok/requirements.toml` or set behavior-related `GROK_*` values that override host config.
+- Cooper preserves the effective host `GROK_HOME` at launch. It sets `GROK_LEADER_SOCKET=/tmp/cooper-grok-leader.sock` so a workload cannot attach to a host Grok process through the shared root. Grok uses this override for both the client and its paired leader lock. Cooper does not install `/etc/grok/requirements.toml` or set behavior-related `GROK_*` values that override host config.
 - Host OAuth and API-key auth are both valid. A set host `XAI_API_KEY` is forwarded for the Grok session.
 - Cooper cleanup never removes or changes the host Grok state root.
 - Cooper rejects direct overlap and overlap after existing symlinks are resolved. The Grok state root cannot contain or be inside the Cooper configuration directory.
@@ -740,7 +740,7 @@ reserved `/clipboard/*` namespace. User bridge routes cannot use this namespace.
 - `COOPER_CLIPBOARD_TOKEN_FILE=/etc/cooper/clipboard-token`
 - `COOPER_CLIPBOARD_MODE={shim|x11|auto}` — auto-selected per tool
 - `COOPER_CLIPBOARD_SHIMS=xclip,xsel` — which shim scripts to install
-- `COOPER_CLIPBOARD_XAUTHORITY=/home/user/.cooper-clipboard.xauth` — X11 auth file path (x11/auto modes)
+- `COOPER_CLIPBOARD_XAUTHORITY=/var/lib/cooper/clipboard/xauth` — X11 auth file path (x11/auto modes)
 - `COOPER_CLIPBOARD_DISPLAY=127.0.0.1:99` — X11 display address (x11/auto modes)
 - `TZ=:/run/cooper/host-localtime` — workload startup and background processes use the host timezone snapshot from the current `cooper cli` or `cooper vm` session without hiding a named zoneinfo file through the image's `/etc/localtime` symlink
 
@@ -754,7 +754,7 @@ reserved `/clipboard/*` namespace. User bridge routes cannot use this namespace.
 - Multi-stage build compiles `cooper-x11-bridge` from embedded Go source, copies to `/usr/local/bin/`
 
 **Entrypoint setup** (conditional on `ClipboardEnabled`):
-- Shim mode: copies shim scripts from `/etc/cooper/shims/` to `/home/user/.local/bin/` (prepended to PATH).
+- Shim mode: copies shim scripts from `/etc/cooper/shims/` to `/opt/cooper/bin/` (prepended to PATH).
 - X11 mode: generates X authority cookie → starts Xvfb on TCP `:99` → starts `cooper-x11-bridge` daemon
   with auto-restart supervisor loop → exports `DISPLAY` and `XAUTHORITY`.
 
@@ -1336,3 +1336,9 @@ Key design patterns (matching pgflock):
 - **ACL helper as separate binary** — `cmd/acl-helper/` compiled into proxy image; bridges Squid stdin/stdout to Unix socket.
 - **X11 bridge as separate binary** — `cmd/cooper-x11-bridge/` compiled into base image; owns X11 CLIPBOARD selection for native clipboard consumers.
 - **Dual clipboard strategy** — shim scripts (for tools that shell out to xclip/wl-paste) and X11 selection ownership (for tools with native clipboard integration). Strategy auto-selected per AI tool.
+
+## Host account and state path contract
+
+The account name, group, UID, GID, and logical home are image build inputs. Both execution modes use the same account and home. Launch rejects images with a different account record and asks the user to run `cooper build`. Account selection does not occur at `cooper up`.
+
+Selected state roots retain their host absolute paths and are mounted read-write. The shared root list and effective path environment are resolved at launch. The complete host home is never mounted. Cooper runtime files, caches, and image binaries remain separate from host-owned state. See [Account and state paths](docs/home-paths.md) for the full contract.

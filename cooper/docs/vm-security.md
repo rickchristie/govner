@@ -118,8 +118,9 @@ any read-write mounted data. Use version control and backups for important
 data. Cooper does not copy agent state into Cooper-owned storage, and
 `cooper cleanup` must not remove a host-owned agent state root.
 
-The agent container also receives `/home/user/.cooper` from the guest file
-system. This directory is guest-local. It supports Cooper self-development
+The agent container also receives `$HOME/.cooper` and `$HOME/.docker` below
+its private runtime home. The home path matches the build account. These
+directories contain only this workload's runtime data. It supports Cooper self-development
 and nested VM assets. It is not the physical host `~/.cooper` directory.
 
 ## Nested Virtualization

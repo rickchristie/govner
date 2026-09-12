@@ -11,6 +11,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/templates"
+	"github.com/rickchristie/govner/cooper/internal/usercontext"
 )
 
 // Options controls how a build run reports progress and output.
@@ -299,10 +300,11 @@ func (p *Prepared) Build(opts Options) error {
 	}
 
 	proxyDockerfile := filepath.Join(p.proxyDir, "proxy.Dockerfile")
-	uidGidArgs := map[string]string{
-		"USER_UID": fmt.Sprintf("%d", os.Getuid()),
-		"USER_GID": fmt.Sprintf("%d", os.Getgid()),
+	account, err := usercontext.Current()
+	if err != nil {
+		return err
 	}
+	uidGidArgs := account.BuildArgs()
 
 	// Step 0: build the proxy image first because the base/tool images depend on shared runtime assets.
 	emitOutput(opts, "Building proxy image...")

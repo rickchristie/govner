@@ -7,6 +7,14 @@
 COOPER_READY_FILE="/tmp/.cooper-entrypoint-ready"
 rm -f "$COOPER_READY_FILE"
 
+# The home is a private runtime directory. Seed only missing shell defaults;
+# agent state and host configuration are attached as separate child mounts.
+for shell_file in .bashrc .profile .bash_logout; do
+    if [ ! -e "$HOME/$shell_file" ] && [ -f "/etc/skel/$shell_file" ]; then
+        cp "/etc/skel/$shell_file" "$HOME/$shell_file"
+    fi
+done
+
 # ============================================================================
 # Runtime CA certificate update
 # ============================================================================
@@ -16,7 +24,7 @@ rm -f "$COOPER_READY_FILE"
 if [ -f /etc/cooper/cooper-ca.pem ]; then
     cp /etc/cooper/cooper-ca.pem /usr/local/share/ca-certificates/cooper-ca.crt 2>/dev/null || true
     cat /etc/cooper/cooper-ca.pem >> /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true
-    export NODE_EXTRA_CA_CERTS=/etc/cooper/cooper-ca.pem
+    export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 fi
 
 SOCAT_RULES="/etc/cooper/live/socat-rules.json"
@@ -64,17 +72,17 @@ handle_shutdown_signal() {
 # so it's available to both interactive shells and autostart commands.
 # Also written to .profile for non-bash login shells.
 # ============================================================================
-COOPER_PATH_LINE='export PATH="/home/user/.local/bin:/home/user/.npm-global/bin:/home/user/.opencode/bin{{- if .HasGo}}:/usr/local/go/bin:{{.GoBinDir}}{{- end}}:$PATH"'
+COOPER_PATH_LINE='export PATH="/opt/cooper/bin:/opt/cooper/npm/bin:/opt/cooper/python/bin{{- if .HasGo}}:/usr/local/go/bin:{{.GoBinDir}}{{- end}}:$PATH"'
 
-if ! grep -q "Cooper: PATH" /home/user/.bashrc 2>/dev/null; then
+if ! grep -q "Cooper: PATH" "$HOME/.bashrc" 2>/dev/null; then
     # Prepend to .bashrc (before the interactive guard) so PATH is set
     # even when .bashrc is sourced from .profile in non-interactive context.
-    { echo "# Cooper: PATH"; echo "$COOPER_PATH_LINE"; echo ""; cat /home/user/.bashrc 2>/dev/null; } > /home/user/.bashrc.tmp
-    mv /home/user/.bashrc.tmp /home/user/.bashrc
+    { echo "# Cooper: PATH"; echo "$COOPER_PATH_LINE"; echo ""; cat "$HOME/.bashrc" 2>/dev/null; } > "$HOME/.bashrc.tmp"
+    mv "$HOME/.bashrc.tmp" "$HOME/.bashrc"
 fi
 
-if ! grep -q "Cooper: PATH" /home/user/.profile 2>/dev/null; then
-    cat >> /home/user/.profile << PATHSETUP
+if ! grep -q "Cooper: PATH" "$HOME/.profile" 2>/dev/null; then
+    cat >> "$HOME/.profile" << PATHSETUP
 
 # Cooper: PATH
 $COOPER_PATH_LINE
@@ -89,8 +97,8 @@ fi
 # commands (cooper cli <tool> -c "go test") don't load aliases, but that's fine
 # because one-shot commands run user code, not the AI tool itself.
 if [ -n "$COOPER_CLI_TOOL" ] && [ -n "$COOPER_CLI_AUTO_APPROVE" ]; then
-    if ! grep -q "Cooper: Auto-approve alias" /home/user/.bashrc 2>/dev/null; then
-        cat >> /home/user/.bashrc << ALIAS
+    if ! grep -q "Cooper: Auto-approve alias" "$HOME/.bashrc" 2>/dev/null; then
+        cat >> "$HOME/.bashrc" << ALIAS
 
 # Cooper: Auto-approve alias
 alias $COOPER_CLI_TOOL='$COOPER_CLI_TOOL $COOPER_CLI_AUTO_APPROVE'
@@ -103,9 +111,10 @@ fi
 # ============================================================================
 if [ "$COOPER_CLI_TOOL" = "opencode" ]; then
     # OpenCode config: create defaults only if not already present (dir is host-mounted)
-    mkdir -p /home/user/.config/opencode/plugins /home/user/.config/opencode/commands
-    if [ ! -f /home/user/.config/opencode/opencode.json ]; then
-        echo '{"$schema": "https://opencode.ai/config.json", "autoupdate": false}' > /home/user/.config/opencode/opencode.json
+    OPENCODE_STATE_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+    mkdir -p "$OPENCODE_STATE_CONFIG/plugins" "$OPENCODE_STATE_CONFIG/commands"
+    if [ ! -f "$OPENCODE_STATE_CONFIG/opencode.json" ]; then
+        echo '{"$schema": "https://opencode.ai/config.json", "autoupdate": false}' > "$OPENCODE_STATE_CONFIG/opencode.json"
     fi
 fi
 
@@ -113,10 +122,12 @@ fi
 # Playwright Runtime Setup
 # ============================================================================
 ensure_playwright_runtime() {
-  mkdir -p /home/user/.local/share/fonts
-  mkdir -p /home/user/.cache/ms-playwright
-  mkdir -p /home/user/.cache/fontconfig
-  ln -snf /home/user/.local/share/fonts /home/user/.fonts
+  mkdir -p "$HOME/.local/share"
+  ln -snf /var/lib/cooper/fonts "$HOME/.local/share/fonts"
+  mkdir -p /var/lib/cooper/fonts
+  mkdir -p /var/lib/cooper/cache/ms-playwright
+  mkdir -p "$HOME/.cache/fontconfig"
+  ln -snf /var/lib/cooper/fonts "$HOME/.fonts"
   fc-cache -f >/tmp/fc-cache.log 2>&1 || true
 }
 
@@ -124,7 +135,7 @@ ensure_playwright_runtime() {
 # Shared X11 Display (Xvfb) — used by Playwright and clipboard bridge
 # ============================================================================
 start_shared_xvfb() {
-  XAUTH_FILE="/home/user/.cooper-clipboard.xauth"
+  XAUTH_FILE="/var/lib/cooper/clipboard/xauth"
   DISPLAY_NUM=99
   DISPLAY_ADDR="127.0.0.1:${DISPLAY_NUM}"
 
@@ -133,7 +144,7 @@ start_shared_xvfb() {
   chmod 0600 "$XAUTH_FILE" 2>/dev/null || true
 
   # Save the raw cookie hex for cooper-x11-bridge.
-  COOKIE_HEX_FILE="/home/user/.cooper-clipboard-cookie"
+  COOKIE_HEX_FILE="/var/lib/cooper/clipboard/cookie"
   echo -n "$COOKIE" > "$COOKIE_HEX_FILE"
   chmod 0600 "$COOKIE_HEX_FILE" 2>/dev/null || true
 
@@ -150,8 +161,8 @@ start_shared_xvfb() {
   export COOPER_CLIPBOARD_XAUTHORITY="$XAUTH_FILE"
 
   # Persist for docker exec sessions.
-  sed -i "1i export DISPLAY=${DISPLAY_ADDR}\nexport XAUTHORITY=${XAUTH_FILE}" /home/user/.bashrc 2>/dev/null || true
-  sed -i "1i export DISPLAY=${DISPLAY_ADDR}\nexport XAUTHORITY=${XAUTH_FILE}" /home/user/.profile 2>/dev/null || true
+  sed -i "1i export DISPLAY=${DISPLAY_ADDR}\nexport XAUTHORITY=${XAUTH_FILE}" "$HOME/.bashrc" 2>/dev/null || true
+  sed -i "1i export DISPLAY=${DISPLAY_ADDR}\nexport XAUTHORITY=${XAUTH_FILE}" "$HOME/.profile" 2>/dev/null || true
 
   # Wait for Xvfb to be ready (TCP port 6000+display_num).
   XVFB_PORT=$((6000 + DISPLAY_NUM))
@@ -307,7 +318,7 @@ start_shared_xvfb
 # calls and serve staged images from the Cooper clipboard bridge.
 CLIP_MODE="${COOPER_CLIPBOARD_MODE:-auto}"
 if [ "$CLIP_MODE" = "shim" ] || [ "$CLIP_MODE" = "auto" ]; then
-  SHIM_DIR="/home/user/.local/bin"
+  SHIM_DIR="/opt/cooper/bin"
   mkdir -p "$SHIM_DIR"
   if [ -f /etc/cooper/shims/xclip ]; then
     cp /etc/cooper/shims/xclip "$SHIM_DIR/xclip"
@@ -337,7 +348,7 @@ if [ "$CLIP_MODE" = "x11" ] || [ "$CLIP_MODE" = "auto" ]; then
       while true; do
         cooper-x11-bridge \
           --display "$DISPLAY_ADDR" \
-          --cookie-file "/home/user/.cooper-clipboard-cookie" \
+          --cookie-file "/var/lib/cooper/clipboard/cookie" \
           --bridge-url "${COOPER_CLIPBOARD_BRIDGE_URL}" \
           --token-file "${COOPER_CLIPBOARD_TOKEN_FILE}" >>/tmp/x11-bridge.log 2>&1
         # If bridge exits, wait briefly and restart (crash recovery).
@@ -351,8 +362,8 @@ fi
 # ============================================================================
 # WELCOME BANNER (interactive bash sessions only)
 # ============================================================================
-if ! grep -q "Cooper: Welcome v3" /home/user/.bashrc 2>/dev/null; then
-    cat >> /home/user/.bashrc << 'BANNER'
+if ! grep -q "Cooper: Welcome v3" "$HOME/.bashrc" 2>/dev/null; then
+    cat >> "$HOME/.bashrc" << 'BANNER'
 
 # Cooper: Welcome v3
 if [[ $- == *i* ]]; then

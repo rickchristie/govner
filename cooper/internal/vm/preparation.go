@@ -14,6 +14,7 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/vmhost"
+	"github.com/rickchristie/govner/cooper/internal/workload"
 )
 
 const preparedMetadataSchema = 9
@@ -131,7 +132,7 @@ func (p Preparer) prepareLocked(ctx context.Context, ubuntuPath, dockerPath stri
 	baseDockerArgs := supervisorSecurityArgs(uid, gid, kvmGID, 2, 3072, seccompPath)
 	seedArgs := append([]string{"run", "--rm"}, baseDockerArgs...)
 	seedArgs = append(seedArgs,
-		"--mount", "type=bind,src="+runtimeDir+",dst=/cooper/runtime",
+		"--mount", workload.DockerBindMount(runtimeDir, "/cooper/runtime", false),
 		"--entrypoint", "cloud-localds", image,
 		"--network-config=/cooper/runtime/network-config",
 		"/cooper/runtime/seed.img", "/cooper/runtime/user-data", "/cooper/runtime/meta-data",
@@ -161,10 +162,10 @@ func (p Preparer) prepareLocked(ctx context.Context, ubuntuPath, dockerPath stri
 		"--label", "cooper.prepare-owner=" + prepareName,
 	}, baseDockerArgs...)
 	runArgs = append(runArgs,
-		"--mount", "type=bind,src="+assetDir+",dst=/cooper/assets",
-		"--mount", "type=bind,src="+runtimeDir+",dst=/cooper/runtime",
-		"--mount", "type=bind,src="+exportDir+",dst=/cooper/exports",
-		"--mount", "type=bind,src="+dockerPath+",dst=/cooper/exports/docker.tgz,readonly",
+		"--mount", workload.DockerBindMount(assetDir, "/cooper/assets", false),
+		"--mount", workload.DockerBindMount(runtimeDir, "/cooper/runtime", false),
+		"--mount", workload.DockerBindMount(exportDir, "/cooper/exports", false),
+		"--mount", workload.DockerBindMount(dockerPath, "/cooper/exports/docker.tgz", true),
 		image, "--config-file", "/cooper/runtime/supervisor.json",
 	)
 	if err := runner.Run(ctx, nil, p.output(), p.output(), "docker", runArgs...); err != nil {
@@ -172,7 +173,7 @@ func (p Preparer) prepareLocked(ctx context.Context, ubuntuPath, dockerPath stri
 	}
 	convertArgs := append([]string{"run", "--rm"}, baseDockerArgs...)
 	convertArgs = append(convertArgs,
-		"--mount", "type=bind,src="+assetDir+",dst=/cooper/assets",
+		"--mount", workload.DockerBindMount(assetDir, "/cooper/assets", false),
 		"--entrypoint", "qemu-img", image,
 		"convert", "-p", "-O", "qcow2",
 		"/cooper/assets/"+filepath.Base(overlay), "/cooper/assets/"+filepath.Base(partial),
@@ -182,7 +183,7 @@ func (p Preparer) prepareLocked(ctx context.Context, ubuntuPath, dockerPath stri
 	}
 	checkArgs := append([]string{"run", "--rm"}, baseDockerArgs...)
 	checkArgs = append(checkArgs,
-		"--mount", "type=bind,src="+assetDir+",dst=/cooper/assets",
+		"--mount", workload.DockerBindMount(assetDir, "/cooper/assets", false),
 		"--entrypoint", "qemu-img", image,
 		"check", "/cooper/assets/"+filepath.Base(partial),
 	)

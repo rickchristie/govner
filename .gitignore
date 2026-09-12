@@ -20,6 +20,7 @@ cooper/.test-latest/
 cooper/.test-pinned/
 cooper/.test-tmp/
 cooper/.test-e2e/
+cooper/.test-e2e-home/
 cooper/.e2e-workspace/
 cooper/.e2e-*-config/
 cooper/.tmp/

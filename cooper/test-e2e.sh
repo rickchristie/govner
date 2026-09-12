@@ -25,6 +25,7 @@ cd "$SCRIPT_DIR"
 # Cooper installation.
 PREFIX="test-e2e-"
 CONFIG_DIR="${SCRIPT_DIR}/.test-e2e"
+HOME_DIR="${SCRIPT_DIR}/.test-e2e-home"
 COOPER="${SCRIPT_DIR}/cooper"
 HOST_OS="$(uname -s)"
 
@@ -35,6 +36,14 @@ NETWORK_EXTERNAL="${PREFIX}cooper-external"
 NETWORK_INTERNAL="${PREFIX}cooper-internal"
 BARREL_PROXY_HOST="cooper-proxy"
 HOST_LOCALTIME="/etc/localtime"
+VM_PARENT_NETWORK=""
+VM_PARENT_AGENT_IP=""
+VM_CONTEXT_FILE="${COOPER_VM_CONTEXT:-/run/cooper/vm-context.json}"
+if [ -f "$VM_CONTEXT_FILE" ]; then
+    VM_PARENT_NETWORK=$(jq -er '.parent_network' "$VM_CONTEXT_FILE")
+    VM_PARENT_AGENT=$(jq -er '.agent_container' "$VM_CONTEXT_FILE")
+    VM_PARENT_AGENT_IP=$(docker inspect "$VM_PARENT_AGENT" | jq -er --arg network "$VM_PARENT_NETWORK" '.[0].NetworkSettings.Networks[$network].IPAddress')
+fi
 
 # Per-tool barrel container names.
 BARREL_CLAUDE="barrel-e2e-workspace-claude"
@@ -157,7 +166,7 @@ cleanup() {
     done
 
     info "Removing test directory..."
-    rm -rf "$CONFIG_DIR"
+    rm -rf "$CONFIG_DIR" "$HOME_DIR"
 
     info "Removing test workspace..."
     rm -rf "${SCRIPT_DIR}/.e2e-workspace"
@@ -245,8 +254,9 @@ CONFIGEOF
 pass "Test config created"
 
 # Step 3: Run cooper build.
+mkdir -p "$HOME_DIR"
 info "Running cooper build (this will take several minutes)..."
-if "$COOPER" build --config "$CONFIG_DIR" --prefix "$PREFIX" 2>&1; then
+if HOME="$HOME_DIR" "$COOPER" build --config "$CONFIG_DIR" --prefix "$PREFIX" 2>&1; then
     pass "cooper build succeeded"
 else
     fail "cooper build failed"
@@ -363,6 +373,13 @@ else
     exit 1
 fi
 
+# Match StartProxy inside a Cooper VM: the nested proxy reaches the outer
+# proxy and host services only through the existing internal control network.
+if [ -n "$VM_PARENT_NETWORK" ]; then
+    docker network connect "$VM_PARENT_NETWORK" "$PROXY_CONTAINER"
+    pass "Proxy connected to the outer VM control network"
+fi
+
 # Step 11: Wait for proxy to become ready.
 info "Waiting for Squid proxy to initialize..."
 proxy_ready=false
@@ -401,9 +418,8 @@ fi
 
 # Create isolated host-side auth/config directories that the barrel expects.
 # Using the real home directory makes the release gate depend on whatever AI
-# CLI versions are already installed on the developer machine; for example,
-# mounting ~/.opencode can hide the pinned opencode binary baked into the image.
-HOME_DIR="${CONFIG_DIR}/home"
+# CLI versions are already installed on the developer machine and can change
+# real auth or session state. All test state stays in the private fixture home.
 mkdir -p "$HOME_DIR"
 
 # Cooper-managed language cache directories (under CONFIG_DIR/cache/).
@@ -419,18 +435,27 @@ state_mounts_for() {
     case "$tool" in
         claude)
             mkdir -p "${HOME_DIR}/.claude" 2>/dev/null || true
-            mounts+=("-v" "${HOME_DIR}/.claude:/home/user/.claude:rw")
+            mounts+=("-v" "${HOME_DIR}/.claude:${HOME_DIR}/.claude:rw")
             if [ -f "${HOME_DIR}/.claude.json" ]; then
-                mounts+=("-v" "${HOME_DIR}/.claude.json:/home/user/.claude.json:rw")
+                mounts+=("-v" "${HOME_DIR}/.claude.json:${HOME_DIR}/.claude.json:rw")
             fi
             ;;
         copilot)
             mkdir -p "${HOME_DIR}/.copilot" 2>/dev/null || true
-            mounts+=("-v" "${HOME_DIR}/.copilot:/home/user/.copilot:rw")
+            mounts+=("-v" "${HOME_DIR}/.copilot:${HOME_DIR}/.copilot:rw")
+            mkdir -p "${HOME_DIR}/.cache/copilot/pkg/universal/999.0.0"
+            # The npm launcher must keep the image version when host state
+            # contains a newer cached native app.
+            printf '%s\n' 'console.log("wrong-host-cache-code");' > "${HOME_DIR}/.cache/copilot/pkg/universal/999.0.0/app.js"
+            mounts+=("-v" "${HOME_DIR}/.cache/copilot:${HOME_DIR}/.cache/copilot:rw")
             ;;
         codex)
             mkdir -p "${HOME_DIR}/.codex" 2>/dev/null || true
-            mounts+=("-v" "${HOME_DIR}/.codex:/home/user/.codex:rw")
+            mounts+=("-v" "${HOME_DIR}/.codex:${HOME_DIR}/.codex:rw")
+            for root in .agents .claude-plugin .cursor-plugin; do
+                mkdir -p "${HOME_DIR}/${root}"
+                mounts+=("-v" "${HOME_DIR}/${root}:${HOME_DIR}/${root}:rw")
+            done
             ;;
         opencode)
             mkdir -p "${HOME_DIR}/.cache/opencode" 2>/dev/null || true
@@ -438,11 +463,11 @@ state_mounts_for() {
             mkdir -p "${HOME_DIR}/.local/share/opencode" 2>/dev/null || true
             mkdir -p "${HOME_DIR}/.local/state/opencode" 2>/dev/null || true
             mkdir -p "${HOME_DIR}/.opencode" 2>/dev/null || true
-            mounts+=("-v" "${HOME_DIR}/.cache/opencode:/home/user/.cache/opencode:rw")
-            mounts+=("-v" "${HOME_DIR}/.config/opencode:/home/user/.config/opencode:rw")
-            mounts+=("-v" "${HOME_DIR}/.local/share/opencode:/home/user/.local/share/opencode:rw")
-            mounts+=("-v" "${HOME_DIR}/.local/state/opencode:/home/user/.local/state/opencode:rw")
-            mounts+=("-v" "${HOME_DIR}/.opencode:/home/user/.opencode:rw")
+            mounts+=("-v" "${HOME_DIR}/.cache/opencode:${HOME_DIR}/.cache/opencode:rw")
+            mounts+=("-v" "${HOME_DIR}/.config/opencode:${HOME_DIR}/.config/opencode:rw")
+            mounts+=("-v" "${HOME_DIR}/.local/share/opencode:${HOME_DIR}/.local/share/opencode:rw")
+            mounts+=("-v" "${HOME_DIR}/.local/state/opencode:${HOME_DIR}/.local/state/opencode:rw")
+            mounts+=("-v" "${HOME_DIR}/.opencode:${HOME_DIR}/.opencode:rw")
             ;;
         grok)
             # Grok stores auth, config, sessions, history, memory, skills,
@@ -473,7 +498,9 @@ echo wrong-host-state-binary
 GROKHOSTBINEOF
             chmod 600 "${HOME_DIR}/.grok/auth.json" "${HOME_DIR}/.grok/config.toml"
             chmod 755 "${HOME_DIR}/.grok/bin/grok"
-            mounts+=("-v" "${HOME_DIR}/.grok:/home/user/.grok:rw")
+            mkdir -p "${HOME_DIR}/.agents"
+            mounts+=("-v" "${HOME_DIR}/.agents:${HOME_DIR}/.agents:rw")
+            mounts+=("-v" "${HOME_DIR}/.grok:${HOME_DIR}/.grok:rw")
             ;;
     esac
     echo "${mounts[@]}"
@@ -552,8 +579,8 @@ other_tools() {
 # Barrel runtime constants and helper. Keep this aligned with
 # cooper/internal/docker/StartBarrel so the manual e2e launches exercise
 # the same container contract as the real application.
-BARREL_XAUTH_PATH="/home/user/.cooper-clipboard.xauth"
-BARREL_PLAYWRIGHT_CACHE="/home/user/.cache/ms-playwright"
+BARREL_XAUTH_PATH="/var/lib/cooper/clipboard/xauth"
+BARREL_PLAYWRIGHT_CACHE="/var/lib/cooper/cache/ms-playwright"
 BARREL_LOCALTIME_PATH="/run/cooper/host-localtime"
 BARREL_TIMEZONE_FILENAME="cooper-localtime"
 
@@ -580,6 +607,8 @@ build_barrel_run_args() {
     local timezone_snapshot
     timezone_snapshot=$(sync_barrel_timezone_file "$barrel_name")
 
+    mkdir -p "${CONFIG_DIR}/tmp/${barrel_name}/.cooper-home/"{.config,.cache,.local/share,.local/state}
+
     BARREL_ARGS=(
         "run" "-d"
         "--name" "$barrel_name"
@@ -604,21 +633,24 @@ build_barrel_run_args() {
         # Workspace (read-write).
         "-v" "${E2E_WORKSPACE}:${E2E_WORKSPACE}:rw"
 
+        # Private home contains only runtime files and selected state mounts.
+        "-v" "${CONFIG_DIR}/tmp/${barrel_name}/.cooper-home:${HOME_DIR}:rw"
+
         # Tool-specific host state mounts.
         "${state_mounts_ref[@]}"
 
         # Language caches (Cooper-managed, all read-write).
-        "-v" "${CONFIG_DIR}/cache/go-mod:/home/user/go/pkg/mod:rw"
-        "-v" "${CONFIG_DIR}/cache/go-build:/home/user/.cache/go-build:rw"
-        "-v" "${CONFIG_DIR}/cache/npm:/home/user/.npm:rw"
-        "-v" "${CONFIG_DIR}/cache/pip:/home/user/.cache/pip:rw"
+        "-v" "${CONFIG_DIR}/cache/go-mod:/go/pkg/mod:rw"
+        "-v" "${CONFIG_DIR}/cache/go-build:/var/lib/cooper/cache/go-build:rw"
+        "-v" "${CONFIG_DIR}/cache/npm:/var/lib/cooper/cache/npm:rw"
+        "-v" "${CONFIG_DIR}/cache/pip:/var/lib/cooper/cache/pip:rw"
 
         # CA cert and socat rules (read-only).
         "-v" "${CONFIG_DIR}/ca/cooper-ca.pem:/etc/cooper/cooper-ca.pem:ro"
         "-v" "${CONFIG_DIR}/live:/etc/cooper/live:ro"
 
         # Playwright support mounts: fonts (ro), browser cache (rw), per-barrel /tmp (rw).
-        "-v" "${CONFIG_DIR}/fonts:/home/user/.local/share/fonts:ro"
+        "-v" "${CONFIG_DIR}/fonts:/var/lib/cooper/fonts:ro"
         "-v" "${CONFIG_DIR}/cache/ms-playwright:${BARREL_PLAYWRIGHT_CACHE}:rw"
         "-v" "${CONFIG_DIR}/tmp/${barrel_name}:/tmp:rw"
         "-v" "${timezone_snapshot}:${BARREL_LOCALTIME_PATH}:ro"
@@ -630,6 +662,10 @@ build_barrel_run_args() {
         "-e" "HTTP_PROXY=http://${BARREL_PROXY_HOST}:${PROXY_PORT}"
         "-e" "HTTPS_PROXY=http://${BARREL_PROXY_HOST}:${PROXY_PORT}"
         "-e" "NO_PROXY=localhost,127.0.0.1"
+        # Docker client defaults in a VM set lowercase names too.
+        "-e" "http_proxy=http://${BARREL_PROXY_HOST}:${PROXY_PORT}"
+        "-e" "https_proxy=http://${BARREL_PROXY_HOST}:${PROXY_PORT}"
+        "-e" "no_proxy=localhost,127.0.0.1"
         "-e" "TZ=:${BARREL_LOCALTIME_PATH}"
         "-e" "COOPER_PROXY_HOST=${BARREL_PROXY_HOST}"
         "-e" "COOPER_INTERNAL_NETWORK=${NETWORK_INTERNAL}"
@@ -659,9 +695,12 @@ build_barrel_run_args() {
 
     # Git config (read-only) is mounted only when it exists, matching runtime.
     if [ -f "${HOME_DIR}/.gitconfig" ]; then
-        BARREL_ARGS+=("-v" "${HOME_DIR}/.gitconfig:/home/user/.gitconfig:ro")
+        BARREL_ARGS+=("-v" "${HOME_DIR}/.gitconfig:${HOME_DIR}/.gitconfig:ro")
     fi
 
+    if [ "$tool_name" = grok ]; then
+        BARREL_ARGS+=("-e" "GROK_HOME=${HOME_DIR}/.grok")
+    fi
     if [ -n "$SECCOMP_PATH" ]; then
         BARREL_ARGS+=("--security-opt" "seccomp=${SECCOMP_PATH}")
     fi
@@ -720,7 +759,7 @@ run_implicit_isolation_fixture() {
 }
 CONFIGEOF
 
-    if "$COOPER" build --config "$fixture_dir" --prefix "$fixture_prefix" >/tmp/cooper-${fixture_name}-build.txt 2>&1; then
+    if HOME="$HOME_DIR" "$COOPER" build --config "$fixture_dir" --prefix "$fixture_prefix" >/tmp/cooper-${fixture_name}-build.txt 2>&1; then
         pass "${fixture_name}: cooper build succeeded"
     else
         fail "${fixture_name}: cooper build failed"
@@ -933,7 +972,7 @@ for tool in "${ALL_TOOLS[@]}"; do
 
     if [ "$tool" = "grok" ]; then
         grok_home=$(barrel_exec 'printf "%s" "$GROK_HOME"')
-        if [ "$(echo "$grok_home" | tr -d '[:space:]')" = "/home/user/.grok" ]; then
+        if [ "$(echo "$grok_home" | tr -d '[:space:]')" = "${HOME_DIR}/.grok" ]; then
             pass "${tool}: GROK_HOME points at the shared state root"
         else
             fail "${tool}: GROK_HOME unexpected: ${grok_home}"
@@ -945,12 +984,12 @@ for tool in "${ALL_TOOLS[@]}"; do
             fail "${tool}: GROK_LEADER_SOCKET unexpected: ${grok_leader_socket}"
         fi
         grok_mounts=$(docker inspect --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}' "$barrel_name")
-        if echo "$grok_mounts" | grep -Fxq "${HOME_DIR}/.grok -> /home/user/.grok"; then
+        if echo "$grok_mounts" | grep -Fxq "${HOME_DIR}/.grok -> ${HOME_DIR}/.grok"; then
             pass "${tool}: complete host Grok state root mounted"
         else
             fail "${tool}: complete host Grok state root not mounted: ${grok_mounts}"
         fi
-        grok_state_mount_count=$(echo "$grok_mounts" | grep -Ec -- ' -> /home/user/\.grok($|/)' || true)
+        grok_state_mount_count=$(echo "$grok_mounts" | grep -Fc -- " -> ${HOME_DIR}/.grok" || true)
         if [ "$grok_state_mount_count" = "1" ]; then
             pass "${tool}: Grok uses one state mount"
         else
@@ -974,7 +1013,7 @@ for tool in "${ALL_TOOLS[@]}"; do
             fail "${tool}: barrel Grok state write did not reach the host root"
         fi
         grok_command=$(barrel_exec 'command -v grok')
-        if [ "$(echo "$grok_command" | tr -d '[:space:]')" = "/home/user/.local/bin/grok" ]; then
+        if [ "$(echo "$grok_command" | tr -d '[:space:]')" = "/opt/cooper/bin/grok" ]; then
             pass "${tool}: image Grok binary wins over host state binary"
         else
             fail "${tool}: Grok command resolved to ${grok_command}"
@@ -1100,28 +1139,28 @@ for tool in "${ALL_TOOLS[@]}"; do
     fi
 
     pw_path=$(barrel_exec 'echo "$PLAYWRIGHT_BROWSERS_PATH"' | tr -d '[:space:]')
-    if [ "$pw_path" = "/home/user/.cache/ms-playwright" ]; then
+    if [ "$pw_path" = "/var/lib/cooper/cache/ms-playwright" ]; then
         pass "${tool}: PLAYWRIGHT_BROWSERS_PATH set correctly"
     else
-        fail "${tool}: PLAYWRIGHT_BROWSERS_PATH expected /home/user/.cache/ms-playwright, got: ${pw_path}"
+        fail "${tool}: PLAYWRIGHT_BROWSERS_PATH expected /var/lib/cooper/cache/ms-playwright, got: ${pw_path}"
     fi
 
     # Filesystem and mounts.
-    fonts_check=$(barrel_exec 'test -d /home/user/.local/share/fonts && echo ok || echo missing')
+    fonts_check=$(barrel_exec 'test -d /var/lib/cooper/fonts && echo ok || echo missing')
     if echo "$fonts_check" | grep -q "ok"; then
-        pass "${tool}: /home/user/.local/share/fonts mounted"
+        pass "${tool}: /var/lib/cooper/fonts mounted"
     else
-        fail "${tool}: /home/user/.local/share/fonts not found"
+        fail "${tool}: /var/lib/cooper/fonts not found"
     fi
 
-    fonts_link=$(barrel_exec 'readlink /home/user/.fonts 2>/dev/null || echo missing')
-    if echo "$fonts_link" | grep -q "/home/user/.local/share/fonts"; then
+    fonts_link=$(barrel_exec 'readlink "$HOME/.fonts" 2>/dev/null || echo missing')
+    if echo "$fonts_link" | grep -q "/var/lib/cooper/fonts"; then
         pass "${tool}: ~/.fonts symlink correct"
     else
         fail "${tool}: ~/.fonts symlink incorrect: ${fonts_link}"
     fi
 
-    pw_cache_check=$(barrel_exec 'test -d /home/user/.cache/ms-playwright && echo ok || echo missing')
+    pw_cache_check=$(barrel_exec 'test -d /var/lib/cooper/cache/ms-playwright && echo ok || echo missing')
     if echo "$pw_cache_check" | grep -q "ok"; then
         pass "${tool}: Playwright cache dir mounted"
     else
@@ -1129,7 +1168,7 @@ for tool in "${ALL_TOOLS[@]}"; do
     fi
 
     # ---- Timezone runtime environment ----
-    host_tz_offset=$(date +%z | tr -d '[:space:]')
+    host_tz_offset=$(TZ=":${HOST_LOCALTIME}" date +%z | tr -d '[:space:]')
     tz_val=$(barrel_exec 'echo "$TZ"' | tr -d '[:space:]')
     if [ "$tz_val" = ":/run/cooper/host-localtime" ]; then
         pass "${tool}: TZ points at the Cooper host-timezone snapshot"
@@ -1145,7 +1184,7 @@ for tool in "${ALL_TOOLS[@]}"; do
     fi
 
     # Playwright cache should be writable.
-    pw_write_check=$(barrel_exec 'touch /home/user/.cache/ms-playwright/e2e-write-test && echo ok || echo fail')
+    pw_write_check=$(barrel_exec 'touch /var/lib/cooper/cache/ms-playwright/e2e-write-test && echo ok || echo fail')
     if echo "$pw_write_check" | grep -q "ok"; then
         pass "${tool}: Playwright cache dir is writable"
     else
@@ -1186,7 +1225,7 @@ for tool in "${ALL_TOOLS[@]}"; do
     fi
 
     # Font runtime.
-    fc_cache_check=$(barrel_exec 'fc-cache -f /home/user/.local/share/fonts 2>&1 && echo ok || echo fail')
+    fc_cache_check=$(barrel_exec 'fc-cache -f /var/lib/cooper/fonts 2>&1 && echo ok || echo fail')
     if echo "$fc_cache_check" | grep -q "ok"; then
         pass "${tool}: fc-cache succeeds with read-only font mount"
     else
@@ -1670,8 +1709,15 @@ if [ "$HOST_OS" != "Darwin" ]; then
     GW_EXTERNAL=$(docker network inspect "$NETWORK_EXTERNAL" --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || echo "")
     GW_BRIDGE=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || echo "")
 
+    if [ -n "$VM_PARENT_AGENT_IP" ]; then
+        # BridgeGatewayIPs uses the outer agent address for nested Cooper.
+        # Docker bridge gateways belong to the guest host, not this process.
+        GW_EXTERNAL=""
+        GW_BRIDGE="$VM_PARENT_AGENT_IP"
+    fi
+
     # Verify the gateway IP CANNOT reach the server before relay (it's loopback-only).
-    if ! curl -sf --connect-timeout 2 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" >/dev/null 2>&1; then
+    if ! curl --noproxy '*' -sf --connect-timeout 2 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" >/dev/null 2>&1; then
         pass "Gateway IP cannot reach loopback server (before relay)"
     else
         info "Gateway IP already reaches server (service may bind wider) — relay test still valid"
@@ -1686,14 +1732,14 @@ if [ "$HOST_OS" != "Darwin" ]; then
     E2E_RELAY_HELPER_PID=$!
     # Wait for the lazy relay to detect the loopback service and bind.
     for _i in $(seq 1 20); do
-        if curl -sf -o /dev/null --connect-timeout 1 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" 2>/dev/null; then
+        if curl --noproxy '*' -sf -o /dev/null --connect-timeout 1 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" 2>/dev/null; then
             break
         fi
         sleep 0.5
     done
 
     # Verify the gateway IP CAN now reach the server via relay.
-    post_relay=$(curl -sf --connect-timeout 2 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" 2>/dev/null || echo "")
+    post_relay=$(curl --noproxy '*' -sf --connect-timeout 2 "http://${GW_BRIDGE}:${RELAY_TEST_PORT}/" 2>/dev/null || echo "")
     if echo "$post_relay" | grep -q "cooper-relay-test-ok"; then
         pass "Gateway IP reaches loopback server via host relay"
     else
@@ -2024,18 +2070,18 @@ section "Phase 11d: Interactive Login Shell PATH"
 login_shell_path=$(docker exec "$ACTIVE_BARREL" bash -lc 'echo $PATH' 2>&1)
 info "Login shell PATH: ${login_shell_path}"
 
-# Verify npm-global bin dir is in interactive PATH.
-if echo "$login_shell_path" | grep -q ".npm-global/bin"; then
-    pass "Login shell PATH includes .npm-global/bin"
+# Verify the image npm bin directory is in the interactive PATH.
+if echo "$login_shell_path" | grep -q "/opt/cooper/npm/bin"; then
+    pass "Login shell PATH includes /opt/cooper/npm/bin"
 else
-    fail "Login shell PATH missing .npm-global/bin — tools won't be found interactively"
+    fail "Login shell PATH missing /opt/cooper/npm/bin — tools won't be found interactively"
 fi
 
 # Verify .local/bin is in interactive PATH (for Claude Code native install).
-if echo "$login_shell_path" | grep -q ".local/bin"; then
-    pass "Login shell PATH includes .local/bin"
+if echo "$login_shell_path" | grep -Fq "/opt/cooper/bin"; then
+    pass "Login shell PATH includes /opt/cooper/bin"
 else
-    fail "Login shell PATH missing .local/bin"
+    fail "Login shell PATH missing /opt/cooper/bin"
 fi
 
 # Test tool via login shell (only the active tool should be found).
@@ -2328,12 +2374,12 @@ func run() error {
 		// The upstream installer writes under ~/.opencode, but Cooper copies
 		// the executable to ~/.local/bin because ~/.opencode is an auth/state
 		// bind mount at runtime.
-		command = "exec /home/user/.local/bin/opencode"
+		command = "exec /opt/cooper/bin/opencode"
 	case "codex":
 		// Keep this clipboard test independent of Codex onboarding and online
 		// startup work. The pinned image contains this model, and Cooper uses
 		// the same allow-all flag for a normal Codex session.
-		command = "exec /home/user/.npm-global/bin/codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.4 -c check_for_update_on_startup=false -c features.plugins=false -C /tmp"
+		command = "exec /opt/cooper/npm/bin/codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.4 -c check_for_update_on_startup=false -c features.plugins=false -C /tmp"
 	default:
 		return fmt.Errorf("unsupported tool %q", *tool)
 	}
@@ -2481,7 +2527,7 @@ start_clipboard_barrel() {
     ACTIVE_IMAGE="$(image_name_for "$tool")"
 
     mkdir -p "${CONFIG_DIR}/tokens"
-    TOKEN=$(head -c 32 /dev/urandom | xxd -p | tr -d '\n')
+    TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
     local token_path="${CONFIG_DIR}/tokens/${ACTIVE_BARREL}"
     local token_part="${token_path}.part"
     local created_at
@@ -2547,7 +2593,7 @@ start_clipboard_barrel() {
     local clipboard_ready=false
     for _i in $(seq 1 30); do
         if [ "$mode" = "shim" ]; then
-            if barrel_exec 'test -x /home/user/.local/bin/xclip' >/dev/null 2>&1; then
+            if barrel_exec 'test -x /opt/cooper/bin/xclip' >/dev/null 2>&1; then
                 clipboard_ready=true
                 break
             fi
@@ -2650,14 +2696,14 @@ fi
 # ---- Test 4: Shim scripts installed in user PATH by entrypoint ----
 info "Checking shim installation in user PATH..."
 
-# The entrypoint copies shims from /etc/cooper/shims/ to ~/.local/bin/
+# The entrypoint copies shims from /etc/cooper/shims/ to /opt/cooper/bin/
 # when COOPER_CLIPBOARD_MODE is "shim" or "auto".
 for shim in xclip xsel wl-paste; do
-    installed_check=$(barrel_exec "test -x /home/user/.local/bin/${shim} && echo found || echo missing")
+    installed_check=$(barrel_exec "test -x /opt/cooper/bin/${shim} && echo found || echo missing")
     if echo "$installed_check" | grep -q "found"; then
-        pass "Shim installed in PATH: /home/user/.local/bin/${shim}"
+        pass "Shim installed in PATH: /opt/cooper/bin/${shim}"
     else
-        fail "Shim not installed in PATH: /home/user/.local/bin/${shim}"
+        fail "Shim not installed in PATH: /opt/cooper/bin/${shim}"
     fi
 done
 
@@ -2686,9 +2732,9 @@ fi
 # ---- Test 7: xclip shim intercepts TARGETS request ----
 info "Checking shim TARGETS interception..."
 
-# The xclip shim in ~/.local/bin should intercept the TARGETS query and expose
+# The xclip shim in /opt/cooper/bin must intercept the TARGETS query and expose
 # the staged PNG without consulting the otherwise empty X11 clipboard.
-targets_output=$(barrel_exec '/home/user/.local/bin/xclip -selection clipboard -t TARGETS -o 2>/dev/null || true')
+targets_output=$(barrel_exec '/opt/cooper/bin/xclip -selection clipboard -t TARGETS -o 2>/dev/null || true')
 if echo "$targets_output" | grep -q "image/png"; then
     pass "xclip shim advertises staged image/png"
 else
@@ -2696,7 +2742,7 @@ else
 fi
 
 claude_image_sha=$(barrel_exec \
-    '/home/user/.local/bin/xclip -selection clipboard -t image/png -o | sha256sum | awk "{print \$1}"')
+    '/opt/cooper/bin/xclip -selection clipboard -t image/png -o | sha256sum | awk "{print \$1}"')
 if [ -n "$EXPECTED_CLIPBOARD_SHA" ] && [ "$claude_image_sha" = "$EXPECTED_CLIPBOARD_SHA" ]; then
     pass "Claude shim returned the staged PNG byte-for-byte"
 else
@@ -2756,7 +2802,7 @@ stop_clipboard_barrel
 start_clipboard_barrel "opencode" "shim" || exit 1
 
 opencode_image_sha=$(barrel_exec \
-    '/home/user/.local/bin/xclip -selection clipboard -t image/png -o | sha256sum | awk "{print \$1}"')
+    '/opt/cooper/bin/xclip -selection clipboard -t image/png -o | sha256sum | awk "{print \$1}"')
 if [ -n "$EXPECTED_CLIPBOARD_SHA" ] && [ "$opencode_image_sha" = "$EXPECTED_CLIPBOARD_SHA" ]; then
     pass "OpenCode shim returned the staged PNG byte-for-byte"
 else
@@ -2790,7 +2836,7 @@ fi
 # and disabled online startup work keep this test focused on clipboard paste.
 # The TUI never submits a prompt, so the fake key cannot incur API usage.
 if barrel_exec \
-    'printf "%s\n" "[projects.\"/tmp\"]" "trust_level = \"trusted\"" > /home/user/.codex/config.toml && printf "sk-e2e-clipboard-sanity\n" | /home/user/.npm-global/bin/codex login --with-api-key >/tmp/e2e-codex-login.log 2>&1'; then
+    'printf "%s\n" "[projects.\"/tmp\"]" "trust_level = \"trusted\"" > "$HOME/.codex/config.toml" && printf "sk-e2e-clipboard-sanity\n" | /opt/cooper/npm/bin/codex login --with-api-key >/tmp/e2e-codex-login.log 2>&1'; then
     info "Codex E2E startup state prepared"
 else
     fail "Codex E2E login setup failed"

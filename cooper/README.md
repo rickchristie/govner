@@ -36,7 +36,7 @@ Custom tools can be added by placing a Dockerfile in `~/.cooper/cli/{tool-name}/
 
 ### Grok Build
 
-Grok is installed from xAI's native CLI release channel, not npm. Mirror, latest, and pin all resolve to an exact `grok-<version>-linux-<arch>` artifact that Cooper copies into `/home/user/.local/bin/grok`.
+Grok is installed from xAI's native CLI release channel, not npm. Mirror, latest, and pin all resolve to an exact `grok-<version>-linux-<arch>` artifact that Cooper copies into `/opt/cooper/bin/grok`.
 
 Sign in with Grok on the host before you start a Grok session:
 
@@ -44,7 +44,7 @@ Sign in with Grok on the host before you start a Grok session:
 grok login --oauth
 ```
 
-Cooper mounts the complete host Grok state root read-write at `/home/user/.grok`. The source is `GROK_HOME` when that variable is not empty. Otherwise, the source is `~/.grok`. Cooper maps the source to a stable container path and sets `GROK_HOME=/home/user/.grok` in the image.
+Cooper mounts the complete host Grok state root read-write at the same absolute path. The source is `GROK_HOME` when that variable is not empty. Otherwise, the source is `~/.grok`. Cooper resolves this path when the session starts. The shared `~/.agents` root is also mounted. Other agents' private roots are not mounted for Grok foreign-session discovery.
 
 The Grok state root and the Cooper configuration directory must not contain each other. Cooper checks the direct paths and the paths after existing symlinks are resolved. It refuses an overlap before it resets runtime data, mounts Grok state, or removes Cooper configuration. This rule prevents Cooper cleanup from deleting host-owned Grok auth or sessions.
 
@@ -64,7 +64,7 @@ OpenCode is installed from the official GitHub Release tarball
 `https://github.com/anomalyco/opencode/releases/download/v<version>/opencode-linux-<x64|arm64>.tar.gz`,
 not from `https://opencode.ai/install`. That convenience URL only redirects to a moving install script
 which then fetches the same artifact, and it rate-limits (HTTP 429) during Docker builds.
-The binary is placed in `/home/user/.local/bin/opencode` so the runtime `~/.opencode` state mount cannot hide it.
+The binary is placed in `/opt/cooper/bin/opencode` so the runtime `~/.opencode` state mount cannot hide it.
 
 ## Supported Platforms
 
@@ -398,21 +398,31 @@ Cooper does **not** install Playwright itself or download browsers. Your project
 
 CLI and VM mode use one shared mount policy. The VM supervisor can see only the approved mount sources that it must export with virtiofs. Inside the guest, the selected agent container receives the same targets as a CLI barrel.
 
-| Host Path | Container Path | Mode | Purpose |
+Cooper builds the agent account with the host login name, primary group, UID, GID, and home path. For example, a host account `ricky` with home `/home/ricky` gets that same account and home in both modes. `HOME`, `USER`, `LOGNAME`, and the password database agree. The home path does not have to match the login name.
+
+Run `cooper build` once after this upgrade. Launch rejects old images or images built for another account. Account changes require a rebuild; `cooper up` does not change image accounts. Agent state overrides are read at launch and do not require a rebuild.
+
+| Host path | Workload path | Mode | Purpose |
 |-----------|---------------|------|---------|
 | Current directory | Same path | read-write | Workspace |
 | `.git/hooks` | Same path | read-only | Prevent hook injection |
-| `~/.claude`, `~/.claude.json` | `/home/user/...` | read-write | Claude Code state |
-| `~/.copilot` | `/home/user/.copilot` | read-write | Copilot state |
-| `~/.codex` | `/home/user/.codex` | read-write | Codex state |
-| `~/.config/opencode`, `~/.local/share/opencode`, `~/.local/state/opencode`, `~/.opencode` | `/home/user/...` | read-write | OpenCode config and state (binary lives in `~/.local/bin`) |
-| `$GROK_HOME`, or `~/.grok` when unset | `/home/user/.grok` | read-write | Complete Grok auth, config, sessions, history, memory, and other state |
-| `~/.gitconfig` | `/home/user/.gitconfig` | read-only | Git identity |
-| `~/.cooper/cache/go-mod` | `/home/user/go/pkg/mod` | read-write | Go module cache |
-| `~/.cooper/cache/go-build` | `/home/user/.cache/go-build` | read-write | Go build cache |
-| `~/.cooper/cache/npm` | `/home/user/.npm` | read-write | npm cache |
-| `~/.cooper/cache/pip` | `/home/user/.cache/pip` | read-write | pip cache |
-| `~/.cooper/tmp/{runtime}` | `/tmp` | read-write | Per-workload temporary directory |
+| `CLAUDE_CONFIG_DIR` or `~/.claude`, existing `~/.claude.json` | Same paths | read-write | Claude Code state |
+| `COPILOT_HOME` or `~/.copilot` | Same path | read-write | Copilot state |
+| Effective Copilot cache root | Same path | read-write | Copilot cache and helper downloads |
+| `CODEX_HOME` or `~/.codex`, `~/.agents`, `~/.claude-plugin`, `~/.cursor-plugin` | Same paths | read-write | Codex state, shared skills, and marketplace roots |
+| Effective XDG config, data, state, and cache roots with `/opencode` appended; `~/.opencode` | Same paths | read-write | OpenCode state |
+| `OPENCODE_CONFIG_DIR`, existing `OPENCODE_CONFIG`, custom `OPENCODE_DB` directory | Same paths | read-write | Explicit OpenCode paths |
+| `GROK_HOME` or `~/.grok`, `~/.agents` | Same paths | read-write | Complete Grok and shared agent state |
+| Existing `~/.gitconfig` | Same path | read-only | Git identity |
+| `~/.cooper/cache/go-mod` | `/go/pkg/mod` | read-write | Go module cache |
+| `~/.cooper/cache/go-build` | `/var/lib/cooper/cache/go-build` | read-write | Go build cache |
+| `~/.cooper/cache/npm` | `/var/lib/cooper/cache/npm` | read-write | npm cache |
+| `~/.cooper/cache/pip` | `/var/lib/cooper/cache/pip` | read-write | pip cache |
+| `~/.cooper/tmp/{runtime}` | `/tmp` | read-write | Temporary files for one workload |
+
+Only the selected agent's state roots are mounted. Cooper does not mount the complete host home. A private runtime home holds shell defaults and temporary application files; selected state roots are mounted below it or at their configured absolute paths. Image binaries stay in `/opt/cooper/bin` and `/opt/cooper/npm`, where a host state mount cannot hide them.
+
+New files below a selected root are shared automatically. To support an additional root, update the shared list in `internal/workload/agentpaths.go`. Both execution modes, session reuse checks, and cleanup checks use that list. See [Account and state paths](docs/home-paths.md) for path rules, the build boundary, and future profile constraints.
 
 Language caches are Cooper-managed under `~/.cooper/cache/`, auto-configured based on which programming tools are enabled. They start empty and fill naturally during normal package-manager use. Each workload gets its own host-backed `/tmp` directory. Cooper clears the complete `~/.cooper/tmp/` tree when `cooper up` starts and when it stops.
 

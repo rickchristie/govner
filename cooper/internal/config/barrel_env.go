@@ -34,6 +34,20 @@ var protectedBarrelEnvExactNames = []string{
 	"SHELL",
 	"NODE_EXTRA_CA_CERTS",
 	"NPM_CONFIG_PREFIX",
+	"NPM_CONFIG_CACHE",
+	"PIP_CACHE_DIR",
+	"PYTHONUSERBASE",
+	"CODEX_HOME",
+	"CLAUDE_CONFIG_DIR",
+	"COPILOT_HOME",
+	"COPILOT_CACHE_HOME",
+	"XDG_CONFIG_HOME",
+	"XDG_DATA_HOME",
+	"XDG_STATE_HOME",
+	"XDG_CACHE_HOME",
+	"OPENCODE_CONFIG",
+	"OPENCODE_CONFIG_DIR",
+	"OPENCODE_DB",
 	"GOPATH",
 	"GOMODCACHE",
 	"GOCACHE",
@@ -99,7 +113,7 @@ func IsProtectedBarrelEnvName(name string) bool {
 
 // IsProtectedBarrelEnvNameForTool reports whether name is reserved for a
 // specific barrel. Built-in Grok reserves GROK_HOME because Cooper maps the
-// effective host state root to /home/user/.grok. It reserves
+// effective host state root at its original path. It reserves
 // GROK_LEADER_SOCKET because process transport must stay in the barrel. Other
 // Grok settings and API keys remain user-controlled.
 func IsProtectedBarrelEnvNameForTool(name, toolName string) bool {

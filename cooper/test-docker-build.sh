@@ -229,6 +229,24 @@ run_build_test() {
         docker run --rm --entrypoint "" "$base_image" "$@" 2>&1
     }
 
+    # The build account must agree across the shell, environment, and passwd.
+    local expected_identity actual_identity
+    expected_identity="$(id -un):$(id -gn):$(id -u):$(id -g):${HOME}"
+    for account_image in "$base_image" "$claude_image" "$copilot_image" "$codex_image" "$opencode_image" "$grok_image"; do
+        actual_identity=$(docker run --rm --entrypoint "" "$account_image" sh -lc '
+            set -eu
+            test "$USER" = "$(id -un)"
+            test "$LOGNAME" = "$USER"
+            test "$HOME" = "$(getent passwd "$(id -u)" | cut -d: -f6)"
+            printf "%s:%s:%s:%s:%s" "$(id -un)" "$(id -gn)" "$(id -u)" "$(id -g)" "$HOME"
+        ' || true)
+        if [ "$actual_identity" = "$expected_identity" ]; then
+            pass "${mode}: ${account_image} uses the host account and home"
+        else
+            fail "${mode}: ${account_image} account '${actual_identity}', expected '${expected_identity}'"
+        fi
+    done
+
     # claude should NOT be found.
     if base_run which claude &>/dev/null; then
         fail "${mode}: base image has 'claude' (should not)"
@@ -464,7 +482,7 @@ run_build_test() {
 
         # A complete runtime state mount must preserve both the image binary
         # and read-write host state. Include a conflicting host-state binary
-        # to prove ~/.local/bin remains first in PATH.
+        # to prove /opt/cooper/bin remains first in PATH.
         local grok_state_dir="${test_dir}/host-grok-state"
         mkdir -p "${grok_state_dir}/bin" "${grok_state_dir}/memory" "${grok_state_dir}/sessions"
         printf '%s\n' '#!/bin/sh' 'echo wrong-host-state-binary' > "${grok_state_dir}/bin/grok"
@@ -473,7 +491,7 @@ run_build_test() {
         printf '%s\n' '# shared memory' > "${grok_state_dir}/memory/MEMORY.md"
 
         local grok_with_state
-        grok_with_state=$(docker run --rm --entrypoint "" -v "${grok_state_dir}:/home/user/.grok:rw" "$grok_image" bash -c 'test "$GROK_HOME" = /home/user/.grok && test "$(command -v grok)" = /home/user/.local/bin/grok && grep -q "enabled = true" "$GROK_HOME/config.toml" && printf "%s\n" barrel-write > "$GROK_HOME/from-barrel" && grok --version 2>&1' || true)
+        grok_with_state=$(docker run --rm --entrypoint "" -v "${grok_state_dir}:${grok_state_dir}:rw" -e "GROK_HOME=${grok_state_dir}" "$grok_image" bash -c 'test "$(command -v grok)" = /opt/cooper/bin/grok && grep -q "enabled = true" "$GROK_HOME/config.toml" && printf "%s\n" barrel-write > "$GROK_HOME/from-barrel" && grok --version 2>&1' || true)
         assert_version "Grok Build with .grok mount" "$grok_version" "$grok_with_state"
         if grep -q barrel-write "${grok_state_dir}/from-barrel"; then
             pass "${mode}: grok complete state mount is read-write"
@@ -514,8 +532,8 @@ run_build_test() {
     fi
     local grok_home
     grok_home=$(grok_run bash -c 'echo $GROK_HOME' || true)
-    if [ "$grok_home" = "/home/user/.grok" ]; then
-        pass "${mode}: grok image maps GROK_HOME to the shared state root"
+    if [ -z "$grok_home" ]; then
+        pass "${mode}: grok state path is selected at launch"
     else
         fail "${mode}: grok image GROK_HOME='${grok_home}'"
     fi

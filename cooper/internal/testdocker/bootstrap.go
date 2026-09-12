@@ -20,6 +20,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/templates"
+	"github.com/rickchristie/govner/cooper/internal/usercontext"
 )
 
 // ImagePrefix isolates go-test Docker images from production images and from
@@ -345,10 +346,11 @@ func ensureTestImagesLocked(name string) error {
 		return err
 	}
 
-	uidGidArgs := map[string]string{
-		"USER_UID": fmt.Sprintf("%d", os.Getuid()),
-		"USER_GID": fmt.Sprintf("%d", os.Getgid()),
+	account, err := usercontext.Current()
+	if err != nil {
+		return err
 	}
+	uidGidArgs := account.BuildArgs()
 
 	logf(name, "building shared proxy image %q", docker.GetImageProxy())
 	if err := docker.BuildImage(
@@ -523,6 +525,11 @@ func sharedImagesUpToDate(fingerprint string) (bool, string, error) {
 
 func buildFingerprint(root string) (string, error) {
 	h := sha256.New()
+	account, err := usercontext.Current()
+	if err != nil {
+		return "", err
+	}
+	_, _ = h.Write([]byte(account.Label()))
 	paths := []string{
 		filepath.Join(root, ".testfiles", "config-pinned.json"),
 		filepath.Join(root, "internal", "clipboard"),

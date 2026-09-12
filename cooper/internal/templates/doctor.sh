@@ -412,11 +412,11 @@ info "COOPER_CLIPBOARD_MODE: ${clip_mode}"
 # Check clipboard shims
 if [ "$clip_mode" = "shim" ] || [ "$clip_mode" = "auto" ]; then
     for shim in xclip xsel wl-paste; do
-        if [ -x "/home/user/.local/bin/${shim}" ]; then
-            pass "Clipboard shim installed: /home/user/.local/bin/${shim}"
+        if [ -x "/opt/cooper/bin/${shim}" ]; then
+            pass "Clipboard shim installed: /opt/cooper/bin/${shim}"
         elif [ -f "/etc/cooper/shims/${shim}" ]; then
             warn "Shim source exists at /etc/cooper/shims/${shim} but not installed in PATH"
-            info "  The entrypoint should copy shims to /home/user/.local/bin/"
+            info "  The entrypoint should copy shims to /opt/cooper/bin/"
         else
             warn "Clipboard shim not found: ${shim}"
         fi
@@ -517,21 +517,21 @@ else
 fi
 
 # Font directories
-if [ -d /home/user/.local/share/fonts ]; then
-    pass "/home/user/.local/share/fonts directory exists"
+if [ -d /var/lib/cooper/fonts ]; then
+    pass "/var/lib/cooper/fonts directory exists"
 else
-    warn "/home/user/.local/share/fonts directory does not exist"
+    warn "/var/lib/cooper/fonts directory does not exist"
 fi
 
-if [ -L /home/user/.fonts ]; then
-    link_target=$(readlink /home/user/.fonts)
-    if [ "$link_target" = "/home/user/.local/share/fonts" ]; then
-        pass "/home/user/.fonts is a symlink to /home/user/.local/share/fonts"
+if [ -L ${HOME}/.fonts ]; then
+    link_target=$(readlink ${HOME}/.fonts)
+    if [ "$link_target" = "/var/lib/cooper/fonts" ]; then
+        pass "${HOME}/.fonts is a symlink to /var/lib/cooper/fonts"
     else
-        warn "/home/user/.fonts is a symlink but points to ${link_target} (expected /home/user/.local/share/fonts)"
+        warn "${HOME}/.fonts is a symlink but points to ${link_target} (expected /var/lib/cooper/fonts)"
     fi
 else
-    warn "/home/user/.fonts is not a symlink to /home/user/.local/share/fonts"
+    warn "${HOME}/.fonts is not a symlink to /var/lib/cooper/fonts"
 fi
 
 # X11 / display environment for Playwright
@@ -595,11 +595,11 @@ if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
 fi
 
 # Font cache rebuild test
-if command -v fc-cache &>/dev/null && [ -d /home/user/.local/share/fonts ]; then
-    if fc-cache -f /home/user/.local/share/fonts 2>/dev/null; then
-        pass "fc-cache -f /home/user/.local/share/fonts succeeds"
+if command -v fc-cache &>/dev/null && [ -d /var/lib/cooper/fonts ]; then
+    if fc-cache -f /var/lib/cooper/fonts 2>/dev/null; then
+        pass "fc-cache -f /var/lib/cooper/fonts succeeds"
     else
-        warn "fc-cache -f /home/user/.local/share/fonts failed (font dir may be read-only)"
+        warn "fc-cache -f /var/lib/cooper/fonts failed (font dir may be read-only)"
     fi
 fi
 

@@ -75,6 +75,17 @@ func setupCooperDir(t *testing.T) (string, *config.Config) {
 	// where /home/user is the selected agent container's private file system.
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GROK_HOME", "")
+	for _, name := range []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "COPILOT_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_DB"} {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restoreImages, err := testdocker.UseHome(homeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restoreImages)
 	t.Cleanup(func() {
 		_ = testdocker.FixOwnership(homeDir)
 	})
@@ -1693,6 +1704,10 @@ func TestCooperApp_ProxyRuntimeScenarios(t *testing.T) {
 		t.Fatalf("read inspected-domain Squid config: %v", err)
 	}
 	squidConfig = append(squidConfig, []byte("\n# Local integration fixture only.\nsslproxy_cert_error allow all\n")...)
+	// In a Cooper VM, these Docker DNS aliases must reach the local fixture.
+	// The parent proxy resolves the same names to real provider services.
+	localOrigins := fmt.Sprintf("acl cooper_test_origin dstdomain %s %s %s\nalways_direct allow cooper_test_origin\nnever_direct allow all", proxyAllowedTestDomain, proxyBlockedTestDomain, proxyInspectedTestDomain)
+	squidConfig = []byte(strings.ReplaceAll(string(squidConfig), "never_direct allow all", localOrigins))
 	if err := os.WriteFile(squidPath, squidConfig, 0o644); err != nil {
 		t.Fatalf("write inspected-domain Squid config: %v", err)
 	}
@@ -2721,11 +2736,11 @@ func TestCooperApp_LoginShellPATH(t *testing.T) {
 		t.Fatalf("login shell PATH check failed: %v", err)
 	}
 
-	if !strings.Contains(loginPath, ".npm-global/bin") {
-		t.Errorf("login shell PATH missing .npm-global/bin: %s", loginPath)
+	if !strings.Contains(loginPath, "/opt/cooper/npm/bin") {
+		t.Errorf("login shell PATH missing /opt/cooper/npm/bin: %s", loginPath)
 	}
-	if !strings.Contains(loginPath, ".local/bin") {
-		t.Errorf("login shell PATH missing .local/bin: %s", loginPath)
+	if !strings.Contains(loginPath, "/opt/cooper/bin") {
+		t.Errorf("login shell PATH missing /opt/cooper/bin: %s", loginPath)
 	}
 
 	// Verify enabled AI tools are found in login shell.
@@ -2970,17 +2985,25 @@ func TestCooperApp_ToolBarrelAuthMounts(t *testing.T) {
 	t.Cleanup(func() { docker.StopBarrel(barrelName) })
 	waitForContainer(t, barrelName, 15*time.Second)
 
-	// Claude barrel should have .claude mounted.
-	out, err := barrelExec(barrelName, "mount | grep '/home/user/.claude'")
-	if err != nil || strings.TrimSpace(out) == "" {
-		t.Error("claude barrel should have /home/user/.claude mounted")
+	// The complete selected state keeps the host path on both sides.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("docker", "inspect", "--format", "{{range .Mounts}}{{.Source}}:{{.Destination}}{{println}}{{end}}", barrelName).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(home, ".claude")
+	if !strings.Contains(string(out), state+":"+state+"\n") {
+		t.Errorf("Claude state must mount at the same path: %s", state)
 	}
 
 	// Claude barrel should NOT have .copilot or .codex mounted.
 	for _, dir := range []string{".copilot", ".codex"} {
-		out, err := barrelExec(barrelName, "mount | grep '/home/user/"+dir+"'")
-		if err == nil && strings.TrimSpace(out) != "" {
-			t.Errorf("claude barrel should NOT have /home/user/%s mounted", dir)
+		state := filepath.Join(home, dir)
+		if strings.Contains(string(out), ":"+state+"\n") {
+			t.Errorf("Claude barrel must not mount unselected state %s", state)
 		}
 	}
 }

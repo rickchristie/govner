@@ -29,6 +29,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/runtimefs"
 	"github.com/rickchristie/govner/cooper/internal/testdocker"
 	"github.com/rickchristie/govner/cooper/internal/testdriver"
+	"github.com/rickchristie/govner/cooper/internal/usercontext"
 	"github.com/rickchristie/govner/cooper/internal/vm"
 )
 
@@ -80,8 +81,8 @@ func TestNestedCooperHarness(t *testing.T) {
 	innerScript := fmt.Sprintf(`
 set -eux
 test -f cooper/go.mod
-test "$(cat /home/user/.codex/cooper-self-host-sentinel)" = outer-state
-printf inner-state > /home/user/.codex/cooper-inner-write
+test "$(cat "$HOME/.codex/cooper-self-host-sentinel")" = outer-state
+printf inner-state > "$HOME/.codex/cooper-inner-write"
 test ! -e /dev/kvm
 ! grep -Eq '(^|[[:space:]])(svm|vmx)([[:space:]]|$)' /proc/cpuinfo
 docker info >/dev/null
@@ -189,8 +190,6 @@ func TestVMNestedDockerMountRefresh(t *testing.T) {
 	}
 	preparedBase := requiredFile(t, "COOPER_VM_PREPARED_BASE")
 	cooperBinary := requiredFile(t, "COOPER_VM_BINARY")
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
 
 	lock, err := testdocker.SetupPackageNamed("vm-refresh-probe", true)
 	if err != nil {
@@ -211,6 +210,8 @@ func TestVMNestedDockerMountRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	homeDir := driver.HomeDir()
+	t.Setenv("HOME", homeDir)
 	defer func() {
 		docker.SetRuntimeNamespace(vmE2ENamespace)
 		if err := driver.Close(); err != nil {
@@ -419,12 +420,12 @@ temporary=$(mktemp)
 trap 'rm -f "$temporary"' EXIT
 curl -fsS --max-time 5 -o "$temporary" -H "Authorization: Bearer ${token}" "$COOPER_CLIPBOARD_BRIDGE_URL/clipboard/image"
 test -s "$temporary"
-sha256sum /home/user/.local/bin/xclip "$temporary"
+sha256sum /opt/cooper/bin/xclip "$temporary"
 `)
 	if !strings.Contains(shimPreparation, hex.EncodeToString(shimDigest[:])) || !strings.Contains(shimPreparation, hex.EncodeToString(pngDigest[:])) {
 		t.Fatalf("guest shim preparation output = %q", shimPreparation)
 	}
-	clipboardOutput := execVM(t, manager, runtimeState, "set -o pipefail; test \"$(command -v xclip)\" = /home/user/.local/bin/xclip; xclip -selection clipboard -t image/png -o | sha256sum")
+	clipboardOutput := execVM(t, manager, runtimeState, "set -o pipefail; test \"$(command -v xclip)\" = /opt/cooper/bin/xclip; xclip -selection clipboard -t image/png -o | sha256sum")
 	if !strings.Contains(clipboardOutput, hex.EncodeToString(pngDigest[:])) {
 		t.Fatalf("clipboard output = %q", clipboardOutput)
 	}
@@ -567,10 +568,6 @@ func TestCooperVMSelfHosting(t *testing.T) {
 	preparedBase := requiredFile(t, "COOPER_VM_PREPARED_BASE")
 	cooperBinary := requiredFile(t, "COOPER_VM_BINARY")
 	repositoryRoot := repositoryRoot(t)
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
-	writeFile(t, filepath.Join(homeDir, ".gitconfig"), "[user]\n\tname = Cooper Self Host Test\n")
-	writeFile(t, filepath.Join(homeDir, ".codex", "cooper-self-host-sentinel"), "outer-state\n")
 
 	lock, err := testdocker.SetupPackageNamed("vm-self-host", false)
 	if err != nil {
@@ -596,6 +593,10 @@ func TestCooperVMSelfHosting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	homeDir := driver.HomeDir()
+	t.Setenv("HOME", homeDir)
+	writeFile(t, filepath.Join(homeDir, ".gitconfig"), "[user]\n\tname = Cooper Self Host Test\n")
+	writeFile(t, filepath.Join(homeDir, ".codex", "cooper-self-host-sentinel"), "outer-state\n")
 	defer func() {
 		docker.SetRuntimeNamespace(vmE2ENamespace)
 		if err := driver.Close(); err != nil {
@@ -677,7 +678,7 @@ set -eu
 self_host_binary=%s
 test -c /dev/kvm
 grep -Eq '(^|[[:space:]])(svm|vmx)([[:space:]]|$)' /proc/cpuinfo
-test "$(cat /home/user/.codex/cooper-self-host-sentinel)" = outer-state
+test "$(cat "$HOME/.codex/cooper-self-host-sentinel")" = outer-state
 docker info >/dev/null
 if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy curl -fsS --connect-timeout 2 --max-time 4 http://1.1.1.1/ >/dev/null 2>&1; then exit 51; fi
 
@@ -708,14 +709,14 @@ if ! go test -C ./cooper -p=1 ./... -count=1 -timeout=30m >/tmp/self-host-go-tes
 fi
 printf 'SELF_HOST_GO_TEST_OK\n'
 
-mkdir -p /home/user/.cooper/vm/assets/schema-1
-cp %s /home/user/.cooper/vm/assets/schema-1/cooper-guest-base.qcow2
-cp %s /home/user/.cooper/vm/assets/schema-1/cooper-guest-base.qcow2.json
-cp %s /home/user/.cooper/config.json
-chmod 0444 /home/user/.cooper/vm/assets/schema-1/cooper-guest-base.qcow2 /home/user/.cooper/vm/assets/schema-1/cooper-guest-base.qcow2.json
+mkdir -p "${HOME}/.cooper/vm/assets/schema-1"
+cp %s "${HOME}/.cooper/vm/assets/schema-1/cooper-guest-base.qcow2"
+cp %s "${HOME}/.cooper/vm/assets/schema-1/cooper-guest-base.qcow2.json"
+cp %s "${HOME}/.cooper/config.json"
+chmod 0444 "${HOME}/.cooper/vm/assets/schema-1/cooper-guest-base.qcow2" "${HOME}/.cooper/vm/assets/schema-1/cooper-guest-base.qcow2.json"
 docker tag %s %s
 
-if ! "$self_host_binary" --config /home/user/.cooper --prefix %s --runtime-namespace %s build >/tmp/self-host-docker-build.log 2>&1; then
+if ! "$self_host_binary" --config "${HOME}/.cooper" --prefix %s --runtime-namespace %s build >/tmp/self-host-docker-build.log 2>&1; then
     tail -n 300 /tmp/self-host-docker-build.log >&2
     exit 54
 fi
@@ -730,7 +731,7 @@ fi
 printf 'SELF_HOST_DOCKER_TEST_OK\n'
 
 if ! COOPER_NESTED_HARNESS=1 \
-    COOPER_SELF_HOST_CONFIG=/home/user/.cooper \
+    COOPER_SELF_HOST_CONFIG="${HOME}/.cooper" \
     COOPER_SELF_HOST_BINARY="$self_host_binary" \
     COOPER_SELF_HOST_TARGET=vm-allowed.cooper.test \
     go test -C ./cooper -v ./internal/vme2e -run '^TestNestedCooperHarness$' -count=1 -timeout=30m >/tmp/self-host-nested.log 2>&1; then
@@ -821,14 +822,22 @@ type builtInAgent struct {
 
 func runBuiltInParityMatrix(t *testing.T, driver *testdriver.Driver, homeDir, preparedBase, cooperBinary string) {
 	t.Helper()
+	account, err := usercontext.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	account.Home = homeDir
 	agents := builtInAgents(homeDir)
 	for _, agent := range agents {
 		writeAgentStateSentinels(t, agent)
 	}
 
+	// A focused subtest run must check writes only for agents it started.
+	var startedAgents []builtInAgent
 	for _, agent := range agents {
 		agent := agent
 		t.Run("built-in-parity-"+agent.name, func(t *testing.T) {
+			startedAgents = append(startedAgents, agent)
 			workspace := t.TempDir()
 			writeFile(t, filepath.Join(workspace, "parity-workspace"), agent.name+"\n")
 
@@ -837,7 +846,7 @@ func runBuiltInParityMatrix(t *testing.T, driver *testdriver.Driver, homeDir, pr
 				t.Fatal(err)
 			}
 			writeFile(t, filepath.Join(agent.targets[0].hostPath, ".cooper-vm-live-cli"), "cli-live\n")
-			cliOutput, err := driver.ExecBarrel(barrel.Name, agentParityScript(agent, agents, workspace, "cli"))
+			cliOutput, err := driver.ExecBarrel(barrel.Name, agentParityScript(agent, agents, workspace, "cli", account))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -855,7 +864,7 @@ func runBuiltInParityMatrix(t *testing.T, driver *testdriver.Driver, homeDir, pr
 			}
 			manager, _, runtimeState, _ := startVM(t, driver, homeDir, preparedBase, cooperBinary, workspace, agent.name, clipboardMode)
 			writeFile(t, filepath.Join(agent.targets[0].hostPath, ".cooper-vm-live-vm"), "vm-live\n")
-			vmOutput := execVM(t, manager, runtimeState, agentParityScript(agent, agents, workspace, "vm"))
+			vmOutput := execVM(t, manager, runtimeState, agentParityScript(agent, agents, workspace, "vm", account))
 			if err := manager.Stop(context.Background(), runtimeState); err != nil {
 				t.Fatal(err)
 			}
@@ -874,7 +883,7 @@ func runBuiltInParityMatrix(t *testing.T, driver *testdriver.Driver, homeDir, pr
 	if err := vm.RemoveCache(driver.CooperDir()); err != nil {
 		t.Fatal(err)
 	}
-	for _, agent := range agents {
+	for _, agent := range startedAgents {
 		for _, target := range agent.targets {
 			if target.file {
 				if !strings.Contains(readFile(t, target.hostPath), "cooper-vm-state-"+agent.name) {
@@ -890,24 +899,24 @@ func runBuiltInParityMatrix(t *testing.T, driver *testdriver.Driver, homeDir, pr
 }
 
 func builtInAgents(homeDir string) []builtInAgent {
-	stateDir := func(host, guest string) stateTarget {
-		return stateTarget{hostPath: filepath.Join(homeDir, host), guestPath: "/home/user/" + guest}
+	stateDir := func(relative string) stateTarget {
+		return stateTarget{hostPath: filepath.Join(homeDir, relative), guestPath: filepath.Join(homeDir, relative)}
 	}
 	return []builtInAgent{
 		{name: "claude", targets: []stateTarget{
-			stateDir(".claude", ".claude"),
-			{hostPath: filepath.Join(homeDir, ".claude.json"), guestPath: "/home/user/.claude.json", file: true},
+			stateDir(".claude"),
+			{hostPath: filepath.Join(homeDir, ".claude.json"), guestPath: filepath.Join(homeDir, ".claude.json"), file: true},
 		}},
-		{name: "copilot", targets: []stateTarget{stateDir(".copilot", ".copilot")}},
-		{name: "codex", targets: []stateTarget{stateDir(".codex", ".codex")}},
+		{name: "copilot", targets: []stateTarget{stateDir(".copilot"), stateDir(".cache/copilot")}},
+		{name: "codex", targets: []stateTarget{stateDir(".codex"), stateDir(".agents"), stateDir(".claude-plugin"), stateDir(".cursor-plugin")}},
 		{name: "opencode", targets: []stateTarget{
-			stateDir(".cache/opencode", ".cache/opencode"),
-			stateDir(".config/opencode", ".config/opencode"),
-			stateDir(".local/share/opencode", ".local/share/opencode"),
-			stateDir(".local/state/opencode", ".local/state/opencode"),
-			stateDir(".opencode", ".opencode"),
+			stateDir(".cache/opencode"),
+			stateDir(".config/opencode"),
+			stateDir(".local/share/opencode"),
+			stateDir(".local/state/opencode"),
+			stateDir(".opencode"),
 		}},
-		{name: "grok", targets: []stateTarget{{hostPath: filepath.Join(homeDir, "grok-state"), guestPath: "/home/user/.grok"}}},
+		{name: "grok", targets: []stateTarget{stateDir("grok-state"), stateDir(".agents")}},
 	}
 }
 
@@ -922,13 +931,14 @@ func writeAgentStateSentinels(t *testing.T, agent builtInAgent) {
 	}
 }
 
-func agentParityScript(selected builtInAgent, all []builtInAgent, workspace, runtimeKind string) string {
+func agentParityScript(selected builtInAgent, all []builtInAgent, workspace, runtimeKind string, account usercontext.Account) string {
 	var checks strings.Builder
 	fmt.Fprintf(&checks, "set -eu\ntest \"$PWD\" = %s\ntest \"$(cat parity-workspace)\" = %s\ntest \"$COOPER_CLI_TOOL\" = %s\n", shellQuote(workspace), shellQuote(selected.name), shellQuote(selected.name))
+	fmt.Fprintf(&checks, "test \"$HOME\" = %s\ntest \"$USER\" = %s\ntest \"$LOGNAME\" = %s\ntest \"$(id -un)\" = %s\ntest \"$(id -u)\" = %d\ntest \"$(id -g)\" = %d\ntest \"$(getent passwd \"$(id -u)\" | cut -d: -f6)\" = %s\n", shellQuote(account.Home), shellQuote(account.Name), shellQuote(account.Name), shellQuote(account.Name), account.UID, account.GID, shellQuote(account.Home))
 	for _, agent := range all {
 		for _, target := range agent.targets {
 			if target.file {
-				if agent.name == selected.name {
+				if stateIsSelected(target, selected) {
 					fmt.Fprintf(&checks, "grep -Fq %s %s\n", shellQuote("cooper-vm-state-"+agent.name), shellQuote(target.guestPath))
 				} else {
 					fmt.Fprintf(&checks, "! grep -Fq %s %s 2>/dev/null\n", shellQuote("cooper-vm-state-"+agent.name), shellQuote(target.guestPath))
@@ -936,7 +946,7 @@ func agentParityScript(selected builtInAgent, all []builtInAgent, workspace, run
 				continue
 			}
 			sentinel := filepath.Join(target.guestPath, ".cooper-vm-state-"+agent.name)
-			if agent.name == selected.name {
+			if stateIsSelected(target, selected) {
 				fmt.Fprintf(&checks, "test \"$(cat %s)\" = %s\n", shellQuote(sentinel), shellQuote(agent.name))
 			} else {
 				fmt.Fprintf(&checks, "! test -e %s\n", shellQuote(sentinel))
@@ -949,7 +959,7 @@ func agentParityScript(selected builtInAgent, all []builtInAgent, workspace, run
 	}
 	fmt.Fprintf(&checks, "test \"$(cat %s)\" = %s\n", shellQuote(filepath.Join(firstDir.guestPath, ".cooper-vm-live-"+runtimeKind)), shellQuote(runtimeKind+"-live"))
 	if selected.name == "grok" {
-		fmt.Fprintf(&checks, "test \"$GROK_HOME\" = /home/user/.grok\n")
+		fmt.Fprintf(&checks, "test \"$GROK_HOME\" = %s\n", shellQuote(firstDir.guestPath))
 	}
 	fmt.Fprintf(&checks, "command -v %s >/dev/null\nprintf 'tool=%s version='\nNO_COLOR=1 %s --version 2>&1 | tr -d '\\r' | head -n 1\n", selected.name, selected.name, selected.name)
 	// Some agents can refresh or replace a cache root while they start. Write
@@ -957,6 +967,15 @@ func agentParityScript(selected builtInAgent, all []builtInAgent, workspace, run
 	// not the tool's valid cache cleanup policy.
 	fmt.Fprintf(&checks, "printf %s > %s\n", shellQuote(runtimeKind+"\n"), shellQuote(filepath.Join(firstDir.guestPath, ".cooper-vm-write-"+runtimeKind)))
 	return checks.String()
+}
+
+func stateIsSelected(target stateTarget, selected builtInAgent) bool {
+	for _, entry := range selected.targets {
+		if entry.hostPath == target.hostPath {
+			return true
+		}
+	}
+	return false
 }
 
 func assertStateWrite(t *testing.T, agent builtInAgent, runtimeKind string) {

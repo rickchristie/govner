@@ -620,28 +620,28 @@ func (ctx *ProofContext) phaseTools() {
 			ctx.fail(fmt.Sprintf("XAUTHORITY=COOPER_CLIPBOARD_XAUTHORITY %s", suffix), "XAUTHORITY and COOPER_CLIPBOARD_XAUTHORITY differ")
 		}
 
-		// 8. /home/user/.local/share/fonts directory exists.
-		_, err = dockerExec(toolBarrel, `test -d /home/user/.local/share/fonts`)
+		// 8. /var/lib/cooper/fonts directory exists.
+		_, err = dockerExec(toolBarrel, `test -d /var/lib/cooper/fonts`)
 		if err == nil {
-			ctx.pass(fmt.Sprintf("Fonts dir %s", suffix), "/home/user/.local/share/fonts exists")
+			ctx.pass(fmt.Sprintf("Fonts dir %s", suffix), "/var/lib/cooper/fonts exists")
 		} else {
-			ctx.fail(fmt.Sprintf("Fonts dir %s", suffix), "/home/user/.local/share/fonts not found")
+			ctx.fail(fmt.Sprintf("Fonts dir %s", suffix), "/var/lib/cooper/fonts not found")
 		}
 
-		// 9. /home/user/.fonts is a symlink.
-		_, err = dockerExec(toolBarrel, `test -L /home/user/.fonts`)
+		// 9. $HOME/.fonts is a symlink.
+		_, err = dockerExec(toolBarrel, `test -L "$HOME/.fonts"`)
 		if err == nil {
-			ctx.pass(fmt.Sprintf("Fonts symlink %s", suffix), "/home/user/.fonts is a symlink")
+			ctx.pass(fmt.Sprintf("Fonts symlink %s", suffix), "$HOME/.fonts is a symlink")
 		} else {
-			ctx.warn(fmt.Sprintf("Fonts symlink %s", suffix), "/home/user/.fonts is not a symlink")
+			ctx.warn(fmt.Sprintf("Fonts symlink %s", suffix), "$HOME/.fonts is not a symlink")
 		}
 
-		// 10. /home/user/.cache/ms-playwright directory exists.
-		_, err = dockerExec(toolBarrel, `test -d /home/user/.cache/ms-playwright`)
+		// 10. /var/lib/cooper/cache/ms-playwright directory exists.
+		_, err = dockerExec(toolBarrel, `test -d /var/lib/cooper/cache/ms-playwright`)
 		if err == nil {
-			ctx.pass(fmt.Sprintf("Playwright cache dir %s", suffix), "/home/user/.cache/ms-playwright exists")
+			ctx.pass(fmt.Sprintf("Playwright cache dir %s", suffix), "/var/lib/cooper/cache/ms-playwright exists")
 		} else {
-			ctx.fail(fmt.Sprintf("Playwright cache dir %s", suffix), "/home/user/.cache/ms-playwright not found")
+			ctx.fail(fmt.Sprintf("Playwright cache dir %s", suffix), "/var/lib/cooper/cache/ms-playwright not found")
 		}
 
 		// 11. Xvfb process is running.

@@ -463,8 +463,8 @@ func TestRunCLIRecreatesLegacyBarrelWithoutSessionMount(t *testing.T) {
 	if got := strings.TrimSpace(stripTerminalTitleEscapes(stdout)); got != "restored" {
 		t.Fatalf("stdout = %q, want %q", got, "restored")
 	}
-	if !strings.Contains(stderr, "Recreating legacy barrel container "+barrelName) {
-		t.Fatalf("stderr missing legacy recreation message: %q", stderr)
+	if !strings.Contains(stderr, "Recreating barrel "+barrelName+" for the current image and host paths") {
+		t.Fatalf("stderr missing barrel recreation message: %q", stderr)
 	}
 	hasSessionMount, err = docker.BarrelHasSessionMount(barrelName)
 	if err != nil {

@@ -39,7 +39,7 @@ func TestManifestValidateRejectsUnsafeContract(t *testing.T) {
 			manifest.Mounts = append(manifest.Mounts, GuestMount{ID: "settings", Tag: "cooper-m-001", Entry: "..", Target: "/home/user/.settings", Kind: "file"})
 		}},
 		{name: "bad CA digest", change: func(manifest *Manifest) { manifest.CADigest = "1234" }},
-		{name: "invalid environment", change: func(manifest *Manifest) { manifest.Environment = []string{"NO_EQUALS"} }},
+		{name: "invalid environment", change: func(manifest *Manifest) { manifest.Environment = []string{"=missing-name"} }},
 		{name: "invalid environment name", change: func(manifest *Manifest) { manifest.Environment = []string{"BAD NAME=value"} }},
 		{name: "duplicate environment", change: func(manifest *Manifest) { manifest.Environment = []string{"NAME=one", "NAME=two"} }},
 		{name: "reserved forward", change: func(manifest *Manifest) { manifest.ForwardPorts = []PortForward{{Port: 3128}} }},
@@ -87,6 +87,7 @@ func validManifest() Manifest {
 		SeccompProfile:    "/run/cooper/host/control/seccomp.json",
 		WorkspaceDir:      "/work/project",
 		CooperDir:         "/home/user/.cooper",
+		HomeDir:           "/home/user",
 		ProxyPort:         3128,
 		BridgePort:        4343,
 		ControlSubnet:     "172.30.0.0/24",

@@ -3,12 +3,15 @@ package workload
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/rickchristie/govner/cooper/internal/config"
 )
+
+const testHomeDir = "/home/user"
 
 func TestBuildMountPlanSelectedAgentState(t *testing.T) {
 	t.Parallel()
@@ -18,11 +21,11 @@ func TestBuildMountPlanSelectedAgentState(t *testing.T) {
 		tool        string
 		wantTargets []string
 	}{
-		{name: "Claude", tool: "claude", wantTargets: []string{HomeDir + "/.claude", HomeDir + "/.claude.json"}},
-		{name: "Copilot", tool: "copilot", wantTargets: []string{HomeDir + "/.copilot"}},
-		{name: "Codex", tool: "codex", wantTargets: []string{HomeDir + "/.codex"}},
-		{name: "OpenCode", tool: "opencode", wantTargets: []string{HomeDir + "/.cache/opencode", HomeDir + "/.config/opencode", HomeDir + "/.local/share/opencode", HomeDir + "/.local/state/opencode", HomeDir + "/.opencode"}},
-		{name: "Grok", tool: "grok", wantTargets: []string{GrokStateRoot}},
+		{name: "Claude", tool: "claude", wantTargets: []string{testHomeDir + "/.claude", testHomeDir + "/.claude.json"}},
+		{name: "Copilot", tool: "copilot", wantTargets: []string{testHomeDir + "/.copilot", copilotDefaultCache(testHomeDir, "", runtime.GOOS)}},
+		{name: "Codex", tool: "codex", wantTargets: []string{testHomeDir + "/.codex"}},
+		{name: "OpenCode", tool: "opencode", wantTargets: []string{testHomeDir + "/.cache/opencode", testHomeDir + "/.config/opencode", testHomeDir + "/.local/share/opencode", testHomeDir + "/.local/state/opencode", testHomeDir + "/.opencode"}},
+		{name: "Grok", tool: "grok", wantTargets: []string{"/home/user/.grok"}},
 	}
 
 	for _, test := range tests {
@@ -46,6 +49,15 @@ func TestBuildMountPlanSelectedAgentState(t *testing.T) {
 			gotTargets := targetsWithOwnership(mounts, HostState)
 			slices.Sort(gotTargets)
 			wantTargets := append([]string(nil), test.wantTargets...)
+			for i, target := range wantTargets {
+				wantTargets[i] = strings.ReplaceAll(target, testHomeDir, in.HomeDir)
+			}
+			if test.tool == "grok" {
+				wantTargets = []string{in.Environment["GROK_HOME"], filepath.Join(in.HomeDir, ".agents")}
+			}
+			if test.tool == "codex" {
+				wantTargets = append(wantTargets, filepath.Join(in.HomeDir, ".agents"), filepath.Join(in.HomeDir, ".claude-plugin"), filepath.Join(in.HomeDir, ".cursor-plugin"))
+			}
 			slices.Sort(wantTargets)
 			if !slices.Equal(gotTargets, wantTargets) {
 				t.Fatalf("host state targets = %v, want %v", gotTargets, wantTargets)
@@ -206,7 +218,7 @@ func TestBuildMountPlanRejectsDirectAndResolvedStateOverlap(t *testing.T) {
 	t.Run("direct", func(t *testing.T) {
 		root := t.TempDir()
 		in := testMountInput(t, root, "grok")
-		in.GrokStateRoot = filepath.Join(in.CooperDir, "grok")
+		in.Environment["GROK_HOME"] = filepath.Join(in.CooperDir, "grok")
 		_, err := BuildMountPlan(in)
 		if err == nil || !strings.Contains(err.Error(), "overlaps") {
 			t.Fatalf("BuildMountPlan() error = %v, want overlap error", err)
@@ -216,7 +228,7 @@ func TestBuildMountPlanRejectsDirectAndResolvedStateOverlap(t *testing.T) {
 	t.Run("state parent", func(t *testing.T) {
 		root := t.TempDir()
 		in := testMountInput(t, root, "grok")
-		in.GrokStateRoot = root
+		in.Environment["GROK_HOME"] = root
 		_, err := BuildMountPlan(in)
 		if err == nil || !strings.Contains(err.Error(), "overlaps") {
 			t.Fatalf("BuildMountPlan() error = %v, want overlap error", err)
@@ -234,7 +246,7 @@ func TestBuildMountPlanRejectsDirectAndResolvedStateOverlap(t *testing.T) {
 		if err := os.Symlink(in.CooperDir, link); err != nil {
 			t.Fatal(err)
 		}
-		in.GrokStateRoot = filepath.Join(link, "future")
+		in.Environment["GROK_HOME"] = filepath.Join(link, "future")
 		_, err := BuildMountPlan(in)
 		if err == nil || !strings.Contains(err.Error(), "overlaps") {
 			t.Fatalf("BuildMountPlan() error = %v, want resolved overlap error", err)
@@ -345,7 +357,7 @@ func TestEnsureDirectoriesRejectsStateOverlapBeforeCreation(t *testing.T) {
 	root := t.TempDir()
 	in := testMountInput(t, root, "grok")
 	unsafeState := filepath.Join(in.CooperDir, "future-grok-state")
-	in.GrokStateRoot = unsafeState
+	in.Environment["GROK_HOME"] = unsafeState
 	if err := EnsureDirectories(in); err == nil || !strings.Contains(err.Error(), "overlaps") {
 		t.Fatalf("EnsureDirectories() error = %v, want overlap error", err)
 	}
@@ -417,17 +429,21 @@ func TestBuildMountPlanOrdersParentBeforeWorkspaceAndHooks(t *testing.T) {
 	}
 }
 
-func TestMountPlanDigestChangesWithAuthorization(t *testing.T) {
+func TestRuntimeDigestChangesWithAuthorizationAndEnvironment(t *testing.T) {
 	t.Parallel()
-	first := []MountSpec{{ID: "workspace", Source: "/work/one", Target: "/work/one", Access: ReadWrite, Kind: Directory, Ownership: HostWorkspace}}
+	first := []MountSpec{{ID: "workspace", Source: t.TempDir(), Target: "/work/one", Access: ReadWrite, Kind: Directory, Ownership: HostWorkspace}}
 	second := append([]MountSpec(nil), first...)
-	second[0].Source = "/work/two"
-	firstDigest, err := MountPlanDigest(first)
+	second[0].Source = t.TempDir()
+	firstDigest, err := RuntimeDigest(first, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, _ := MountPlanDigest(first)
-	secondDigest, _ := MountPlanDigest(second)
+	again, _ := RuntimeDigest(first, nil)
+	secondDigest, _ := RuntimeDigest(second, nil)
+	changedEnvironment, _ := RuntimeDigest(first, []EnvVar{{Name: "CODEX_HOME", Value: "/state/work"}})
+	if firstDigest == changedEnvironment {
+		t.Fatal("path environment did not change runtime identity")
+	}
 	if firstDigest != again || firstDigest == secondDigest || len(firstDigest) != 64 {
 		t.Fatalf("mount plan digests = %q, %q, %q", firstDigest, again, secondDigest)
 	}
@@ -444,13 +460,13 @@ func testMountInput(t *testing.T, root, tool string) MountInput {
 		}
 	}
 	return MountInput{
-		WorkspaceDir:  workspace,
-		HomeDir:       home,
-		CooperDir:     cooperDir,
-		RuntimeID:     "test-runtime",
-		ToolName:      tool,
-		GrokStateRoot: filepath.Join(root, "grok-state"),
-		Config:        config.DefaultConfig(),
+		WorkspaceDir: workspace,
+		HomeDir:      home,
+		CooperDir:    cooperDir,
+		RuntimeID:    "test-runtime",
+		ToolName:     tool,
+		Environment:  map[string]string{"GROK_HOME": filepath.Join(root, "grok-state")},
+		Config:       config.DefaultConfig(),
 	}
 }
 

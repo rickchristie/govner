@@ -7,32 +7,14 @@ import (
 	"testing"
 )
 
-func TestGrokHostStateRootUsesTheProcessWorkingDirectory(t *testing.T) {
-	root := t.TempDir()
-	previous, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(root); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(previous); err != nil {
-			t.Errorf("restore working directory: %v", err)
-		}
-	})
-	t.Setenv("GROK_HOME", "relative-grok")
-
-	want := filepath.Join(root, "relative-grok")
-	if got := GrokHostStateRoot(t.TempDir()); got != want {
-		t.Fatalf("GrokHostStateRoot() = %q, want %q", got, want)
-	}
-}
-
 func TestValidateAllHostAgentStateRootsRejectsEachBuiltInRoot(t *testing.T) {
 	t.Setenv("GROK_HOME", "")
 	home := t.TempDir()
-	for _, stateRoot := range HostAgentStateRoots(home) {
+	roots, err := HostAgentStateRoots(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stateRoot := range roots {
 		stateRoot := stateRoot
 		t.Run(filepath.Base(stateRoot), func(t *testing.T) {
 			cooperDir := filepath.Join(stateRoot, "cooper-owned")

@@ -184,8 +184,8 @@ func (d *dockerRuntime) loadAndStartAgent(ctx context.Context, log io.Writer) er
 		"--mount", "type=bind,src=" + dockerSocketPath + ",dst=/var/run/docker.sock",
 		"--mount", "type=bind,src=" + dockerWrapperPath + ",dst=/usr/local/bin/docker,readonly",
 		"--mount", "type=bind,src=/usr/local/bin/docker,dst=/usr/local/libexec/cooper-vm-docker,readonly",
-		"--mount", "type=bind,src=/home/user/.cooper,dst=/home/user/.cooper",
-		"--mount", "type=bind,src=/home/user/.docker,dst=/home/user/.docker",
+		"--mount", workload.DockerBindMount(d.manifest.CooperDir, d.manifest.CooperDir, false),
+		"--mount", workload.DockerBindMount(filepath.Join(d.manifest.HomeDir, ".docker"), filepath.Join(d.manifest.HomeDir, ".docker"), false),
 		"--mount", "type=bind,src=/run/cooper/vm-context.json,dst=/run/cooper/vm-context.json,readonly",
 	}
 	if d.manifest.Depth == 1 {
@@ -199,10 +199,7 @@ func (d *dockerRuntime) loadAndStartAgent(ctx context.Context, log io.Writer) er
 		)
 	}
 	for _, mount := range d.manifest.Mounts {
-		value := "type=bind,src=" + mount.Target + ",dst=" + mount.Target
-		if mount.ReadOnly {
-			value += ",readonly"
-		}
+		value := workload.DockerBindMount(mount.Target, mount.Target, mount.ReadOnly)
 		args = append(args, "--mount", value)
 	}
 	for _, environment := range d.manifest.Environment {
@@ -243,7 +240,7 @@ func lastOutputLine(output []byte) string {
 }
 
 func (d *dockerRuntime) writeNestedFiles() error {
-	for _, dir := range []string{"/home/user/.cooper", "/home/user/.docker"} {
+	for _, dir := range []string{d.manifest.CooperDir, filepath.Join(d.manifest.HomeDir, ".docker")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create guest-local user directory: %w", err)
 		}
@@ -260,7 +257,7 @@ func (d *dockerRuntime) writeNestedFiles() error {
 	if err != nil {
 		return err
 	}
-	configPath := "/home/user/.docker/config.json"
+	configPath := filepath.Join(d.manifest.HomeDir, ".docker", "config.json")
 	if err := os.WriteFile(configPath, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write nested Docker proxy config: %w", err)
 	}
@@ -275,7 +272,7 @@ func (d *dockerRuntime) writeNestedFiles() error {
 		ParentNetwork: controlNetworkName, ParentProxy: d.manifest.ControlGateway,
 		AgentContainer: d.manifest.AgentContainer,
 		ProxyPort:      d.manifest.ProxyPort, BridgePort: d.manifest.BridgePort,
-		WorkspaceDir: d.manifest.WorkspaceDir, TempDir: "/tmp", CooperDir: "/home/user/.cooper",
+		WorkspaceDir: d.manifest.WorkspaceDir, TempDir: "/tmp", CooperDir: d.manifest.CooperDir, HomeDir: d.manifest.HomeDir,
 	}
 	if err := vmcontext.Write("/run/cooper/vm-context.json", contextData); err != nil {
 		return fmt.Errorf("write nested Cooper context: %w", err)

@@ -92,12 +92,18 @@ func StartBarrelWithHomeDir(cfg *config.Config, workspaceDir, cooperDir, homeDir
 	if !filepath.IsAbs(homeDir) {
 		return errors.New("barrel host home directory must be absolute")
 	}
+	if err := ValidateImageAccount(GetImageCLI(toolName), homeDir); err != nil {
+		return err
+	}
 	name := BarrelContainerName(workspaceDir, toolName)
 	absWorkspace, err := filepath.Abs(workspaceDir)
 	if err != nil {
 		return fmt.Errorf("resolve workspace path: %w", err)
 	}
-	mountInput := barrelMountInput(absWorkspace, homeDir, cfg, cooperDir, toolName, name)
+	mountInput, err := workload.ResolveMountInput(barrelMountInput(absWorkspace, homeDir, cfg, cooperDir, toolName, name))
+	if err != nil {
+		return err
+	}
 	// Create only the known host state, cache, and runtime directories before
 	// the pure plan detects optional directory mounts such as live config.
 	if err := workload.EnsureDirectories(mountInput); err != nil {
@@ -112,6 +118,11 @@ func StartBarrelWithHomeDir(cfg *config.Config, workspaceDir, cooperDir, homeDir
 	mounts, err := workload.BuildMountPlan(mountInput)
 	if err != nil {
 		return fmt.Errorf("build mount plan: %w", err)
+	}
+	environment := append(workload.RuntimeEnvironment(cfg, ProxyHost(), InternalNetworkName()), mountInput.Agent.Environment...)
+	digest, err := workload.RuntimeDigest(mounts, environment)
+	if err != nil {
+		return err
 	}
 	clipboardMode, err := ToolClipboardMode(toolName)
 	if err != nil {
@@ -148,14 +159,15 @@ func StartBarrelWithHomeDir(cfg *config.Config, workspaceDir, cooperDir, homeDir
 		"--label", "cooper.runtime-id=" + name,
 		"--label", "cooper.tool=" + toolName,
 		"--label", "cooper.clipboard-mode=" + clipboardMode,
+		"--label", "cooper.mount-plan=" + digest,
 	}
 
 	// Volume mounts.
 	args = appendDockerMounts(args, mounts)
 
 	// Render the shared non-secret environment with this back end's proxy.
-	for _, environment := range workload.RenderEnvironment(workload.RuntimeEnvironment(cfg, ProxyHost(), InternalNetworkName())) {
-		args = append(args, "-e", environment)
+	for _, value := range workload.RenderEnvironment(environment) {
+		args = append(args, "-e", value)
 	}
 	args = append(args, "-e", "COOPER_CLIPBOARD_MODE="+clipboardMode)
 
@@ -219,10 +231,7 @@ func clipboardModeFromEnvironment(environment []string) (string, error) {
 
 func appendDockerMounts(args []string, mounts []workload.MountSpec) []string {
 	for _, mount := range mounts {
-		value := fmt.Sprintf("type=bind,src=%s,dst=%s", mount.Source, mount.Target)
-		if mount.Access == workload.ReadOnly {
-			value += ",readonly"
-		}
+		value := workload.DockerBindMount(mount.Source, mount.Target, mount.Access == workload.ReadOnly)
 		args = append(args, "--mount", value)
 	}
 	return args
@@ -230,14 +239,50 @@ func appendDockerMounts(args []string, mounts []workload.MountSpec) []string {
 
 func barrelMountInput(absWorkspace, homeDir string, cfg *config.Config, cooperDir, toolName, containerName string) workload.MountInput {
 	return workload.MountInput{
-		WorkspaceDir:  absWorkspace,
-		HomeDir:       homeDir,
-		CooperDir:     cooperDir,
-		RuntimeID:     containerName,
-		ToolName:      toolName,
-		GrokStateRoot: GrokHostStateRoot(homeDir),
-		Config:        cfg,
+		WorkspaceDir: absWorkspace,
+		HomeDir:      homeDir,
+		CooperDir:    cooperDir,
+		RuntimeID:    containerName,
+		ToolName:     toolName,
+		Environment:  workload.HostPathEnvironment(),
+		Config:       cfg,
 	}
+}
+
+// BarrelMatchesHost rejects reuse after an image, state-root, or path-variable
+// change. All agents use this check; new state roots need no new reuse branch.
+func BarrelMatchesHost(name string, cfg *config.Config, workspace, cooperDir, home, tool string) (bool, error) {
+	if err := ValidateImageAccount(GetImageCLI(tool), home); err != nil {
+		return false, err
+	}
+	input, err := workload.ResolveMountInput(barrelMountInput(workspace, home, cfg, cooperDir, tool, name))
+	if err != nil {
+		return false, err
+	}
+	if err := workload.EnsureDirectories(input); err != nil {
+		return false, err
+	}
+	mounts, err := workload.BuildMountPlan(input)
+	if err != nil {
+		return false, err
+	}
+	environment := append(workload.RuntimeEnvironment(cfg, ProxyHost(), InternalNetworkName()), input.Agent.Environment...)
+	digest, err := workload.RuntimeDigest(mounts, environment)
+	if err != nil {
+		return false, err
+	}
+	if containerLabel(name, "cooper.mount-plan") != digest {
+		return false, nil
+	}
+	current, err := exec.Command("docker", "image", "inspect", "--format", "{{.Id}}", GetImageCLI(tool)).Output()
+	if err != nil {
+		return false, err
+	}
+	built, err := exec.Command("docker", "inspect", "--format", "{{.Image}}", name).Output()
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(current)) == strings.TrimSpace(string(built)), nil
 }
 
 // StopBarrel stops and removes a barrel container by name.
@@ -385,48 +430,4 @@ func BarrelHasSessionMount(name string) (bool, error) {
 		}
 	}
 	return false, nil
-}
-
-// BarrelHasGrokStateMount reports whether a running barrel has the expected
-// complete Grok state root as one read-write mount. A legacy barrel or a
-// barrel created with a different GROK_HOME must be recreated.
-func BarrelHasGrokStateMount(name, expectedHostRoot string) (bool, error) {
-	cmd := exec.Command("docker", "inspect",
-		"--format", `{{range .Mounts}}{{printf "%s\t%s\t%t\n" .Source .Destination .RW}}{{end}}`,
-		name,
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return false, fmt.Errorf("inspect barrel mounts for %s: %w\n%s", name, err, string(output))
-	}
-	return hasGrokStateMount(string(output), expectedHostRoot), nil
-}
-
-func hasGrokStateMount(inspectOutput, expectedHostRoot string) bool {
-	stateMounts := 0
-	expectedMount := false
-	for _, line := range strings.Split(strings.TrimSpace(inspectOutput), "\n") {
-		fields := strings.Split(line, "\t")
-		if len(fields) != 3 {
-			continue
-		}
-		destination := filepath.Clean(fields[1])
-		if destination != BarrelGrokStateRoot && !strings.HasPrefix(destination, BarrelGrokStateRoot+string(filepath.Separator)) {
-			continue
-		}
-		stateMounts++
-		if destination == BarrelGrokStateRoot && fields[2] == "true" && sameHostPath(fields[0], expectedHostRoot) {
-			expectedMount = true
-		}
-	}
-	return stateMounts == 1 && expectedMount
-}
-
-func sameHostPath(left, right string) bool {
-	if filepath.Clean(left) == filepath.Clean(right) {
-		return true
-	}
-	leftResolved, leftErr := filepath.EvalSymlinks(left)
-	rightResolved, rightErr := filepath.EvalSymlinks(right)
-	return leftErr == nil && rightErr == nil && filepath.Clean(leftResolved) == filepath.Clean(rightResolved)
 }

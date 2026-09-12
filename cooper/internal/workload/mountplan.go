@@ -11,33 +11,56 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/runtimefs"
 )
 
-// MountPlanDigest returns a stable identity for the complete authorized mount
-// set. It lets a reusable runtime detect state-root or policy changes without
-// putting the mount list in a Docker label.
-func MountPlanDigest(mounts []MountSpec) (string, error) {
-	data, err := json.Marshal(mounts)
+// RuntimeDigest includes path variables because equal mount targets can have
+// different agent behavior (for example a relative GROK_HOME). Reuse must not
+// keep the preceding session's selected state or environment.
+func RuntimeDigest(mounts []MountSpec, environment []EnvVar) (string, error) {
+	// A symlink change or an atomic root replacement must replace the bind
+	// mount too. Hash directory identity, never state contents: normal agent
+	// writes must not cause a new runtime on every launch.
+	var sources []string
+	for _, mount := range mounts {
+		resolved, err := filepath.EvalSymlinks(mount.Source)
+		if err != nil {
+			return "", err
+		}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return "", err
+		}
+		stat := info.Sys().(*syscall.Stat_t)
+		sources = append(sources, fmt.Sprintf("%s:%d:%d", resolved, stat.Dev, stat.Ino))
+	}
+	data, err := json.Marshal(struct {
+		Mounts      []MountSpec
+		Sources     []string
+		Environment []EnvVar
+	}{mounts, sources, environment})
 	if err != nil {
-		return "", fmt.Errorf("encode mount plan: %w", err)
+		return "", err
 	}
 	digest := sha256.Sum256(data)
 	return hex.EncodeToString(digest[:]), nil
 }
 
 // MountInput contains all values that can affect the shared mount policy.
-// GrokStateRoot is required only for Grok because GROK_HOME can move it.
+// Environment carries the host path settings for the selected agent.
 type MountInput struct {
-	WorkspaceDir  string
-	HomeDir       string
-	CooperDir     string
-	RuntimeID     string
-	ToolName      string
-	GrokStateRoot string
-	Config        *config.Config
+	WorkspaceDir string
+	HomeDir      string
+	CooperDir    string
+	RuntimeID    string
+	ToolName     string
+	Config       *config.Config
+	Environment  map[string]string
+	// Agent is optional for raw inputs. ResolveMountInput supplies the snapshot.
+	Agent *AgentPaths
 }
 
 // DirectorySpec is a directory that Cooper must create before it renders the
@@ -50,6 +73,11 @@ type DirectorySpec struct {
 // BuildMountPlan returns the complete ordered mount policy for one workload.
 // It does not create or remove a path.
 func BuildMountPlan(in MountInput) ([]MountSpec, error) {
+	var err error
+	in, err = ResolveMountInput(in)
+	if err != nil {
+		return nil, err
+	}
 	if err := validateHostOwnedRoots(in); err != nil {
 		return nil, err
 	}
@@ -58,6 +86,10 @@ func BuildMountPlan(in MountInput) ([]MountSpec, error) {
 		ID: "workspace", Source: in.WorkspaceDir, Target: in.WorkspaceDir,
 		Access: ReadWrite, Kind: Directory, Ownership: HostWorkspace,
 	}}
+	// A private home supplies writable shell and application scratch files.
+	// Only listed state roots persist on the host. This also works when the
+	// host home is below /tmp and would otherwise be hidden by the tmp mount.
+	mounts = append(mounts, MountSpec{ID: "home", Source: filepath.Join(runtimefs.TempDir(in.CooperDir, in.RuntimeID), ".cooper-home"), Target: in.HomeDir, Access: ReadWrite, Kind: Directory, Ownership: CooperRuntime})
 
 	hooks, hasHooks, err := gitHooksMount(in.WorkspaceDir)
 	if err != nil {
@@ -67,12 +99,17 @@ func BuildMountPlan(in MountInput) ([]MountSpec, error) {
 		mounts = append(mounts, hooks)
 	}
 
-	mounts = append(mounts, agentStateMounts(in)...)
+	for _, mount := range agentStateMounts(in) {
+		if mount.Source == in.WorkspaceDir && mount.Target == in.WorkspaceDir {
+			continue // The workspace already supplies this complete root.
+		}
+		mounts = append(mounts, mount)
+	}
 	gitconfig := filepath.Join(in.HomeDir, ".gitconfig")
 	if pathIsFile(gitconfig) {
 		mounts = append(mounts, MountSpec{
 			ID: "git-config", Source: gitconfig,
-			Target: filepath.Join(HomeDir, ".gitconfig"),
+			Target: gitconfig,
 			Access: ReadOnly, Kind: File, Ownership: HostConfig,
 		})
 	}
@@ -129,7 +166,12 @@ func pathDepth(path string) int {
 
 // RequiredDirectories returns the known directories that can be created for
 // the mount plan. It does not include optional host configuration files.
-func RequiredDirectories(in MountInput) []DirectorySpec {
+func RequiredDirectories(in MountInput) ([]DirectorySpec, error) {
+	var err error
+	in, err = ResolveMountInput(in)
+	if err != nil {
+		return nil, err
+	}
 	dirs := make([]DirectorySpec, 0, 16)
 	for _, mount := range agentStateMounts(in) {
 		if mount.Kind != Directory {
@@ -145,18 +187,38 @@ func RequiredDirectories(in MountInput) []DirectorySpec {
 		dirs = append(dirs, DirectorySpec{Path: mount.Source, Mode: 0o755})
 	}
 	dirs = append(dirs,
+		DirectorySpec{Path: filepath.Join(runtimefs.TempDir(in.CooperDir, in.RuntimeID), ".cooper-home"), Mode: 0o700},
 		DirectorySpec{Path: filepath.Join(in.CooperDir, "live"), Mode: 0o755},
 		DirectorySpec{Path: filepath.Join(in.CooperDir, "fonts"), Mode: 0o755},
 		DirectorySpec{Path: filepath.Join(in.CooperDir, "cache", "ms-playwright"), Mode: 0o755},
 		DirectorySpec{Path: runtimefs.TempDir(in.CooperDir, in.RuntimeID), Mode: 0o755},
 		DirectorySpec{Path: runtimefs.SessionDir(in.CooperDir, in.RuntimeID), Mode: 0o755},
 	)
-	return dirs
+	// Docker creates missing mount parents as root. Prepare the private
+	// home parents first so the account can create sibling scratch files.
+	privateHome := filepath.Join(runtimefs.TempDir(in.CooperDir, in.RuntimeID), ".cooper-home")
+	for _, relative := range []string{".config", ".cache", ".local/share", ".local/state"} {
+		dirs = append(dirs, DirectorySpec{Path: filepath.Join(privateHome, relative), Mode: 0o755})
+	}
+	for _, mount := range agentStateMounts(in) {
+		parent := filepath.Dir(mount.Target)
+		if parent == in.HomeDir || !pathContains(in.HomeDir, parent) {
+			continue
+		}
+		relative, _ := filepath.Rel(in.HomeDir, parent)
+		dirs = append(dirs, DirectorySpec{Path: filepath.Join(privateHome, relative), Mode: 0o755})
+	}
+	return dirs, nil
 }
 
 // EnsureDirectories creates only the known state, cache, and runtime
 // directories required by a mount plan.
 func EnsureDirectories(in MountInput) error {
+	var err error
+	in, err = ResolveMountInput(in)
+	if err != nil {
+		return err
+	}
 	// Reject deletion-root overlap before Cooper creates any host-owned state.
 	// A later validation error must not leave a new state directory below a
 	// root that cooper down or cooper cleanup can remove.
@@ -166,7 +228,11 @@ func EnsureDirectories(in MountInput) error {
 	if err := ensureGitHooksDirectory(in.WorkspaceDir); err != nil {
 		return err
 	}
-	for _, dir := range RequiredDirectories(in) {
+	dirs, err := RequiredDirectories(in)
+	if err != nil {
+		return err
+	}
+	for _, dir := range dirs {
 		if err := os.MkdirAll(dir.Path, dir.Mode); err != nil {
 			return fmt.Errorf("create mount directory %s: %w", dir.Path, err)
 		}
@@ -303,6 +369,17 @@ func ValidateMountPlan(mounts []MountSpec, cooperDir string) error {
 		default:
 			return fmt.Errorf("mount %s has invalid ownership %q", mount.ID, mount.Ownership)
 		}
+		if mount.Ownership == HostState {
+			resolved, err := resolveExistingPath(mount.Source)
+			if err != nil {
+				return err
+			}
+			for _, protected := range []string{"/opt/cooper", "/var/lib/cooper", "/go", "/etc", "/usr", "/bin", "/sbin", "/dev", "/proc", "/sys", "/run", "/var/run", "/var/lib/docker", "/var/lib/containerd"} {
+				if pathsOverlap(mount.Target, protected) || pathsOverlap(resolved, protected) {
+					return fmt.Errorf("agent state %s overlaps protected runtime path %s", mount.Target, protected)
+				}
+			}
+		}
 		if mount.Ownership == HostState || mount.Ownership == HostWorkspace {
 			overlaps, err := pathsOverlapAfterSymlinks(mount.Source, cooperDir)
 			if err != nil {
@@ -340,7 +417,17 @@ func ValidateMountPlan(mounts []MountSpec, cooperDir string) error {
 }
 
 func allowedTargetOverlay(parent, child MountSpec, mounts []MountSpec) bool {
-	if parent.ID == "tmp" && child.ID == "workspace" && child.Access == ReadWrite {
+	// Agent worktrees can be below state, and a relative state override can
+	// be below the workspace. Both mounts expose the same host paths.
+	if parent.Source == parent.Target && child.Source == child.Target && parent.Access == ReadWrite &&
+		(parent.Ownership == HostState || parent.Ownership == HostWorkspace) &&
+		(child.Ownership == HostState || child.Ownership == HostWorkspace) {
+		return true
+	}
+	if parent.ID == "home" {
+		return true
+	}
+	if parent.ID == "tmp" && child.ID != "git-hooks" {
 		return true
 	}
 	if parent.ID == "workspace" && child.ID == "git-hooks" && child.Access == ReadOnly {
@@ -379,13 +466,15 @@ func validateMountInput(in MountInput) error {
 	if filepath.Clean(in.WorkspaceDir) == string(filepath.Separator) || filepath.Clean(in.CooperDir) == string(filepath.Separator) {
 		return errors.New("workspace and Cooper directory must not be the file-system root")
 	}
-	if in.ToolName == "grok" && !filepath.IsAbs(in.GrokStateRoot) {
-		return errors.New("grok state root must be absolute")
-	}
-	return nil
+	return validateHomeBoundary(in.WorkspaceDir, in.HomeDir, "workspace")
 }
 
 func validateHostOwnedRoots(in MountInput) error {
+	var err error
+	in, err = ResolveMountInput(in)
+	if err != nil {
+		return err
+	}
 	if err := validateMountInput(in); err != nil {
 		return err
 	}
@@ -402,34 +491,7 @@ func validateHostOwnedRoots(in MountInput) error {
 }
 
 func agentStateMounts(in MountInput) []MountSpec {
-	state := func(id, source, target string, kind PathKind) MountSpec {
-		return MountSpec{ID: id, Source: source, Target: target, Access: ReadWrite, Kind: kind, Ownership: HostState}
-	}
-	switch in.ToolName {
-	case "claude":
-		mounts := []MountSpec{state("claude-state", filepath.Join(in.HomeDir, ".claude"), filepath.Join(HomeDir, ".claude"), Directory)}
-		jsonPath := filepath.Join(in.HomeDir, ".claude.json")
-		if pathIsFile(jsonPath) {
-			mounts = append(mounts, state("claude-config", jsonPath, filepath.Join(HomeDir, ".claude.json"), File))
-		}
-		return mounts
-	case "copilot":
-		return []MountSpec{state("copilot-state", filepath.Join(in.HomeDir, ".copilot"), filepath.Join(HomeDir, ".copilot"), Directory)}
-	case "codex":
-		return []MountSpec{state("codex-state", filepath.Join(in.HomeDir, ".codex"), filepath.Join(HomeDir, ".codex"), Directory)}
-	case "opencode":
-		return []MountSpec{
-			state("opencode-cache", filepath.Join(in.HomeDir, ".cache", "opencode"), filepath.Join(HomeDir, ".cache", "opencode"), Directory),
-			state("opencode-config", filepath.Join(in.HomeDir, ".config", "opencode"), filepath.Join(HomeDir, ".config", "opencode"), Directory),
-			state("opencode-share", filepath.Join(in.HomeDir, ".local", "share", "opencode"), filepath.Join(HomeDir, ".local", "share", "opencode"), Directory),
-			state("opencode-local-state", filepath.Join(in.HomeDir, ".local", "state", "opencode"), filepath.Join(HomeDir, ".local", "state", "opencode"), Directory),
-			state("opencode-compat", filepath.Join(in.HomeDir, ".opencode"), filepath.Join(HomeDir, ".opencode"), Directory),
-		}
-	case "grok":
-		return []MountSpec{state("grok-state", in.GrokStateRoot, GrokStateRoot, Directory)}
-	default:
-		return nil
-	}
+	return in.Agent.Mounts
 }
 
 func pathIsDirectory(path string) bool {

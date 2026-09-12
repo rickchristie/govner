@@ -5,6 +5,13 @@
 # Build stage: compile cooper-x11-bridge from Go source
 # ============================================================================
 FROM golang:1.25-bookworm AS x11-bridge-builder
+
+{{if .HasParentCA -}}
+# Trust the outer proxy before package and source downloads start. The public
+# CA is appended directly because a minimal stage has no update command yet.
+COPY parent-cooper-ca.pem /usr/local/share/ca-certificates/cooper-parent-ca.crt
+RUN mkdir -p /etc/ssl/certs && cat /usr/local/share/ca-certificates/cooper-parent-ca.crt >> /etc/ssl/certs/ca-certificates.crt
+{{end}}
 COPY x11-bridge-src/ /build/
 WORKDIR /build
 RUN go build -o /cooper-x11-bridge .
@@ -14,6 +21,13 @@ FROM golang:{{.GoVersion}}-bookworm
 {{- else}}
 FROM debian:bookworm-slim
 {{- end}}
+
+{{if .HasParentCA -}}
+# Trust the outer proxy before package and source downloads start. The public
+# CA is appended directly because a minimal stage has no update command yet.
+COPY parent-cooper-ca.pem /usr/local/share/ca-certificates/cooper-parent-ca.crt
+RUN mkdir -p /etc/ssl/certs && cat /usr/local/share/ca-certificates/cooper-parent-ca.crt >> /etc/ssl/certs/ca-certificates.crt
+{{end}}
 
 # A VM session needs the current shared entrypoint contract. Cooper checks this
 # label before it exports an agent image into the guest.
@@ -126,17 +140,25 @@ RUN BWRAP_VERSION=0.11.0 && \
 # ============================================================================
 # User setup - matching host UID/GID for file permissions
 # ============================================================================
-ARG USER_UID=1000
-ARG USER_GID=1000
-RUN groupadd --gid ${USER_GID} user 2>/dev/null || true && \
-    useradd --uid ${USER_UID} --gid ${USER_GID} -m user 2>/dev/null || true
-{{- if .HasGo}} && \
-    mkdir -p /go && chown -R user:user /go
-{{- end}}
+ARG USER_UID
+ARG USER_GID
+ARG USER_NAME
+ARG USER_GROUP
+ARG USER_HOME
+ARG COOPER_ACCOUNT
+LABEL cooper.account="${COOPER_ACCOUNT}"
+ENV COOPER_USER_NAME=${USER_NAME} COOPER_USER_GROUP=${USER_GROUP}
+ENV HOME=${USER_HOME} USER=${USER_NAME} LOGNAME=${USER_NAME} SHELL=/bin/bash
+COPY setup-account.sh /usr/local/libexec/cooper-setup-account
+RUN /bin/sh /usr/local/libexec/cooper-setup-account \
+      "$USER_NAME" "$USER_GROUP" "$USER_UID" "$USER_GID" "$USER_HOME" \
+    && mkdir -p /etc/cooper \
+    && printf '%s\n' "$COOPER_ACCOUNT" > /etc/cooper/account.json \
+    && chmod 0444 /etc/cooper/account.json
 
 # Setup directories for user
-RUN mkdir -p /home/user/.npm-global /home/user/.config /home/user/.local/bin \
-    && chown -R user:user /home/user
+RUN mkdir -p /opt/cooper/bin /opt/cooper/npm /var/lib/cooper/cache /var/lib/cooper/clipboard /go \
+    && chown -R "$USER_UID:$USER_GID" /opt/cooper /var/lib/cooper /go
 
 # Copy entrypoint and diagnostic script
 COPY entrypoint.sh /entrypoint.sh
@@ -151,7 +173,7 @@ RUN update-ca-certificates && \
     chmod 666 /etc/ssl/certs/ca-certificates.crt && \
     chmod 666 /usr/local/share/ca-certificates/cooper-ca.crt
 
-USER user
+USER ${USER_NAME}
 
 {{- if .HasGo}}
 # Make Go's runtime cache locations explicit so barrel mounts and `go env`
@@ -162,9 +184,14 @@ ENV GOCACHE={{.GoBuildCache}}
 {{- end}}
 
 # Configure npm to use user-writable directory for global packages
-ENV NPM_CONFIG_PREFIX=/home/user/.npm-global
-ENV PATH=/home/user/.local/bin:/home/user/.npm-global/bin:/home/user/.opencode/bin{{- if .HasGo}}:{{.GoBinDir}}{{- end}}:$PATH
-ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/cooper-ca.crt
+ENV NPM_CONFIG_PREFIX=/opt/cooper/npm
+ENV NPM_CONFIG_CACHE=/var/lib/cooper/cache/npm
+ENV PIP_CACHE_DIR=/var/lib/cooper/cache/pip
+ENV PYTHONUSERBASE=/opt/cooper/python
+ENV PATH=/opt/cooper/bin:/opt/cooper/npm/bin:/opt/cooper/python/bin{{- if .HasGo}}:{{.GoBinDir}}{{- end}}:$PATH
+# Node uses its own CA set by default. Include both the current and outer
+# Cooper CA from the system bundle for nested build downloads.
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 # ============================================================================
 # Implicit language-server tooling
@@ -184,7 +211,7 @@ ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/cooper-ca.crt
 # leave a Docker layer waiting indefinitely on a half-open transfer.
 RUN set -eu; \
     export GOTOOLCHAIN=local \
-      GOBIN=/home/user/.local/bin \
+      GOBIN=/opt/cooper/bin \
       GOPROXY=https://proxy.golang.org \
       GOSUMDB=sum.golang.org; \
     attempt=1; \

@@ -10,9 +10,9 @@ import (
 	"strings"
 )
 
-const ManifestSchema = 1
+const ManifestSchema = 2
 
-const maxGuestMounts = 24
+const maxGuestMounts = 40
 
 var runtimeName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 var environmentName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
@@ -47,6 +47,7 @@ type Manifest struct {
 	SeccompProfile    string        `json:"seccomp_profile"`
 	WorkspaceDir      string        `json:"workspace_dir"`
 	CooperDir         string        `json:"cooper_dir"`
+	HomeDir           string        `json:"home_dir"`
 	ProxyPort         int           `json:"proxy_port"`
 	BridgePort        int           `json:"bridge_port"`
 	ForwardPorts      []PortForward `json:"forward_ports"`
@@ -91,7 +92,7 @@ func (m Manifest) Validate() error {
 	if m.ImageArchive != "/run/cooper/host/image/agent.tar" || m.SeccompProfile != "/run/cooper/host/control/seccomp.json" {
 		return errors.New("manifest image or seccomp path does not match the fixed guest path")
 	}
-	if m.CooperDir != "/home/user/.cooper" || !filepath.IsAbs(m.WorkspaceDir) || filepath.Clean(m.WorkspaceDir) != m.WorkspaceDir {
+	if !filepath.IsAbs(m.HomeDir) || filepath.Clean(m.HomeDir) != m.HomeDir || m.HomeDir == "/" || m.CooperDir != filepath.Join(m.HomeDir, ".cooper") || !filepath.IsAbs(m.WorkspaceDir) || filepath.Clean(m.WorkspaceDir) != m.WorkspaceDir {
 		return errors.New("manifest workspace or Cooper path is invalid")
 	}
 	if !validHexDigest(m.CADigest) {
@@ -190,8 +191,10 @@ func (m Manifest) Validate() error {
 	}
 	seenEnvironment := make(map[string]bool, len(m.Environment))
 	for _, value := range m.Environment {
-		name, _, ok := strings.Cut(value, "=")
-		if !ok || !environmentName.MatchString(name) || strings.ContainsAny(value, "\x00\r\n") {
+		// A bare name removes an inherited image value with Docker's -e
+		// syntax. Keep unset distinct from an explicitly empty path value.
+		name, _, _ := strings.Cut(value, "=")
+		if !environmentName.MatchString(name) || strings.ContainsAny(value, "\x00\r\n") {
 			return errors.New("manifest environment contains an invalid value")
 		}
 		if seenEnvironment[name] {

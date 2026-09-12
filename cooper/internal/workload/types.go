@@ -12,7 +12,7 @@ const (
 	// starts a VM. An old entrypoint cannot create EntrypointReadyPath and would
 	// otherwise fail after a misleading guest startup timeout.
 	VMImageContractLabel   = "cooper.vm.agent-schema"
-	VMImageContractVersion = "1"
+	VMImageContractVersion = "2"
 )
 
 // Access is the permitted access to a mounted path.
@@ -58,4 +58,5 @@ type EnvVar struct {
 	Name   string
 	Value  string
 	Secret bool
+	Unset  bool
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/usercontext"
 	"github.com/rickchristie/govner/cooper/internal/vmcontext"
 	"github.com/rickchristie/govner/cooper/internal/vmhost"
 	"github.com/rickchristie/govner/cooper/internal/vmproto"
@@ -112,6 +113,9 @@ func (m Manager) Start(ctx context.Context, request StartRequest) (Runtime, erro
 		}
 	}
 	runtime := runtimeFor(m.CooperDir, request, depth)
+	if err := m.checkImageAccount(ctx, imageSource); err != nil {
+		return Runtime{}, err
+	}
 	requestedImageID, err := inspectImageID(ctx, imageSource, m.Runner)
 	if err != nil {
 		return Runtime{}, err
@@ -125,7 +129,7 @@ func (m Manager) Start(ctx context.Context, request StartRequest) (Runtime, erro
 	if err != nil {
 		return Runtime{}, err
 	}
-	mounts, mountDigest, err := m.resolveMountPlan(request, runtime.ID)
+	mounts, environment, mountDigest, err := m.resolveMountPlan(request, runtime.ID)
 	if err != nil {
 		return Runtime{}, err
 	}
@@ -180,7 +184,7 @@ func (m Manager) Start(ctx context.Context, request StartRequest) (Runtime, erro
 	if err := os.MkdirAll(runtime.RuntimeDir, 0o700); err != nil {
 		return Runtime{}, fmt.Errorf("create VM runtime directory: %w", err)
 	}
-	if err := m.writeRuntimeFiles(runtime, request, archive, mounts, mountDigest, depth); err != nil {
+	if err := m.writeRuntimeFiles(runtime, request, archive, mounts, environment, mountDigest, depth); err != nil {
 		return Runtime{}, err
 	}
 	if err := m.startResources(ctx, runtime, request, archive, mounts, mountDigest, base); err != nil {
@@ -239,24 +243,41 @@ func (r StartRequest) imageSource() (string, error) {
 	return r.ImageID, nil
 }
 
-func (m Manager) resolveMountPlan(request StartRequest, runtimeID string) ([]workload.MountSpec, string, error) {
-	input := workload.MountInput{
+func (m Manager) resolveMountPlan(request StartRequest, runtimeID string) ([]workload.MountSpec, []string, string, error) {
+	input, err := workload.ResolveMountInput(workload.MountInput{
 		WorkspaceDir: request.WorkspaceDir, HomeDir: m.HomeDir, CooperDir: m.CooperDir,
 		RuntimeID: runtimeID, ToolName: request.ToolName,
-		GrokStateRoot: workload.GrokHostStateRoot(m.HomeDir), Config: m.Config,
+		Environment: workload.HostPathEnvironment(), Config: m.Config,
+	})
+	if err != nil {
+		return nil, nil, "", err
 	}
 	if err := workload.EnsureDirectories(input); err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
 	mounts, err := workload.BuildMountPlan(input)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
-	digest, err := workload.MountPlanDigest(mounts)
+	environment := append(workload.RuntimeEnvironment(m.Config, guestControlGateway, "cooper-control"), input.Agent.Environment...)
+	digest, err := workload.RuntimeDigest(mounts, environment)
+	return mounts, workload.RenderEnvironment(environment), digest, err
+}
+
+func (m Manager) checkImageAccount(ctx context.Context, imageRef string) error {
+	account, err := usercontext.Current()
 	if err != nil {
-		return nil, "", err
+		return err
 	}
-	return mounts, digest, nil
+	account.Home = m.HomeDir
+	if err := account.Validate(); err != nil {
+		return err
+	}
+	output, err := runnerOrSystem(m.Runner).Output(ctx, "docker", "image", "inspect", "--format", `{{index .Config.Labels "cooper.account"}}`, imageRef)
+	if err != nil {
+		return fmt.Errorf("inspect VM image account: %w", err)
+	}
+	return account.CheckLabel(strings.TrimSpace(string(output)))
 }
 
 func inspectImageID(ctx context.Context, imageRef string, runner CommandRunner) (string, error) {
@@ -376,7 +397,7 @@ func runtimeFor(cooperDir string, request StartRequest, depth int) Runtime {
 	}
 }
 
-func (m Manager) writeRuntimeFiles(runtime Runtime, request StartRequest, archive ImageArchive, mounts []workload.MountSpec, mountDigest string, depth int) error {
+func (m Manager) writeRuntimeFiles(runtime Runtime, request StartRequest, archive ImageArchive, mounts []workload.MountSpec, environment []string, mountDigest string, depth int) error {
 	exportDir := filepath.Join(runtime.RuntimeDir, "exports")
 	controlDir := filepath.Join(exportDir, "control")
 	relayDir := filepath.Join(runtime.RuntimeDir, "relay")
@@ -449,12 +470,12 @@ func (m Manager) writeRuntimeFiles(runtime Runtime, request StartRequest, archiv
 		ImageRef: request.ImageRef, ImageID: archive.ImageID,
 		ImageArchive:   "/run/cooper/host/image/agent.tar",
 		SeccompProfile: "/run/cooper/host/control/seccomp.json",
-		WorkspaceDir:   request.WorkspaceDir, CooperDir: "/home/user/.cooper",
+		WorkspaceDir:   request.WorkspaceDir, HomeDir: m.HomeDir, CooperDir: filepath.Join(m.HomeDir, ".cooper"),
 		ProxyPort: m.Config.ProxyPort, BridgePort: m.Config.BridgePort,
 		ControlSubnet: guestControlSubnet, ControlGateway: guestControlGateway,
 		DefaultBridgeCIDR: guestBridgeCIDR, UID: os.Getuid(), GID: os.Getgid(),
 		Depth: depth, SHMSize: m.Config.BarrelSHMSize, Mounts: guestMounts,
-		Environment: workload.RenderEnvironment(workload.RuntimeEnvironment(m.Config, guestControlGateway, "cooper-control")),
+		Environment: environment,
 		CADigest:    caDigest,
 	}
 	for _, port := range forwardPorts {
@@ -534,8 +555,8 @@ func relayDockerRunArgs(runtime Runtime, prefix string, uid, gid int) []string {
 		"--read-only", "--pids-limit", "300", "--memory", "256m", "--cpus", "1",
 		"--user", fmt.Sprintf("%d:%d", uid, gid),
 		"--label", "cooper.kind=vm-relay", "--label", "cooper.runtime-id=" + runtime.ID,
-		"--mount", "type=bind,src=" + filepath.Join(runtime.RuntimeDir, "relay") + ",dst=/cooper/relay",
-		"--mount", "type=bind,src=" + filepath.Join(runtime.RuntimeDir, "live") + ",dst=/cooper/live,readonly",
+		"--mount", workload.DockerBindMount(filepath.Join(runtime.RuntimeDir, "relay"), "/cooper/relay", false),
+		"--mount", workload.DockerBindMount(filepath.Join(runtime.RuntimeDir, "live"), "/cooper/live", true),
 		RelayImageName(prefix), "--socket", "/cooper/relay/relay.sock", "--policy", "/cooper/live/relay-policy.json", "--log", "/cooper/relay/relay.log",
 	}
 }
@@ -562,11 +583,11 @@ func supervisorDockerRunArgs(runtime Runtime, request StartRequest, archive Imag
 		"--label", "cooper.image-id="+archive.ImageID,
 		"-e", "COOPER_CLI_TOOL="+request.ToolName,
 		"-e", "COOPER_CLIPBOARD_MODE="+request.ClipboardMode,
-		"--mount", "type=bind,src="+filepath.Dir(base)+",dst=/cooper/assets,readonly",
-		"--mount", "type=bind,src="+SupervisorRuntimeDir(runtime.RuntimeDir)+",dst=/cooper/runtime",
-		"--mount", "type=bind,src="+runtime.ControlDir+",dst=/cooper/control",
-		"--mount", "type=bind,src="+filepath.Join(runtime.RuntimeDir, "exports")+",dst=/cooper/exports,readonly",
-		"--mount", "type=bind,src="+filepath.Join(runtime.RuntimeDir, "relay")+",dst=/cooper/relay,readonly",
+		"--mount", workload.DockerBindMount(filepath.Dir(base), "/cooper/assets", true),
+		"--mount", workload.DockerBindMount(SupervisorRuntimeDir(runtime.RuntimeDir), "/cooper/runtime", false),
+		"--mount", workload.DockerBindMount(runtime.ControlDir, "/cooper/control", false),
+		"--mount", workload.DockerBindMount(filepath.Join(runtime.RuntimeDir, "exports"), "/cooper/exports", true),
+		"--mount", workload.DockerBindMount(filepath.Join(runtime.RuntimeDir, "relay"), "/cooper/relay", true),
 	)
 	workspaceExport := ""
 	for index, mount := range mounts {
@@ -575,10 +596,7 @@ func supervisorDockerRunArgs(runtime Runtime, request StartRequest, archive Imag
 		if mount.Kind == workload.File {
 			destination += "/value"
 		}
-		value := "type=bind,src=" + mount.Source + ",dst=" + destination
-		if mount.Access == workload.ReadOnly {
-			value += ",readonly"
-		}
+		value := workload.DockerBindMount(mount.Source, destination, mount.Access == workload.ReadOnly)
 		args = append(args, "--mount", value)
 		if mount.ID == "workspace" {
 			workspaceExport = destination
@@ -591,7 +609,7 @@ func supervisorDockerRunArgs(runtime Runtime, request StartRequest, archive Imag
 			if relativeErr != nil || relative == "." || strings.HasPrefix(relative, "..") {
 				return nil, errors.New("git hooks mount is outside the workspace export")
 			}
-			args = append(args, "--mount", "type=bind,src="+mount.Source+",dst="+filepath.Join(workspaceExport, relative)+",readonly")
+			args = append(args, "--mount", workload.DockerBindMount(mount.Source, filepath.Join(workspaceExport, relative), true))
 		}
 	}
 	args = append(args, SupervisorImageName(prefix), "--config-file", "/cooper/runtime/supervisor.json")

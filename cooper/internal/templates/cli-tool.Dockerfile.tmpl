@@ -6,11 +6,11 @@ FROM {{.BaseImage}}
 
 # Tool directories
 USER root
-RUN mkdir -p{{range .ToolDirs}} {{.}}{{end}} \
-    && chown -R user:user /home/user
+RUN mkdir -p{{range .ToolDirs}} "$HOME/{{.}}"{{end}} \
+    && chown -R "$COOPER_USER_NAME:$COOPER_USER_GROUP" "$HOME"
 {{- end}}
 
-USER user
+USER ${COOPER_USER_NAME}
 
 # Clear inherited proxy env for build-time downloads.
 # The proxy (cooper-proxy) only exists at container runtime, not during image build.

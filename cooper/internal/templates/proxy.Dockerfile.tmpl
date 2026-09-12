@@ -9,6 +9,13 @@
 
 FROM golang:1.24-alpine AS acl-builder
 
+{{if .HasParentCA -}}
+# Trust the outer proxy before package and source downloads start. The public
+# CA is appended directly because a minimal stage has no update command yet.
+COPY parent-cooper-ca.pem /usr/local/share/ca-certificates/cooper-parent-ca.crt
+RUN mkdir -p /etc/ssl/certs && cat /usr/local/share/ca-certificates/cooper-parent-ca.crt >> /etc/ssl/certs/ca-certificates.crt
+{{end}}
+
 # Build the ACL helper binary from source inside Docker.
 # This makes `cooper build` self-contained — no host Go required.
 # The source mirrors the exact tested code from the cooper repo.
@@ -17,6 +24,13 @@ WORKDIR /src
 RUN CGO_ENABLED=0 go build -o /cooper-acl-helper ./cmd/acl-helper/
 
 FROM alpine:3.21 AS builder
+
+{{if .HasParentCA -}}
+# Trust the outer proxy before package and source downloads start. The public
+# CA is appended directly because a minimal stage has no update command yet.
+COPY parent-cooper-ca.pem /usr/local/share/ca-certificates/cooper-parent-ca.crt
+RUN mkdir -p /etc/ssl/certs && cat /usr/local/share/ca-certificates/cooper-parent-ca.crt >> /etc/ssl/certs/ca-certificates.crt
+{{end}}
 
 # Build Squid from source with selective TLS inspection support
 # Alpine's squid package may not include --enable-ssl-crtd, so we build from source.
@@ -55,6 +69,13 @@ RUN curl --fail --show-error --silent --location --http1.1 --retry 5 --retry-all
 
 FROM alpine:3.21
 
+{{if .HasParentCA -}}
+# Trust the outer proxy before package and source downloads start. The public
+# CA is appended directly because a minimal stage has no update command yet.
+COPY parent-cooper-ca.pem /usr/local/share/ca-certificates/cooper-parent-ca.crt
+RUN mkdir -p /etc/ssl/certs && cat /usr/local/share/ca-certificates/cooper-parent-ca.crt >> /etc/ssl/certs/ca-certificates.crt
+{{end}}
+
 # Install runtime dependencies
 RUN apk add --no-cache \
     openssl \
@@ -66,9 +87,7 @@ RUN apk add --no-cache \
     ca-certificates
 
 {{if .HasParentCA -}}
-# A nested proxy must verify the TLS certificate from its outer Cooper proxy.
-# This is the outer public CA certificate. The outer private key is not shared.
-COPY parent-cooper-ca.pem /usr/local/share/ca-certificates/cooper-parent-ca.crt
+# Refresh the bundle now that ca-certificates is installed.
 RUN update-ca-certificates
 {{end}}
 

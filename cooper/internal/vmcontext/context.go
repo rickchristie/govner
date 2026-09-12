@@ -34,6 +34,7 @@ type Context struct {
 	WorkspaceDir   string `json:"workspace_dir"`
 	TempDir        string `json:"temp_dir"`
 	CooperDir      string `json:"cooper_dir"`
+	HomeDir        string `json:"home_dir,omitempty"`
 }
 
 // Validate rejects values that can select an arbitrary route or mount root.
@@ -67,8 +68,13 @@ func (c Context) Validate() error {
 			return fmt.Errorf("cooper VM %s path %q is invalid", name, path)
 		}
 	}
-	if c.TempDir != "/tmp" || c.CooperDir != "/home/user/.cooper" {
-		return errors.New("cooper VM shared development paths do not match the fixed guest paths")
+	accountHome := c.HomeDir
+	// Accept the previous fixed home only for an already running outer VM.
+	if accountHome == "" {
+		accountHome = "/home/user"
+	}
+	if c.TempDir != "/tmp" || !filepath.IsAbs(accountHome) || filepath.Clean(accountHome) != accountHome || accountHome == "/" || c.CooperDir != filepath.Join(accountHome, ".cooper") {
+		return errors.New("cooper VM shared development paths do not match the guest account paths")
 	}
 	return nil
 }

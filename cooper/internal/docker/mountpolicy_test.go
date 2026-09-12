@@ -44,13 +44,13 @@ func TestBarrelMountInputUsesSharedPolicyValues(t *testing.T) {
 
 	got := barrelMountInput(workspace, home, cfg, cooperDir, "codex", "barrel-project-codex")
 	want := workload.MountInput{
-		WorkspaceDir:  workspace,
-		HomeDir:       home,
-		CooperDir:     cooperDir,
-		RuntimeID:     "barrel-project-codex",
-		ToolName:      "codex",
-		GrokStateRoot: filepath.Join(home, ".grok"),
-		Config:        cfg,
+		WorkspaceDir: workspace,
+		HomeDir:      home,
+		CooperDir:    cooperDir,
+		RuntimeID:    "barrel-project-codex",
+		ToolName:     "codex",
+		Environment:  workload.HostPathEnvironment(),
+		Config:       cfg,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("barrelMountInput() = %#v; want %#v", got, want)

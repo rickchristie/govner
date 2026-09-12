@@ -9,46 +9,36 @@ import (
 	"strings"
 )
 
-// GrokHostStateRoot returns the effective host Grok state root. A relative
-// GROK_HOME is relative to the Cooper process working directory, as it is for
-// a Grok process started on the host.
-func GrokHostStateRoot(homeDir string) string {
-	override := os.Getenv("GROK_HOME")
-	if override == "" {
-		return filepath.Join(homeDir, ".grok")
-	}
-	if filepath.IsAbs(override) {
-		return filepath.Clean(override)
-	}
-	abs, err := filepath.Abs(override)
-	if err != nil {
-		return filepath.Clean(override)
-	}
-	return abs
-}
-
 // HostAgentStateRoots lists every host-owned built-in agent state root. A
 // cleanup check uses all roots, not only the agent selected for one workload.
-func HostAgentStateRoots(homeDir string) []string {
-	return []string{
-		filepath.Join(homeDir, ".claude"),
-		filepath.Join(homeDir, ".claude.json"),
-		filepath.Join(homeDir, ".copilot"),
-		filepath.Join(homeDir, ".codex"),
-		filepath.Join(homeDir, ".cache", "opencode"),
-		filepath.Join(homeDir, ".config", "opencode"),
-		filepath.Join(homeDir, ".local", "share", "opencode"),
-		filepath.Join(homeDir, ".local", "state", "opencode"),
-		filepath.Join(homeDir, ".opencode"),
-		GrokHostStateRoot(homeDir),
+func HostAgentStateRoots(homeDir string) ([]string, error) {
+	launchDir, err := os.Getwd()
+	if err != nil {
+		return nil, err
 	}
+	values := HostPathEnvironment()
+	var roots []string
+	for tool := range agentStatePaths {
+		paths, err := ResolveAgentPaths(tool, homeDir, launchDir, values)
+		if err != nil {
+			return nil, err
+		}
+		for _, mount := range paths.Mounts {
+			roots = append(roots, mount.Source)
+		}
+	}
+	return roots, nil
 }
 
 // ValidateAllHostAgentStateRoots rejects a Cooper-owned directory that can
 // contain a host agent state root, or that an agent state root can contain.
 // It checks direct paths and paths after existing symlinks are resolved.
 func ValidateAllHostAgentStateRoots(homeDir, cooperDir string) error {
-	for _, stateRoot := range HostAgentStateRoots(homeDir) {
+	roots, err := HostAgentStateRoots(homeDir)
+	if err != nil {
+		return err
+	}
+	for _, stateRoot := range roots {
 		if err := ValidateHostOwnedPath(stateRoot, cooperDir); err != nil {
 			return err
 		}

@@ -34,6 +34,21 @@ func TestNestedProxyTemplatesAreParentOnly(t *testing.T) {
 	if !strings.Contains(dockerfile, "COPY parent-cooper-ca.pem") || !strings.Contains(dockerfile, "update-ca-certificates") {
 		t.Fatalf("nested proxy image does not trust the outer Cooper CA:\n%s", dockerfile)
 	}
+	// Every download stage needs the public CA before its first network RUN.
+	for _, stage := range strings.Split(dockerfile, "FROM ")[1:] {
+		if strings.Index(stage, "COPY parent-cooper-ca.pem") > strings.Index(stage, "RUN ") {
+			t.Fatal("nested build downloads before it trusts the outer CA")
+		}
+	}
+	base, err := RenderBaseDockerfile(config.DefaultConfig(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stage := range strings.Split(base, "FROM ")[1:] {
+		if strings.Index(stage, "COPY parent-cooper-ca.pem") < 0 || strings.Index(stage, "COPY parent-cooper-ca.pem") > strings.Index(stage, "RUN ") {
+			t.Fatal("nested base stage does not trust the outer CA before downloads")
+		}
+	}
 	for _, want := range []string{
 		"cache_peer 172.30.0.1 parent 3128 0 no-query default",
 		"never_direct allow all",

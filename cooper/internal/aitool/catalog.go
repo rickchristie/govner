@@ -25,7 +25,7 @@ type Definition struct {
 	HostVersionCommand []string
 	AutoApproveArgs    string
 	ClipboardMode      string
-	// HomeDirs are paths relative to /home/user that the image must create
+	// HomeDirs are paths relative to the account home that the image must create
 	// before runtime mounts attach (for example ".grok").
 	HomeDirs []string
 }
