@@ -233,7 +233,17 @@ func TestVMNestedDockerMountRefresh(t *testing.T) {
 	defer func() { _ = manager.Stop(context.Background(), runtimeState) }()
 
 	imageRef := docker.GetImageCLI("codex")
-	script := fmt.Sprintf(`
+	script := mountRefreshScript(imageRef)
+	output := execVM(t, manager, runtimeState, script)
+	if !strings.Contains(output, "VM_NESTED_BIND_REFRESH_OK") {
+		t.Fatalf("nested Docker did not observe both timezone updates:\n%s", output)
+	}
+	assertVirtioFSDLogsClean(t, filepath.Join(runtimeState.RuntimeDir, "supervisor"))
+}
+
+// Reuse the inode refresh regression in both the release and development gates.
+func mountRefreshScript(imageRef string) string {
+	return fmt.Sprintf(`
 set -eu
 root=/tmp/cooper-refresh-probe
 rm -rf "$root"
@@ -251,13 +261,12 @@ second_source=$(sha256sum "$root/second" | cut -d ' ' -f 1)
 second_container=$(docker exec cooper-refresh-probe sha256sum /probe/second | cut -d ' ' -f 1)
 test "$second_source" = "$second_container"
 test "$(docker exec -e TZ=:/probe/second cooper-refresh-probe date +%%z)" = +0000
+rm "$root/second"
+cp /usr/share/zoneinfo/Asia/Tokyo "$root/second"
+test "$(docker exec -e TZ=:/probe/second cooper-refresh-probe date +%%z)" = +0900
+test "$(sha256sum "$root/second" | cut -d ' ' -f 1)" = "$(docker exec cooper-refresh-probe sha256sum /probe/second | cut -d ' ' -f 1)"
 printf VM_NESTED_BIND_REFRESH_OK
 `, imageRef)
-	output := execVM(t, manager, runtimeState, script)
-	if !strings.Contains(output, "VM_NESTED_BIND_REFRESH_OK") {
-		t.Fatalf("nested Docker did not observe both timezone updates:\n%s", output)
-	}
-	assertVirtioFSDLogsClean(t, filepath.Join(runtimeState.RuntimeDir, "supervisor"))
 }
 
 func TestSecureVMFeatureMatrix(t *testing.T) {
@@ -304,6 +313,7 @@ func TestSecureVMFeatureMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	homeDir := driver.HomeDir()
+	clearAgentStatePaths(t)
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GROK_HOME", filepath.Join(homeDir, "grok-state"))
 	writeFile(t, filepath.Join(homeDir, ".gitconfig"), "[user]\n\tname = Cooper VM Test\n")
@@ -327,8 +337,8 @@ func TestSecureVMFeatureMatrix(t *testing.T) {
 	if err := driver.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	// This local target has a self-signed certificate. Successful fixture
-	// requests use -k; public Grok E2E checks verify the Cooper CA separately.
+	// The target is local. Shared checks trust its exact certificate; no
+	// public server or provider credentials are required.
 	target, err := testdocker.StartHTTPSTarget("vm-allowed.cooper.test", "vm-blocked.cooper.test")
 	if err != nil {
 		t.Fatal(err)
@@ -345,132 +355,8 @@ func TestSecureVMFeatureMatrix(t *testing.T) {
 	manager, request, runtimeState, oldToken := startVM(t, driver, homeDir, preparedBase, cooperBinary, workspace, vmTestTool, "shim")
 	defer func() { _ = manager.Stop(context.Background(), runtimeState) }()
 
-	diagnostic, err := manager.GuestDiagnostic(context.Background(), runtimeState)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if diagnostic.Depth != 1 || !contains(diagnostic.Interfaces, "lo") || len(diagnostic.ExternalInterfaces) != 0 || len(diagnostic.DefaultRoutes) != 0 || !diagnostic.KVMAvailable {
-		t.Fatalf("guest diagnostic = %#v", diagnostic)
-	}
-	assertHostBoundary(t, runtimeState, workspace, homeDir)
-
-	imageRef := docker.GetImageCLI(vmTestTool)
-	baseChecks := fmt.Sprintf(`
-set -eux
-test "$(cat workspace-sentinel)" = workspace-ok
-printf 'workspace-write-ok\n' > vm-write-result
-docker run --rm --user 0 -v "$PWD:/mnt" --entrypoint sh %s -c 'printf root-write-ok > /mnt/vm-root-write-result'
-test "$(cat .git/hooks/kept)" = hook-ok
-if touch .git/hooks/direct-write 2>/dev/null; then exit 31; fi
-if docker run --rm -v "$PWD:/mnt" --entrypoint sh %s -c 'touch /mnt/.git/hooks/docker-bypass' 2>/dev/null; then exit 32; fi
-test -S /var/run/docker.sock
-docker info >/dev/null
-if docker ps --format '{{.Names}}' | grep -Fq '%s-proxy'; then exit 33; fi
-test -c /dev/kvm
-test "$(cat /sys/class/net/eth0/operstate)" = up
-mkdir -p /tmp/vm-sibling-source
-printf sibling-ok > /tmp/vm-sibling-source/value
-test "$(docker run --rm -v /tmp/vm-sibling-source:/mnt --entrypoint sh %s -c 'cat /mnt/value')" = sibling-ok
-test "$(curl -kfsS --max-time 10 https://vm-allowed.cooper.test/)" = ok
-if curl -kfsS --connect-timeout 2 --max-time 4 --noproxy '*' https://%s/ >/dev/null 2>&1; then exit 34; fi
-if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy curl -fsS --connect-timeout 2 --max-time 4 http://1.1.1.1/ >/dev/null 2>&1; then exit 35; fi
-if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy HTTPS_PROXY=http://1.1.1.1:8888 curl -kfsS --connect-timeout 2 --max-time 4 https://vm-allowed.cooper.test/ >/dev/null 2>&1; then exit 36; fi
-if curl -fsS --max-time 5 https://vm-blocked.cooper.test/ >/dev/null 2>&1; then exit 37; fi
-test "$(curl -fsS --max-time 5 http://127.0.0.1:48080/)" = first-port-ok
-test "$(curl -fsS -X POST --max-time 5 http://127.0.0.1:%d/vm-e2e | grep -o vm-bridge-ok)" = vm-bridge-ok
-printf VM_BASE_MATRIX_OK
-`, imageRef, imageRef, vmE2ENamespace, imageRef, target.IP, driver.Config().BridgePort)
-	if output := execVM(t, manager, runtimeState, baseChecks); !strings.Contains(output, "VM_BASE_MATRIX_OK") {
-		t.Fatalf("base VM checks output = %q", output)
-	}
-	if got := strings.TrimSpace(readFile(t, filepath.Join(workspace, "vm-write-result"))); got != "workspace-write-ok" {
-		t.Fatalf("host workspace result = %q", got)
-	}
-	assertHostFileOwner(t, filepath.Join(workspace, "vm-root-write-result"), os.Getuid(), os.Getgid())
-	if _, err := os.Stat(filepath.Join(workspace, ".git", "hooks", "docker-bypass")); !os.IsNotExist(err) {
-		t.Fatalf("guest Docker changed host Git hooks: %v", err)
-	}
-
-	stageClipboard(t, driver)
-	pngDigest := sha256.Sum256(minimalPNG(t))
-	response, body, err := driver.ClipboardGet("/clipboard/image", oldToken)
-	if err != nil || response.StatusCode != 200 || !bytes.Equal(body, minimalPNG(t)) {
-		t.Fatalf("host clipboard check: status=%v bytes=%d error=%v", responseStatus(response), len(body), err)
-	}
-	directClipboard := execVM(t, manager, runtimeState, `
-set -eu
-token=$(jq -er '.token' "$COOPER_CLIPBOARD_TOKEN_FILE")
-curl -fsS --max-time 5 -H "Authorization: Bearer ${token}" "$COOPER_CLIPBOARD_BRIDGE_URL/clipboard/image" | sha256sum
-`)
-	if !strings.Contains(directClipboard, hex.EncodeToString(pngDigest[:])) {
-		t.Fatalf("direct guest clipboard output = %q", directClipboard)
-	}
-	hostShim, err := os.ReadFile(filepath.Join(driver.CooperDir(), "base", "shims", "xclip"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	shimDigest := sha256.Sum256(hostShim)
-	shimPreparation := execVM(t, manager, runtimeState, `
-set -eu
-test "$COOPER_CLIPBOARD_ENABLED" = 1
-test "$COOPER_CLIPBOARD_MODE" = shim
-test -r /etc/cooper/shims/xclip
-token=$(jq -er '.token' "$COOPER_CLIPBOARD_TOKEN_FILE")
-temporary=$(mktemp)
-trap 'rm -f "$temporary"' EXIT
-curl -fsS --max-time 5 -o "$temporary" -H "Authorization: Bearer ${token}" "$COOPER_CLIPBOARD_BRIDGE_URL/clipboard/image"
-test -s "$temporary"
-sha256sum /opt/cooper/bin/xclip "$temporary"
-`)
-	if !strings.Contains(shimPreparation, hex.EncodeToString(shimDigest[:])) || !strings.Contains(shimPreparation, hex.EncodeToString(pngDigest[:])) {
-		t.Fatalf("guest shim preparation output = %q", shimPreparation)
-	}
-	clipboardOutput := execVM(t, manager, runtimeState, "set -o pipefail; test \"$(command -v xclip)\" = /opt/cooper/bin/xclip; xclip -selection clipboard -t image/png -o | sha256sum")
-	if !strings.Contains(clipboardOutput, hex.EncodeToString(pngDigest[:])) {
-		t.Fatalf("clipboard output = %q", clipboardOutput)
-	}
-
-	buildScript := fmt.Sprintf(`
-set -eu
-context=/tmp/vm-build-context
-rm -rf "$context"
-mkdir -p "$context"
-cat > "$context/Dockerfile" <<'EOF'
-FROM %s
-RUN test "$(curl -kfsS --max-time 10 https://vm-allowed.cooper.test/)" = ok
-EOF
-docker build -t vm-e2e-build-result "$context" >/tmp/vm-build.log
-docker image inspect vm-e2e-build-result >/dev/null
-printf VM_DOCKER_BUILD_OK
-`, imageRef)
-	if output := execVM(t, manager, runtimeState, buildScript); !strings.Contains(output, "VM_DOCKER_BUILD_OK") {
-		t.Fatalf("guest Docker build output = %q", output)
-	}
-
-	secondRules := []config.PortForwardRule{
-		{Description: "VM first test port", ContainerPort: 48080, HostPort: firstHostPort},
-		{Description: "VM second test port", ContainerPort: 48081, HostPort: secondHostPort},
-	}
-	if err := driver.App().UpdatePortForwards(secondRules); err != nil {
-		t.Fatal(err)
-	}
-	if output := execVM(t, manager, runtimeState, "test \"$(curl -fsS --max-time 5 http://127.0.0.1:48081/)\" = second-port-ok && printf VM_LIVE_PORT_OK"); !strings.Contains(output, "VM_LIVE_PORT_OK") {
-		t.Fatalf("live port output = %q", output)
-	}
-	if err := driver.App().UpdatePortForwards(secondRules[1:]); err != nil {
-		t.Fatal(err)
-	}
-	execVM(t, manager, runtimeState, "! curl -fsS --connect-timeout 1 --max-time 3 http://127.0.0.1:48080/ >/dev/null 2>&1")
-
-	assertConcurrentExec(t, manager, runtimeState)
-	reuseStart := time.Now()
-	reused, err := manager.Start(context.Background(), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reused.ID != runtimeState.ID || time.Since(reuseStart) > 3*time.Second {
-		t.Fatalf("warm VM reuse took %s and returned %s", time.Since(reuseStart), reused.ID)
-	}
+	runVMSmokeChecks(t, driver, manager, request, runtimeState, oldToken, workspace, homeDir, target, firstHostPort, secondHostPort)
+	var response *http.Response
 	// A resource or image change recreates the stable VM identity. This path
 	// must rotate the file-backed token after the old guest releases its bind
 	// mount. Otherwise, the new guest can keep clipboard authority from the old
@@ -556,6 +442,174 @@ printf VM_DOCKER_BUILD_OK
 	}
 	assertRuntimeRemoved(t, runtimeState)
 	runBuiltInParityMatrix(t, driver, homeDir, preparedBase, cooperBinary)
+}
+
+// Both gates use these assertions. The development gate pays for one small
+// image load; the release gate continues through recovery and all agent images.
+func runVMSmokeChecks(t *testing.T, driver *testdriver.Driver, manager vm.Manager, request vm.StartRequest, runtimeState vm.Runtime, oldToken, workspace, homeDir string, target *testdocker.HTTPSTarget, firstHostPort, secondHostPort int) {
+	t.Helper()
+	diagnostic, err := manager.GuestDiagnostic(context.Background(), runtimeState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diagnostic.Depth != runtimeState.Depth || !contains(diagnostic.Interfaces, "lo") || len(diagnostic.ExternalInterfaces) != 0 || len(diagnostic.DefaultRoutes) != 0 || diagnostic.KVMAvailable != (runtimeState.Depth == 1) {
+		t.Fatalf("guest diagnostic = %#v", diagnostic)
+	}
+	assertHostBoundary(t, runtimeState, workspace, homeDir)
+
+	certificate, err := exec.Command("docker", "exec", target.ContainerName, "cat", "/tmp/target.crt").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(workspace, "cooper-test-target.crt"), string(certificate))
+	firstGuestPort, secondGuestPort := 48080, 48081
+	// Nested proxy rules pass through the outer agent's listening port. The
+	// physical-host release path still checks distinct host/container ports.
+	if runtimeState.Depth == 2 {
+		firstGuestPort, secondGuestPort = firstHostPort, secondHostPort
+	}
+	imageRef := docker.GetImageCLI(vmTestTool)
+	baseChecks := fmt.Sprintf(`
+set -eux
+export CURL_CA_BUNDLE="$PWD/cooper-test-target.crt"
+test "$(cat workspace-sentinel)" = workspace-ok
+printf 'workspace-write-ok\n' > vm-write-result
+docker run --rm --user 0 -v "$PWD:/mnt" --entrypoint sh %s -c 'printf root-write-ok > /mnt/vm-root-write-result'
+test "$(cat .git/hooks/kept)" = hook-ok
+if touch .git/hooks/direct-write 2>/dev/null; then exit 31; fi
+if docker run --rm -v "$PWD:/mnt" --entrypoint sh %s -c 'touch /mnt/.git/hooks/docker-bypass' 2>/dev/null; then exit 32; fi
+test -S /var/run/docker.sock
+docker info >/dev/null
+if docker ps --format '{{.Names}}' | grep -Fq '%s-proxy'; then exit 33; fi
+if [ %d = 1 ]; then test -c /dev/kvm; else test ! -e /dev/kvm; fi
+test "$(cat /sys/class/net/eth0/operstate)" = up
+mkdir -p /tmp/vm-sibling-source
+printf sibling-ok > /tmp/vm-sibling-source/value
+test "$(docker run --rm -v /tmp/vm-sibling-source:/mnt --entrypoint sh %s -c 'cat /mnt/value')" = sibling-ok
+test "$(curl -fsS --max-time 10 https://vm-allowed.cooper.test/)" = ok
+if curl -fsS --connect-timeout 2 --max-time 4 --noproxy '*' --resolve vm-allowed.cooper.test:443:%s https://vm-allowed.cooper.test/ >/dev/null 2>&1; then exit 34; fi
+if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy curl -fsS --connect-timeout 2 --max-time 4 http://1.1.1.1/ >/dev/null 2>&1; then exit 35; fi
+if env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy HTTPS_PROXY=http://1.1.1.1:8888 curl -fsS --connect-timeout 2 --max-time 4 https://vm-allowed.cooper.test/ >/dev/null 2>&1; then exit 36; fi
+if curl -kfsS --max-time 5 https://vm-blocked.cooper.test/ >/dev/null 2>&1; then exit 37; fi
+test "$(curl -fsS --max-time 5 http://127.0.0.1:%d/)" = first-port-ok
+test "$(curl -fsS -X POST --max-time 5 http://127.0.0.1:%d/vm-e2e | grep -o vm-bridge-ok)" = vm-bridge-ok
+printf VM_BASE_MATRIX_OK
+`, imageRef, imageRef, docker.RuntimeNamespace(), runtimeState.Depth, imageRef, target.IP, firstGuestPort, driver.Config().BridgePort)
+	if output := execVM(t, manager, runtimeState, baseChecks); !strings.Contains(output, "VM_BASE_MATRIX_OK") {
+		t.Fatalf("base VM checks output = %q", output)
+	}
+	if got := strings.TrimSpace(readFile(t, filepath.Join(workspace, "vm-write-result"))); got != "workspace-write-ok" {
+		t.Fatalf("host workspace result = %q", got)
+	}
+	assertHostFileOwner(t, filepath.Join(workspace, "vm-root-write-result"), os.Getuid(), os.Getgid())
+	if _, err := os.Stat(filepath.Join(workspace, ".git", "hooks", "docker-bypass")); !os.IsNotExist(err) {
+		t.Fatalf("guest Docker changed host Git hooks: %v", err)
+	}
+
+	stageClipboard(t, driver)
+	pngDigest := sha256.Sum256(minimalPNG(t))
+	response, body, err := driver.ClipboardGet("/clipboard/image", oldToken)
+	if err != nil || response.StatusCode != 200 || !bytes.Equal(body, minimalPNG(t)) {
+		t.Fatalf("host clipboard check: status=%v bytes=%d error=%v", responseStatus(response), len(body), err)
+	}
+	directClipboard := execVM(t, manager, runtimeState, `
+set -eu
+token=$(jq -er '.token' "$COOPER_CLIPBOARD_TOKEN_FILE")
+curl -fsS --max-time 5 -H "Authorization: Bearer ${token}" "$COOPER_CLIPBOARD_BRIDGE_URL/clipboard/image" | sha256sum
+`)
+	if !strings.Contains(directClipboard, hex.EncodeToString(pngDigest[:])) {
+		t.Fatalf("direct guest clipboard output = %q", directClipboard)
+	}
+	hostShim, err := os.ReadFile(filepath.Join(driver.CooperDir(), "base", "shims", "xclip"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shimDigest := sha256.Sum256(hostShim)
+	shimPreparation := execVM(t, manager, runtimeState, `
+set -eu
+test "$COOPER_CLIPBOARD_ENABLED" = 1
+test "$COOPER_CLIPBOARD_MODE" = shim
+test -r /etc/cooper/shims/xclip
+token=$(jq -er '.token' "$COOPER_CLIPBOARD_TOKEN_FILE")
+temporary=$(mktemp)
+trap 'rm -f "$temporary"' EXIT
+curl -fsS --max-time 5 -o "$temporary" -H "Authorization: Bearer ${token}" "$COOPER_CLIPBOARD_BRIDGE_URL/clipboard/image"
+test -s "$temporary"
+sha256sum /opt/cooper/bin/xclip "$temporary"
+`)
+	if !strings.Contains(shimPreparation, hex.EncodeToString(shimDigest[:])) || !strings.Contains(shimPreparation, hex.EncodeToString(pngDigest[:])) {
+		t.Fatalf("guest shim preparation output = %q", shimPreparation)
+	}
+	clipboardOutput := execVM(t, manager, runtimeState, "set -o pipefail; test \"$(command -v xclip)\" = /opt/cooper/bin/xclip; xclip -selection clipboard -t image/png -o | sha256sum")
+	if !strings.Contains(clipboardOutput, hex.EncodeToString(pngDigest[:])) {
+		t.Fatalf("clipboard output = %q", clipboardOutput)
+	}
+
+	buildScript := fmt.Sprintf(`
+set -eu
+context=/tmp/vm-build-context
+rm -rf "$context"
+mkdir -p "$context"
+cp cooper-test-target.crt "$context/target.crt"
+# COPY keeps the source mode but uses root ownership. The public certificate
+# must remain readable by the non-root user inherited from the agent image.
+chmod 0644 "$context/target.crt"
+cat > "$context/Dockerfile" <<'EOF'
+FROM %s
+COPY target.crt /tmp/cooper-test-target.crt
+ENV CURL_CA_BUNDLE=/tmp/cooper-test-target.crt
+RUN test "$(curl -fsS --max-time 10 https://vm-allowed.cooper.test/)" = ok
+RUN ! curl -kfsS --max-time 5 https://vm-blocked.cooper.test/
+EOF
+if ! docker build --pull=false -t vm-e2e-build-result "$context" >/tmp/vm-build.log 2>&1; then
+    cat /tmp/vm-build.log >&2
+    exit 1
+fi
+docker image inspect vm-e2e-build-result >/dev/null
+printf VM_DOCKER_BUILD_OK
+`, imageRef)
+	if output := execVM(t, manager, runtimeState, buildScript); !strings.Contains(output, "VM_DOCKER_BUILD_OK") {
+		t.Fatalf("guest Docker build output = %q", output)
+	}
+
+	secondRules := []config.PortForwardRule{
+		{Description: "VM first test port", ContainerPort: firstGuestPort, HostPort: firstHostPort},
+		{Description: "VM second test port", ContainerPort: secondGuestPort, HostPort: secondHostPort},
+	}
+	if err := driver.App().UpdatePortForwards(secondRules); err != nil {
+		t.Fatal(err)
+	}
+	if output := execVM(t, manager, runtimeState, fmt.Sprintf("test \"$(curl -fsS --max-time 5 http://127.0.0.1:%d/)\" = second-port-ok && printf VM_LIVE_PORT_OK", secondGuestPort)); !strings.Contains(output, "VM_LIVE_PORT_OK") {
+		t.Fatalf("live port output = %q", output)
+	}
+	if err := driver.App().UpdatePortForwards(secondRules[1:]); err != nil {
+		t.Fatal(err)
+	}
+	execVM(t, manager, runtimeState, fmt.Sprintf("! curl -fsS --connect-timeout 1 --max-time 3 http://127.0.0.1:%d/ >/dev/null 2>&1", firstGuestPort))
+
+	assertConcurrentExec(t, manager, runtimeState)
+	beforeReuse, err := exec.Command("docker", "inspect", "--format", "{{.Id}}/{{.State.StartedAt}}", runtimeState.ContainerName).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reuseStart := time.Now()
+	reused, err := manager.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused.ID != runtimeState.ID || time.Since(reuseStart) > 3*time.Second {
+		t.Fatalf("warm VM reuse took %s and returned %s", time.Since(reuseStart), reused.ID)
+	}
+	afterReuse, err := exec.Command("docker", "inspect", "--format", "{{.Id}}/{{.State.StartedAt}}", runtimeState.ContainerName).Output()
+	if err != nil || !bytes.Equal(beforeReuse, afterReuse) {
+		t.Fatalf("warm reuse replaced the VM: %q -> %q, %v", beforeReuse, afterReuse, err)
+	}
+	for _, token := range []string{"", "wrong-token"} {
+		response, _, err := driver.ClipboardGet("/clipboard/image", token)
+		if err != nil || response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("invalid clipboard token: status=%v error=%v", responseStatus(response), err)
+		}
+	}
 }
 
 func TestCooperVMSelfHosting(t *testing.T) {
@@ -703,7 +757,7 @@ printf 'SELF_HOST_BUILD_OK\n'
 # Docker-backed packages share one lock. Run packages in sequence so a package
 # does not spend its timeout waiting for another cold image build. Keep an
 # explicit per-package bound above Go's short default test timeout.
-if ! go test -C ./cooper -p=1 ./... -count=1 -timeout=30m >/tmp/self-host-go-test.log 2>&1; then
+if ! env -u COOPER_RUN_VM_E2E -u COOPER_NESTED_HARNESS -u COOPER_VM_DEV_MODE go test -C ./cooper -p=1 ./... -count=1 -timeout=30m >/tmp/self-host-go-test.log 2>&1; then
     tail -n 2000 /tmp/self-host-go-test.log >&2
     exit 53
 fi
@@ -961,7 +1015,16 @@ func agentParityScript(selected builtInAgent, all []builtInAgent, workspace, run
 	if selected.name == "grok" {
 		fmt.Fprintf(&checks, "test \"$GROK_HOME\" = %s\n", shellQuote(firstDir.guestPath))
 	}
-	fmt.Fprintf(&checks, "command -v %s >/dev/null\nprintf 'tool=%s version='\nNO_COLOR=1 %s --version 2>&1 | tr -d '\\r' | head -n 1\n", selected.name, selected.name, selected.name)
+	// Capture the command first so a failed version check cannot be hidden by
+	// a successful head or tr at the end of a pipeline.
+	fmt.Fprintf(&checks, `command -v %s >/dev/null
+if ! version=$(NO_COLOR=1 %s --version 2>&1); then
+    printf '%%s\n' "$version" >&2
+    exit 1
+fi
+printf 'tool=%s version='
+printf '%%s\n' "$version" | tr -d '\r' | head -n 1
+`, selected.name, selected.name, selected.name)
 	// Some agents can refresh or replace a cache root while they start. Write
 	// after the version command so the assertion measures the mounted root,
 	// not the tool's valid cache cleanup policy.
@@ -1452,4 +1515,15 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+// Tests must not follow host agent path overrides into real credentials.
+func clearAgentStatePaths(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "COPILOT_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_DB"} {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

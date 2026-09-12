@@ -325,7 +325,9 @@ func (d *dockerRuntime) reloadAgentEntrypoint(ctx context.Context) error {
 	if err := dockerCommand(ctx, nil, io.Discard, io.Discard, "exec", d.manifest.AgentContainer, "rm", "-f", workload.EntrypointReadyPath); err != nil {
 		return fmt.Errorf("clear VM agent readiness before reload: %w", err)
 	}
-	if err := dockerCommand(ctx, nil, io.Discard, io.Discard, "exec", d.manifest.AgentContainer, "kill", "-HUP", "1"); err != nil {
+	// The base image need not contain an external kill program. Ask Docker to
+	// signal the entrypoint directly, as the barrel reload does.
+	if err := dockerCommand(ctx, nil, io.Discard, io.Discard, "kill", "--signal=HUP", d.manifest.AgentContainer); err != nil {
 		return fmt.Errorf("signal VM agent port reload: %w", err)
 	}
 	for attempt := 0; attempt < 100; attempt++ {

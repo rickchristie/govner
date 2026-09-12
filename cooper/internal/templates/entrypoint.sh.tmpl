@@ -309,7 +309,9 @@ start_socat_from_config
 ensure_playwright_runtime
 start_shared_xvfb
 
-{{if .ClipboardEnabled}}
+# A custom CLI can be the only configured image. Clipboard support follows
+# the selected runtime, not the list of built-in agents present during build.
+if [ "${COOPER_CLIPBOARD_ENABLED:-0}" = 1 ]; then
 # ============================================================================
 # CLIPBOARD BRIDGE: Shim Setup
 # ============================================================================
@@ -358,7 +360,7 @@ if [ "$CLIP_MODE" = "x11" ] || [ "$CLIP_MODE" = "auto" ]; then
     X11_BRIDGE_SUPERVISOR_PID=$!
   fi
 fi
-{{end}}
+fi
 # ============================================================================
 # WELCOME BANNER (interactive bash sessions only)
 # ============================================================================

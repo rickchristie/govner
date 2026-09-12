@@ -57,6 +57,18 @@ type Driver struct {
 	builtImages   []string
 	workspaces    []string
 	restoreImages func()
+	borrowedPaths bool
+}
+
+// AttachPrepared uses inputs that a development test has already prepared and
+// leased. It does not build images, project a new account layer, or acquire
+// the shared release-test lock. The caller owns paths and resource cleanup.
+// Close stops the app but does not remove or change borrowed files.
+func AttachPrepared(cfg *config.Config, cooperDir, homeDir string) *Driver {
+	application := app.NewCooperApp(cfg, cooperDir)
+	application.DisableHostFontSync()
+	application.DisableClipboardReader()
+	return &Driver{cfg: cfg, cooperDir: cooperDir, homeDir: homeDir, app: application, imagePrefix: docker.ImagePrefix(), borrowedPaths: true}
 }
 
 // New creates a runtime driver with a temporary Cooper directory rendered via
@@ -164,6 +176,12 @@ func (d *Driver) Close() error {
 			errs = append(errs, fmt.Sprintf("stop app: %v", err))
 		}
 		d.started = false
+	}
+	if d.borrowedPaths {
+		if len(errs) > 0 {
+			return fmt.Errorf("%s", strings.Join(errs, "; "))
+		}
+		return nil
 	}
 
 	for _, imageName := range d.builtImages {

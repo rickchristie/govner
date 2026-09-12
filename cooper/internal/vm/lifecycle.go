@@ -50,6 +50,10 @@ type Manager struct {
 	Executable   string
 	SkipPrepare  bool
 	PreparedBase string
+	// PreparedArchive is optional. Development tests use an immutable archive
+	// held under their cache lease. A missing or stale archive must fail before
+	// a runtime changes, without an export or a preparation fallback.
+	PreparedArchive *ImageArchive
 }
 
 // StartRequest contains the selected-agent values for one reusable VM.
@@ -120,6 +124,9 @@ func (m Manager) Start(ctx context.Context, request StartRequest) (Runtime, erro
 	if err != nil {
 		return Runtime{}, err
 	}
+	if err := m.checkPreparedArchive(requestedImageID); err != nil {
+		return Runtime{}, err
+	}
 	lock, err := acquireRuntimeLock(m.CooperDir, runtime.ID)
 	if err != nil {
 		return Runtime{}, err
@@ -174,7 +181,7 @@ func (m Manager) Start(ctx context.Context, request StartRequest) (Runtime, erro
 	if base == "" {
 		return Runtime{}, errors.New("prepared VM base is required")
 	}
-	archive, err := EnsureImageArchive(ctx, m.CooperDir, imageSource, m.Runner, m.output())
+	archive, err := m.imageArchive(ctx, imageSource)
 	if err != nil {
 		return Runtime{}, err
 	}
@@ -570,6 +577,12 @@ func supervisorDockerRunArgs(runtime Runtime, request StartRequest, archive Imag
 	if err != nil {
 		return nil, err
 	}
+	return supervisorDockerArgs(runtime, request, archive, base, mounts, mountDigest, prefix, seccompPath, uid, gid, kvmGID)
+}
+
+// Keep host discovery outside argument construction. Security assertions must
+// run on developer machines that do not have a KVM device.
+func supervisorDockerArgs(runtime Runtime, request StartRequest, archive ImageArchive, base string, mounts []workload.MountSpec, mountDigest, prefix, seccompPath string, uid, gid, kvmGID int) ([]string, error) {
 	args := []string{"run", "-d", "--name", runtime.ContainerName}
 	args = append(args, supervisorSecurityArgs(uid, gid, kvmGID, request.CPUs, request.MemoryMiB, seccompPath)...)
 	args = append(args,
@@ -695,7 +708,7 @@ func (m Manager) Restart(ctx context.Context, runtimeID string) (Runtime, error)
 	// Restart also uses the recorded image ID, not a tag that can move between
 	// the first launch and the restart.
 	request.ImageID = metadata.ImageID
-	if _, err := EnsureImageArchive(ctx, m.CooperDir, request.ImageID, m.Runner, m.output()); err != nil {
+	if _, err := m.imageArchive(ctx, request.ImageID); err != nil {
 		return Runtime{}, err
 	}
 	if !m.SkipPrepare {

@@ -330,7 +330,11 @@ class AllowGovnerDevTest(unittest.TestCase):
             "cooper: Docker Test (Clean)",
             "cooper: E2E Test",
             "cooper: E2E Test (Clean)",
+            "cooper: VM Unit",
+            "cooper: VM Prepare",
+            "cooper: VM Smoke (Prepared Inputs)",
         }
+        manual_tasks = {"cooper: VM Release Gate (Release Only)"}
         build_tasks = {"cooper: Build", "pgflock: Build"}
         interactive_tasks = {
             "cooper: TUI Test",
@@ -341,7 +345,7 @@ class AllowGovnerDevTest(unittest.TestCase):
         }
         self.assertEqual(
             set(by_label),
-            script_tasks | build_tasks | interactive_tasks,
+            script_tasks | build_tasks | interactive_tasks | manual_tasks,
         )
 
         for label in script_tasks:
@@ -350,12 +354,16 @@ class AllowGovnerDevTest(unittest.TestCase):
                 str(REPO_ROOT),
             )
             command = (
-                f"{expanded} > /tmp/govner-hook-vscode-script.txt 2>&1"
+                expanded if " > " in expanded else f"{expanded} > /tmp/govner-hook-vscode-script.txt 2>&1"
             )
             with self.subTest(label=label):
                 self.assertTrue(
                     allow_govner_dev.is_allowed(command, cwd=REPO_ROOT)
                 )
+
+        for label in manual_tasks:
+            expanded = by_label[label]["command"].replace("${workspaceFolder}", str(REPO_ROOT))
+            self.assertFalse(allow_govner_dev.is_allowed(expanded, cwd=REPO_ROOT))
 
         for label in build_tasks:
             expanded = by_label[label]["command"].replace(

@@ -109,8 +109,11 @@ func PortForwardConfigPath(cooperDir string) string {
 // running containers to reload their socat processes via SIGHUP.
 //
 //  1. Write updated socat-rules.json
-//  2. Signal proxy container: docker exec <runtime-proxy> kill -HUP 1
-//  3. Signal each running barrel: docker exec barrel-X kill -HUP 1
+//  2. Signal the proxy container with docker kill --signal=HUP.
+//  3. Signal each running barrel with docker kill --signal=HUP.
+//
+// Docker sends the signal without requiring an external kill program in the
+// image. Custom agents can use the base image without optional system tools.
 //
 // Returns an error describing any signal failures. The config file is always
 // written first; signal errors are collected but do not prevent subsequent
@@ -131,7 +134,7 @@ func ReloadSocat(cooperDir string, bridgePort int, rules []config.PortForwardRul
 	running, err := IsProxyRunning()
 	var signaled []string
 	if err == nil && running {
-		cmd := exec.Command("docker", "exec", ProxyContainerName(), "kill", "-HUP", "1")
+		cmd := exec.Command("docker", "kill", "--signal=HUP", ProxyContainerName())
 		if output, execErr := cmd.CombinedOutput(); execErr != nil {
 			errs = append(errs, fmt.Sprintf("signal proxy: %v (%s)", execErr, strings.TrimSpace(string(output))))
 		} else {
@@ -147,7 +150,7 @@ func ReloadSocat(cooperDir string, bridgePort int, rules []config.PortForwardRul
 	} else {
 		for _, b := range barrels {
 			if strings.HasPrefix(b.Name, BarrelNamePrefix()) {
-				cmd := exec.Command("docker", "exec", b.Name, "kill", "-HUP", "1")
+				cmd := exec.Command("docker", "kill", "--signal=HUP", b.Name)
 				if execErr := cmd.Run(); execErr != nil {
 					errs = append(errs, fmt.Sprintf("signal %s: %v", b.Name, execErr))
 				} else {

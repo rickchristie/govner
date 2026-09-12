@@ -61,7 +61,16 @@ Read README.md of the project before starting.
   Its reviewed modes are `mirror`, `latest`, `pinned`, `all`, and `clean`.
   Cleanup-only runs use
   `./cooper/test-docker-build.sh clean > /tmp/cooper-docker-build-clean.txt 2>&1`.
-- **Cooper VM E2E gate:** Before every Cooper release, run
+- **Cooper VM development:** Run `./cooper/test-vm-dev.sh unit` first. It
+  runs local tests with Docker and QEMU blocked. Use `prepare` once, then
+  `smoke`, `mounts`, or `lifecycle restart|resources|relay|agent` for the
+  changed VM behavior. Use `prepare-agent <agent>` and `parity <agent>` when
+  changing agent mounts or images. Each runtime command requires prepared
+  inputs and cannot build, download, or export a host image. See
+  `cooper/dev/README.md` for cache ownership, reports, and command limits.
+- **Cooper VM E2E gate:** Run the full gate only before a Cooper release,
+  not during routine development or to obtain a cost baseline. Before every
+  Cooper release, run
   `timeout 90m ./cooper/test-vm.sh > /tmp/cooper-vm-gate.txt 2>&1`.
 - **Other Go modules:** validate Gowt with
   `go test -C ./gowt ./... > /tmp/gowt-go-test.txt 2>&1` and pgflock with

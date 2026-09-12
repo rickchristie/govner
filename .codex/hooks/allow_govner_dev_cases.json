@@ -1075,5 +1075,83 @@
     "cwd": "/tmp",
     "expected": false,
     "why": "The project hook must not authorize commands from an unrelated working directory."
+  },
+  {
+    "id": "vm-development-default",
+    "command": "./cooper/test-vm-dev.sh > /tmp/cooper-vm-dev-default.txt 2>&1",
+    "expected": true,
+    "why": "The finite development command owns its cache and runtime cleanup and captures complete output."
+  },
+  {
+    "id": "vm-development-unit",
+    "command": "./cooper/test-vm-dev.sh unit > /tmp/cooper-vm-dev-unit.txt 2>&1",
+    "expected": true,
+    "why": "The finite development command owns its cache and runtime cleanup and captures complete output."
+  },
+  {
+    "id": "vm-development-smoke",
+    "command": "./cooper/test-vm-dev.sh smoke > /tmp/cooper-vm-dev-smoke.txt 2>&1",
+    "expected": true,
+    "why": "The finite development command owns its cache and runtime cleanup and captures complete output."
+  },
+  {
+    "id": "vm-development-mounts",
+    "command": "./cooper/test-vm-dev.sh mounts > /tmp/cooper-vm-dev-mounts.txt 2>&1",
+    "expected": true,
+    "why": "The finite development command owns its cache and runtime cleanup and captures complete output."
+  },
+  {
+    "id": "vm-development-prepare",
+    "command": "./cooper/test-vm-dev.sh prepare > /tmp/cooper-vm-dev-prepare.txt 2>&1",
+    "expected": true,
+    "why": "The finite development command owns its cache and runtime cleanup and captures complete output."
+  },
+  {
+    "id": "vm-development-clean",
+    "command": "./cooper/test-vm-dev.sh clean > /tmp/cooper-vm-dev-clean.txt 2>&1",
+    "expected": true,
+    "why": "The finite development command owns its cache and runtime cleanup and captures complete output."
+  },
+  {
+    "id": "vm-development-clean-cache",
+    "command": "./cooper/test-vm-dev.sh clean-cache > /tmp/cooper-vm-dev-clean-cache.txt 2>&1",
+    "expected": true,
+    "why": "The finite development command owns its cache and runtime cleanup and captures complete output."
+  },
+  {
+    "id": "vm-development-reject-179",
+    "command": "./cooper/test-vm-dev.sh all > /tmp/cooper-vm-dev-invalid.txt 2>&1",
+    "expected": false,
+    "why": "Unknown modes, images, arguments, and cleanup paths cannot widen the reviewed VM work."
+  },
+  {
+    "id": "vm-development-reject-180",
+    "command": "./cooper/test-vm-dev.sh smoke --image host:latest > /tmp/cooper-vm-dev-invalid.txt 2>&1",
+    "expected": false,
+    "why": "Unknown modes, images, arguments, and cleanup paths cannot widen the reviewed VM work."
+  },
+  {
+    "id": "vm-development-reject-181",
+    "command": "./cooper/test-vm-dev.sh parity custom > /tmp/cooper-vm-dev-invalid.txt 2>&1",
+    "expected": false,
+    "why": "Unknown modes, images, arguments, and cleanup paths cannot widen the reviewed VM work."
+  },
+  {
+    "id": "vm-development-reject-182",
+    "command": "./cooper/test-vm-dev.sh lifecycle all > /tmp/cooper-vm-dev-invalid.txt 2>&1",
+    "expected": false,
+    "why": "Unknown modes, images, arguments, and cleanup paths cannot widen the reviewed VM work."
+  },
+  {
+    "id": "vm-development-reject-183",
+    "command": "./cooper/test-vm-dev.sh clean /home/ricky > /tmp/cooper-vm-dev-invalid.txt 2>&1",
+    "expected": false,
+    "why": "Unknown modes, images, arguments, and cleanup paths cannot widen the reviewed VM work."
+  },
+  {
+    "id": "vm-development-reject-184",
+    "command": "./cooper/test-vm-dev.sh nested > /tmp/cooper-vm-dev-invalid.txt 2>&1",
+    "expected": false,
+    "why": "Unknown modes, images, arguments, and cleanup paths cannot widen the reviewed VM work."
   }
 ]

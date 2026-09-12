@@ -475,7 +475,7 @@ For VM-specific diagnostics, use:
 cooper vm doctor
 ```
 
-The report distinguishes an unsupported host, missing prepared assets, missing infrastructure images, no running VM, and an unhealthy running VM. A source checkout can also run `./cooper/dev/setup.sh --check` and the KVM release gate `timeout 90m ./cooper/test-vm.sh`.
+The report distinguishes an unsupported host, missing prepared assets, missing infrastructure images, no running VM, and an unhealthy running VM. For source development, start with `./cooper/test-vm-dev.sh unit`, then use a small prepared VM profile from [the development guide](dev/README.md). Run the complete `timeout 90m ./cooper/test-vm.sh` gate only before a release on the physical Linux host.
 
 ### Grok login, versions, or custom-directory collisions
 

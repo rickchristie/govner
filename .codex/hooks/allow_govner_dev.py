@@ -42,7 +42,15 @@ SEMVER_RE = re.compile(
     r"(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$"
 )
 
+VM_DEVELOPMENT_AGENTS = {"claude", "copilot", "codex", "opencode", "grok"}
+VM_DEVELOPMENT_MODES = {
+    (), ("unit",), ("prepare",), ("smoke",), ("mounts",), ("clean",), ("clean-cache",),
+    *(("lifecycle", case) for case in ("restart", "resources", "relay", "agent")),
+    *((mode, agent) for mode in ("prepare-agent", "parity") for agent in VM_DEVELOPMENT_AGENTS),
+}
+
 COOPER_TEST_SCRIPTS = {
+    (COOPER_ROOT / "test-vm-dev.sh").resolve(): VM_DEVELOPMENT_MODES,
     (COOPER_ROOT / "test-e2e.sh").resolve(): {(), ("clean",)},
     (COOPER_ROOT / "test-docker-build.sh").resolve(): {
         (),
@@ -58,6 +66,13 @@ RELEASE_SCRIPTS = {
     for project in PROJECT_ROOTS
 }
 MANUALLY_REVIEWED_SCRIPTS = {
+    # The complete VM release gate retains a separate review boundary. It
+    # contains self-host builds and broader cleanup than development profiles.
+    (COOPER_ROOT / "test-vm.sh").resolve(),
+    (COOPER_ROOT / "dev/setup.sh").resolve(),
+    (COOPER_ROOT / "dev/setup_test.sh").resolve(),
+    (COOPER_ROOT / "dev/build-virtiofsd.sh").resolve(),
+    (COOPER_ROOT / "internal/templates/setup-account.sh").resolve(),
     (COOPER_ROOT / "internal/templates/doctor.sh").resolve(),
     (REPO_ROOT / "scripts/capture-tui.sh").resolve(),
     (REPO_ROOT / "scripts/convert-agents.sh").resolve(),

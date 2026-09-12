@@ -15,6 +15,10 @@ The initial policy is based on Govner/Cooper Codex sessions through
   current-version release artifact targets;
 - every mode of the repo-owned `cooper/test-e2e.sh` and
   `cooper/test-docker-build.sh`, including their isolated cleanup modes;
+- the finite `cooper/test-vm-dev.sh` modes: default/`unit`, `prepare`,
+  `prepare-agent <agent>`, `smoke`, `mounts`, `lifecycle <case>`,
+  `parity <agent>`, `clean`, and `clean-cache`; agent and case names must match
+  the script's fixed lists;
 - all three `scripts/release-*.sh` release generators, whose only write is a
   private tag-message file under `/tmp`, and the exact build, tag, push, and
   Go-proxy indexing steps they print;
@@ -38,6 +42,8 @@ go test -C ./pgflock ./... > /tmp/pgflock-go-test.txt 2>&1
 go build -C ./cooper -o ./cooper . > /tmp/cooper-build.txt 2>&1
 go build -C ./gowt -o ./gowt . > /tmp/gowt-build.txt 2>&1
 go build -C ./pgflock -o ./pgflock . > /tmp/pgflock-build.txt 2>&1
+./cooper/test-vm-dev.sh unit > /tmp/cooper-vm-unit.txt 2>&1
+./cooper/test-vm-dev.sh smoke > /tmp/cooper-vm-smoke.txt 2>&1
 timeout 90m ./cooper/test-e2e.sh > /tmp/cooper-e2e.txt 2>&1
 timeout 90m ./cooper/test-docker-build.sh all > /tmp/cooper-docker-build.txt 2>&1
 ./cooper/test-docker-build.sh clean > /tmp/cooper-docker-build-clean.txt 2>&1
@@ -89,7 +95,9 @@ remotes.
 
 The tracked `.vscode/tasks.json` is also inventoried by the unit suite. Its two
 plain Go build steps map to the exact development-binary policy above, and all
-seven Cooper script tasks map to reviewed script modes. The desktop
+Cooper development script tasks map to reviewed script modes. The task named
+`VM Release Gate (Release Only)` remains subject to manual review; its full
+self-host build and cleanup scope is separate from a development profile. The desktop
 notification/read wrappers, installed `gowt` TUI tasks, and interactive
 `cooper tui-test` process are IDE-only behavior rather than headless Codex
 commands; agents use the logged build/test forms above. Directly copying an

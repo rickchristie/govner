@@ -1104,7 +1104,26 @@ Tests are organized by layer, each with clear scope:
     Validates the full bridge relay path.
   - These tests are part of `cooper proof` AND are standalone integration tests tagged `//go:build integration`.
 
+- **VM Development Gates** (`test-vm-dev.sh`):
+  - Default to an explicit local unit package list with Docker/QEMU blocked.
+    Template tests must not fetch current registry versions.
+  - Separate preparation from runtime. A runtime command must reject stale
+    source, account, binary, base, or image inputs before creating a VM and
+    must not rebuild, download, or export an image as a fallback.
+  - Use one small production image for smoke/mount checks, one selected real
+    image for CLI/VM parity, and two VM starts for each recovery case.
+  - Share smoke, bind-refresh, and state assertions with the release gate.
+    Verify actual container identity and image-load events, not only names.
+  - Keep immutable caches separate from disposable guest disks. Lease by
+    Docker daemon and account through cleanup. Never prune global Docker
+    state, modify host agent roots, or change a shared archive's ownership.
+  - Report logical archive/disk work and elapsed time. Mark unavailable
+    physical measurements clearly; never equate archive bytes with SSD wear.
+  - See `dev/README.md` for the finite commands and coverage limits.
+
 - **VM Release Gate** (`test-vm.sh`, Linux x86-64 with KVM):
+  - Run only before release, from the physical host. Development profiles do
+    not replace self-hosting, the complete agent matrix, or nested acceptance.
   - Tests the supervisor container security settings, no-NIC guest, private
     guest Docker daemon, exact image import, shared mount policy, all built-in
     agent images, clipboard, bridge, live ports, reuse, restart, token

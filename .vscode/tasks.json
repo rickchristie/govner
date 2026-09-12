@@ -268,6 +268,66 @@
       },
       "problemMatcher": [],
       "isBackground": false
+    },
+    {
+      "label": "cooper: VM Unit",
+      "type": "shell",
+      "command": "./cooper/test-vm-dev.sh unit > /tmp/cooper-vm-unit.txt 2>&1",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "echo": true,
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "cooper: VM Prepare",
+      "type": "shell",
+      "command": "./cooper/test-vm-dev.sh prepare > /tmp/cooper-vm-dev-prepare.txt 2>&1",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "echo": true,
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "cooper: VM Smoke (Prepared Inputs)",
+      "type": "shell",
+      "command": "./cooper/test-vm-dev.sh smoke > /tmp/cooper-vm-smoke.txt 2>&1",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "echo": true,
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "cooper: VM Release Gate (Release Only)",
+      "type": "shell",
+      "command": "timeout 90m ./cooper/test-vm.sh > /tmp/cooper-vm-gate.txt 2>&1",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "echo": true,
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "problemMatcher": [],
+      "isBackground": false
     }
   ]
 }

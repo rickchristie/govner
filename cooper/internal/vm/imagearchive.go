@@ -23,6 +23,58 @@ type ImageArchive struct {
 	Path    string
 }
 
+// ReadImageArchive reads an existing archive. Unlike EnsureImageArchive it
+// cannot create a directory, repair metadata, or call Docker. The caller must
+// keep the cache leased until the VM has stopped.
+func ReadImageArchive(cooperDir, imageID string) (ImageArchive, error) {
+	if !validImageID(imageID) {
+		return ImageArchive{}, fmt.Errorf("invalid prepared image ID %q", imageID)
+	}
+	archive := ImageArchive{ImageID: imageID, Path: filepath.Join(ImageCacheDir(cooperDir), strings.TrimPrefix(imageID, "sha256:")+".tar")}
+	if err := checkImageArchive(archive); err != nil {
+		return ImageArchive{}, err
+	}
+	return archive, nil
+}
+
+func checkImageArchive(archive ImageArchive) error {
+	valid, err := imageArchiveReusable(archive.Path, archive.ImageID)
+	if err != nil {
+		return err
+	}
+	if !valid {
+		return fmt.Errorf("prepared image archive %s is absent or stale; prepare it before starting the VM", archive.Path)
+	}
+	return nil
+}
+
+func (m Manager) checkPreparedArchive(imageID string) error {
+	if m.PreparedArchive == nil {
+		return nil
+	}
+	if !m.SkipPrepare || m.PreparedBase == "" {
+		return errors.New("a prepared archive requires SkipPrepare and a prepared base")
+	}
+	if imageID != m.PreparedArchive.ImageID {
+		return errors.New("selected image differs from the prepared image archive")
+	}
+	return checkImageArchive(*m.PreparedArchive)
+}
+
+func (m Manager) imageArchive(ctx context.Context, source string) (ImageArchive, error) {
+	if m.PreparedArchive == nil {
+		return EnsureImageArchive(ctx, m.CooperDir, source, m.Runner, m.output())
+	}
+	imageID, err := inspectImageID(ctx, source, m.Runner)
+	if err != nil {
+		return ImageArchive{}, err
+	}
+	if err := m.checkPreparedArchive(imageID); err != nil {
+		return ImageArchive{}, err
+	}
+	return *m.PreparedArchive, nil
+}
+
 // imageArchiveMetadata lets Cooper reject an interrupted or truncated cache
 // without reading a multi-gigabyte archive on each warm VM start. The cache is
 // Cooper-owned host data. The guest still verifies the loaded Docker image ID.

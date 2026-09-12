@@ -3,12 +3,53 @@ package vm
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"net"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/vmproto"
 )
+
+func TestExecCommandCancellationAfterConnection(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "control.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- (Manager{}).ExecCommand(ctx, Runtime{ID: "test", ControlSocket: path}, []string{"sleep", "30"}, nil, false, nil, io.Discard, io.Discard)
+	}()
+	connection, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if _, err := vmproto.ReadHeader(connection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vmproto.ReadFrame(connection); err != nil {
+		t.Fatal(err)
+	}
+	// Cancel after the request reaches the guest. DialContext alone cannot
+	// interrupt the read that waits for command output or an exit status.
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled exec returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled exec kept waiting on the guest connection")
+	}
+}
 
 func TestExecCommandCarriesOutputAndExitStatus(t *testing.T) {
 	t.Parallel()

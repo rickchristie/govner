@@ -44,6 +44,12 @@ type AssetClient interface {
 	Ensure(ctx context.Context, asset Asset) (string, error)
 }
 
+// PreparedGuestValid verifies an existing base without preparing or downloading
+// anything. Tests can reuse a host base after this full content check.
+func PreparedGuestValid(cooperDir string) bool {
+	return preparedGuestValid(AssetDir(cooperDir))
+}
+
 // Prepare is safe to call at the same time from multiple Cooper processes.
 func (p Preparer) Prepare(ctx context.Context) (string, error) {
 	if err := HostRequirements(true); err != nil {

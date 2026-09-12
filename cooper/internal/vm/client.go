@@ -29,6 +29,10 @@ func (m Manager) Exec(ctx context.Context, runtime Runtime, spec workloadExec, s
 		return fmt.Errorf("connect to VM %s: %w", runtime.ID, err)
 	}
 	defer connection.Close()
+	// DialContext only covers connection setup. Closing the established stream
+	// also interrupts a blocked read and notifies the guest of the disconnect.
+	stopCancellation := context.AfterFunc(ctx, func() { connection.Close() })
+	defer stopCancellation()
 	requestID, err := randomHex(12)
 	if err != nil {
 		return err
@@ -41,6 +45,9 @@ func (m Manager) Exec(ctx context.Context, runtime Runtime, spec workloadExec, s
 		header.Rows, header.Columns = terminalSize(stdin)
 	}
 	if err := vmproto.WriteHeader(connection, header); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return err
 	}
 	writer := &lockedWriter{writer: connection}
@@ -54,6 +61,9 @@ func (m Manager) Exec(ctx context.Context, runtime Runtime, spec workloadExec, s
 	for {
 		frame, err := vmproto.ReadFrame(connection)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 				return errors.New("VM command stream closed before an exit status")
 			}

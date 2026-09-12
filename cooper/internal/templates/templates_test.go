@@ -149,9 +149,23 @@ func truncate(s string, maxLen int) string {
 
 func resolveImplicitForTest(t *testing.T, cfg *config.Config) []config.ImplicitToolConfig {
 	t.Helper()
-	implicit, err := config.ResolveImplicitTools(cfg)
-	if err != nil {
-		t.Fatalf("ResolveImplicitTools failed: %v", err)
+	// These tests check rendering. Registry resolution has separate tests in
+	// config; fetching live versions here makes a local template check depend
+	// on the network and on package releases.
+	fixtures := []config.ImplicitToolConfig{
+		{Name: "gopls", Kind: config.ImplicitToolKindLSP, ParentTool: "go", Binary: "gopls", ContainerVersion: "v0.20.0"},
+		{Name: "typescript-language-server", Kind: config.ImplicitToolKindLSP, ParentTool: "node", Binary: "typescript-language-server", ContainerVersion: "4.3.3"},
+		{Name: "typescript", Kind: config.ImplicitToolKindSupport, ParentTool: "node", Binary: "tsc", ContainerVersion: "5.7.2"},
+		{Name: "pyright", Kind: config.ImplicitToolKindLSP, ParentTool: "python", Binary: "pyright-langserver", ContainerVersion: "1.1.390"},
+		{Name: "python-lsp-server", Kind: config.ImplicitToolKindLSP, ParentTool: "python", Binary: "pylsp", ContainerVersion: "1.12.0"},
+	}
+	var implicit []config.ImplicitToolConfig
+	for _, fixture := range fixtures {
+		for _, tool := range cfg.ProgrammingTools {
+			if tool.Name == fixture.ParentTool && tool.Enabled {
+				implicit = append(implicit, fixture)
+			}
+		}
 	}
 	return implicit
 }
@@ -995,10 +1009,9 @@ func TestRenderEntrypoint_NoToolBooleans(t *testing.T) {
 	// Verify that entrypointData has the expected fields and no per-tool
 	// booleans like HasClaudeCode. This is a compile-time check.
 	d := entrypointData{
-		HasGo:            true,
-		GoBinDir:         docker.BarrelGoBinDir,
-		BridgePort:       4343,
-		ClipboardEnabled: true,
+		HasGo:      true,
+		GoBinDir:   docker.BarrelGoBinDir,
+		BridgePort: 4343,
 	}
 
 	// Verify the struct fields are what we expect
@@ -1010,9 +1023,6 @@ func TestRenderEntrypoint_NoToolBooleans(t *testing.T) {
 	}
 	if d.GoBinDir != docker.BarrelGoBinDir {
 		t.Errorf("expected GoBinDir=%q, got %q", docker.BarrelGoBinDir, d.GoBinDir)
-	}
-	if !d.ClipboardEnabled {
-		t.Error("expected ClipboardEnabled=true")
 	}
 }
 

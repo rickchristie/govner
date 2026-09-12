@@ -314,9 +314,9 @@ func TestSupervisorDockerArgsMountOnlyKVMDevice(t *testing.T) {
 		{ID: "workspace", Source: "/work/project", Target: "/work/project", Access: workload.ReadWrite},
 		{ID: "git-hooks", Source: "/work/project/.git/hooks", Target: "/work/project/.git/hooks", Access: workload.ReadOnly},
 	}
-	args, err := supervisorDockerRunArgs(runtime, request, ImageArchive{ImageID: "sha256:" + strings.Repeat("a", 64), Path: "/state/image.tar"}, "/state/base.qcow2", mounts, strings.Repeat("b", 64), "", "/state/seccomp.json")
+	args, err := supervisorDockerArgs(runtime, request, ImageArchive{ImageID: "sha256:" + strings.Repeat("a", 64), Path: "/state/image.tar"}, "/state/base.qcow2", mounts, strings.Repeat("b", 64), "", "/state/seccomp.json", 1001, 1002, 993)
 	if err != nil {
-		t.Skipf("host /dev/kvm is not visible in unit sandbox: %v", err)
+		t.Fatal(err)
 	}
 	joined := strings.Join(args, " ")
 	if strings.Count(joined, "--device") != 1 || !strings.Contains(joined, "--device /dev/kvm") {
@@ -352,7 +352,7 @@ func TestSupervisorDockerArgsRejectHooksOutsideWorkspace(t *testing.T) {
 		{ID: "workspace", Source: "/work/project", Target: "/work/project", Access: workload.ReadWrite},
 		{ID: "git-hooks", Source: "/other/hooks", Target: "/other/hooks", Access: workload.ReadOnly},
 	}
-	_, err := supervisorDockerRunArgs(runtime, request, ImageArchive{ImageID: "sha256:" + strings.Repeat("a", 64)}, "/state/base.qcow2", mounts, strings.Repeat("b", 64), "", "/state/seccomp.json")
+	_, err := supervisorDockerArgs(runtime, request, ImageArchive{ImageID: "sha256:" + strings.Repeat("a", 64)}, "/state/base.qcow2", mounts, strings.Repeat("b", 64), "", "/state/seccomp.json", 1001, 1002, 993)
 	if err == nil || !strings.Contains(err.Error(), "outside") {
 		t.Fatalf("supervisorDockerRunArgs() error = %v", err)
 	}

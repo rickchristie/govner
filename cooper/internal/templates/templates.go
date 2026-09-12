@@ -96,10 +96,9 @@ type squidConfData struct {
 // Port forwarding rules are read from /etc/cooper/live/socat-rules.json at runtime,
 // not baked into the template. BridgePort is kept as a fallback default.
 type entrypointData struct {
-	HasGo            bool
-	GoBinDir         string
-	BridgePort       int
-	ClipboardEnabled bool
+	HasGo      bool
+	GoBinDir   string
+	BridgePort int
 }
 
 // proxyEntrypointData holds template data for the proxy entrypoint script.
@@ -109,16 +108,6 @@ type proxyEntrypointData struct {
 	BridgePort int
 	RelayHost  string
 	Nested     bool
-}
-
-// anyAIToolEnabled returns true if at least one AI tool is enabled.
-func anyAIToolEnabled(tools []config.ToolConfig) bool {
-	for _, t := range tools {
-		if t.Enabled {
-			return true
-		}
-	}
-	return false
 }
 
 // isToolEnabled checks if a tool with the given name is enabled in a slice of ToolConfig.
@@ -492,10 +481,9 @@ func RenderEntrypoint(cfg *config.Config) (string, error) {
 	}
 
 	data := entrypointData{
-		HasGo:            isToolEnabled(cfg.ProgrammingTools, "go"),
-		GoBinDir:         docker.BarrelGoBinDir,
-		BridgePort:       cfg.BridgePort,
-		ClipboardEnabled: anyAIToolEnabled(cfg.AITools),
+		HasGo:      isToolEnabled(cfg.ProgrammingTools, "go"),
+		GoBinDir:   docker.BarrelGoBinDir,
+		BridgePort: cfg.BridgePort,
 	}
 
 	var buf strings.Builder
