@@ -1,7 +1,7 @@
 # Cooper VM development
 
 Start with local tests. They find mount-plan, account, protocol, lifecycle,
-relay, template, and clipboard errors without Docker or a VM:
+relay, template, clipboard, and account-profile errors without Docker or a VM:
 
 ```bash
 ./cooper/test-vm-dev.sh unit > /tmp/cooper-vm-unit.txt 2>&1
@@ -41,8 +41,14 @@ Choose the smallest runtime check for the change:
 | `lifecycle agent` | 2 | Lost agent, health change, recovery |
 | `prepare-agent codex` | 0, or 1 cold base | Prepare only the selected real agent and its required base/helpers |
 | `parity codex` | 1 | Real CLI/VM version, account, same paths, selected state, isolation, writes |
+| `profiles codex` | 2 | Saved profile in Docker and VM, complete roots, credential isolation, restart, status, cleanup |
 
 The agent choices are `claude`, `copilot`, `codex`, `opencode`, and `grok`.
+`profiles codex` uses the assets from `prepare-agent codex`. It tests the shared
+profile integration with fabricated accounts; local tests cover all five root
+catalogs and identity adapters. The restart check requires the second VM and
+image import.
+
 Preparation uses explicit version pins in `internal/vmdev/config.go`.
 Change a pin to test a new version, then prepare that agent again. The fixture
 uses empty test-owned state; it never needs host provider credentials.
@@ -141,6 +147,19 @@ through the Cooper relay and proxy. Use `cooper vm doctor` for runtime and
 asset diagnostics.
 
 The required full Go, shell E2E, and Docker-build gates remain unchanged.
+
+Run local profile tests and real runtime checks in sequence. They use the
+production per-UID state lock. A VM startup can therefore make a concurrent
+profile test report that state is busy. For the full Go suite, use
+`GOFLAGS=-p=1 go test -C ./cooper ./...` from the repository root when packages
+would otherwise spend their test time limit waiting for the shared Docker
+test lock. This changes package scheduling, not test coverage.
+
+The Docker-build gate's mirror mode requires an actual host executable for
+each enabled harness. A `cooper vm codex` session normally provides only
+Codex. Put real test versions of the other harnesses in a private tools
+directory and add that directory to `PATH` for the gate. A version-output
+stub does not verify mirror behavior.
 
 ## Validation evidence
 

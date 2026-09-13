@@ -152,6 +152,10 @@ func renderActionStatus(state actionState, text string, width int) string {
 
 // renderDetail renders identity and health values that do not fit the table.
 func renderDetail(workload workloadItem, width int) string {
+	profile := workload.Profile
+	if profile == "" {
+		profile = "Host"
+	}
 	treeMid := theme.DividerStyle.Render("├─ ")
 	treeEnd := theme.DividerStyle.Render("└─ ")
 	shellText := "--"
@@ -162,6 +166,7 @@ func renderDetail(workload workloadItem, width int) string {
 		treeMid + theme.DetailLabelStyle.Render("ID:      ") + theme.DetailValueStyle.Render(workload.ID),
 		treeMid + theme.DetailLabelStyle.Render("Kind:    ") + theme.DetailValueStyle.Render(workloadKindLabel(workload)),
 		treeMid + theme.DetailLabelStyle.Render("Tool:    ") + theme.DetailValueStyle.Render(valueOrDash(workload.Tool)),
+		treeMid + theme.DetailLabelStyle.Render("Profile: ") + theme.DetailValueStyle.Render(profile),
 		treeMid + theme.DetailLabelStyle.Render("Status:  ") + theme.DetailValueStyle.Render(workload.Status),
 		treeMid + theme.DetailLabelStyle.Render("Shells:  ") + theme.DetailValueStyle.Render(shellText),
 		treeMid + theme.DetailLabelStyle.Render("CPU:     ") + theme.DetailValueStyle.Render(valueOrDash(workload.CPUPercent)),

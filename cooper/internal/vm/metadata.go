@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/rickchristie/govner/cooper/internal/profiles"
 )
 
 const runtimeMetadataSchema = 2
@@ -18,6 +20,8 @@ type RuntimeMetadata struct {
 	Schema          int    `json:"schema"`
 	RuntimeID       string `json:"runtime_id"`
 	ToolName        string `json:"tool"`
+	ProfileID       string `json:"profile_id,omitempty"`
+	ProfileName     string `json:"profile_name,omitempty"`
 	WorkspaceDir    string `json:"workspace"`
 	ImageRef        string `json:"image_ref"`
 	ImageID         string `json:"image_id"`
@@ -38,6 +42,16 @@ func (m RuntimeMetadata) validate(expectedID string) error {
 	}
 	if strings.TrimSpace(m.ToolName) == "" || !filepath.IsAbs(m.WorkspaceDir) || strings.TrimSpace(m.ImageRef) == "" {
 		return errors.New("VM runtime metadata has missing launch values")
+	}
+	if m.ProfileID != "" {
+		if !validProfileID.MatchString(m.ProfileID) {
+			return errors.New("invalid VM profile ID")
+		}
+		if err := profiles.ValidateName(m.ProfileName); err != nil {
+			return err
+		}
+	} else if m.ProfileName != "" {
+		return errors.New("VM profile name has no profile ID")
 	}
 	if !validImageID(m.ImageID) {
 		return errors.New("VM runtime metadata has an invalid image ID")
@@ -62,6 +76,7 @@ func (m RuntimeMetadata) validate(expectedID string) error {
 
 func (m RuntimeMetadata) matches(request StartRequest, depth int, imageID, mountDigest string) bool {
 	return m.RuntimeID == request.RuntimeID &&
+		m.ProfileID == request.ProfileID &&
 		m.ToolName == request.ToolName &&
 		m.WorkspaceDir == request.WorkspaceDir &&
 		m.ImageRef == request.ImageRef &&
@@ -104,5 +119,6 @@ func (m RuntimeMetadata) startRequest() StartRequest {
 		WorkspaceDir: m.WorkspaceDir, ToolName: m.ToolName, ImageRef: m.ImageRef,
 		RuntimeID: m.RuntimeID, CPUs: m.CPUs, MemoryMiB: m.MemoryMiB, DiskGiB: m.DiskGiB,
 		ClipboardMode: m.ClipboardMode,
+		ProfileID:     m.ProfileID, ProfileName: m.ProfileName,
 	}
 }

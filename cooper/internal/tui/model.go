@@ -3,6 +3,8 @@ package tui
 import (
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
 	"github.com/rickchristie/govner/cooper/internal/tui/loading"
@@ -57,6 +59,7 @@ type Model struct {
 	runtimeModel      SubModel
 	portForwardModel  SubModel
 	aboutModel        SubModel
+	profilesModel     SubModel
 
 	// Loading screen (nil after startup completes).
 	loadingModel SubModel
@@ -123,6 +126,9 @@ func (m *Model) SetSize(w, h int) {
 	m.width = w
 	m.height = h
 	m.tabBar.Width = w
+	if m.profilesModel != nil {
+		m.profilesModel, _ = m.profilesModel.Update(tea.WindowSizeMsg{Width: w, Height: m.contentHeight()})
+	}
 }
 
 // SetRuntimesModel wires the runtimes tab.
@@ -154,6 +160,10 @@ func (m *Model) SetPortForwardModel(sm SubModel) { m.portForwardModel = sm }
 
 // SetAboutModel wires the about tab.
 func (m *Model) SetAboutModel(sm SubModel) { m.aboutModel = sm }
+
+func (m *Model) SetProfilesModel(sm SubModel) {
+	m.profilesModel, _ = sm.Update(tea.WindowSizeMsg{Width: m.width, Height: m.contentHeight()})
+}
 
 // SetLoadingModel wires the loading/startup screen sub-model.
 func (m *Model) SetLoadingModel(sm SubModel) { m.loadingModel = sm }
@@ -207,6 +217,8 @@ func (m *Model) activeSubModel() SubModel {
 		return m.portForwardModel
 	case theme.TabAbout:
 		return m.aboutModel
+	case theme.TabProfiles:
+		return m.profilesModel
 	}
 	return nil
 }

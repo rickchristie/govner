@@ -1,6 +1,8 @@
 package workload
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +11,21 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 )
+
+// AgentStatePolicy changes when a supported root rule changes. A saved view
+// must be refreshed explicitly rather than silently filling a new root from
+// another account's live host state.
+func AgentStatePolicy(tool string) (string, error) {
+	paths, ok := agentStatePaths[tool]
+	if !ok {
+		return "", fmt.Errorf("profiles do not support harness %q", tool)
+	}
+	data, err := json.Marshal(paths)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
+}
 
 // StatePath is one complete state root. Base selects an agent or XDG path
 // rule; Path is relative to that base. Add newly supported folders here,
@@ -73,9 +90,9 @@ func HostPathEnvironment() map[string]string {
 	return values
 }
 
-// AgentPaths is the resolved selected-agent policy. Source and Target remain
-// separate fields for future profiles, but today's host-state policy requires
-// identical paths. The same value is passed to both execution back ends.
+// AgentPaths is the resolved selected-agent policy. Live host state uses the
+// same source and target. Profiles change only the source. Both execution
+// back ends receive this same path contract.
 type AgentPaths struct {
 	Mounts      []MountSpec
 	Environment []EnvVar
@@ -85,6 +102,20 @@ type AgentPaths struct {
 // an explicit CODEX_HOME is canonicalized; relative Grok and XDG values are
 // relative to the launch directory, never to the host home.
 func ResolveAgentPaths(tool, home, launchDir string, values map[string]string) (AgentPaths, error) {
+	return resolveAgentPaths(tool, home, launchDir, values, false)
+}
+
+// ResolveAgentScope includes absent optional paths. Profile replacement needs
+// this scope so a missing incoming file cannot retain the outgoing account's
+// file. Runtime mounts continue to omit absent optional paths.
+func ResolveAgentScope(tool, home, launchDir string, values map[string]string) (AgentPaths, error) {
+	if _, supported := agentStatePaths[tool]; !supported {
+		return AgentPaths{}, fmt.Errorf("profiles do not support harness %q", tool)
+	}
+	return resolveAgentPaths(tool, home, launchDir, values, true)
+}
+
+func resolveAgentPaths(tool, home, launchDir string, values map[string]string, includeAbsent bool) (AgentPaths, error) {
 	result := AgentPaths{}
 	roots := map[string]string{"home": home}
 	environment := map[string]string{}
@@ -95,7 +126,7 @@ func ResolveAgentPaths(tool, home, launchDir string, values map[string]string) (
 		base, ok := roots[spec.Base]
 		if !ok {
 			var err error
-			base, err = resolveStateBase(spec.Base, home, launchDir, values, environment)
+			base, err = resolveStateBase(spec.Base, home, launchDir, values, environment, includeAbsent)
 			if err != nil {
 				return AgentPaths{}, err
 			}
@@ -109,7 +140,7 @@ func ResolveAgentPaths(tool, home, launchDir string, values map[string]string) (
 			return AgentPaths{}, err
 		}
 		info, err := os.Stat(path)
-		if spec.Optional && os.IsNotExist(err) && !(spec.Kind == Directory && values[spec.Base] != "") {
+		if !includeAbsent && spec.Optional && os.IsNotExist(err) && !(spec.Kind == Directory && values[spec.Base] != "") {
 			// A SQLite file needs its containing directory for WAL and shared
 			// memory files. It must exist before launch so Cooper does not
 			// create or export an unrelated parent directory.
@@ -154,7 +185,7 @@ func ResolveAgentPaths(tool, home, launchDir string, values map[string]string) (
 	return result, nil
 }
 
-func resolveStateBase(base, home, launchDir string, values, environment map[string]string) (string, error) {
+func resolveStateBase(base, home, launchDir string, values, environment map[string]string, includeAbsent bool) (string, error) {
 	var name, fallback string
 	switch base {
 	case "codex":
@@ -237,7 +268,7 @@ func resolveStateBase(base, home, launchDir string, values, environment map[stri
 		if value == ":memory:" {
 			return "", nil
 		}
-		data, err := resolveStateBase("XDG_DATA_HOME", home, launchDir, values, environment)
+		data, err := resolveStateBase("XDG_DATA_HOME", home, launchDir, values, environment, includeAbsent)
 		if err != nil {
 			return "", err
 		}
@@ -260,11 +291,14 @@ func resolveStateBase(base, home, launchDir string, values, environment map[stri
 	path = filepath.Clean(path)
 	if base == "codex" {
 		resolved, err := filepath.EvalSymlinks(path)
+		if includeAbsent && os.IsNotExist(err) {
+			resolved, err = resolveExistingPath(path)
+		}
 		if err != nil {
 			return "", fmt.Errorf("resolve CODEX_HOME: %w", err)
 		}
 		info, err := os.Stat(resolved)
-		if err != nil || !info.IsDir() {
+		if (err != nil && !(includeAbsent && os.IsNotExist(err))) || (err == nil && !info.IsDir()) {
 			return "", fmt.Errorf("CODEX_HOME %s must be an existing directory", path)
 		}
 		path = resolved

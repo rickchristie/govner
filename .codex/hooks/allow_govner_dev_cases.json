@@ -1153,5 +1153,23 @@
     "command": "./cooper/test-vm-dev.sh nested > /tmp/cooper-vm-dev-invalid.txt 2>&1",
     "expected": false,
     "why": "Unknown modes, images, arguments, and cleanup paths cannot widen the reviewed VM work."
+  },
+  {
+    "id": "vm-development-account-profiles",
+    "command": "./cooper/test-vm-dev.sh profiles codex > /tmp/cooper-profile-vm.txt 2>&1",
+    "expected": true,
+    "why": "The fixed account-profile fixture uses prepared Codex assets and two VM starts to check profile mounts and restart."
+  },
+  {
+    "id": "vm-development-account-profiles-unknown-agent",
+    "command": "./cooper/test-vm-dev.sh profiles copilot > /tmp/cooper-profile-vm.txt 2>&1",
+    "expected": false,
+    "why": "Only the reviewed Codex account-profile fixture is in the finite command set."
+  },
+  {
+    "id": "vm-development-account-profiles-extra-path",
+    "command": "./cooper/test-vm-dev.sh profiles codex /home/ricky > /tmp/cooper-profile-vm.txt 2>&1",
+    "expected": false,
+    "why": "Profile tests cannot accept arbitrary host account paths or extra arguments."
   }
 ]

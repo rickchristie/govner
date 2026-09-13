@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,6 +30,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/proof"
 	"github.com/rickchristie/govner/cooper/internal/proxy"
 	"github.com/rickchristie/govner/cooper/internal/runtimefs"
+	"github.com/rickchristie/govner/cooper/internal/statelock"
 	"github.com/rickchristie/govner/cooper/internal/templates"
 	"github.com/rickchristie/govner/cooper/internal/tui"
 	"github.com/rickchristie/govner/cooper/internal/tui/about"
@@ -38,6 +40,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tui/history"
 	"github.com/rickchristie/govner/cooper/internal/tui/loading"
 	"github.com/rickchristie/govner/cooper/internal/tui/portfwd"
+	"github.com/rickchristie/govner/cooper/internal/tui/profileui"
 	"github.com/rickchristie/govner/cooper/internal/tui/proxymon"
 	"github.com/rickchristie/govner/cooper/internal/tui/settings"
 	squidlogui "github.com/rickchristie/govner/cooper/internal/tui/squidlog"
@@ -116,10 +119,12 @@ var updateCmd = &cobra.Command{
 
 var cliOneShot string
 var tuiTestScreen string
+
+var tuiTestProfileScenario string
 var regenerateCA bool
 
 var cliCmd = &cobra.Command{
-	Use:   "cli [tool-name]",
+	Use:   "cli [tool-name] [profile]",
 	Short: "Launch an AI tool in a network-isolated barrel",
 	Long: `Launches an AI CLI tool inside a network-isolated barrel container.
 The current directory is mounted as the workspace. The tool starts
@@ -127,6 +132,7 @@ automatically with auto-approve enabled.
 
   cooper cli claude       Launch Claude Code
   cooper cli codex        Launch Codex CLI
+  cooper cli codex Work   Launch Codex with the saved Work profile
   cooper cli copilot      Launch Copilot CLI
   cooper cli opencode     Launch OpenCode
   cooper cli grok         Launch Grok Build
@@ -135,7 +141,7 @@ automatically with auto-approve enabled.
 Use -c to run a one-shot command instead:
   cooper cli claude -c "go test ./..."
   cooper cli grok -c 'grok -p "Reply with only the word: ok" --always-approve --max-turns 1'`,
-	Args: cobra.MaximumNArgs(1),
+	Args: cobra.MaximumNArgs(2),
 	RunE: runCLI,
 }
 
@@ -212,7 +218,8 @@ func init() {
 	initVMCommands()
 
 	tuiTestCmd.Flags().StringVar(&tuiTestScreen, "screen", "",
-		"Jump to a specific screen: runtimes, monitor, blocked, allowed, bridge-logs, bridge-routes, settings, ports, about, loading, configure, build")
+		"Jump to a specific screen: runtimes, profiles, monitor, blocked, allowed, bridge-logs, bridge-routes, settings, ports, about, loading, configure, build")
+	tuiTestCmd.Flags().StringVar(&tuiTestProfileScenario, "profile-scenario", "populated", "Profile fixture: populated, empty, unmapped, conflict, busy, or error")
 }
 
 func main() {
@@ -611,6 +618,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// Wire all tab sub-models.
 	runtimesModel := containers.New(cooperApp)
 	mainModel.SetRuntimesModel(runtimesModel)
+	mainModel.SetProfilesModel(profileui.New(cooperApp))
 
 	timeout := time.Duration(cfg.MonitorTimeoutSecs) * time.Second
 	proxyMonModel := proxymon.New(cooperApp, timeout)
@@ -791,6 +799,9 @@ func runCLI(cmd *cobra.Command, args []string) error {
 
 	// Handle "cooper cli list" subcommand.
 	if args[0] == "list" {
+		if len(args) != 1 {
+			return fmt.Errorf("usage: cooper cli list")
+		}
 		listCLITools()
 		return nil
 	}
@@ -832,14 +843,25 @@ func runCLI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get working directory: %w", err)
 	}
 
-	// 6. Determine barrel container name (includes tool name).
-	containerName := docker.BarrelContainerName(workspaceDir, toolName)
+	// Keep startup and reuse inside the same shared lock as profile selection.
+	stateLock, err := statelock.Acquire(cmd.Context(), false)
+	if err != nil {
+		return err
+	}
+	defer stateLock.Close()
+	selection, err := selectLaunchProfile(cmd.Context(), cooperDir, workspaceDir, homeDir, toolName, args[1:])
+	if err != nil {
+		return err
+	}
+	// 6. Determine barrel container name (includes tool and profile identity).
+	containerName := docker.BarrelContainerNameForProfile(workspaceDir, toolName, selection.ID)
 	if _, err := runtimefs.SyncTimezoneFile(cooperDir, containerName); err != nil {
 		return fmt.Errorf("sync barrel timezone: %w", err)
 	}
 	preparedSession, warnings, err := launch.PrepareSession(launch.SessionRequest{
 		Config: cfg, CooperDir: cooperDir, RuntimeID: containerName,
 		ToolName: toolName, WorkspaceDir: workspaceDir, OneShot: cliOneShot,
+		State: &selection,
 	})
 	if err != nil {
 		return err
@@ -859,7 +881,7 @@ func runCLI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("check barrel: %w", err)
 	}
 	if barrelRunning {
-		matches, err := docker.BarrelMatchesHost(containerName, cfg, workspaceDir, cooperDir, homeDir, toolName)
+		matches, err := docker.BarrelMatchesProfile(containerName, cfg, workspaceDir, cooperDir, homeDir, toolName, selection.ID)
 		if err != nil {
 			return fmt.Errorf("check barrel state paths: %w", err)
 		}
@@ -889,7 +911,7 @@ func runCLI(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Fprintf(os.Stderr, "Starting barrel container %s...\n", containerName)
-		if err := docker.StartBarrel(cfg, workspaceDir, cooperDir, toolName); err != nil {
+		if err := docker.StartBarrelWithProfile(cfg, workspaceDir, cooperDir, homeDir, toolName, selection.ID); err != nil {
 			// Clean up token file on failed start.
 			clipboard.RemoveTokenFile(cooperDir, containerName)
 			return fmt.Errorf("start barrel: %w", err)
@@ -897,6 +919,9 @@ func runCLI(cmd *cobra.Command, args []string) error {
 	}
 
 	// 8. Execute the common session through the Docker back end.
+	if err := stateLock.Close(); err != nil {
+		return err
+	}
 	if preparedSession.Interactive {
 		fmt.Fprintf(os.Stdout, "\033]0;%s\007", preparedSession.Title)
 	}
@@ -1045,6 +1070,16 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 // removeCooperConfigDir keeps every host-owned agent state root outside the
 // recursive Cooper configuration deletion boundary.
 func removeCooperConfigDir(cooperDir string) error {
+	lock, err := statelock.Acquire(context.Background(), true)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	// Account copies and recovery records are user data, not runtime cache.
+	// This also refuses a symlink in place of the store.
+	if _, err := os.Lstat(filepath.Join(cooperDir, "profiles")); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("Cooper directory contains profile data; move its profiles directory to a safe location before configuration cleanup")
+	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("get home directory before Cooper directory removal: %w", err)
@@ -1348,6 +1383,9 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 
 	// Build the test app and TUI model.
 	testApp := app.NewTestApp(cfg, aclCh, bridgeLogCh)
+	if err := testApp.SetProfileScenario(tuiTestProfileScenario); err != nil {
+		return err
+	}
 	mainModel := tui.NewModel(testApp)
 	// Keep the same controller wiring as real cooper up so tui-test exercises
 	// the root-shell alert path, while the default runtime setting still keeps
@@ -1356,6 +1394,7 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 
 	// Wire sub-models.
 	mainModel.SetRuntimesModel(containers.New(testApp))
+	mainModel.SetProfilesModel(profileui.New(testApp))
 	mainModel.SetProxyMonModel(proxymon.New(testApp, time.Duration(cfg.MonitorTimeoutSecs)*time.Second))
 	mainModel.SetBlockedModel(history.NewWithCapacity(history.ModeBlocked, cfg.BlockedHistoryLimit))
 	mainModel.SetAllowedModel(history.NewWithCapacity(history.ModeAllowed, cfg.AllowedHistoryLimit))
@@ -1390,6 +1429,8 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 		switch strings.ToLower(tuiTestScreen) {
 		case "runtimes", "containers":
 			mainModel.SetActiveTab(theme.TabRuntimes)
+		case "profiles":
+			mainModel.SetActiveTab(theme.TabProfiles)
 		case "monitor":
 			mainModel.SetActiveTab(theme.TabMonitor)
 		case "blocked":
@@ -1427,7 +1468,7 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 			_, err := p.Run()
 			return err
 		default:
-			return fmt.Errorf("unknown screen: %s\nAvailable: runtimes, monitor, blocked, allowed, squid-logs, bridge-logs, bridge-routes, settings, ports, about, loading, configure, build", tuiTestScreen)
+			return fmt.Errorf("unknown screen: %s\nAvailable: runtimes, profiles, monitor, blocked, allowed, squid-logs, bridge-logs, bridge-routes, settings, ports, about, loading, configure, build", tuiTestScreen)
 		}
 	}
 

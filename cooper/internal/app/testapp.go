@@ -7,6 +7,7 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/profiles"
 )
 
 // Compile-time check that TestApp satisfies App.
@@ -16,15 +17,18 @@ var _ App = (*TestApp)(nil)
 // It provides mock channels and no-op infrastructure methods, allowing the
 // TUI to render without Docker or any real services.
 type TestApp struct {
-	cfg        *config.Config
-	aclCh      chan ACLRequest
-	decisionCh chan DecisionEvent
-	bridgeCh   chan ExecutionLog
-	squidLogCh chan string
-	proxyUp    bool
-	socatUp    bool
-	bridgeUp   bool
-	workloads  []WorkloadStat
+	cfg             *config.Config
+	aclCh           chan ACLRequest
+	decisionCh      chan DecisionEvent
+	bridgeCh        chan ExecutionLog
+	squidLogCh      chan string
+	proxyUp         bool
+	socatUp         bool
+	bridgeUp        bool
+	workloads       []WorkloadStat
+	profileMu       sync.Mutex
+	profileItems    []profiles.Summary
+	profileScenario string
 
 	sessionMu      sync.Mutex
 	sessionDomains map[string]struct{}
@@ -34,18 +38,19 @@ type TestApp struct {
 // The caller populates the channels with test data as needed.
 func NewTestApp(cfg *config.Config, aclCh chan ACLRequest, bridgeCh chan ExecutionLog) *TestApp {
 	return &TestApp{
-		cfg:        cfg,
-		aclCh:      aclCh,
-		decisionCh: make(chan DecisionEvent),
-		bridgeCh:   bridgeCh,
-		squidLogCh: make(chan string, 1024),
-		proxyUp:    true,
-		socatUp:    true,
-		bridgeUp:   true,
+		profileItems: ProfileStory(),
+		cfg:          cfg,
+		aclCh:        aclCh,
+		decisionCh:   make(chan DecisionEvent),
+		bridgeCh:     bridgeCh,
+		squidLogCh:   make(chan string, 1024),
+		proxyUp:      true,
+		socatUp:      true,
+		bridgeUp:     true,
 		workloads: []WorkloadStat{
 			{ID: "cooper-proxy", Kind: WorkloadProxy, Status: "Running", CPUPercent: "0.4%", MemUsage: "42MiB / 256MiB", StorageUsage: "--"},
 			{ID: "barrel-demo-claude", Kind: WorkloadCLI, Tool: "claude", Workspace: "/work/demo", Status: "Running", ShellCount: 2, CPUPercent: "1.2%", MemUsage: "380MiB / 4GiB", StorageUsage: "18MiB"},
-			{ID: "cooper-vm-govner-codex-aabbccddeeff", Kind: WorkloadVM, Tool: "codex", Workspace: "/work/govner", Depth: 1, Status: "Running", ShellCount: 1, CPUPercent: "7.8%", MemUsage: "4.2GiB / 12.8GiB", StorageUsage: "3.1GiB"},
+			{ID: "cooper-vm-govner-codex-aabbccddeeff", Kind: WorkloadVM, Tool: "codex", Profile: "Work", Workspace: "/work/govner", Depth: 1, Status: "Running", ShellCount: 1, CPUPercent: "7.8%", MemUsage: "4.2GiB / 12.8GiB", StorageUsage: "3.1GiB"},
 		},
 		sessionDomains: make(map[string]struct{}),
 	}

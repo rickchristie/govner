@@ -10,6 +10,7 @@ require (
 	github.com/hashicorp/yamux v0.1.2
 	github.com/jezek/xgb v1.3.0
 	github.com/jfreymuth/pulse v0.1.1
+	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/image v0.38.0
 	golang.org/x/term v0.45.0

@@ -60,6 +60,7 @@ type CooperApp struct {
 	storageUsageCache map[string]storageUsageSnapshot
 
 	startupWarnings []string
+	profileTasks    profileOperations
 }
 
 type storageUsageSnapshot struct {
@@ -310,6 +311,7 @@ func (a *CooperApp) Stop() error {
 // each step completes so the caller can drive a progress UI.
 // Steps: 0=ACL, 1=bridge, 2=containers, 3=proxy, 4=sealed.
 func (a *CooperApp) StopWithProgress(onStep func(int)) error {
+	a.profileTasks.stop()
 	if onStep == nil {
 		onStep = func(int) {}
 	}
@@ -503,6 +505,7 @@ func (a *CooperApp) WorkloadStats() ([]WorkloadStat, error) {
 			ID:           barrelStats.Name,
 			Kind:         WorkloadCLI,
 			Tool:         barrel.ToolName,
+			Profile:      barrel.ProfileName,
 			Workspace:    barrel.WorkspaceDir,
 			Status:       "Running",
 			ShellCount:   shellCount,
@@ -538,7 +541,7 @@ func (a *CooperApp) WorkloadStats() ([]WorkloadStat, error) {
 			status = "Unhealthy"
 		}
 		stats = append(stats, WorkloadStat{
-			ID: info.ID, Kind: WorkloadVM, Tool: info.ToolName, Workspace: info.WorkspaceDir,
+			ID: info.ID, Kind: WorkloadVM, Tool: info.ToolName, Workspace: info.WorkspaceDir, Profile: info.ProfileName,
 			Depth: info.Depth, Status: status, HealthReason: healthReason,
 			ShellCount: shellCount, CPUPercent: cpu, MemUsage: memory,
 			StorageUsage: a.cachedVMStorageUsage(info.ID),
@@ -688,6 +691,7 @@ func (a *CooperApp) ListWorkloads() ([]WorkloadInfo, error) {
 			ID:           barrel.Name,
 			Kind:         WorkloadCLI,
 			Tool:         barrel.ToolName,
+			Profile:      barrel.ProfileName,
 			Status:       barrel.Status,
 			WorkspaceDir: barrel.WorkspaceDir,
 		})
@@ -701,6 +705,7 @@ func (a *CooperApp) ListWorkloads() ([]WorkloadInfo, error) {
 			ID:           info.ID,
 			Kind:         WorkloadVM,
 			Tool:         info.ToolName,
+			Profile:      info.ProfileName,
 			Depth:        info.Depth,
 			Status:       info.Status,
 			WorkspaceDir: info.WorkspaceDir,

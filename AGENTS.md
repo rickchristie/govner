@@ -35,8 +35,9 @@ Read README.md of the project before starting.
   Mount the complete selected state read-write. This includes auth, sessions, all configs, conversation history, auto-memory, and future state.
   A user must be able to start a session on the host, exit it, and continue it in Cooper, or do the reverse.
   All host settings for the selected agent must apply directly in Cooper.
-- Build agent images with the host account name, group, UID, GID, and home. Keep selected state paths identical on the host and in both execution modes. Use the shared root list in `cooper/internal/workload/agentpaths.go`; account changes require a rebuild.
-- Treat each CLI state root as host-owned data. Mount it read-write. Do not copy it or split its children into Cooper-owned state.
+- Build agent images with the host account name, group, UID, GID, and home. Keep selected state paths identical on the host and in both execution modes. Use the shared root list in `cooper/internal/workload/agentpaths.go`; OS account changes require a rebuild. AI account profiles do not.
+- Ordinary sessions mount complete live host roots read-write. Never split their children into Cooper-owned state.
+- Explicit account profiles copy the same complete root catalog. Profile selection changes sources only; preserve targets, path settings, and the built account. `cooper save` chooses the current account mapping; a name cannot select an existing save destination. `cooper load` saves outgoing state before replacement. Keep profiles separate from disposable runtime/cache data and preserve them during cleanup. See `cooper/docs/profiles.md` for identity, recovery, and credential rules.
 - `cooper cli [agent]` and `cooper vm [agent]` must give the same user experience. They must use the same workspace path, selected-agent mounts, tool versions, settings, environment, proxy policy, clipboard behavior, port forwarding, and other Cooper features.
 - The execution boundary is the only functional difference. `cooper cli` uses a Docker barrel. `cooper vm` uses a virtual machine with its own Docker daemon, so the agent can do Docker development in allow-all mode. Never mount the host Docker or container-runtime socket in the VM.
 - Use `cooper cli` for most work because it starts faster and uses fewer resources. Use `cooper vm` when the work needs Docker or a stronger kernel boundary.
@@ -65,7 +66,8 @@ Read README.md of the project before starting.
   runs local tests with Docker and QEMU blocked. Use `prepare` once, then
   `smoke`, `mounts`, or `lifecycle restart|resources|relay|agent` for the
   changed VM behavior. Use `prepare-agent <agent>` and `parity <agent>` when
-  changing agent mounts or images. Each runtime command requires prepared
+  changing agent mounts or images. Use `profiles codex` after `prepare-agent codex`
+  for account-profile mount, credential, restart, and cleanup checks. Each runtime command requires prepared
   inputs and cannot build, download, or export a host image. See
   `cooper/dev/README.md` for cache ownership, reports, and command limits.
 - **Cooper VM E2E gate:** Run the full gate only before a Cooper release,

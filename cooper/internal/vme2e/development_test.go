@@ -77,6 +77,9 @@ func TestVMDevelopment(t *testing.T) {
 	if mode == "prepare-agent" || mode == "parity" {
 		_, valid = developmentAgentVersions[selection]
 	}
+	if mode == "profiles" {
+		valid = selection == "codex"
+	}
 	if mode == "lifecycle" {
 		valid = contains([]string{"restart", "resources", "relay", "agent"}, selection)
 	}
@@ -86,7 +89,7 @@ func TestVMDevelopment(t *testing.T) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	f := &developmentFixture{t: t, ctx: ctx, root: filepath.Join(repositoryRoot(t), "cooper"), mode: mode, selection: selection, tool: vmTestTool, report: map[string]any{}, lifetimes: map[string]bool{}}
-	if mode == "prepare-agent" || mode == "parity" {
+	if mode == "prepare-agent" || mode == "parity" || mode == "profiles" {
 		f.tool = selection
 	}
 	f.binary = filepath.Join(f.root, "cooper")
@@ -159,6 +162,8 @@ func TestVMDevelopment(t *testing.T) {
 		f.lifecycle(selection)
 	case "parity":
 		f.parity()
+	case "profiles":
+		f.profiles()
 	}
 	if err := ctx.Err(); err != nil {
 		t.Fatal(err)
@@ -544,9 +549,11 @@ func (f *developmentFixture) recordInfrastructure() {
 	}
 	f.saveRun()
 }
-func (f *developmentFixture) startVM() {
+func (f *developmentFixture) startVM() { f.startVMWithProfile("") }
+
+func (f *developmentFixture) startVMWithProfile(profileID string) {
 	started := time.Now()
-	id, err := vm.RuntimeID(f.run.Namespace, f.run.Workspace, f.tool)
+	id, err := vm.ProfileRuntimeID(f.run.Namespace, f.run.Workspace, f.tool, profileID)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -560,7 +567,7 @@ func (f *developmentFixture) startVM() {
 			f.t.Fatal(err)
 		}
 	}
-	f.request = vm.StartRequest{RuntimeID: id, WorkspaceDir: f.run.Workspace, ToolName: f.tool, ImageRef: docker.GetImageCLI(f.tool), ClipboardMode: mode, CPUs: f.manifest.Config.VM.CPUs, MemoryMiB: f.manifest.Config.VM.MemoryMiB, DiskGiB: f.manifest.Config.VM.DiskGiB}
+	f.request = vm.StartRequest{RuntimeID: id, ProfileID: profileID, WorkspaceDir: f.run.Workspace, ToolName: f.tool, ImageRef: docker.GetImageCLI(f.tool), ClipboardMode: mode, CPUs: f.manifest.Config.VM.CPUs, MemoryMiB: f.manifest.Config.VM.MemoryMiB, DiskGiB: f.manifest.Config.VM.DiskGiB}
 	f.state, err = f.manager.Start(f.ctx, f.request)
 	if err != nil {
 		// A failed boot can still create a VM and import an image. Keep its

@@ -429,7 +429,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
       - Python: `pip install`, `pipenv install`, or `poetry install` work inside the barrel. The pip cache persists in `~/.cooper/cache/pip`.
         Cooper detects which Python tool is installed and generates the Dockerfile accordingly, but
         does not enforce a specific virtualenv layout — it just ensures `python` is available at the configured version.
-  - Authentication / Token Management:
+  - Authentication / Token Management (live host sessions; named profiles use the captured credential contract below):
     - API keys and tokens are automatically resolved and forwarded into the container as environment variables.
     - Resolution order (first match wins): environment variable → `~/.cooper/secrets/{workspace-hash}` cache → login shell profile (`~/.bashrc`, `~/.zshrc`).
     - If resolved from login shell, the value is cached to `~/.cooper/secrets/{workspace-hash}` for faster subsequent launches.
@@ -1361,3 +1361,37 @@ Key design patterns (matching pgflock):
 The account name, group, UID, GID, and logical home are image build inputs. Both execution modes use the same account and home. Launch rejects images with a different account record and asks the user to run `cooper build`. Account selection does not occur at `cooper up`.
 
 Selected state roots retain their host absolute paths and are mounted read-write. The shared root list and effective path environment are resolved at launch. The complete host home is never mounted. Cooper runtime files, caches, and image binaries remain separate from host-owned state. See [Account and state paths](docs/home-paths.md) for the full contract.
+
+
+## Account profile contract
+
+- `cooper save <harness>` selects a destination from verified local credential
+  identity. The first profile is `Default`. An unmapped account can receive a
+  new unused name with a prompt or `--name`; an existing name cannot override
+  the mapping. A pending fresh profile binds only a new account.
+- `cooper load <harness> <profile>` saves outgoing state, then loads complete
+  roots. A missing profile starts empty and awaits host login/save. Unknown
+  identity, conflicting changes, unsafe paths, or active use cannot silently
+  replace an account. Explicit conflict choices retain recovery copies.
+- `cooper cli <harness> [profile]` and `cooper vm <harness> [profile]` use the
+  same selection and session credential policy. Omitted profiles use live host
+  state. Named profiles mount only their own complete roots at the original
+  paths; no host token cache or shell credential fallback is permitted.
+- Storage is private and has a versioned index. Save publishes a new generation
+  atomically. Multi-root host replacement uses same-filesystem staging,
+  journals, rollback, and retained original data. Launch refuses an unfinished
+  transaction in the selected Cooper directory. Normal cleanup preserves all
+  profile state; full configuration deletion refuses to erase it.
+- A per-UID lock coordinates startup and mutation. Actual running Docker mounts
+  and host harness processes guard use. Profile ID belongs to runtime identity,
+  labels, status, reuse, and VM restart metadata. OS account selection remains
+  a build input; an AI account profile does not require rebuilding.
+- The Profiles tab and CLI use the same application/domain service. The TUI
+  supports empty state, save/name, load/create, delete confirmation, conflicts,
+  complete error details, async results after tab changes, and narrow terminals.
+  Shutdown cancels operations and waits for rollback.
+- Local tests cover all supported identities and root maps, real file copies,
+  SQLite/WAL, faults, recovery, concurrency, and path traps. The prepared
+  `profiles codex` development check uses two VM starts/imports for profile
+  parity and restart. See [Account profiles](docs/profiles.md) for supported
+  login formats, platform limits, storage, and extension rules.

@@ -20,6 +20,29 @@ AI coding assistants need broad system access to be useful -- but that access is
 - **Develop Docker projects in a VM** -- `cooper vm` gives the agent its own Docker daemon. The guest has no network device, and all guest and nested-container traffic must use the same Cooper proxy policy.
 - **Multi-tool, multi-workspace** -- Each AI tool gets its own [container image](#configuration). Open multiple CLI and VM workloads across different project directories. Monitor all of them from one TUI.
 
+## Account profiles
+
+Save and switch personal, work, and test accounts without rebuilding images.
+Profiles copy the selected harness's complete state roots and keep the same
+absolute paths in Docker and VM sessions.
+
+```bash
+cooper save codex              # First save is Default.
+cooper load codex Work         # Save the current account; create fresh Work state.
+# Log in to Work with Codex on the host, then exit it.
+cooper save codex              # Bind and save Work.
+cooper cli codex Work          # Use the writable saved profile.
+cooper vm codex Work           # Use the same profile in a VM.
+cooper load codex Default      # Save Work and restore Default on the host.
+```
+
+Close the host harness and stop related runtimes before save/load. Without a
+profile argument, `cooper cli` and `cooper vm` still mount live host state.
+Save selects the account by its local identity, so it cannot accept the wrong
+existing profile name as a destination. Manage profiles in the new Profiles
+tab or with `cooper profiles`. See [Account profiles](docs/profiles.md) for
+supported logins, credential environment, conflicts, and recovery.
+
 ## Supported AI Tools
 
 | Tool | Commands | Auto-approve flag |
@@ -422,7 +445,7 @@ Run `cooper build` once after this upgrade. Launch rejects old images or images 
 
 Only the selected agent's state roots are mounted. Cooper does not mount the complete host home. A private runtime home holds shell defaults and temporary application files; selected state roots are mounted below it or at their configured absolute paths. Image binaries stay in `/opt/cooper/bin` and `/opt/cooper/npm`, where a host state mount cannot hide them.
 
-New files below a selected root are shared automatically. To support an additional root, update the shared list in `internal/workload/agentpaths.go`. Both execution modes, session reuse checks, and cleanup checks use that list. See [Account and state paths](docs/home-paths.md) for path rules, the build boundary, and future profile constraints.
+New files below a selected root are shared automatically. To support an additional root, update the shared list in `internal/workload/agentpaths.go`. Both execution modes, session reuse checks, and cleanup checks use that list. See [Account and state paths](docs/home-paths.md) for path rules, the build boundary, and profile path rules.
 
 Language caches are Cooper-managed under `~/.cooper/cache/`, auto-configured based on which programming tools are enabled. They start empty and fill naturally during normal package-manager use. Each workload gets its own host-backed `/tmp` directory. Cooper clears the complete `~/.cooper/tmp/` tree when `cooper up` starts and when it stops.
 

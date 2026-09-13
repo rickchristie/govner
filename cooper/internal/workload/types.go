@@ -37,6 +37,7 @@ type Ownership string
 const (
 	HostWorkspace Ownership = "host-workspace"
 	HostState     Ownership = "host-state"
+	ProfileState  Ownership = "profile-state"
 	HostConfig    Ownership = "host-config"
 	CooperCache   Ownership = "cooper-cache"
 	CooperRuntime Ownership = "cooper-runtime"

@@ -12,6 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/config"
@@ -22,6 +23,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tui/history"
 	"github.com/rickchristie/govner/cooper/internal/tui/loading"
 	"github.com/rickchristie/govner/cooper/internal/tui/portfwd"
+	"github.com/rickchristie/govner/cooper/internal/tui/profileui"
 	"github.com/rickchristie/govner/cooper/internal/tui/proxymon"
 	"github.com/rickchristie/govner/cooper/internal/tui/settings"
 	squidlogui "github.com/rickchristie/govner/cooper/internal/tui/squidlog"
@@ -37,6 +39,9 @@ func (m *Model) Init() tea.Cmd {
 	// If we have a loading screen, let it initialise.
 	if m.loadingModel != nil {
 		cmds = append(cmds, m.loadingModel.Init())
+	}
+	if m.profilesModel != nil {
+		cmds = append(cmds, m.profilesModel.Init())
 	}
 
 	// Start tick timers.
@@ -75,12 +80,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case profileui.ProfilesListedMsg, profileui.ProfileActionCompletedMsg:
+		if m.profilesModel != nil {
+			var cmd tea.Cmd
+			m.profilesModel, cmd = m.profilesModel.Update(msg)
+			return m, cmd
+		}
+		return m, nil
 
 	// ---- Window resize ----
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.tabBar.Width = msg.Width
+		m.SetSize(msg.Width, msg.Height)
 		return m, nil
 
 	case events.ExternalSignalMsg:
@@ -846,6 +856,8 @@ func (m *Model) setActiveSubModel(sm SubModel) {
 		m.portForwardModel = sm
 	case theme.TabAbout:
 		m.aboutModel = sm
+	case theme.TabProfiles:
+		m.profilesModel = sm
 	}
 }
 
@@ -949,10 +961,16 @@ func (m *Model) headerBar(width int) string {
 
 	// Clipboard status segment on the right side.
 	right := m.clipboardHeaderSegment()
+	if lipgloss.Width(left)+lipgloss.Width(right)+1 > width {
+		// The header owns one row. Padding with Width alone can wrap it and
+		// move the brand out of the visible screen on a small terminal.
+		right = ansi.Truncate(right, max(0, width/2), "…")
+		left = ansi.Truncate(left, max(0, width-lipgloss.Width(right)-1), "…")
+	}
 
 	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 1 {
-		gap = 1
+	if gap < 0 {
+		gap = 0
 	}
 
 	row := left + strings.Repeat(" ", gap) + right
@@ -1094,6 +1112,13 @@ func (m *Model) helpBar(width int) string {
 
 	// Add tab-specific bindings.
 	switch m.activeTab {
+	case theme.TabProfiles:
+		if active := m.activeSubModel(); active != nil {
+			if owner, ok := active.(interface{ ModalActive() bool }); ok && owner.ModalActive() {
+				return "Esc Cancel  ·  Complete the profile form above"
+			}
+		}
+		// Profile actions have a footer in their own fixed frame.
 	case theme.TabMonitor:
 		bindings = append(bindings,
 			HelpBinding{Key: "a", Desc: "Approve"},
@@ -1138,11 +1163,12 @@ func (m *Model) helpBar(width int) string {
 
 	left := strings.Join(parts, "  ")
 	right := theme.BarrelEmoji
+	left = ansi.Truncate(left, max(0, width-lipgloss.Width(right)-1), "")
 
 	// Fill the gap between left and right with spaces.
 	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 1 {
-		gap = 1
+	if gap < 0 {
+		gap = 0
 	}
 
 	return theme.HelpBarStyle.Render(left + strings.Repeat(" ", gap) + right)

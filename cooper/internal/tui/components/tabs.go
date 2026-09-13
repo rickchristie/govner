@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
@@ -27,10 +28,12 @@ func NewTabBar(tabs []theme.TabInfo, active theme.TabID) TabBar {
 // View renders the tab bar as a single line with active tab underlined.
 func (t TabBar) View() string {
 	var labels []string
+	active := 0
 
-	for _, tab := range t.Tabs {
+	for position, tab := range t.Tabs {
 		icon := tab.Icon + " "
 		if tab.ID == t.ActiveTab {
+			active = position
 			// Only underline the label text, not the icon.
 			labels = append(labels, theme.TabActiveStyle.Render(icon)+theme.TabActiveStyle.Underline(true).Render(tab.Label))
 		} else {
@@ -40,9 +43,13 @@ func (t TabBar) View() string {
 
 	row := strings.Join(labels, "  ")
 
-	// Truncate to terminal width if necessary.
+	// Keep the active tab visible when the terminal cannot show every tab.
 	if t.Width > 0 {
-		row = truncateToWidth(row, t.Width)
+		start := 0
+		for start < active && lipgloss.Width(strings.Join(labels[start:active+1], "  ")) > t.Width {
+			start++
+		}
+		row = ansi.Truncate(strings.Join(labels[start:], "  "), t.Width, "")
 	}
 
 	return row

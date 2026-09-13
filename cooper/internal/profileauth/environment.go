@@ -1,0 +1,21 @@
+package profileauth
+
+import "sort"
+
+// Keep the credential and provider selectors together. Named sessions clear
+// every supported selector before applying this profile's captured values.
+// This catalog is separate from state roots: it controls process credentials,
+// while workload owns which complete folders a harness needs.
+var credentialNames = map[string][]string{
+	"codex":    {"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID", "CODEX_API_KEY", "CODEX_AUTH_JSON"},
+	"claude":   {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_ACCOUNT_UUID", "CLAUDE_CODE_ORGANIZATION_UUID", "CLAUDE_CODE_USER_EMAIL"},
+	"copilot":  {"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "COPILOT_API_URL", "COPILOT_PROVIDER_API_KEY", "COPILOT_PROVIDER_BEARER_TOKEN", "COPILOT_DISABLE_KEYTAR"},
+	"grok":     {"XAI_API_KEY", "GROK_AUTH", "GROK_AUTH_PATH", "GROK_DEPLOYMENT_KEY", "GROK_AUTH_PROVIDER_COMMAND", "GROK_OIDC_ISSUER", "GROK_OIDC_CLIENT_ID", "GROK_OIDC_AUDIENCE", "GROK_OIDC_SCOPES"},
+	"opencode": {"OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN", "GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY", "OPENCODE_API_KEY", "AZURE_OPENAI_API_KEY", "AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS"},
+}
+
+func CredentialNames(harness string) []string {
+	names := append([]string(nil), credentialNames[harness]...)
+	sort.Strings(names)
+	return names
+}

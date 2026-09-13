@@ -8,6 +8,7 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/profiles"
 )
 
 // Compile-time check that MockApp satisfies App.
@@ -39,6 +40,13 @@ type MockApp struct {
 	ProxyRunning       bool
 	HeaderHealthVal    HeaderHealth
 	SessionAllowErr    error
+	ProfilesVal        []profiles.Summary
+	ProfilesErr        error
+	ProfileResult      profiles.Result
+	ProfileActionErr   error
+	SaveProfileCalls   []profiles.SaveRequest
+	LoadProfileCalls   []profiles.LoadRequest
+	DeleteProfileCalls []string
 
 	// Clipboard controllable return values.
 	CaptureClipboardResult *clipboard.ClipboardEvent

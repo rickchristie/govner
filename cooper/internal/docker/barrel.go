@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -13,7 +14,9 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/profilemanager"
 	"github.com/rickchristie/govner/cooper/internal/runtimefs"
+	"github.com/rickchristie/govner/cooper/internal/statelock"
 	"github.com/rickchristie/govner/cooper/internal/workload"
 )
 
@@ -23,6 +26,8 @@ type BarrelInfo struct {
 	Status       string
 	WorkspaceDir string
 	ToolName     string
+	ProfileID    string
+	ProfileName  string
 }
 
 // BarrelContainerName returns the container name for a barrel based on the
@@ -45,6 +50,13 @@ func BarrelContainerName(workspaceDir, toolName string) string {
 	// Collision detected: append short hash of absolute path.
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(absPath)))
 	return name + "-" + hash[:4]
+}
+
+func BarrelContainerNameForProfile(workspaceDir, toolName, profileID string) string {
+	if profileID == "" {
+		return BarrelContainerName(workspaceDir, toolName)
+	}
+	return BarrelContainerName(workspaceDir, toolName+"-p-"+profileID)
 }
 
 // containerWorkspacePath returns the workspace path label of an existing
@@ -89,18 +101,33 @@ func StartBarrel(cfg *config.Config, workspaceDir, cooperDir, toolName string) e
 // tests use a temporary home that is visible to both the Docker client and its
 // daemon. Production callers use StartBarrel and the real user home.
 func StartBarrelWithHomeDir(cfg *config.Config, workspaceDir, cooperDir, homeDir, toolName string) error {
+	return StartBarrelWithProfile(cfg, workspaceDir, cooperDir, homeDir, toolName, "")
+}
+
+func StartBarrelWithProfile(cfg *config.Config, workspaceDir, cooperDir, homeDir, toolName, profileID string) error {
+	lock, err := statelock.Acquire(context.Background(), false)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	if !filepath.IsAbs(homeDir) {
 		return errors.New("barrel host home directory must be absolute")
 	}
 	if err := ValidateImageAccount(GetImageCLI(toolName), homeDir); err != nil {
 		return err
 	}
-	name := BarrelContainerName(workspaceDir, toolName)
+	selection, err := profilemanager.SelectID(context.Background(), cooperDir, workspaceDir, homeDir, toolName, profileID)
+	if err != nil {
+		return err
+	}
+	name := BarrelContainerNameForProfile(workspaceDir, toolName, selection.ID)
 	absWorkspace, err := filepath.Abs(workspaceDir)
 	if err != nil {
 		return fmt.Errorf("resolve workspace path: %w", err)
 	}
-	mountInput, err := workload.ResolveMountInput(barrelMountInput(absWorkspace, homeDir, cfg, cooperDir, toolName, name))
+	input := barrelMountInput(absWorkspace, homeDir, cfg, cooperDir, toolName, name)
+	input.Agent = &selection.Paths
+	mountInput, err := workload.ResolveMountInput(input)
 	if err != nil {
 		return err
 	}
@@ -160,6 +187,9 @@ func StartBarrelWithHomeDir(cfg *config.Config, workspaceDir, cooperDir, homeDir
 		"--label", "cooper.tool=" + toolName,
 		"--label", "cooper.clipboard-mode=" + clipboardMode,
 		"--label", "cooper.mount-plan=" + digest,
+	}
+	if selection.ID != "" {
+		args = append(args, "--label", "cooper.profile-id="+selection.ID, "--label", "cooper.profile="+selection.Name)
 	}
 
 	// Volume mounts.
@@ -252,10 +282,23 @@ func barrelMountInput(absWorkspace, homeDir string, cfg *config.Config, cooperDi
 // BarrelMatchesHost rejects reuse after an image, state-root, or path-variable
 // change. All agents use this check; new state roots need no new reuse branch.
 func BarrelMatchesHost(name string, cfg *config.Config, workspace, cooperDir, home, tool string) (bool, error) {
+	return BarrelMatchesProfile(name, cfg, workspace, cooperDir, home, tool, "")
+}
+
+func BarrelMatchesProfile(name string, cfg *config.Config, workspace, cooperDir, home, tool, profileID string) (bool, error) {
 	if err := ValidateImageAccount(GetImageCLI(tool), home); err != nil {
 		return false, err
 	}
-	input, err := workload.ResolveMountInput(barrelMountInput(workspace, home, cfg, cooperDir, tool, name))
+	selection, err := profilemanager.SelectID(context.Background(), cooperDir, workspace, home, tool, profileID)
+	if err != nil {
+		return false, err
+	}
+	if containerLabel(name, "cooper.profile-id") != selection.ID {
+		return false, nil
+	}
+	raw := barrelMountInput(workspace, home, cfg, cooperDir, tool, name)
+	raw.Agent = &selection.Paths
+	input, err := workload.ResolveMountInput(raw)
 	if err != nil {
 		return false, err
 	}
@@ -393,6 +436,8 @@ func ListBarrels() ([]BarrelInfo, error) {
 			Status:       status,
 			WorkspaceDir: workspace,
 			ToolName:     containerLabel(name, "cooper.tool"),
+			ProfileID:    containerLabel(name, "cooper.profile-id"),
+			ProfileName:  containerLabel(name, "cooper.profile"),
 		})
 	}
 	return barrels, nil

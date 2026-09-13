@@ -44,7 +44,7 @@ new root or changed override cannot silently reuse a previous state view.
 `internal/workload/agentpaths.go` is the runtime root list. Each entry states
 its base rule, relative path, file or directory kind, and whether it is
 optional. The resolver produces `MountSpec` values with separate source and
-target fields. Today, each host state source and target are identical.
+target fields. Live host state uses identical sources and targets. A named profile changes the sources and keeps those targets.
 
 | Agent | Roots |
 | --- | --- |
@@ -122,11 +122,15 @@ data; neither is the physical host's configuration directory. Nested image
 builds trust the outer public Cooper CA before network downloads start.
 They still use the outer proxy and have no direct network route.
 
-## Future profiles
+## Account profiles
 
-The source and target remain separate fields so a future profile can select
-a different source. A profile must define the complete state view, home and
-environment meaning, stable stored paths, and reuse identity together.
-Changing only the source of one mount is not enough when state contains
-absolute paths to other roots. This change adds no profile switch or state
-copying. It supplies one shared list and a stable path contract for that work.
+A named profile selects a complete copied state view from this same catalog.
+It preserves the built account, mount targets, path environment, and absolute
+paths in stored records. Runtime identity includes the profile ID; a new saved
+generation changes the mount digest. Named sessions use their captured
+credential environment and never fall back to live host credentials.
+
+Profile roots use a separate durable ownership class. Their sources must be
+validated private profile storage; their targets retain the normal state-path
+checks. Ordinary sessions still mount live host roots directly. See
+[Account profiles](profiles.md) for save/load policy and recovery.

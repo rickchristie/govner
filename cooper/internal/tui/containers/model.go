@@ -42,6 +42,7 @@ type workloadItem struct {
 	Kind         app.WorkloadKind
 	Tool         string
 	Workspace    string
+	Profile      string
 	Depth        int
 	Status       string
 	HealthReason string
@@ -190,7 +191,7 @@ func (m *Model) applyStats(stats []app.WorkloadStat) {
 	updated := make([]workloadItem, 0, len(stats))
 	for _, s := range stats {
 		updated = append(updated, workloadItem{
-			ID: s.ID, Kind: s.Kind, Tool: s.Tool, Workspace: s.Workspace, Depth: s.Depth,
+			ID: s.ID, Kind: s.Kind, Tool: s.Tool, Workspace: s.Workspace, Depth: s.Depth, Profile: s.Profile,
 			Status: s.Status, HealthReason: s.HealthReason, ShellCount: s.ShellCount,
 			CPUPercent: s.CPUPercent, MemUsage: s.MemUsage, StorageUsage: s.StorageUsage,
 		})

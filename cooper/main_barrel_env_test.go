@@ -92,7 +92,7 @@ func TestRunCLIOneShotSeesConfiguredBarrelEnvValue(t *testing.T) {
 	})
 
 	cliOneShot = `printf %s "$BARREL_TEST_VAR"`
-	stdout, _, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	stdout, _, err := captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"claude"}) })
 	if err != nil {
 		t.Fatalf("runCLI() failed: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestRunCLIBarrelEnvChangeAppliesNextSessionWithoutRestart(t *testing.T) {
 	})
 
 	cliOneShot = `printf %s "$MY_VAR"`
-	stdout, _, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	stdout, _, err := captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"claude"}) })
 	if err != nil {
 		t.Fatalf("first runCLI() failed: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestRunCLIBarrelEnvChangeAppliesNextSessionWithoutRestart(t *testing.T) {
 	}
 
 	updatePersistedBarrelEnvVars(t, driver.CooperDir(), []config.BarrelEnvVar{{Name: "MY_VAR", Value: "new"}})
-	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"claude"}) })
 	if err != nil {
 		t.Fatalf("second runCLI() failed: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestRunCLIEmptyConfiguredValueIsSet(t *testing.T) {
 	})
 
 	cliOneShot = `if [[ -v EMPTY_TEST ]]; then printf 'set:%s' "$EMPTY_TEST"; else printf 'unset'; fi`
-	stdout, _, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	stdout, _, err := captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"claude"}) })
 	if err != nil {
 		t.Fatalf("runCLI() failed: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestRunCLISpecialCharactersRoundTripExactly(t *testing.T) {
 	})
 
 	cliOneShot = `printf %s "$SPECIAL_TEST"`
-	stdout, _, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	stdout, _, err := captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"claude"}) })
 	if err != nil {
 		t.Fatalf("runCLI() failed: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestRunCLIWarningsDoNotBlockSessionAndProtectedValuesWin(t *testing.T) {
 	})
 
 	cliOneShot = `printf '%s|%s|%s|%s' "$GOOD" "${HTTP_PROXY-}" "${http_proxy-}" "${DISPLAY-}"`
-	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"claude"}) })
 	if err != nil {
 		t.Fatalf("runCLI() failed: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestRunCLIForwardsTerminalSessionEnv(t *testing.T) {
 	_, _ = setupCLIBarrelEnvTest(t, nil)
 
 	cliOneShot = `printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|' "${TERM-}" "${COLORTERM-}" "${TERM_PROGRAM-}" "${TERM_PROGRAM_VERSION-}" "${COLORFGBG-}" "${LC_TERMINAL-}" "${LC_TERMINAL_VERSION-}" "${TERM_SESSION_ID-}" "${WEZTERM_PANE-}" "${KITTY_WINDOW_ID-}"; if [[ -v NO_COLOR ]]; then printf 'set:%s' "$NO_COLOR"; else printf unset; fi; printf '|%s|%s|%s|%s|%s' "${FORCE_COLOR-}" "${FORCE_HYPERLINK-}" "${CLICOLOR-}" "${CLICOLOR_FORCE-}" "${NODE_DISABLE_COLORS-}"`
-	stdout, _, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	stdout, _, err := captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"claude"}) })
 	if err != nil {
 		t.Fatalf("runCLI() failed: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestRunCLIProtectedTokenEnvWinsOverBadConfig(t *testing.T) {
 	})
 
 	cliOneShot = `printf %s "$OPENAI_API_KEY"`
-	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"codex"}) })
+	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"codex"}) })
 	if err != nil {
 		t.Fatalf("runCLI(codex) failed: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestRunCLIPathCannotBeOverriddenByBadConfig(t *testing.T) {
 	})
 
 	cliOneShot = `command -v bash >/dev/null && printf ok`
-	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"claude"}) })
 	if err != nil {
 		t.Fatalf("runCLI() failed: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestRunCLISessionTimezoneFollowsSyncedHostTimezoneOnReuse(t *testing.T) {
 	restoreTokyo := runtimefs.SetHostLocaltimePathForTesting(tokyoPath)
 	t.Cleanup(restoreTokyo)
 	cliOneShot = `printf '%s|%s' "${TZ-}" "$(date +%z)"`
-	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"claude"}) })
 	if err != nil {
 		t.Fatalf("first runCLI() failed: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestRunCLISessionTimezoneFollowsSyncedHostTimezoneOnReuse(t *testing.T) {
 	restoreTokyo()
 	restoreUTC := runtimefs.SetHostLocaltimePathForTesting(utcPath)
 	t.Cleanup(restoreUTC)
-	stdout, stderr, err = captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	stdout, stderr, err = captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"claude"}) })
 	if err != nil {
 		t.Fatalf("second runCLI() failed: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestRunCLITimezoneCannotBeOverriddenByBadConfig(t *testing.T) {
 	t.Cleanup(restore)
 
 	cliOneShot = `printf '%s|%s' "${TZ-}" "$(date +%z)"`
-	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"claude"}) })
 	if err != nil {
 		t.Fatalf("runCLI() failed: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestRunCLISessionEnvFileIsCleanedUp(t *testing.T) {
 	})
 
 	cliOneShot = `printf %s "$FOO"`
-	if _, _, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) }); err != nil {
+	if _, _, err := captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"claude"}) }); err != nil {
 		t.Fatalf("runCLI() failed: %v", err)
 	}
 
@@ -405,7 +405,7 @@ func TestRunCLISessionMountIsReadOnlyAndTmpRemainsWritable(t *testing.T) {
 	barrelName := docker.BarrelContainerName(workspaceDir, "claude")
 
 	cliOneShot = `if touch '` + runtimefs.SessionContainerDir + `/should-not-write' 2>/dev/null; then printf 'session-rw'; elif touch /tmp/cooper-tmp-write-check 2>/dev/null; then printf 'session-ro|tmp-rw'; else printf 'session-ro|tmp-blocked'; fi`
-	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"claude"}) })
 	if err != nil {
 		t.Fatalf("runCLI() failed: %v", err)
 	}
@@ -456,7 +456,7 @@ func TestRunCLIRecreatesLegacyBarrelWithoutSessionMount(t *testing.T) {
 	}
 
 	cliOneShot = `printf %s "$LEGACY_FIX"`
-	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(nil, []string{"claude"}) })
+	stdout, stderr, err := captureCommandIO(t, "", func() error { return runCLI(testCommand(t), []string{"claude"}) })
 	if err != nil {
 		t.Fatalf("runCLI() failed: %v", err)
 	}

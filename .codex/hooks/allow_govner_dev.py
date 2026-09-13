@@ -45,6 +45,7 @@ SEMVER_RE = re.compile(
 VM_DEVELOPMENT_AGENTS = {"claude", "copilot", "codex", "opencode", "grok"}
 VM_DEVELOPMENT_MODES = {
     (), ("unit",), ("prepare",), ("smoke",), ("mounts",), ("clean",), ("clean-cache",),
+    ("profiles", "codex"),
     *(("lifecycle", case) for case in ("restart", "resources", "relay", "agent")),
     *((mode, agent) for mode in ("prepare-agent", "parity") for agent in VM_DEVELOPMENT_AGENTS),
 }

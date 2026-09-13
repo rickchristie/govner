@@ -621,7 +621,7 @@ func TestRunCLIList(t *testing.T) {
 	}
 
 	stdout, stderr, err := captureCommandIO(t, "", func() error {
-		return runCLI(nil, []string{"list"})
+		return runCLI(testCommand(t), []string{"list"})
 	})
 	if err != nil {
 		t.Fatalf("runCLI(list) failed: %v", err)
@@ -669,7 +669,7 @@ func TestRunCLIStartsBarrelForOneShot(t *testing.T) {
 	tokenPath := clipboard.TokenFilePath(driver.CooperDir(), barrelName)
 
 	stdout, stderr, err := captureCommandIO(t, "", func() error {
-		return runCLI(nil, []string{"claude"})
+		return runCLI(testCommand(t), []string{"claude"})
 	})
 	if err != nil {
 		t.Fatalf("runCLI(claude -c) failed: %v", err)
@@ -1082,4 +1082,11 @@ func TestCleanupRuntimeStatePreservesVMBackedPathsAfterStopFailure(t *testing.T)
 			t.Fatalf("revoked runtime path %s remains: %v", path, err)
 		}
 	}
+}
+
+// Direct command tests use the same non-nil context as Cobra execution.
+func testCommand(t *testing.T) *cobra.Command {
+	command := &cobra.Command{}
+	command.SetContext(t.Context())
+	return command
 }

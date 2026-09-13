@@ -9,12 +9,14 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/profiles"
 )
 
 // App is the interface between the TUI (presentation) and the business logic
 // (infrastructure). The TUI depends ONLY on this interface -- it knows nothing
 // about Docker, Squid, socat, or any implementation detail.
 type App interface {
+	ProfileManager
 	// Lifecycle
 
 	// Start executes the startup sequence (networks, proxy, CA verification,
@@ -73,6 +75,15 @@ type App interface {
 	StartupWarnings() []string
 }
 
+// ProfileManager is the account-state boundary used by the Profiles screen.
+// Inputs and results are shared with the CLI; the screen owns only UI state.
+type ProfileManager interface {
+	ListProfiles(context.Context) ([]profiles.Summary, error)
+	SaveProfile(context.Context, profiles.SaveRequest) (profiles.Result, error)
+	LoadProfile(context.Context, profiles.LoadRequest) (profiles.Result, error)
+	DeleteProfile(context.Context, string, string) error
+}
+
 // WorkloadKind identifies the execution role without exposing Docker or QEMU
 // details to the TUI.
 type WorkloadKind string
@@ -88,6 +99,7 @@ type WorkloadStat struct {
 	ID           string
 	Kind         WorkloadKind
 	Tool         string
+	Profile      string
 	Workspace    string
 	Depth        int
 	Status       string
@@ -103,6 +115,7 @@ type WorkloadInfo struct {
 	ID           string
 	Kind         WorkloadKind
 	Tool         string
+	Profile      string
 	Depth        int
 	Status       string
 	WorkspaceDir string

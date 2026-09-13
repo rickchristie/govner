@@ -17,7 +17,7 @@ The initial policy is based on Govner/Cooper Codex sessions through
   `cooper/test-docker-build.sh`, including their isolated cleanup modes;
 - the finite `cooper/test-vm-dev.sh` modes: default/`unit`, `prepare`,
   `prepare-agent <agent>`, `smoke`, `mounts`, `lifecycle <case>`,
-  `parity <agent>`, `clean`, and `clean-cache`; agent and case names must match
+  `parity <agent>`, `profiles codex`, `clean`, and `clean-cache`; agent and case names must match
   the script's fixed lists;
 - all three `scripts/release-*.sh` release generators, whose only write is a
   private tag-message file under `/tmp`, and the exact build, tag, push, and

@@ -20,6 +20,9 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/profilemanager"
+	"github.com/rickchristie/govner/cooper/internal/profiles"
+	"github.com/rickchristie/govner/cooper/internal/statelock"
 	"github.com/rickchristie/govner/cooper/internal/usercontext"
 	"github.com/rickchristie/govner/cooper/internal/vmcontext"
 	"github.com/rickchristie/govner/cooper/internal/vmhost"
@@ -70,6 +73,11 @@ type StartRequest struct {
 	MemoryMiB     int
 	DiskGiB       int
 	ClipboardMode string
+	ProfileID     string
+	ProfileName   string
+	// profilePaths is optional until a named profile is resolved under the
+	// shared startup lock. It is never serialized into restart metadata.
+	profilePaths *workload.AgentPaths
 }
 
 // Runtime is a reusable VM workload.
@@ -92,6 +100,14 @@ func (m Manager) Start(ctx context.Context, request StartRequest) (Runtime, erro
 	if err := m.validate(); err != nil {
 		return Runtime{}, err
 	}
+	stateLock, err := statelock.Acquire(ctx, false)
+	if err != nil {
+		return Runtime{}, err
+	}
+	defer stateLock.Close()
+	if err := m.resolveProfile(ctx, &request); err != nil {
+		return Runtime{}, err
+	}
 	depth, err := ManagedDepth()
 	if err != nil {
 		return Runtime{}, err
@@ -111,7 +127,7 @@ func (m Manager) Start(ctx context.Context, request StartRequest) (Runtime, erro
 		return Runtime{}, err
 	}
 	if request.RuntimeID == "" {
-		request.RuntimeID, err = RuntimeID(m.Namespace, request.WorkspaceDir, request.ToolName)
+		request.RuntimeID, err = ProfileRuntimeID(m.Namespace, request.WorkspaceDir, request.ToolName, request.ProfileID)
 		if err != nil {
 			return Runtime{}, err
 		}
@@ -251,10 +267,16 @@ func (r StartRequest) imageSource() (string, error) {
 }
 
 func (m Manager) resolveMountPlan(request StartRequest, runtimeID string) ([]workload.MountSpec, []string, string, error) {
+	if request.ProfileID != "" && request.profilePaths == nil {
+		if err := m.resolveProfile(context.Background(), &request); err != nil {
+			return nil, nil, "", err
+		}
+	}
 	input, err := workload.ResolveMountInput(workload.MountInput{
 		WorkspaceDir: request.WorkspaceDir, HomeDir: m.HomeDir, CooperDir: m.CooperDir,
 		RuntimeID: runtimeID, ToolName: request.ToolName,
 		Environment: workload.HostPathEnvironment(), Config: m.Config,
+		Agent: request.profilePaths,
 	})
 	if err != nil {
 		return nil, nil, "", err
@@ -269,6 +291,19 @@ func (m Manager) resolveMountPlan(request StartRequest, runtimeID string) ([]wor
 	environment := append(workload.RuntimeEnvironment(m.Config, guestControlGateway, "cooper-control"), input.Agent.Environment...)
 	digest, err := workload.RuntimeDigest(mounts, environment)
 	return mounts, workload.RenderEnvironment(environment), digest, err
+}
+
+func (m Manager) resolveProfile(ctx context.Context, request *StartRequest) error {
+	if request.ProfileID == "" {
+		return profiles.CheckReady(m.CooperDir)
+	}
+	selection, err := profilemanager.SelectID(ctx, m.CooperDir, request.WorkspaceDir, m.HomeDir, request.ToolName, request.ProfileID)
+	if err != nil {
+		return err
+	}
+	request.ProfileName = selection.Name
+	request.profilePaths = &selection.Paths
+	return nil
 }
 
 func (m Manager) checkImageAccount(ctx context.Context, imageRef string) error {
@@ -510,6 +545,7 @@ func (m Manager) writeRuntimeFiles(runtime Runtime, request StartRequest, archiv
 		return err
 	}
 	metadata := RuntimeMetadata{
+		ProfileID: request.ProfileID, ProfileName: request.ProfileName,
 		Schema: runtimeMetadataSchema, RuntimeID: runtime.ID, ToolName: request.ToolName,
 		WorkspaceDir: request.WorkspaceDir, ImageRef: request.ImageRef, ImageID: archive.ImageID,
 		Depth: depth, CPUs: request.CPUs, MemoryMiB: request.MemoryMiB, DiskGiB: request.DiskGiB,
@@ -584,6 +620,9 @@ func supervisorDockerRunArgs(runtime Runtime, request StartRequest, archive Imag
 // run on developer machines that do not have a KVM device.
 func supervisorDockerArgs(runtime Runtime, request StartRequest, archive ImageArchive, base string, mounts []workload.MountSpec, mountDigest, prefix, seccompPath string, uid, gid, kvmGID int) ([]string, error) {
 	args := []string{"run", "-d", "--name", runtime.ContainerName}
+	if request.ProfileID != "" {
+		args = append(args, "--label", "cooper.profile-id="+request.ProfileID, "--label", "cooper.profile="+request.ProfileName)
+	}
 	args = append(args, supervisorSecurityArgs(uid, gid, kvmGID, request.CPUs, request.MemoryMiB, seccompPath)...)
 	args = append(args,
 		"--label", "cooper.kind=vm-supervisor",
@@ -698,11 +737,19 @@ func (m Manager) Stop(ctx context.Context, runtime Runtime) error {
 // Restart recreates one VM from its host-owned launch metadata. It rotates the
 // clipboard token between the old and new guest lifetimes.
 func (m Manager) Restart(ctx context.Context, runtimeID string) (Runtime, error) {
+	stateLock, err := statelock.Acquire(ctx, false)
+	if err != nil {
+		return Runtime{}, err
+	}
+	defer stateLock.Close()
 	metadata, err := loadRuntimeMetadata(m.CooperDir, runtimeID)
 	if err != nil {
 		return Runtime{}, err
 	}
 	request := metadata.startRequest()
+	if err := m.resolveProfile(ctx, &request); err != nil {
+		return Runtime{}, err
+	}
 	// Resolve every immutable launch input before the old VM stops. A failed
 	// image lookup or preparation must leave the healthy workload intact.
 	// Restart also uses the recorded image ID, not a tag that can move between

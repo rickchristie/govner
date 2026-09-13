@@ -9,6 +9,32 @@ import (
 	"strings"
 )
 
+// ValidateAgentStatePath checks a complete state root before profile copying
+// or replacement. It applies the same protected path rules as runtime mounts.
+func ValidateAgentStatePath(path, home, cooperDir string) error {
+	if err := validateHomeBoundary(path, home, "agent state"); err != nil {
+		return err
+	}
+	if err := ValidateHostOwnedPath(path, cooperDir); err != nil {
+		return err
+	}
+	resolved, err := resolveExistingPath(path)
+	if err != nil {
+		return err
+	}
+	for _, protected := range protectedStatePaths {
+		if pathsOverlap(path, protected) || pathsOverlap(resolved, protected) {
+			return fmt.Errorf("agent state %s overlaps protected runtime path %s", path, protected)
+		}
+	}
+	return nil
+}
+
+var protectedStatePaths = []string{"/opt/cooper", "/var/lib/cooper", "/go", "/etc", "/usr", "/bin", "/sbin", "/dev", "/proc", "/sys", "/run", "/var/run", "/var/lib/docker", "/var/lib/containerd"}
+
+// ResolvedPath resolves existing parents even when an optional root is absent.
+func ResolvedPath(path string) (string, error) { return resolveExistingPath(path) }
+
 // HostAgentStateRoots lists every host-owned built-in agent state root. A
 // cleanup check uses all roots, not only the agent selected for one workload.
 func HostAgentStateRoots(homeDir string) ([]string, error) {

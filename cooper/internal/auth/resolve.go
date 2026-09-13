@@ -183,6 +183,13 @@ func ResolveTokens(workspacePath, cooperDir string, enabledTools []string) ([]To
 		}
 	}
 
+	return append(results, TerminalEnvironment()...), nil
+}
+
+// TerminalEnvironment contains no provider credential lookup. A named profile
+// uses it without consulting the live host token cache or a login shell.
+func TerminalEnvironment() []TokenResult {
+	var results []TokenResult
 	// Always forward terminal and IDE integration env vars when set.
 	for _, variable := range forwardedSessionEnvVars {
 		val, ok := os.LookupEnv(variable.Name)
@@ -196,7 +203,7 @@ func ResolveTokens(workspacePath, cooperDir string, enabledTools []string) ([]To
 		})
 	}
 
-	return results, nil
+	return results
 }
 
 // resolveToken tries each resolution strategy in order for a single token definition.

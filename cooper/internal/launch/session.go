@@ -12,6 +12,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/barrelenv"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/names"
+	"github.com/rickchristie/govner/cooper/internal/profiles"
 	"github.com/rickchristie/govner/cooper/internal/runtimefs"
 )
 
@@ -24,6 +25,9 @@ type SessionRequest struct {
 	ToolName     string
 	WorkspaceDir string
 	OneShot      string
+	// State is optional. A named selection supplies all supported credentials;
+	// the default selection retains host credential resolution.
+	State *profiles.Selection
 }
 
 // Session is the prepared runtime-neutral execution contract. Environment can
@@ -57,7 +61,7 @@ func PrepareSession(request SessionRequest) (*Session, []string, error) {
 		}
 	}
 
-	tokens, err := auth.ResolveTokens(request.WorkspaceDir, request.CooperDir, []string{request.ToolName})
+	tokens, err := sessionTokens(request)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve tokens: %w", err)
 	}
@@ -66,6 +70,9 @@ func PrepareSession(request SessionRequest) (*Session, []string, error) {
 		Interactive: request.OneShot == "",
 	}
 	session.Title += "-" + session.Name
+	if request.State != nil && request.State.ID != "" {
+		session.Title += "-" + request.State.Name
+	}
 	fail := func(cause error, warnings []string) (*Session, []string, error) {
 		return nil, warnings, errors.Join(cause, session.Close())
 	}
@@ -88,6 +95,15 @@ func PrepareSession(request SessionRequest) (*Session, []string, error) {
 	}
 	session.envPath = envFile.HostPath
 	var protectedNames []string
+	var unsetNames []string
+	if request.State != nil && request.State.ID != "" {
+		for _, value := range request.State.Credentials {
+			protectedNames = append(protectedNames, value.Name)
+			if value.Unset {
+				unsetNames = append(unsetNames, value.Name)
+			}
+		}
+	}
 	for _, token := range tokens {
 		session.Environment = append(session.Environment, token.Name+"="+token.Value)
 		protectedNames = append(protectedNames, token.Name)
@@ -104,6 +120,13 @@ func PrepareSession(request SessionRequest) (*Session, []string, error) {
 	if err != nil {
 		return fail(fmt.Errorf("build session command: %w", err), warnings)
 	}
+	if len(unsetNames) > 0 {
+		prefix := []string{"env"}
+		for _, name := range unsetNames {
+			prefix = append(prefix, "-u", name)
+		}
+		session.Command = append(prefix, session.Command...)
+	}
 	if session.Interactive {
 		marker, err := runtimefs.CreateShellMarker(request.CooperDir, request.RuntimeID)
 		if err != nil {
@@ -112,6 +135,19 @@ func PrepareSession(request SessionRequest) (*Session, []string, error) {
 		session.markerPath = marker.HostPath
 	}
 	return session, warnings, nil
+}
+
+func sessionTokens(request SessionRequest) ([]auth.TokenResult, error) {
+	if request.State == nil || request.State.ID == "" {
+		return auth.ResolveTokens(request.WorkspaceDir, request.CooperDir, []string{request.ToolName})
+	}
+	tokens := auth.TerminalEnvironment()
+	for _, value := range request.State.Credentials {
+		if !value.Unset {
+			tokens = append(tokens, auth.TokenResult{Name: value.Name, Value: value.Value, Source: "profile"})
+		}
+	}
+	return tokens, nil
 }
 
 // Close removes all per-shell files and releases the generated display name.

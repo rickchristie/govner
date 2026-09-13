@@ -35,6 +35,7 @@ const (
 	TabRuntime
 	TabPortForward
 	TabAbout
+	TabProfiles
 )
 
 // ModalType identifies which modal dialog is active.
@@ -61,6 +62,7 @@ type TabInfo struct {
 // AllTabs is the ordered list of all top-level tabs with their metadata.
 var AllTabs = []TabInfo{
 	{ID: TabRuntimes, Label: "Runtimes", Icon: CaskEmoji, ShortcutKey: "1"},
+	{ID: TabProfiles, Label: "Profiles", Icon: "◈"},
 	{ID: TabMonitor, Label: "Monitor", Icon: "🔍", ShortcutKey: "2"},
 	{ID: TabBlocked, Label: "Blocked", Icon: IconCross, ShortcutKey: "3"},
 	{ID: TabAllowed, Label: "Allowed", Icon: IconCheck, ShortcutKey: "4"},

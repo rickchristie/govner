@@ -365,16 +365,21 @@ func ValidateMountPlan(mounts []MountSpec, cooperDir string) error {
 			return fmt.Errorf("mount %s has invalid path kind %q", mount.ID, mount.Kind)
 		}
 		switch mount.Ownership {
-		case HostWorkspace, HostState, HostConfig, CooperCache, CooperRuntime:
+		case HostWorkspace, HostState, ProfileState, HostConfig, CooperCache, CooperRuntime:
 		default:
 			return fmt.Errorf("mount %s has invalid ownership %q", mount.ID, mount.Ownership)
 		}
-		if mount.Ownership == HostState {
+		if mount.Ownership == ProfileState {
+			if err := ValidateProfileSource(mount, cooperDir); err != nil {
+				return err
+			}
+		}
+		if mount.Ownership == HostState || mount.Ownership == ProfileState {
 			resolved, err := resolveExistingPath(mount.Source)
 			if err != nil {
 				return err
 			}
-			for _, protected := range []string{"/opt/cooper", "/var/lib/cooper", "/go", "/etc", "/usr", "/bin", "/sbin", "/dev", "/proc", "/sys", "/run", "/var/run", "/var/lib/docker", "/var/lib/containerd"} {
+			for _, protected := range protectedStatePaths {
 				if pathsOverlap(mount.Target, protected) || pathsOverlap(resolved, protected) {
 					return fmt.Errorf("agent state %s overlaps protected runtime path %s", mount.Target, protected)
 				}
@@ -480,6 +485,15 @@ func validateHostOwnedRoots(in MountInput) error {
 	}
 	paths := []string{in.WorkspaceDir}
 	for _, mount := range agentStateMounts(in) {
+		if mount.Ownership == ProfileState {
+			if err := ValidateProfileSource(mount, in.CooperDir); err != nil {
+				return err
+			}
+			if err := validateHomeBoundary(mount.Target, in.HomeDir, "profile state"); err != nil {
+				return err
+			}
+			continue
+		}
 		paths = append(paths, mount.Source)
 	}
 	for _, path := range paths {

@@ -17,6 +17,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/launch"
 	"github.com/rickchristie/govner/cooper/internal/runtimefs"
+	"github.com/rickchristie/govner/cooper/internal/statelock"
 	"github.com/rickchristie/govner/cooper/internal/vm"
 	"github.com/rickchristie/govner/cooper/internal/vmguest"
 	"github.com/rickchristie/govner/cooper/internal/vmhost"
@@ -31,13 +32,14 @@ var (
 )
 
 var vmCmd = &cobra.Command{
-	Use:   "vm [tool-name]",
+	Use:   "vm [tool-name] [profile]",
 	Short: "Launch an AI tool in a secure VM with its own Docker daemon",
 	Long: `Launches the selected AI CLI in a KVM virtual machine. It uses the same
 workspace, selected-agent state, tools, proxy, clipboard, and settings as
 cooper cli. The guest has its own Docker daemon and has no network device.
 
   cooper vm codex
+  cooper vm codex Work
   cooper vm claude -c "go test ./..."
   cooper vm list
   cooper vm stop <runtime-id>
@@ -172,9 +174,6 @@ func runVM(cmd *cobra.Command, args []string) error {
 		_, err := manager.Restart(cmd.Context(), args[1])
 		return err
 	}
-	if len(args) != 1 {
-		return fmt.Errorf("usage: cooper vm <tool-name>")
-	}
 	toolName := strings.ToLower(strings.TrimSpace(args[0]))
 	imageRef := docker.GetImageCLI(toolName)
 	exists, err := docker.ImageExists(imageRef)
@@ -203,7 +202,16 @@ func runVM(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	runtimeID, err := vm.RuntimeID(docker.RuntimeNamespace(), workspaceDir, toolName)
+	stateLock, err := statelock.Acquire(cmd.Context(), false)
+	if err != nil {
+		return err
+	}
+	defer stateLock.Close()
+	selection, err := selectLaunchProfile(cmd.Context(), cooperDir, workspaceDir, homeDir, toolName, args[1:])
+	if err != nil {
+		return err
+	}
+	runtimeID, err := vm.ProfileRuntimeID(docker.RuntimeNamespace(), workspaceDir, toolName, selection.ID)
 	if err != nil {
 		return err
 	}
@@ -213,6 +221,7 @@ func runVM(cmd *cobra.Command, args []string) error {
 	preparedSession, warnings, err := launch.PrepareSession(launch.SessionRequest{
 		Config: cfg, CooperDir: cooperDir, RuntimeID: runtimeID,
 		ToolName: toolName, WorkspaceDir: workspaceDir, OneShot: vmOneShot,
+		State: &selection,
 	})
 	if err != nil {
 		return err
@@ -237,9 +246,13 @@ func runVM(cmd *cobra.Command, args []string) error {
 		WorkspaceDir: workspaceDir, ToolName: toolName, ImageRef: imageRef,
 		RuntimeID: runtimeID, CPUs: vmCPUs, MemoryMiB: memoryMiB, DiskGiB: diskGiB,
 		ClipboardMode: clipboardMode,
+		ProfileID:     selection.ID,
 	})
 	if err != nil {
 		_ = clipboard.RemoveTokenFile(cooperDir, runtimeID)
+		return err
+	}
+	if err := stateLock.Close(); err != nil {
 		return err
 	}
 	return executeVMSession(cmd.Context(), manager, runtime, preparedSession)

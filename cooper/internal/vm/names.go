@@ -13,6 +13,17 @@ import (
 const dockerNameLimit = 128
 
 var unsafeNameCharacter = regexp.MustCompile(`[^a-z0-9_.-]+`)
+var validProfileID = regexp.MustCompile(`^[a-f0-9]{24}$`)
+
+func ProfileRuntimeID(namespace, workspace, tool, profileID string) (string, error) {
+	if profileID == "" {
+		return RuntimeID(namespace, workspace, tool)
+	}
+	if !validProfileID.MatchString(profileID) {
+		return "", fmt.Errorf("invalid profile ID")
+	}
+	return RuntimeID(namespace, workspace, tool+"-p-"+profileID)
+}
 
 // RuntimeID returns a stable VM identity. It always includes a path hash, so
 // two workspaces with the same base name cannot share a VM by accident.
