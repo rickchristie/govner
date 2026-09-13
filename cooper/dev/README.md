@@ -36,7 +36,7 @@ Choose the smallest runtime check for the change:
 | `smoke` | 1 | Boundary, mounts, Docker, local HTTPS policy, bridge, live ports, clipboard, exec, warm reuse, stop |
 | `mounts` | 1 | Create/remove/replace a nested bind file, timezone content, ownership, virtiofs logs |
 | `lifecycle restart` | 2 | Explicit restart, token rotation, new private state |
-| `lifecycle resources` | 2 | Changed resource request recreates the VM |
+| `lifecycle resources` | 2 | Rejected CLI request preserves the token and disk; valid resource change recreates the VM |
 | `lifecycle relay` | 2 | Lost relay, unhealthy-start refusal, recovery |
 | `lifecycle agent` | 2 | Lost agent, health change, recovery |
 | `prepare-agent codex` | 0, or 1 cold base | Prepare only the selected real agent and its required base/helpers |

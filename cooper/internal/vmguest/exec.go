@@ -66,9 +66,8 @@ func runInteractiveExec(ctx context.Context, cancel context.CancelFunc, stream i
 		close(outputDone)
 	}()
 	go readClientFrames(ctx, cancel, stream, terminal, command.Process)
-	err = command.Wait()
-	terminal.Close()
 	<-outputDone
+	err = command.Wait()
 	_ = writer.write(vmproto.Frame{Type: vmproto.FrameExit, Data: vmproto.EncodeExit(exitStatus(err))})
 }
 
@@ -97,9 +96,11 @@ func runOneShotExec(ctx context.Context, cancel context.CancelFunc, stream io.Re
 	go func() { defer output.Done(); copyFrames(stdout, writer, vmproto.FrameStdout) }()
 	go func() { defer output.Done(); copyFrames(stderr, writer, vmproto.FrameStderr) }()
 	go readClientFrames(ctx, cancel, stream, stdin, command.Process)
+	// Wait closes StdoutPipe and StderrPipe. Drain them first so a slow
+	// frame consumer still receives the bytes buffered when the process exits.
+	output.Wait()
 	err = command.Wait()
 	stdin.Close()
-	output.Wait()
 	_ = writer.write(vmproto.Frame{Type: vmproto.FrameExit, Data: vmproto.EncodeExit(exitStatus(err))})
 }
 

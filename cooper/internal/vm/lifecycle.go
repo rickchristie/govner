@@ -148,10 +148,25 @@ func (m Manager) Start(ctx context.Context, request StartRequest) (Runtime, erro
 		return Runtime{}, err
 	}
 	defer lock.release()
+	return m.startLocked(ctx, request, runtime, imageSource, requestedImageID)
+}
+
+// startLocked owns token changes under the runtime lock. Preflight failures
+// occur before this method and must not remove a token from an existing VM.
+func (m Manager) startLocked(ctx context.Context, request StartRequest, runtime Runtime, imageSource, requestedImageID string) (result Runtime, returnErr error) {
+	depth := runtime.Depth
 	freshToken, err := m.ensureClipboardTokenLocked(ctx, runtime, request)
 	if err != nil {
 		return Runtime{}, err
 	}
+	// Only this operation's token can be removed on failure. A rejected start
+	// must keep an existing VM's token, or the next start would replace its disk.
+	tokenChanged := freshToken
+	defer func() {
+		if returnErr != nil && tokenChanged {
+			_ = clipboard.RemoveTokenFile(m.CooperDir, runtime.ID)
+		}
+	}()
 	mounts, environment, mountDigest, err := m.resolveMountPlan(request, runtime.ID)
 	if err != nil {
 		return Runtime{}, err
@@ -185,6 +200,7 @@ func (m Manager) Start(ctx context.Context, request StartRequest) (Runtime, erro
 		if err := m.writeClipboardToken(runtime.ID, request.ToolName, request.ClipboardMode); err != nil {
 			return Runtime{}, fmt.Errorf("rotate VM clipboard token: %w", err)
 		}
+		tokenChanged = true
 	}
 
 	base := m.PreparedBase
@@ -670,7 +686,11 @@ func supervisorDockerArgs(runtime Runtime, request StartRequest, archive ImageAr
 
 // Healthy asks the private supervisor control socket for guest readiness.
 func (m Manager) Healthy(runtime Runtime) (bool, error) {
-	healthContext, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	return m.healthy(context.Background(), runtime)
+}
+
+func (m Manager) healthy(ctx context.Context, runtime Runtime) (bool, error) {
+	healthContext, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
 	defer cancel()
 	proxyName := m.ProxyName
 	if strings.TrimSpace(proxyName) == "" {
@@ -685,12 +705,25 @@ func (m Manager) Healthy(runtime Runtime) (bool, error) {
 			return false, nil
 		}
 	}
-	connection, err := net.DialTimeout("unix", runtime.ControlSocket, 250*time.Millisecond)
+	dialer := net.Dialer{Timeout: 250 * time.Millisecond}
+	connection, err := dialer.DialContext(healthContext, "unix", runtime.ControlSocket)
 	if err != nil {
 		return false, nil
 	}
 	defer connection.Close()
-	header := vmproto.NewHeader(vmproto.ServiceHealth, "health")
+	// The context bounds Docker checks and dialing. Bound stream reads and
+	// writes too, and close promptly if startup is canceled before its deadline.
+	deadline, _ := healthContext.Deadline()
+	if err := connection.SetDeadline(deadline); err != nil {
+		return false, err
+	}
+	stopClose := context.AfterFunc(healthContext, func() { connection.Close() })
+	defer stopClose()
+	requestID, err := randomHex(12)
+	if err != nil {
+		return false, err
+	}
+	header := vmproto.NewHeader(vmproto.ServiceHealth, requestID)
 	if err := vmproto.WriteHeader(connection, header); err != nil {
 		return false, err
 	}
@@ -702,24 +735,27 @@ func (m Manager) Healthy(runtime Runtime) (bool, error) {
 }
 
 func (m Manager) waitHealthy(ctx context.Context, runtime Runtime, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	startup, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for startup.Err() == nil {
 		if data, err := os.ReadFile(filepath.Join(runtime.ControlDir, "guest-error.log")); err == nil && len(data) > 0 {
 			return fmt.Errorf("VM guest failed: %s", strings.TrimSpace(string(data)))
 		}
-		healthy, err := m.Healthy(runtime)
+		healthy, err := m.healthy(startup, runtime)
 		if err == nil && healthy {
 			return nil
 		}
-		running, runErr := containerRunning(ctx, m.Runner, runtime.ContainerName)
+		running, runErr := containerRunning(startup, m.Runner, runtime.ContainerName)
 		if runErr == nil && !running {
 			return fmt.Errorf("VM supervisor %s stopped before the guest became ready; inspect %s", runtime.ID, filepath.Join(runtime.ControlDir, "guest-error.log"))
 		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-startup.Done():
 		case <-time.After(200 * time.Millisecond):
 		}
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	return fmt.Errorf("VM %s did not become ready in %s; inspect %s", runtime.ID, timeout, filepath.Join(SupervisorRuntimeDir(runtime.RuntimeDir), "console.log"))
 }

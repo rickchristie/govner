@@ -47,6 +47,9 @@ func (s *Service) Load(ctx context.Context, request LoadRequest) (Result, error)
 	if err := s.options.Guard.Check(ctx, rootPaths(roots)); err != nil {
 		return Result{}, err
 	}
+	if err := checkHostExecutable(request.Harness, roots); err != nil {
+		return Result{}, err
+	}
 	if target := state.byName(request.Harness, request.Name); target != nil {
 		if err := s.checkLoadTarget(ctx, store, *target, paths, roots); err != nil {
 			return Result{}, err
@@ -101,6 +104,32 @@ func (s *Service) Load(ctx context.Context, request LoadRequest) (Result, error)
 		}
 	}
 	return result, err
+}
+
+// OpenCode's installer can put the host executable inside its state root.
+// A complete root replacement would remove it, including the command needed
+// to log in to a fresh profile. Refuse before changing either saved or live state.
+func checkHostExecutable(harness string, roots []Root) error {
+	if harness != "opencode" {
+		return nil
+	}
+	for _, root := range roots {
+		if root.ID != "opencode-compat" {
+			continue
+		}
+		path := filepath.Join(root.HostPath, "bin", "opencode")
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("check host OpenCode executable: %w", err)
+		}
+		if info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			return fmt.Errorf("OpenCode executable %q is inside a profile state root; move the executable outside all OpenCode state roots and update PATH before loading a profile", path)
+		}
+	}
+	return nil
 }
 
 func (s *Service) saveOutgoing(ctx context.Context, store *os.Root, state *index, request LoadRequest, paths workload.AgentPaths, roots []Root) (Result, error) {

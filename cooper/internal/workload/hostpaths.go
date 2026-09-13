@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // ValidateAgentStatePath checks a complete state root before profile copying
@@ -115,31 +116,58 @@ func hostStateOverlapError(hostPath, cooperDir string) error {
 	return fmt.Errorf("host-owned agent state %q overlaps Cooper-owned directory %q; move the Cooper directory or agent state", hostPath, cooperDir)
 }
 
-// resolveExistingPath resolves every existing symlink component. It resolves
-// the nearest existing parent first when the final path does not yet exist.
+// resolveExistingPath follows existing links even when their targets are absent.
+// Profile rollback moves whole roots, so an unchanged link can be temporarily
+// dangling. Walking upward with EvalSymlinks would lose that link's target.
 func resolveExistingPath(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
-	current := filepath.Clean(abs)
-	var missing []string
-	for {
-		resolved, resolveErr := filepath.EvalSymlinks(current)
-		if resolveErr == nil {
-			for index := len(missing) - 1; index >= 0; index-- {
-				resolved = filepath.Join(resolved, missing[index])
+	volume := filepath.VolumeName(abs)
+	resolved := volume + string(filepath.Separator)
+	pending := strings.Split(strings.TrimPrefix(abs, volume), string(filepath.Separator))
+	links := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		if part == "" || part == "." {
+			continue
+		}
+		if part == ".." {
+			resolved = filepath.Dir(resolved)
+			continue
+		}
+		next := filepath.Join(resolved, part)
+		info, err := os.Lstat(next)
+		if errors.Is(err, fs.ErrNotExist) {
+			resolved = next
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			if len(pending) > 0 && !info.IsDir() {
+				return "", &os.PathError{Op: "resolve", Path: next, Err: syscall.ENOTDIR}
 			}
-			return filepath.Clean(resolved), nil
+			resolved = next
+			continue
 		}
-		if !errors.Is(resolveErr, fs.ErrNotExist) {
-			return "", resolveErr
+		links++
+		if links > 255 {
+			return "", &os.PathError{Op: "resolve", Path: path, Err: syscall.ELOOP}
 		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return "", resolveErr
+		target, err := os.Readlink(next)
+		if err != nil {
+			return "", err
 		}
-		missing = append(missing, filepath.Base(current))
-		current = parent
+		if filepath.IsAbs(target) {
+			volume = filepath.VolumeName(target)
+			resolved = volume + string(filepath.Separator)
+			target = strings.TrimPrefix(target, volume)
+		}
+		pending = append(strings.Split(target, string(filepath.Separator)), pending...)
 	}
+	return resolved, nil
 }

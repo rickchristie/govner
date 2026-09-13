@@ -228,6 +228,55 @@ func TestEnsureClipboardTokenKeepsMatchingTokenWithoutRuntimeChange(t *testing.T
 	}
 }
 
+func TestFailedStartRemovesOnlyItsNewToken(t *testing.T) {
+	for _, existing := range []bool{true, false} {
+		t.Run(fmt.Sprint(existing), func(t *testing.T) {
+			home := t.TempDir()
+			cooperDir := filepath.Join(home, ".cooper")
+			request := StartRequest{RuntimeID: "unit-vm-project-codex-aabbccddeeff", ToolName: "codex", ClipboardMode: "shim", WorkspaceDir: filepath.Join(home, "project")}
+			runtime := runtimeFor(cooperDir, request, 1)
+			marker := filepath.Join(runtime.RuntimeDir, "guest-disk-marker")
+			if existing {
+				if _, err := clipboard.WriteRuntimeToken(cooperDir, runtime.ID, "existing-token", clipboard.RuntimeVM, "codex", "shim"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(runtime.RuntimeDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(marker, []byte("private data"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Invalid state placement fails after token setup, without Docker,
+			// KVM, image preparation, or a guest disk write.
+			t.Setenv("CODEX_HOME", filepath.Join(cooperDir, "state"))
+			if err := os.MkdirAll(filepath.Join(cooperDir, "state"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			runner := &recordingRunner{output: func(string) ([]byte, error) {
+				return nil, errors.New("no such object")
+			}}
+			manager := Manager{CooperDir: cooperDir, HomeDir: home, Namespace: "unit", Runner: runner, Config: config.DefaultConfig()}
+			if _, err := manager.startLocked(context.Background(), request, runtime, "unused-reference", "unused-image"); err == nil || !strings.Contains(err.Error(), "overlap") {
+				t.Fatalf("expected mount preflight failure: %v", err)
+			}
+			metadata, err := clipboard.ReadTokenMetadata(clipboard.TokenFilePath(cooperDir, runtime.ID))
+			if !existing {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("failed start left its new token: %v", err)
+				}
+				return
+			}
+			if err != nil || metadata.Token != "existing-token" {
+				t.Fatalf("failed start changed the existing token: %v", err)
+			}
+			if data, err := os.ReadFile(marker); err != nil || string(data) != "private data" || len(runner.commands) != 0 {
+				t.Fatalf("failed start changed the existing VM: %v; commands: %v", err, runner.commands)
+			}
+		})
+	}
+}
+
 func TestEnsureClipboardTokenRecreatesRuntimeBeforeReplacingMissingFile(t *testing.T) {
 	t.Parallel()
 	cooperDir := t.TempDir()

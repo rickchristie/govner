@@ -57,3 +57,48 @@ func TestValidateAllHostAgentStateRootsAllowsSiblingDirectory(t *testing.T) {
 		t.Fatalf("ValidateAllHostAgentStateRoots() error = %v", err)
 	}
 }
+
+func TestResolveExistingPathKeepsMissingLinkTargets(t *testing.T) {
+	for _, relative := range []bool{false, true} {
+		t.Run(map[bool]string{false: "absolute", true: "relative"}[relative], func(t *testing.T) {
+			root := t.TempDir()
+			target := filepath.Join(root, "missing", "state")
+			linkTarget := target
+			if relative {
+				linkTarget = "missing/state"
+			}
+			link := filepath.Join(root, "link")
+			if err := os.Symlink(linkTarget, link); err != nil {
+				t.Fatal(err)
+			}
+			chain := filepath.Join(root, "chain")
+			if err := os.Symlink("link", chain); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{link, chain} {
+				for _, child := range []string{"", "sessions/new"} {
+					got, err := resolveExistingPath(filepath.Join(path, child))
+					if err != nil || got != filepath.Join(target, child) {
+						t.Fatalf("resolve %s: %q, %v", path, got, err)
+					}
+				}
+			}
+			if err := ValidateHostOwnedPath(link, filepath.Join(target, "cooper")); err == nil {
+				t.Fatal("missing link target hid a Cooper directory overlap")
+			}
+		})
+	}
+}
+
+func TestResolveExistingPathRejectsLinkCycle(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Symlink("second", filepath.Join(root, "first")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("first", filepath.Join(root, "second")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveExistingPath(filepath.Join(root, "first", "missing")); err == nil {
+		t.Fatal("accepted a link cycle")
+	}
+}

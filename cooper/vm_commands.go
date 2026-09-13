@@ -12,7 +12,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/launch"
@@ -249,7 +248,6 @@ func runVM(cmd *cobra.Command, args []string) error {
 		ProfileID:     selection.ID,
 	})
 	if err != nil {
-		_ = clipboard.RemoveTokenFile(cooperDir, runtimeID)
 		return err
 	}
 	if err := stateLock.Close(); err != nil {

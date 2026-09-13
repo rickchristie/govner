@@ -55,6 +55,15 @@ These examples use Codex. The harness choices are `claude`, `codex`, `copilot`,
 `grok`, `opencode`, and `antigravity`. The supported login forms are listed below.
 For Antigravity, see [the native CLI guide](antigravity.md): `.gemini` is shared Google state, and keyring/ADC/WIF logins have explicit limits.
 
+Before you load an OpenCode profile, keep the host executable outside its
+state roots. The standard installer can put it at `~/.opencode/bin/opencode`.
+A fresh profile replaces that complete root with an empty directory, which
+would remove the command needed for login. Cooper rejects this installation
+layout before saving or replacing state. Move the executable to a directory
+outside all OpenCode state roots, such as `~/.local/bin`, and update `PATH`.
+Check `command -v opencode` and `opencode --version` before you try the load
+again. Cooper's Docker and VM images already install it outside state roots.
+
 ## Use the host or a saved profile
 
 | Command | State source |

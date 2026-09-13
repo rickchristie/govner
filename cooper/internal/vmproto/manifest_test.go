@@ -60,7 +60,7 @@ func TestManifestValidateRejectsUnsafeContract(t *testing.T) {
 func TestManifestValidateRejectsBoundOverflows(t *testing.T) {
 	t.Parallel()
 	manifest := validManifest()
-	manifest.Mounts = make([]GuestMount, maxGuestMounts+1)
+	manifest.Mounts = make([]GuestMount, MaxGuestMounts+1)
 	if err := manifest.Validate(); err == nil {
 		t.Fatal("Manifest.Validate accepted too many mounts")
 	}

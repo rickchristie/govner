@@ -12,7 +12,8 @@ import (
 
 const ManifestSchema = 2
 
-const maxGuestMounts = 40
+// MaxGuestMounts bounds both the guest manifest and host device layout.
+const MaxGuestMounts = 40
 
 var runtimeName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 var environmentName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
@@ -133,8 +134,8 @@ func (m Manifest) Validate() error {
 	if controlNetwork.Contains(bridgeIP) || bridgeNetwork.Contains(controlIP) {
 		return errors.New("manifest Docker bridge overlaps the control network")
 	}
-	if len(m.Mounts) == 0 || len(m.Mounts) > maxGuestMounts {
-		return fmt.Errorf("manifest has %d mounts; allowed range is 1-%d", len(m.Mounts), maxGuestMounts)
+	if len(m.Mounts) == 0 || len(m.Mounts) > MaxGuestMounts {
+		return fmt.Errorf("manifest has %d mounts; allowed range is 1-%d", len(m.Mounts), MaxGuestMounts)
 	}
 	seenIDs := make(map[string]bool, len(m.Mounts))
 	seenTags := make(map[string]bool, len(m.Mounts))

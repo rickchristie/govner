@@ -17,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/rickchristie/govner/cooper/internal/vmproto"
 )
 
 const (
@@ -115,8 +117,8 @@ func (c SupervisorConfig) Validate() error {
 	if c.Overlay != "/cooper/runtime/disk.qcow2" || c.ControlDir != "/cooper/control" || c.RelaySocket != "/cooper/relay/relay.sock" {
 		return errors.New("VM runtime paths do not match the fixed supervisor mounts")
 	}
-	if len(c.Mounts) > 24 {
-		return fmt.Errorf("VM supervisor has %d mounts; the maximum is 24", len(c.Mounts))
+	if len(c.Mounts) > vmproto.MaxGuestMounts {
+		return fmt.Errorf("VM supervisor has %d mounts; the maximum is %d", len(c.Mounts), vmproto.MaxGuestMounts)
 	}
 	seenTags := make(map[string]bool, len(c.Mounts))
 	seenPaths := make(map[string]bool, len(c.Mounts))
@@ -344,10 +346,22 @@ func BuildQEMUArgs(config SupervisorConfig, virtioSocket, cpuInfo string) []stri
 		args = append(args, "-drive", "if=virtio,format=raw,readonly=on,file="+config.SeedImage)
 	}
 	for index, mount := range config.Mounts {
+		// State roots, language caches, and path overrides can exceed the root
+		// bus's free slots. Each PCI bridge holds at most 16 mount devices; the
+		// root bus then needs only three ports for the complete mount contract.
+		const mountsPerBus = 16
+		bus := fmt.Sprintf("mount-bus-%d", index/mountsPerBus)
+		if index%mountsPerBus == 0 {
+			port := fmt.Sprintf("mount-port-%d", index/mountsPerBus)
+			args = append(args,
+				"-device", fmt.Sprintf("pcie-root-port,id=%s,chassis=%d,slot=%d", port, index/mountsPerBus+1, index/mountsPerBus+1),
+				"-device", "pcie-pci-bridge,id="+bus+",bus="+port,
+			)
+		}
 		chardevID := fmt.Sprintf("mountfs%d", index)
 		args = append(args,
 			"-chardev", "socket,id="+chardevID+",path="+mountSocket(config.RuntimeDir, index),
-			"-device", "vhost-user-fs-pci,chardev="+chardevID+",tag="+mount.Tag+",queue-size=1024",
+			"-device", fmt.Sprintf("vhost-user-fs-pci,chardev=%s,tag=%s,queue-size=1024,bus=%s,addr=0x%x", chardevID, mount.Tag, bus, index%mountsPerBus+1),
 		)
 	}
 	if config.Mode == ModeRuntime {

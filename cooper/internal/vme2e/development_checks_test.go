@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -104,6 +105,7 @@ func (f *developmentFixture) lifecycle(scenario string) {
 	var err error
 	switch scenario {
 	case "resources":
+		f.checkRejectedStart(before, oldToken)
 		// Depth-two workloads cap CPUs at four. Reduce the request so the
 		// effective resource setting changes at either supported depth.
 		f.request.CPUs--
@@ -147,6 +149,32 @@ func (f *developmentFixture) lifecycle(scenario string) {
 	f.report["recovery_seconds"] = time.Since(started).Seconds()
 	f.report["checks"] = []string{scenario, "new-VM-identity", "token-rotation-and-revocation", "new-private-disk", "workspace-survives", "recovered-health"}
 	f.stopVM()
+}
+
+func (f *developmentFixture) checkRejectedStart(containerID, token string) {
+	// Use the real command handler: it once removed the token after a rejected
+	// resource request and caused the next valid launch to discard the disk.
+	ctx, cancel := context.WithTimeout(f.ctx, 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, f.binary, "--config", f.run.CooperDir, "--prefix", f.prefix,
+		"--runtime-namespace", f.run.Namespace, "vm", f.tool, "--memory", "1g", "-c", "true")
+	command.Dir = f.run.Workspace
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "VM memory 1024 MiB is outside") {
+		f.t.Fatalf("expected rejected memory request: %v\n%s", err, output)
+	}
+	if f.token() != token {
+		f.t.Fatal("rejected CLI request changed the existing token")
+	}
+	reused, err := f.manager.Start(f.ctx, f.request)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if got := strings.TrimSpace(f.command("docker", "inspect", "--format", "{{.Id}}", reused.ContainerName)); got != containerID {
+		f.t.Fatal("valid launch after rejection replaced the existing VM")
+	}
+	execVM(f.t, f.manager, reused, `test "$(cat /var/tmp/cooper-dev-private)" = private`)
+	f.report["rejected_start_preserved_VM"] = true
 }
 
 // Selected parity also runs inside a depth-one Cooper VM. It checks account

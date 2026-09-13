@@ -1,9 +1,128 @@
 package vmhost
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/vmproto"
+	"github.com/rickchristie/govner/cooper/internal/workload"
 )
+
+func TestSupervisorAcceptsCompleteMountCatalog(t *testing.T) {
+	for _, count := range []int{25, vmproto.MaxGuestMounts, vmproto.MaxGuestMounts + 1} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			config := validSupervisorConfig()
+			for index := range count {
+				config.Mounts = append(config.Mounts, MountExport{
+					Tag: fmt.Sprintf("cooper-m-%03d", index), Path: fmt.Sprintf("/cooper/mounts/%03d", index),
+				})
+			}
+			err := config.Validate()
+			if count > vmproto.MaxGuestMounts {
+				if err == nil {
+					t.Fatal("accepted more mounts than the guest supports")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertMountDeviceSlots(t, config)
+		})
+	}
+}
+
+func TestSupervisorAcceptsSharedOpenCodeMountPlan(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.ProgrammingTools = []config.ToolConfig{{Name: "go", Enabled: true}, {Name: "node", Enabled: true}, {Name: "python", Enabled: true}}
+	input := workload.MountInput{
+		HomeDir: filepath.Join(root, "home"), CooperDir: filepath.Join(root, "cooper"),
+		WorkspaceDir: filepath.Join(root, "workspace"), RuntimeID: "test-opencode", ToolName: "opencode", Config: cfg,
+		Environment: map[string]string{
+			"OPENCODE_CONFIG_DIR": filepath.Join(root, "extra-config"),
+			"OPENCODE_CONFIG":     filepath.Join(root, "settings", "opencode.json"),
+			"OPENCODE_DB":         filepath.Join(root, "database", "opencode.db"),
+		},
+	}
+	for _, path := range []string{filepath.Join(input.HomeDir, ".gitconfig"),
+		input.Environment["OPENCODE_CONFIG"], input.Environment["OPENCODE_DB"],
+		filepath.Join(input.CooperDir, "ca", "cooper-ca.pem"),
+		filepath.Join(input.CooperDir, "tokens", input.RuntimeID),
+		filepath.Join(input.CooperDir, "session", input.RuntimeID, "cooper-localtime")} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{filepath.Join(input.WorkspaceDir, ".git", "hooks"),
+		filepath.Join(input.CooperDir, "base", "shims"), filepath.Join(input.CooperDir, "live")} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := workload.EnsureDirectories(input); err != nil {
+		t.Fatal(err)
+	}
+	mounts, err := workload.BuildMountPlan(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) < 25 {
+		t.Fatalf("fixture did not cover the full OpenCode plan: %d mounts", len(mounts))
+	}
+	supervisor := validSupervisorConfig()
+	for index := range mounts {
+		supervisor.Mounts = append(supervisor.Mounts, MountExport{Tag: fmt.Sprintf("cooper-m-%03d", index), Path: fmt.Sprintf("/cooper/mounts/%03d", index)})
+	}
+	if err := supervisor.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	assertMountDeviceSlots(t, supervisor)
+}
+
+func assertMountDeviceSlots(t *testing.T, config SupervisorConfig) {
+	t.Helper()
+	args := BuildQEMUArgs(config, "/cooper/runtime/fs.sock", "")
+	buses := map[string]bool{}
+	addresses := map[string]bool{}
+	devices := 0
+	for index, arg := range args {
+		if arg != "-device" {
+			continue
+		}
+		fields := strings.Split(args[index+1], ",")
+		properties := map[string]string{}
+		for _, field := range fields[1:] {
+			name, value, _ := strings.Cut(field, "=")
+			properties[name] = value
+		}
+		if fields[0] == "pcie-pci-bridge" {
+			buses[properties["id"]] = true
+		}
+		if fields[0] != "vhost-user-fs-pci" || properties["tag"] == "cooper-host" {
+			continue
+		}
+		bus := properties["bus"]
+		address := bus + ":" + properties["addr"]
+		slot, err := strconv.ParseUint(properties["addr"], 0, 8)
+		if !buses[bus] || err != nil || slot < 1 || slot > 31 || addresses[address] {
+			t.Fatalf("mount has no unique PCI slot: %s", args[index+1])
+		}
+		addresses[address] = true
+		devices++
+	}
+	if devices != len(config.Mounts) || len(buses) > 3 {
+		t.Fatalf("device layout: %d mounts, %d devices, %d bridges", len(config.Mounts), devices, len(buses))
+	}
+}
 
 func validSupervisorConfig() SupervisorConfig {
 	return SupervisorConfig{
