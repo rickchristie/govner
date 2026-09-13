@@ -8,8 +8,8 @@ import (
 
 func TestDefinitionsOrderAndUniqueness(t *testing.T) {
 	defs := Definitions()
-	wantNames := []string{"claude", "copilot", "codex", "opencode", "grok"}
-	wantDisplay := []string{"Claude Code", "Copilot CLI", "Codex CLI", "OpenCode", "Grok Build"}
+	wantNames := []string{"claude", "copilot", "codex", "opencode", "grok", "antigravity"}
+	wantDisplay := []string{"Claude Code", "Copilot CLI", "Codex CLI", "OpenCode", "Grok Build", "Antigravity CLI"}
 
 	if len(defs) != len(wantNames) {
 		t.Fatalf("len(Definitions()) = %d, want %d", len(defs), len(wantNames))
@@ -60,7 +60,7 @@ func TestNamesMatchesDefinitions(t *testing.T) {
 }
 
 func TestLookupAndIsBuiltin(t *testing.T) {
-	for _, name := range []string{"claude", "copilot", "codex", "opencode", "grok"} {
+	for _, name := range []string{"claude", "copilot", "codex", "opencode", "grok", "antigravity"} {
 		def, ok := Lookup(name)
 		if !ok {
 			t.Fatalf("Lookup(%q) = false, want true", name)
@@ -84,7 +84,7 @@ func TestDefinitionsDefensiveCopies(t *testing.T) {
 	first := Definitions()
 	first[0].Name = "mutated"
 	first[0].HostVersionCommand[0] = "mutated"
-	first[len(first)-1].HomeDirs[0] = "mutated"
+	first[4].HomeDirs[0] = "mutated"
 
 	second := Definitions()
 	if second[0].Name != "claude" {
@@ -196,5 +196,11 @@ func TestClipboardModeFallback(t *testing.T) {
 	}
 	if got := ClipboardMode("custom-tool"); got != ClipboardAuto {
 		t.Fatalf("ClipboardMode(custom) = %q, want auto", got)
+	}
+}
+
+func TestNativeExecutableCanDifferFromToolName(t *testing.T) {
+	if Executable("antigravity") != "agy" || Executable("codex") != "codex" || Executable("custom") != "custom" {
+		t.Fatal("executable lookup changed a built-in or custom command")
 	}
 }

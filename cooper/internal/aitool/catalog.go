@@ -81,6 +81,24 @@ var definitions = []Definition{
 		// not selected children, so new Grok state is shared automatically.
 		HomeDirs: []string{".grok"},
 	},
+	{
+		Name:               "antigravity",
+		DisplayName:        "Antigravity CLI",
+		HostVersionCommand: []string{"agy", "--version"},
+		AutoApproveArgs:    "--dangerously-skip-permissions",
+		ClipboardMode:      ClipboardX11,
+		HomeDirs:           []string{".gemini"},
+	},
+}
+
+// Executable separates the stable Cooper identity from the native command.
+// Host detection and runtime checks must name the same terminal product.
+// Custom tools keep their existing command-name contract.
+func Executable(name string) string {
+	if def, ok := Lookup(name); ok {
+		return def.HostVersionCommand[0]
+	}
+	return name
 }
 
 // Definitions returns a defensive copy of the ordered built-in catalog.

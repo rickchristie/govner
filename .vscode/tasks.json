@@ -328,6 +328,51 @@
       },
       "problemMatcher": [],
       "isBackground": false
+    },
+    {
+      "label": "cooper: Antigravity VM Prepare",
+      "type": "shell",
+      "command": "./cooper/test-vm-dev.sh prepare-agent antigravity > /tmp/cooper-antigravity-prepare-agent.txt 2>&1",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "echo": true,
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "cooper: Antigravity VM Parity",
+      "type": "shell",
+      "command": "./cooper/test-vm-dev.sh parity antigravity > /tmp/cooper-antigravity-parity.txt 2>&1",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "echo": true,
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "cooper: Antigravity VM Profiles",
+      "type": "shell",
+      "command": "./cooper/test-vm-dev.sh profiles antigravity > /tmp/cooper-antigravity-profiles.txt 2>&1",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "echo": true,
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "problemMatcher": [],
+      "isBackground": false
     }
   ]
 }

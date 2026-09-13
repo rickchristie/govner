@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
@@ -894,6 +895,7 @@ func runBuiltInParityMatrix(t *testing.T, driver *testdriver.Driver, homeDir, pr
 			startedAgents = append(startedAgents, agent)
 			workspace := t.TempDir()
 			writeFile(t, filepath.Join(workspace, "parity-workspace"), agent.name+"\n")
+			writeNativeProbe(t, agent.name, workspace)
 
 			barrel, err := driver.StartBarrelInWorkspace(agent.name, workspace)
 			if err != nil {
@@ -971,7 +973,20 @@ func builtInAgents(homeDir string) []builtInAgent {
 			stateDir(".opencode"),
 		}},
 		{name: "grok", targets: []stateTarget{stateDir("grok-state"), stateDir(".agents")}},
+		{name: "antigravity", targets: []stateTarget{stateDir(".gemini")}},
 	}
+}
+
+func writeNativeProbe(t *testing.T, tool, workspace string) {
+	t.Helper()
+	if tool != "antigravity" {
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(repositoryRoot(t), "cooper/internal/antigravity/testdata/native_probe.mjs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(workspace, "native_probe.mjs"), string(data))
 }
 
 func writeAgentStateSentinels(t *testing.T, agent builtInAgent) {
@@ -1024,7 +1039,10 @@ if ! version=$(NO_COLOR=1 %s --version 2>&1); then
 fi
 printf 'tool=%s version='
 printf '%%s\n' "$version" | tr -d '\r' | head -n 1
-`, selected.name, selected.name, selected.name)
+`, aitool.Executable(selected.name), aitool.Executable(selected.name), selected.name)
+	if selected.name == "antigravity" {
+		fmt.Fprintf(&checks, "timeout --kill-after=5s 60s node native_probe.mjs %s\n", shellQuote(runtimeKind))
+	}
 	// Some agents can refresh or replace a cache root while they start. Write
 	// after the version command so the assertion measures the mounted root,
 	// not the tool's valid cache cleanup policy.
@@ -1520,7 +1538,7 @@ func readFile(t *testing.T, path string) string {
 // Tests must not follow host agent path overrides into real credentials.
 func clearAgentStatePaths(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "COPILOT_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_DB"} {
+	for _, name := range []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "COPILOT_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "AGY_ADC_AUTH", "GOOGLE_APPLICATION_CREDENTIALS"} {
 		t.Setenv(name, "")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)

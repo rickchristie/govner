@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rickchristie/govner/cooper/internal/aitool"
+	"github.com/rickchristie/govner/cooper/internal/antigravity"
 	"github.com/rickchristie/govner/cooper/internal/auth"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
@@ -2674,10 +2676,11 @@ func TestCooperApp_PerToolDockerfiles(t *testing.T) {
 		{Name: "codex", Enabled: true},
 		{Name: "opencode", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.3.7"},
 		{Name: "grok", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.0.4"},
+		{Name: "antigravity", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.2.2", AntigravityReleases: antigravity.KnownReleases("1.2.2")},
 	}
 
 	// Render per-tool Dockerfiles and verify they reference the base image.
-	for _, tool := range []string{"claude", "copilot", "codex", "opencode", "grok"} {
+	for _, tool := range []string{"claude", "copilot", "codex", "opencode", "grok", "antigravity"} {
 		df, err := templates.RenderCLIToolDockerfile(cfg, tool)
 		if err != nil {
 			t.Fatalf("RenderCLIToolDockerfile(%s) failed: %v", tool, err)
@@ -2705,7 +2708,7 @@ func TestCooperApp_PerToolDockerfiles(t *testing.T) {
 	if strings.Contains(base, "CACHE_BUST") {
 		t.Error("base Dockerfile should not contain CACHE_BUST")
 	}
-	for _, tool := range []string{"claude", "copilot", "codex", "opencode", "grok"} {
+	for _, tool := range []string{"claude", "copilot", "codex", "opencode", "grok", "antigravity"} {
 		if strings.Contains(base, "COOPER_CLI_TOOL="+tool) {
 			t.Errorf("base Dockerfile should not contain COOPER_CLI_TOOL=%s", tool)
 		}
@@ -2748,7 +2751,7 @@ func TestCooperApp_LoginShellPATH(t *testing.T) {
 		if !tool.Enabled {
 			continue
 		}
-		which, err := barrelExec(barrelName, "bash -lc 'which "+tool.Name+"'")
+		which, err := barrelExec(barrelName, "bash -lc 'which "+aitool.Executable(tool.Name)+"'")
 		if err != nil || strings.TrimSpace(which) == "" {
 			t.Errorf("login shell: '%s' not found (enabled but not in login PATH)", tool.Name)
 		} else {
@@ -3033,7 +3036,7 @@ func TestCooperApp_CustomToolImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadDir cli: %v", err)
 	}
-	builtinNames := map[string]bool{"claude": true, "copilot": true, "codex": true, "opencode": true, "grok": true}
+	builtinNames := map[string]bool{"claude": true, "copilot": true, "codex": true, "opencode": true, "grok": true, "antigravity": true}
 	found := false
 	for _, e := range entries {
 		if e.IsDir() && !builtinNames[e.Name()] && e.Name() == "my-custom" {

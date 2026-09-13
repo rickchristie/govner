@@ -60,9 +60,10 @@ IMAGE_COPILOT="${PREFIX}cooper-cli-copilot"
 IMAGE_CODEX="${PREFIX}cooper-cli-codex"
 IMAGE_OPENCODE="${PREFIX}cooper-cli-opencode"
 IMAGE_GROK="${PREFIX}cooper-cli-grok"
+IMAGE_ANTIGRAVITY="${PREFIX}cooper-cli-antigravity"
 
 # All tool names for iteration.
-ALL_TOOLS=(claude copilot codex opencode grok)
+ALL_TOOLS=(claude copilot codex opencode grok antigravity)
 
 # Colors.
 RED='\033[0;31m'
@@ -221,7 +222,8 @@ cat > "${CONFIG_DIR}/config.json" <<CONFIGEOF
     {"name": "copilot", "enabled": true, "mode": "pin", "pinned_version": "1.0.12"},
     {"name": "codex", "enabled": true, "mode": "pin", "pinned_version": "0.117.0"},
     {"name": "opencode", "enabled": true, "mode": "pin", "pinned_version": "1.3.7"},
-    {"name": "grok", "enabled": true, "mode": "pin", "pinned_version": "1.0.4"}
+    {"name": "grok", "enabled": true, "mode": "pin", "pinned_version": "1.0.4"},
+    {"name": "antigravity", "enabled": true, "mode": "pin", "pinned_version": "1.2.2"}
   ],
   "whitelisted_domains": [
     {"domain": ".anthropic.com", "include_subdomains": true, "source": "default"},
@@ -264,7 +266,7 @@ else
 fi
 
 # Step 4: Assert all images exist (proxy, base, and each tool image).
-for img in "$IMAGE_PROXY" "$IMAGE_BASE" "$IMAGE_CLAUDE" "$IMAGE_COPILOT" "$IMAGE_CODEX" "$IMAGE_OPENCODE" "$IMAGE_GROK"; do
+for img in "$IMAGE_PROXY" "$IMAGE_BASE" "$IMAGE_CLAUDE" "$IMAGE_COPILOT" "$IMAGE_CODEX" "$IMAGE_OPENCODE" "$IMAGE_GROK" "$IMAGE_ANTIGRAVITY"; do
     if docker image inspect "$img" &>/dev/null; then
         pass "Image exists: ${img}"
     else
@@ -469,6 +471,13 @@ state_mounts_for() {
             mounts+=("-v" "${HOME_DIR}/.local/state/opencode:${HOME_DIR}/.local/state/opencode:rw")
             mounts+=("-v" "${HOME_DIR}/.opencode:${HOME_DIR}/.opencode:rw")
             ;;
+        antigravity)
+            for root in antigravity-cli antigravity conversations future-state; do
+                mkdir -p "${HOME_DIR}/.gemini/${root}"
+                printf '%s\n' 'e2e-complete-root' > "${HOME_DIR}/.gemini/${root}/sentinel"
+            done
+            mounts+=("-v" "${HOME_DIR}/.gemini:${HOME_DIR}/.gemini:rw")
+            ;;
         grok)
             # Grok stores auth, config, sessions, history, memory, skills,
             # locks, logs, and future state under one GROK_HOME root. Mount
@@ -515,6 +524,7 @@ tool_binary_for() {
         codex)   echo "codex" ;;
         opencode) echo "opencode" ;;
         grok) echo "grok" ;;
+        antigravity) echo "agy" ;;
     esac
 }
 
@@ -524,7 +534,7 @@ clipboard_mode_for() {
     local tool=$1
     case "$tool" in
         claude|opencode) echo "shim" ;;
-        copilot|codex|grok) echo "x11" ;;
+        copilot|codex|grok|antigravity) echo "x11" ;;
         *) echo "auto" ;;
     esac
 }
@@ -943,6 +953,9 @@ for tool in "${ALL_TOOLS[@]}"; do
         opencode)
             actual=$(barrel_exec 'export PATH="$HOME/.opencode/bin:$PATH"; opencode --version 2>&1 || ls "$HOME/.opencode/bin/" 2>&1 || echo notfound')
             ;;
+        antigravity)
+            actual=$(barrel_exec 'agy --version 2>&1 || echo notfound')
+            ;;
         grok)
             actual=$(barrel_exec 'grok --version 2>&1 || echo notfound')
             ;;
@@ -969,6 +982,21 @@ for tool in "${ALL_TOOLS[@]}"; do
             fail "${tool}: ${other} binary found at ${other_check} (should not be present!)"
         fi
     done
+
+    if [ "$tool" = "antigravity" ]; then
+        alias_value=$(barrel_exec 'bash -ic "alias agy" 2>/dev/null')
+        if [ "$alias_value" = "alias agy='agy --dangerously-skip-permissions'" ]; then
+            pass "${tool}: interactive alias uses the native command"
+        else
+            fail "${tool}: native alias is incorrect: ${alias_value}"
+        fi
+        if barrel_exec 'set -eu; test "$(command -v agy)" = /opt/cooper/bin/agy; for root in antigravity-cli antigravity conversations future-state; do test "$(cat "$HOME/.gemini/$root/sentinel")" = e2e-complete-root; done; printf barrel-write > "$HOME/.gemini/from-barrel"' &&
+            test "$(cat "${HOME_DIR}/.gemini/from-barrel")" = barrel-write; then
+            pass "${tool}: complete host state is read-write and preserves the image executable"
+        else
+            fail "${tool}: complete state or executable contract failed"
+        fi
+    fi
 
     if [ "$tool" = "grok" ]; then
         grok_home=$(barrel_exec 'printf "%s" "$GROK_HOME"')

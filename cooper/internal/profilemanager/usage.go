@@ -93,6 +93,11 @@ func contains(parent, child string) bool {
 func harnessName(args []string) string {
 	for _, arg := range args[:min(3, len(args))] {
 		base := filepath.Base(arg)
+		// Gemini CLI and the Antigravity desktop product share .gemini with
+		// agy. Their presence must also block replacement of that root.
+		if base == "agy" || base == "antigravity" || base == "gemini" || strings.Contains(arg, "/@google/gemini-cli/") {
+			return "antigravity"
+		}
 		for _, name := range []string{"claude", "codex", "copilot", "opencode", "grok"} {
 			if base == name || strings.Contains(arg, "/@anthropic-ai/claude-code/") && name == "claude" || strings.Contains(arg, "/@github/copilot/") && name == "copilot" || strings.Contains(arg, "/@openai/codex/") && name == "codex" {
 				return name

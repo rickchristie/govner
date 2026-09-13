@@ -160,6 +160,9 @@ func RefreshDesiredToolVersions(cfg *Config, opts DesiredVersionRefreshOptions) 
 		if err != nil {
 			return warnings, err
 		}
+		if err := resolveAntigravityReleases(&cfg.AITools[i]); err != nil {
+			return warnings, err
+		}
 		if warning != "" {
 			warnings = append(warnings, warning)
 		}
@@ -704,6 +707,11 @@ func refreshDesiredToolVersion(tool *ToolConfig, opts DesiredVersionRefreshOptio
 		tool.PinnedVersion = strings.TrimSpace(tool.PinnedVersion)
 		if tool.PinnedVersion == "" {
 			return "", fmt.Errorf("%s is enabled in pin mode but no pinned version is set", tool.Name)
+		}
+		if tool.Name == "antigravity" {
+			// The archive lookup below validates both platforms and uses this
+			// config's frozen records. A separate lookup would lose those inputs.
+			return "", nil
 		}
 		ok, err := VersionValidator(tool.Name, tool.PinnedVersion)
 		if err != nil {

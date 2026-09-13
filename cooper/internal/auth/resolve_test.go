@@ -45,6 +45,33 @@ func TestResolveGrokAPIKeyFromHostEnv(t *testing.T) {
 	}
 }
 
+func TestAntigravityForwardsOnlyExplicitCredentialSelectors(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "fake-gemini-key")
+	t.Setenv("AGY_ADC_AUTH", "false")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "fixture-project")
+	t.Setenv("AGY_UNKNOWN_OPTION", "must-not-forward")
+	results, err := ResolveTokens(t.TempDir(), t.TempDir(), []string{"antigravity"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"GEMINI_API_KEY", "AGY_ADC_AUTH", "GOOGLE_CLOUD_PROJECT"} {
+		got := findToken(results, name)
+		if got == nil || got.Value != os.Getenv(name) || got.Source != "env" {
+			t.Fatalf("missing explicit %s", name)
+		}
+	}
+	if findToken(results, "AGY_UNKNOWN_OPTION") != nil {
+		t.Fatal("unknown native option was forwarded")
+	}
+	other, err := ResolveTokens(t.TempDir(), t.TempDir(), []string{"claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findToken(other, "GEMINI_API_KEY") != nil || findToken(other, "AGY_ADC_AUTH") != nil {
+		t.Fatal("other harness received Antigravity credentials")
+	}
+}
+
 func TestResolveFromEnv_GH_TOKEN(t *testing.T) {
 	t.Setenv("GH_TOKEN", "ghp-test-token")
 
@@ -733,7 +760,7 @@ func TestResolveToken_MultipleToolsSameToken(t *testing.T) {
 
 func TestResolveToken_ToolTokenDefs_Coverage(t *testing.T) {
 	// Verify all expected tools are defined in toolTokenDefs.
-	expectedTools := []string{"claude", "copilot", "codex", "opencode", "grok"}
+	expectedTools := []string{"claude", "copilot", "codex", "opencode", "grok", "antigravity"}
 	for _, tool := range expectedTools {
 		if _, ok := toolTokenDefs[tool]; !ok {
 			t.Errorf("expected tool %q in toolTokenDefs", tool)

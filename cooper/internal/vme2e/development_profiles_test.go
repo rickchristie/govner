@@ -3,6 +3,7 @@ package vme2e
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os/exec"
@@ -21,6 +22,10 @@ import (
 // cover every catalog and identity adapter. A restart is the only second VM
 // import: it must retain the selected profile from persisted runtime metadata.
 func (f *developmentFixture) profiles() {
+	roots, stateRoot, credential := []string{".codex", ".agents", ".claude-plugin", ".cursor-plugin"}, ".codex", "OPENAI_API_KEY"
+	if f.tool == "antigravity" {
+		roots, stateRoot, credential = []string{".gemini"}, ".gemini", "GEMINI_API_KEY"
+	}
 	account, err := usercontext.Current()
 	if err != nil {
 		f.t.Fatal(err)
@@ -32,42 +37,51 @@ func (f *developmentFixture) profiles() {
 		// these fabricated fixture roots bypass that broad parent mount check.
 		Guard: profiles.GuardFunc(func(context.Context, []string) error { return nil })})
 	seed := func(name string) {
-		for _, relative := range []string{".codex", ".agents", ".claude-plugin", ".cursor-plugin"} {
+		for _, relative := range roots {
 			writeFile(f.t, filepath.Join(f.home, relative, "profile-sentinel"), name)
 		}
-		writeFile(f.t, filepath.Join(f.home, ".codex", "auth.json"), fmt.Sprintf(`{"auth_mode":"apikey","OPENAI_API_KEY":"fake-%s-key"}`, name))
-		writeFile(f.t, filepath.Join(f.home, ".codex", "session"), name)
+		if f.tool == "antigravity" {
+			// Fabricated Google subjects test the local identity adapter without
+			// sending a token or prompt to an external service.
+			claims := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"iss":"https://accounts.google.com","sub":%q,"aud":"cooper-fixture"}`, name)))
+			token := fmt.Sprintf(`{"auth_method":"consumer","id_token":"fake.%s.fake","token":{"access_token":"fake-access","refresh_token":"fake-refresh","expiry":"2099-01-01T00:00:00Z"}}`, claims)
+			writeFile(f.t, filepath.Join(f.home, stateRoot, "antigravity-cli/antigravity-oauth-token"), token)
+		} else {
+			writeFile(f.t, filepath.Join(f.home, stateRoot, "auth.json"), fmt.Sprintf(`{"auth_mode":"apikey","OPENAI_API_KEY":"fake-%s-key"}`, name))
+		}
+		writeFile(f.t, filepath.Join(f.home, stateRoot, "session"), name)
 	}
 	seed("personal")
-	if _, err := service.Save(f.ctx, profiles.SaveRequest{Harness: "codex"}); err != nil {
+	if _, err := service.Save(f.ctx, profiles.SaveRequest{Harness: f.tool}); err != nil {
 		f.t.Fatal(err)
 	}
-	if _, err := service.Load(f.ctx, profiles.LoadRequest{Harness: "codex", Name: "Work"}); err != nil {
+	if _, err := service.Load(f.ctx, profiles.LoadRequest{Harness: f.tool, Name: "Work"}); err != nil {
 		f.t.Fatal(err)
 	}
 	seed("work")
-	if _, err := service.Save(f.ctx, profiles.SaveRequest{Harness: "codex"}); err != nil {
+	if _, err := service.Save(f.ctx, profiles.SaveRequest{Harness: f.tool}); err != nil {
 		f.t.Fatal(err)
 	}
-	if _, err := service.Load(f.ctx, profiles.LoadRequest{Harness: "codex", Name: "Default"}); err != nil {
+	if _, err := service.Load(f.ctx, profiles.LoadRequest{Harness: f.tool, Name: "Default"}); err != nil {
 		f.t.Fatal(err)
 	}
-	selection, err := service.Select(f.ctx, "codex", "Work")
+	selection, err := service.Select(f.ctx, f.tool, "Work")
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	f.t.Setenv("OPENAI_API_KEY", "fake-host-key-must-not-replace-profile")
+	f.t.Setenv(credential, "fake-host-key-must-not-replace-profile")
 	name := docker.BarrelContainerNameForProfile(f.run.Workspace, f.tool, selection.ID)
 	if err := docker.StartBarrelWithProfile(f.manifest.Config, f.run.Workspace, f.run.CooperDir, f.home, f.tool, selection.ID); err != nil {
 		f.t.Fatal(err)
 	}
 	f.run.Objects = append(f.run.Objects, developmentObject{Type: "container", Name: name, ID: strings.TrimSpace(f.command("docker", "inspect", "--format", "{{.Id}}", name))})
 	f.saveRun()
-	checks := `set -eu
-for root in .codex .agents .claude-plugin .cursor-plugin; do test "$(cat "$HOME/$root/profile-sentinel")" = work; done
-test "${OPENAI_API_KEY-unset}" = unset
-`
-	command, env, closeSession := f.profileSession(name, selection, checks+`test "$(cat "$HOME/.codex/session")" = work; printf docker > "$HOME/.codex/session"`)
+	checks := fmt.Sprintf(`set -eu
+for root in %s; do test "$(cat "$HOME/$root/profile-sentinel")" = work; done
+test "${%s-unset}" = unset
+session="$HOME/%s/session"
+`, strings.Join(roots, " "), credential, stateRoot)
+	command, env, closeSession := f.profileSession(name, selection, checks+`test "$(cat "$session")" = work; printf docker > "$session"`)
 	args := []string{"exec"}
 	for _, value := range env {
 		args = append(args, "-e", value)
@@ -83,7 +97,7 @@ test "${OPENAI_API_KEY-unset}" = unset
 		f.t.Fatal(err)
 	}
 	f.startVMWithProfile(selection.ID)
-	f.execProfile(selection, checks+`test "$(cat "$HOME/.codex/session")" = docker; printf vm > "$HOME/.codex/session"`)
+	f.execProfile(selection, checks+`test "$(cat "$session")" = docker; printf vm > "$session"`)
 	original := f.state.ID
 	f.state, err = f.manager.Restart(f.ctx, f.state.ID)
 	if err != nil {
@@ -93,7 +107,7 @@ test "${OPENAI_API_KEY-unset}" = unset
 	if f.state.ID != original {
 		f.t.Fatal("restart changed selected runtime identity")
 	}
-	f.execProfile(selection, checks+`test "$(cat "$HOME/.codex/session")" = vm`)
+	f.execProfile(selection, checks+`test "$(cat "$session")" = vm`)
 	infos, err := vm.ListInfo(f.ctx, f.run.Namespace, nil)
 	if err != nil {
 		f.t.Fatal(err)
@@ -111,15 +125,15 @@ test "${OPENAI_API_KEY-unset}" = unset
 	if err := vm.RemoveCache(f.run.CooperDir); err != nil {
 		f.t.Fatal(err)
 	}
-	if got := readFile(f.t, filepath.Join(f.home, ".codex/session")); got != "personal" {
+	if got := readFile(f.t, filepath.Join(f.home, stateRoot, "session")); got != "personal" {
 		f.t.Fatalf("profile runtime changed host account: %q", got)
 	}
-	selected, err := service.Select(f.ctx, "codex", "Work")
+	selected, err := service.Select(f.ctx, f.tool, "Work")
 	if err != nil {
 		f.t.Fatal(err)
 	}
 	for _, root := range selected.Paths.Mounts {
-		if root.ID == "codex-state" && readFile(f.t, filepath.Join(root.Source, "session")) != "vm" {
+		if root.ID == f.tool+"-state" && readFile(f.t, filepath.Join(root.Source, "session")) != "vm" {
 			f.t.Fatal("VM cleanup removed saved sessions")
 		}
 	}

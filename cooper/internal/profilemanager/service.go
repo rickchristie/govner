@@ -7,6 +7,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/rickchristie/govner/cooper/internal/profileauth"
@@ -32,8 +35,23 @@ func New(cooperDir, workspace, home string) (*profiles.Service, error) {
 			environment[name] = value
 		}
 	}
+	if runtime.GOOS == "linux" {
+		noteSessionBus(environment, filepath.Join("/run/user", strconv.Itoa(account.UID), "bus"))
+	}
 	return profiles.New(profiles.Options{CooperDir: cooperDir, Workspace: workspace, Account: account,
 		Environment: environment, CredentialNames: profileauth.CredentialNames, Reader: profileauth.Reader{}, Guard: HostUsage{}}), nil
+}
+
+// The native keyring library can find the default user bus without an env
+// value. Tell the local identity reader that a file can have another active
+// credential source. This observation is not a saved or forwarded variable.
+func noteSessionBus(environment map[string]string, path string) {
+	if environment["DBUS_SESSION_BUS_ADDRESS"] != "" {
+		return
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		environment["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=" + path
+	}
 }
 
 func SelectID(ctx context.Context, cooperDir, workspace, home, harness, id string) (profiles.Selection, error) {

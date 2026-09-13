@@ -71,7 +71,7 @@ func TestWriteAllTemplates_RemovesObsoleteGrokPolicyWhenDisabled(t *testing.T) {
 	}
 }
 
-func TestValidateGrokOutputDirUnmanagedConflict(t *testing.T) {
+func TestValidateBuiltinOutputDirsUnmanagedConflict(t *testing.T) {
 	cliDir := t.TempDir()
 	grokDir := filepath.Join(cliDir, "grok")
 	if err := os.MkdirAll(grokDir, 0o755); err != nil {
@@ -81,7 +81,7 @@ func TestValidateGrokOutputDirUnmanagedConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{AITools: []config.ToolConfig{{Name: "grok", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.0.4"}}}
-	err := ValidateGrokOutputDir(cliDir)
+	err := ValidateBuiltinOutputDirs(cliDir)
 	if err == nil {
 		t.Fatal("expected unmanaged grok conflict")
 	}
@@ -102,7 +102,7 @@ func TestValidateGrokOutputDirUnmanagedConflict(t *testing.T) {
 	}
 }
 
-func TestValidateGrokOutputDirNonDockerfileConflict(t *testing.T) {
+func TestValidateBuiltinOutputDirsNonDockerfileConflict(t *testing.T) {
 	cliDir := t.TempDir()
 	grokDir := filepath.Join(cliDir, "grok")
 	if err := os.MkdirAll(grokDir, 0o755); err != nil {
@@ -111,7 +111,7 @@ func TestValidateGrokOutputDirNonDockerfileConflict(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(grokDir, "notes.txt"), []byte("custom"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateGrokOutputDir(cliDir); err == nil {
+	if err := ValidateBuiltinOutputDirs(cliDir); err == nil {
 		t.Fatal("expected conflict for grok dir without generated Dockerfile")
 	}
 }

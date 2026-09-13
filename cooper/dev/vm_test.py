@@ -15,12 +15,12 @@ import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-AGENTS = {"claude", "copilot", "codex", "opencode", "grok"}
+AGENTS = {"claude", "copilot", "codex", "opencode", "grok", "antigravity"}
 LIFECYCLES = {"restart", "resources", "relay", "agent"}
 PACKAGES = ["vm", "vmhost", "vmguest", "vmproto", "vmrelay", "vmstate", "vmcontext",
             "vmpayload", "workload", "runtimefs", "launch", "auth", "config",
             "templates", "clipboard", "usercontext", "vmdev", "profiles",
-            "profileauth", "profilemanager", "statelock"]
+            "profileauth", "profilemanager", "statelock", "aitool", "antigravity"]
 
 DOCKER_GUARD = '''#!/bin/sh
 case "$1:$2" in
@@ -39,11 +39,11 @@ def parse_args(args):
         return args[0], ""
     if len(args) == 2 and args[0] in {"prepare-agent", "parity"} and args[1] in AGENTS:
         return tuple(args)
-    if args == ["profiles", "codex"]:
+    if len(args) == 2 and args[0] == "profiles" and args[1] in {"codex", "antigravity"}:
         return tuple(args)
     if len(args) == 2 and args[0] == "lifecycle" and args[1] in LIFECYCLES:
         return tuple(args)
-    raise ValueError("usage: cooper/test-vm-dev.sh [unit|prepare|smoke|mounts|lifecycle restart|resources|relay|agent|prepare-agent AGENT|parity AGENT|profiles codex|clean|clean-cache]")
+    raise ValueError("usage: cooper/test-vm-dev.sh [unit|prepare|smoke|mounts|lifecycle restart|resources|relay|agent|prepare-agent AGENT|parity AGENT|profiles codex|antigravity|clean|clean-cache]")
 
 
 def source_file(relative):

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rickchristie/govner/cooper/internal/antigravity"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/workload"
@@ -25,6 +26,7 @@ func testConfig() *config.Config {
 			{Name: "codex", Enabled: true},
 			{Name: "opencode", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.3.7"},
 			{Name: "grok", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.0.4"},
+			{Name: "antigravity", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.2.2", AntigravityReleases: antigravity.KnownReleases("1.2.2")},
 		},
 		WhitelistedDomains: []config.DomainEntry{
 			{Domain: ".anthropic.com", IncludeSubdomains: true, Source: "default"},
@@ -850,6 +852,7 @@ func TestRenderCLIToolDockerfile_Grok(t *testing.T) {
 	cfg := &config.Config{
 		AITools: []config.ToolConfig{
 			{Name: "grok", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.0.4"},
+			{Name: "antigravity", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.2.2", AntigravityReleases: antigravity.KnownReleases("1.2.2")},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -1101,7 +1104,7 @@ func TestWriteAllTemplates(t *testing.T) {
 	}
 
 	// Verify per-tool Dockerfiles in cliDir
-	expectedTools := []string{"claude", "copilot", "codex", "opencode", "grok"}
+	expectedTools := []string{"claude", "copilot", "codex", "opencode", "grok", "antigravity"}
 	for _, tool := range expectedTools {
 		path := filepath.Join(cliDir, tool, "Dockerfile")
 		info, err := os.Stat(path)

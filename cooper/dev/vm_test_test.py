@@ -37,7 +37,8 @@ class VMDevelopmentCommands(unittest.TestCase):
         for mode in ("prepare-agent", "parity"):
             for agent in vm_test.AGENTS:
                 self.assertEqual(vm_test.parse_args([mode, agent]), (mode, agent))
-        self.assertEqual(vm_test.parse_args(["profiles", "codex"]), ("profiles", "codex"))
+        for agent in ("codex", "antigravity"):
+            self.assertEqual(vm_test.parse_args(["profiles", agent]), ("profiles", agent))
         for case in vm_test.LIFECYCLES:
             self.assertEqual(vm_test.parse_args(["lifecycle", case]), ("lifecycle", case))
         for args in (["all"], ["nested"], ["prepare", "extra"], ["parity", "custom"], ["profiles", "custom"],

@@ -59,6 +59,7 @@ run_build_test() {
     local codex_image="${prefix}cooper-cli-codex"
     local opencode_image="${prefix}cooper-cli-opencode"
     local grok_image="${prefix}cooper-cli-grok"
+    local antigravity_image="${prefix}cooper-cli-antigravity"
     local proxy_image="${prefix}cooper-proxy"
 
     info "=== Testing ${mode} mode ==="
@@ -232,7 +233,7 @@ run_build_test() {
     # The build account must agree across the shell, environment, and passwd.
     local expected_identity actual_identity
     expected_identity="$(id -un):$(id -gn):$(id -u):$(id -g):${HOME}"
-    for account_image in "$base_image" "$claude_image" "$copilot_image" "$codex_image" "$opencode_image" "$grok_image"; do
+    for account_image in "$base_image" "$claude_image" "$copilot_image" "$codex_image" "$opencode_image" "$grok_image" "$antigravity_image"; do
         actual_identity=$(docker run --rm --entrypoint "" "$account_image" sh -lc '
             set -eu
             test "$USER" = "$(id -un)"
@@ -471,6 +472,36 @@ run_build_test() {
         pass "${mode}: opencode image COOPER_CLI_TOOL=opencode"
     else
         fail "${mode}: opencode image COOPER_CLI_TOOL='${opencode_cli_tool}' (expected 'opencode')"
+    fi
+
+    # Check the real native client without external credentials or model use.
+    if docker run --rm --network none --entrypoint "" "$antigravity_image" bash -c '
+        set -eu
+        test "$(command -v agy)" = /opt/cooper/bin/agy
+        test "$(agy --version)" = "$1"
+        test "$COOPER_CLI_TOOL" = antigravity
+        test "$COOPER_CLI_EXECUTABLE" = agy
+        test "$COOPER_CLI_AUTO_APPROVE" = --dangerously-skip-permissions
+        test "$COOPER_CLIPBOARD_MODE" = x11
+        test "$AGY_CLI_DISABLE_AUTO_UPDATE" = true
+        test "$(node "$PLAYWRIGHT_DRIVER_PATH/package/cli.js" --version)" = "Version 1.57.0"
+        ! command -v claude
+    ' fixture "$(get_tool_version ai_tools antigravity)"; then
+        pass "${mode}: Antigravity native version, helper, and runtime settings are exact"
+    else
+        fail "${mode}: Antigravity native image contract failed"
+    fi
+    if docker run --rm --network none --entrypoint "" \
+        -v "${SCRIPT_DIR}/internal/antigravity/testdata/native_probe.mjs:/tmp/native_probe.mjs:ro" \
+        "$antigravity_image" timeout --kill-after=5s 60s node /tmp/native_probe.mjs; then
+        pass "${mode}: native Antigravity request and durable conversation restore"
+    else
+        fail "${mode}: native Antigravity local model fixture failed"
+    fi
+    if base_run which agy &>/dev/null || claude_run which agy &>/dev/null; then
+        fail "${mode}: Antigravity binary leaked into another image"
+    else
+        pass "${mode}: Antigravity executable is confined to its selected image"
     fi
 
     local grok_version
@@ -814,6 +845,7 @@ cleanup_test() {
     docker rmi -f "${prefix}cooper-cli-codex" 2>/dev/null || true
     docker rmi -f "${prefix}cooper-cli-opencode" 2>/dev/null || true
     docker rmi -f "${prefix}cooper-cli-grok" 2>/dev/null || true
+    docker rmi -f "${prefix}cooper-cli-antigravity" 2>/dev/null || true
     docker rmi -f "${prefix}cooper-cli-my-custom" 2>/dev/null || true
 
     rm -rf "$test_dir"

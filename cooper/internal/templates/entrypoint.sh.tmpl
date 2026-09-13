@@ -97,11 +97,16 @@ fi
 # commands (cooper cli <tool> -c "go test") don't load aliases, but that's fine
 # because one-shot commands run user code, not the AI tool itself.
 if [ -n "$COOPER_CLI_TOOL" ] && [ -n "$COOPER_CLI_AUTO_APPROVE" ]; then
+    # Older custom images use the tool identity as their command name.
+    COOPER_CLI_EXECUTABLE="${COOPER_CLI_EXECUTABLE:-$COOPER_CLI_TOOL}"
+    case "$COOPER_CLI_EXECUTABLE" in
+        ''|*[!a-zA-Z0-9_.-]*) echo "Invalid CLI executable name" >&2; exit 1 ;;
+    esac
     if ! grep -q "Cooper: Auto-approve alias" "$HOME/.bashrc" 2>/dev/null; then
         cat >> "$HOME/.bashrc" << ALIAS
 
 # Cooper: Auto-approve alias
-alias $COOPER_CLI_TOOL='$COOPER_CLI_TOOL $COOPER_CLI_AUTO_APPROVE'
+alias $COOPER_CLI_EXECUTABLE='$COOPER_CLI_EXECUTABLE $COOPER_CLI_AUTO_APPROVE'
 ALIAS
     fi
 fi

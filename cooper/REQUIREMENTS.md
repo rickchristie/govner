@@ -373,7 +373,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
   - Updates built state in `config.json` to reflect what was just built, including top-level `ContainerVersion` fields, `implicit_tools`, and `base_node_version`.
 
 - `cooper cli {tool-name}` opens a CLI container for a specific AI tool:
-  - Usage: `cooper cli claude`, `cooper cli codex`, `cooper cli copilot`, `cooper cli opencode`, `cooper cli grok`.
+  - Usage: `cooper cli claude`, `cooper cli codex`, `cooper cli copilot`, `cooper cli opencode`, `cooper cli grok`, `cooper cli antigravity`.
   - `cooper cli list` lists available tool images.
   - Each tool uses its own image (`cooper-cli-{toolname}`), but the same image is used across all workspaces.
   - It mounts the current folder where user runs this command to the CLI container.
@@ -473,7 +473,7 @@ This design keeps Cooper images stable across Playwright version bumps and avoid
     - Tests blocked domains are actually blocked (example.com, google.com).
     - Tests direct internet access is blocked (no route bypassing proxy).
   - **Phase 5 — Tools**: Verifies Go/Node/Python installations and versions (based on enabled tools).
-    Verifies AI CLI tool installations (Claude Code, Copilot, Codex, OpenCode, and Grok Build — based on enabled tools).
+    Verifies AI CLI tool installations (Claude Code, Copilot, Codex, OpenCode, Grok Build, and Antigravity CLI — based on enabled tools).
   - **Phase 6 — AI CLI Smoke Test**: Runs actual AI CLI commands to verify API connectivity (e.g., `claude -p "Reply with only the word: ok"`).
   - **Phase 7 — Barrel Environment**: Tests configured environment values and protected runtime values.
   - **Phase 8 — Port Forwarding & Bridge**: Tests bridge health endpoint and port forwarding connectivity.
@@ -1395,3 +1395,21 @@ Selected state roots retain their host absolute paths and are mounted read-write
   `profiles codex` development check uses two VM starts/imports for profile
   parity and restart. See [Account profiles](docs/profiles.md) for supported
   login formats, platform limits, storage, and extension rules.
+
+## Antigravity CLI
+
+- The built-in tool key is `antigravity`; its native command is `agy`.
+- Docker and VM use the shared same-path state catalog and runtime settings.
+  Mount complete `.gemini` state and the selected ADC credential parent when
+  ADC mode is active. Cleanup protects both default and explicit ADC roots.
+- Resolve official platform URLs and SHA-512 values before image rendering.
+  Keep native and Playwright driver versions exact, outside host state mounts.
+- Named profiles use the common profile service and local identity adapter.
+  Stable Google subject, audience, auth method, project, and region determine
+  OAuth identity. Gemini API keys require the matching native provider setting.
+- Unknown identity, keyring-only auth, ADC, and WIF cannot overwrite a saved
+  account. Shared Google state requires all known writers to stop first.
+- Native proof checks complete machine output and has an outer timeout.
+  Exit zero with partial output does not pass.
+- [The native guide](docs/antigravity.md) defines the reviewed version, helper
+  dependency, network hosts, auth limits, and final account checks.

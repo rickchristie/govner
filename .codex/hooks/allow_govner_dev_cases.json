@@ -1164,12 +1164,30 @@
     "id": "vm-development-account-profiles-unknown-agent",
     "command": "./cooper/test-vm-dev.sh profiles copilot > /tmp/cooper-profile-vm.txt 2>&1",
     "expected": false,
-    "why": "Only the reviewed Codex account-profile fixture is in the finite command set."
+    "why": "Only the reviewed Codex and Antigravity profile fixtures are in the finite command set."
   },
   {
     "id": "vm-development-account-profiles-extra-path",
     "command": "./cooper/test-vm-dev.sh profiles codex /home/ricky > /tmp/cooper-profile-vm.txt 2>&1",
     "expected": false,
     "why": "Profile tests cannot accept arbitrary host account paths or extra arguments."
+  },
+  {
+    "id": "vm-development-antigravity-prepare-agent",
+    "command": "./cooper/test-vm-dev.sh prepare-agent antigravity > /tmp/cooper-antigravity-vm.txt 2>&1",
+    "expected": true,
+    "why": "The fixed Antigravity fixture uses the finite agent set and prepared runtime inputs."
+  },
+  {
+    "id": "vm-development-antigravity-parity",
+    "command": "./cooper/test-vm-dev.sh parity antigravity > /tmp/cooper-antigravity-vm.txt 2>&1",
+    "expected": true,
+    "why": "The fixed Antigravity fixture uses the finite agent set and prepared runtime inputs."
+  },
+  {
+    "id": "vm-development-antigravity-profiles",
+    "command": "./cooper/test-vm-dev.sh profiles antigravity > /tmp/cooper-antigravity-vm.txt 2>&1",
+    "expected": true,
+    "why": "The fixed Antigravity fixture uses the finite agent set and prepared runtime inputs."
   }
 ]

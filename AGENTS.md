@@ -66,7 +66,7 @@ Read README.md of the project before starting.
   runs local tests with Docker and QEMU blocked. Use `prepare` once, then
   `smoke`, `mounts`, or `lifecycle restart|resources|relay|agent` for the
   changed VM behavior. Use `prepare-agent <agent>` and `parity <agent>` when
-  changing agent mounts or images. Use `profiles codex` after `prepare-agent codex`
+  changing agent mounts or images. Use `profiles codex` or `profiles antigravity` after the matching `prepare-agent` command
   for account-profile mount, credential, restart, and cleanup checks. Each runtime command requires prepared
   inputs and cannot build, download, or export a host image. See
   `cooper/dev/README.md` for cache ownership, reports, and command limits.

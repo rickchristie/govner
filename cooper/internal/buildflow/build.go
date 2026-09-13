@@ -426,8 +426,8 @@ func emitOutput(opts Options, line string) {
 }
 
 // DiscoverCustomImageNames returns user-managed CLI image names. It skips all
-// built-in directories. It returns a conflict for a user-managed cli/grok path,
-// including when Grok is disabled.
+// built-in directories. It rejects user directories that conflict with a
+// newly reserved built-in name, including when that tool is disabled.
 func DiscoverCustomImageNames(cliDir string) ([]string, error) {
 	entries, err := os.ReadDir(cliDir)
 	if err != nil {
@@ -436,7 +436,7 @@ func DiscoverCustomImageNames(cliDir string) ([]string, error) {
 		}
 		return nil, fmt.Errorf("read cli directory %s: %w", cliDir, err)
 	}
-	if err := templates.ValidateGrokOutputDir(cliDir); err != nil {
+	if err := templates.ValidateBuiltinOutputDirs(cliDir); err != nil {
 		return nil, err
 	}
 	custom := make([]string, 0, len(entries))

@@ -8,8 +8,22 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rickchristie/govner/cooper/internal/antigravity"
 	"github.com/rickchristie/govner/cooper/internal/config"
 )
+
+func TestConfigureKeepsArchiveRecordsOutsideTheTUI(t *testing.T) {
+	records := antigravity.KnownReleases("1.2.2")
+	ca := &ConfigureApp{cfg: &config.Config{AITools: []config.ToolConfig{{Name: "antigravity", AntigravityReleases: records}}}}
+	ca.SetAITools([]config.ToolConfig{{Name: "antigravity", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.2.2"}})
+	if !reflect.DeepEqual(ca.cfg.AITools[0].AntigravityReleases, records) {
+		t.Fatal("TUI edits lost frozen release inputs")
+	}
+	records[0].URL = "changed"
+	if ca.cfg.AITools[0].AntigravityReleases[0].URL == "changed" {
+		t.Fatal("new config shares prior records")
+	}
+}
 
 func stubConfigureTestResolvers(t *testing.T) {
 	t.Helper()

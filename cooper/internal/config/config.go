@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -206,7 +207,13 @@ func CloneConfig(cfg *Config) *Config {
 	}
 	cp := *cfg
 	cp.ProgrammingTools = append([]ToolConfig(nil), cfg.ProgrammingTools...)
+	for i := range cp.ProgrammingTools {
+		cp.ProgrammingTools[i].AntigravityReleases = slices.Clone(cfg.ProgrammingTools[i].AntigravityReleases)
+	}
 	cp.AITools = append([]ToolConfig(nil), cfg.AITools...)
+	for i := range cp.AITools {
+		cp.AITools[i].AntigravityReleases = slices.Clone(cfg.AITools[i].AntigravityReleases)
+	}
 	cp.ImplicitTools = append([]ImplicitToolConfig(nil), cfg.ImplicitTools...)
 	cp.WhitelistedDomains = append([]DomainEntry(nil), cfg.WhitelistedDomains...)
 	cp.PortForwardRules = append([]PortForwardRule(nil), cfg.PortForwardRules...)
@@ -264,62 +271,15 @@ func isGrokDefaultDomain(domain string) bool {
 	return false
 }
 
-func grokEnabled(tools []ToolConfig) bool {
-	for _, tool := range tools {
-		if strings.EqualFold(tool.Name, "grok") && tool.Enabled {
-			return true
-		}
-	}
-	return false
-}
-
-// MergeDefaultDomains ensures all default whitelisted domains are present
-// in the config. New defaults added in code updates are merged into existing
-// configs so users don't have to reconfigure to pick up new tool domains.
-// Grok hosts are reconciled separately: they are added only while Grok is
-// enabled and removed only when they are still Cooper-owned defaults.
+// MergeDefaultDomains preserves user entries and reconciles managed hosts.
+// A shared host remains available while any owning feature needs it.
 func (c *Config) MergeDefaultDomains() {
-	existing := make(map[string]bool)
-	for _, d := range c.WhitelistedDomains {
-		existing[d.Domain] = true
-	}
-	for _, d := range defaultWhitelistedDomains() {
-		if !existing[d.Domain] {
-			c.WhitelistedDomains = append(c.WhitelistedDomains, d)
+	for _, entry := range defaultWhitelistedDomains() {
+		if !hasDomainIgnoreCase(c.WhitelistedDomains, entry.Domain) {
+			c.WhitelistedDomains = append(c.WhitelistedDomains, entry)
 		}
 	}
-	c.reconcileGrokDefaultDomains()
-}
-
-// reconcileGrokDefaultDomains adds or removes the exact Grok default hosts
-// based on whether built-in Grok is enabled. User-added matching entries are
-// never removed, and case-insensitive duplicates are not introduced.
-func (c *Config) reconcileGrokDefaultDomains() {
-	if grokEnabled(c.AITools) {
-		c.addGrokDefaultDomains()
-		return
-	}
-	c.removeDefaultGrokDomains()
-}
-
-func (c *Config) addGrokDefaultDomains() {
-	for _, want := range grokDefaultDomains() {
-		if hasDomainIgnoreCase(c.WhitelistedDomains, want.Domain) {
-			continue
-		}
-		c.WhitelistedDomains = append(c.WhitelistedDomains, want)
-	}
-}
-
-func (c *Config) removeDefaultGrokDomains() {
-	filtered := c.WhitelistedDomains[:0]
-	for _, d := range c.WhitelistedDomains {
-		if isGrokDefaultDomain(d.Domain) && d.Source == "default" {
-			continue
-		}
-		filtered = append(filtered, d)
-	}
-	c.WhitelistedDomains = filtered
+	c.reconcileToolDefaultDomains()
 }
 
 func hasDomainIgnoreCase(domains []DomainEntry, domain string) bool {

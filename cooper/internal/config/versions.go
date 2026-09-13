@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/rickchristie/govner/cooper/internal/aitool"
+	"github.com/rickchristie/govner/cooper/internal/antigravity"
 )
 
 // VersionMode controls how a tool's version is resolved.
@@ -82,6 +83,9 @@ type ToolConfig struct {
 	HostVersion      string      `json:"host_version,omitempty"`
 	ContainerVersion string      `json:"container_version,omitempty"`
 	InstallCmd       string      `json:"install_cmd,omitempty"`
+	// Antigravity archive URLs contain opaque build IDs. Keep the resolved
+	// records with the version so later builds do not fetch a moving manifest.
+	AntigravityReleases []antigravity.Release `json:"antigravity_releases,omitempty"`
 }
 
 // RefreshContainerVersion sets ContainerVersion based on the version mode

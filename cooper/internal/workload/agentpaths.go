@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 
 	"golang.org/x/text/unicode/norm"
 )
@@ -69,6 +70,12 @@ var agentStatePaths = map[string][]StatePath{
 		{ID: "grok-state", Base: "grok", Kind: Directory},
 		{ID: "shared-agents", Base: "home", Path: ".agents", Kind: Directory},
 	},
+	"antigravity": {
+		// Auth, conversations, shared configuration, plugins, and future
+		// state span sibling folders. Preserve the complete Google root.
+		{ID: "antigravity-state", Base: "home", Path: ".gemini", Kind: Directory},
+		{ID: "antigravity-adc", Base: "antigravity-adc", Kind: Directory},
+	},
 }
 
 var pathEnvironmentNames = []string{
@@ -76,6 +83,7 @@ var pathEnvironmentNames = []string{
 	"COPILOT_HOME", "COPILOT_CACHE_HOME",
 	"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
 	"OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_DB",
+	"AGY_ADC_AUTH", "GOOGLE_APPLICATION_CREDENTIALS",
 }
 
 // HostPathEnvironment keeps unset and empty values distinct. Claude treats
@@ -188,6 +196,23 @@ func resolveAgentPaths(tool, home, launchDir string, values map[string]string, i
 func resolveStateBase(base, home, launchDir string, values, environment map[string]string, includeAbsent bool) (string, error) {
 	var name, fallback string
 	switch base {
+	case "antigravity-adc":
+		enabled, _ := strconv.ParseBool(values["AGY_ADC_AUTH"])
+		if !enabled {
+			return "", nil
+		}
+		// Google's Go ADC resolver uses the explicit credentials path or
+		// ~/.config/gcloud. It does not use CLOUDSDK_CONFIG. Keep the whole
+		// selected parent for replacement and related credential state.
+		credential := values["GOOGLE_APPLICATION_CREDENTIALS"]
+		if credential == "" {
+			return filepath.Join(home, ".config", "gcloud"), nil
+		}
+		if !filepath.IsAbs(credential) {
+			credential = filepath.Join(launchDir, credential)
+		}
+		environment["GOOGLE_APPLICATION_CREDENTIALS"] = filepath.Clean(credential)
+		return filepath.Dir(credential), nil
 	case "codex":
 		name, fallback = "CODEX_HOME", ".codex"
 	case "grok":

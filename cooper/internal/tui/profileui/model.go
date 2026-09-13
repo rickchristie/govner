@@ -6,11 +6,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/profiles"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
@@ -128,7 +130,8 @@ func (m *Model) key(key tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 		m.busy = true
 		return m, listCmd(m.manager)
 	case "h":
-		harnesses := []string{"claude", "codex", "copilot", "grok", "opencode"}
+		harnesses := aitool.Names()
+		sort.Strings(harnesses)
 		for index, name := range harnesses {
 			if name == m.harness {
 				m.harness = harnesses[(index+1)%len(harnesses)]

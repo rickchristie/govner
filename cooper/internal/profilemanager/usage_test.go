@@ -57,10 +57,34 @@ func TestHarnessNamesRecognizeNativeAndNodeExecutables(t *testing.T) {
 		{[]string{"node", "/opt/npm/node_modules/@anthropic-ai/claude-code/cli.js"}, "claude"},
 		{[]string{"node", "/opt/npm/node_modules/@github/copilot/index.js"}, "copilot"},
 		{[]string{"cooper", "cli", "codex"}, "codex"},
+		{[]string{"/opt/cooper/bin/agy"}, "antigravity"},
+		{[]string{"/opt/antigravity/antigravity"}, "antigravity"},
+		{[]string{"node", "/opt/npm/node_modules/@google/gemini-cli/index.js"}, "antigravity"},
 		{[]string{"/bin/sleep", "30"}, ""},
 	} {
 		if got := harnessName(test.args); got != test.want {
 			t.Fatalf("harness %v = %s", test.args, got)
 		}
+	}
+}
+
+func TestDefaultSessionBusCannotBeMistakenForFileOnlyAuth(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bus")
+	environment := map[string]string{}
+	noteSessionBus(environment, path)
+	if environment["DBUS_SESSION_BUS_ADDRESS"] != "" {
+		t.Fatal("absent bus changed the auth observation")
+	}
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	noteSessionBus(environment, path)
+	if environment["DBUS_SESSION_BUS_ADDRESS"] != "unix:path="+path {
+		t.Fatal("default keyring source was missed")
+	}
+	environment["DBUS_SESSION_BUS_ADDRESS"] = "explicit"
+	noteSessionBus(environment, path)
+	if environment["DBUS_SESSION_BUS_ADDRESS"] != "explicit" {
+		t.Fatal("explicit bus selection changed")
 	}
 }

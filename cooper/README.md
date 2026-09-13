@@ -52,10 +52,15 @@ supported logins, credential environment, conflicts, and recovery.
 | **OpenAI Codex CLI** | `cooper cli codex`, `cooper vm codex` | `--dangerously-bypass-approvals-and-sandbox` |
 | **OpenCode** | `cooper cli opencode`, `cooper vm opencode` | None |
 | **Grok Build** | `cooper cli grok`, `cooper vm grok` | `--always-approve` |
+| **Antigravity CLI** | `cooper cli antigravity`, `cooper vm antigravity` | `--dangerously-skip-permissions` |
 
 The listed auto-approve flags are safe because Cooper isolates the workload before it starts the agent -- Cooper's network policy and runtime isolation replace each tool's built-in permission system.
 
 Custom tools can be added by placing a Dockerfile in `~/.cooper/cli/{tool-name}/`. The name `grok` is reserved for built-in Grok Build. If you already have a custom `~/.cooper/cli/grok` directory, rename it and update any `cooper cli` invocation before configuring Grok.
+
+### Antigravity CLI
+
+Antigravity uses the native `agy` executable and the complete host `~/.gemini` state root at the same path. Named profiles use that same root catalog. The reviewed release is 1.2.2. See [Antigravity CLI](docs/antigravity.md) for version pins, the image-owned browser driver, ADC paths, supported profile logins, and keyring limits. The built-in name `antigravity` is reserved; rename a custom directory with that name before configuration.
 
 ### Grok Build
 
@@ -436,6 +441,7 @@ Run `cooper build` once after this upgrade. Launch rejects old images or images 
 | Effective XDG config, data, state, and cache roots with `/opencode` appended; `~/.opencode` | Same paths | read-write | OpenCode state |
 | `OPENCODE_CONFIG_DIR`, existing `OPENCODE_CONFIG`, custom `OPENCODE_DB` directory | Same paths | read-write | Explicit OpenCode paths |
 | `GROK_HOME` or `~/.grok`, `~/.agents` | Same paths | read-write | Complete Grok and shared agent state |
+| `~/.gemini`; effective ADC credential parent when ADC is enabled | Same paths | read-write | Complete Antigravity and shared Google state; see [Antigravity](docs/antigravity.md) |
 | Existing `~/.gitconfig` | Same path | read-only | Git identity |
 | `~/.cooper/cache/go-mod` | `/go/pkg/mod` | read-write | Go module cache |
 | `~/.cooper/cache/go-build` | `/var/lib/cooper/cache/go-build` | read-write | Go build cache |

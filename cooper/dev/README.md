@@ -43,10 +43,10 @@ Choose the smallest runtime check for the change:
 | `parity codex` | 1 | Real CLI/VM version, account, same paths, selected state, isolation, writes |
 | `profiles codex` | 2 | Saved profile in Docker and VM, complete roots, credential isolation, restart, status, cleanup |
 
-The agent choices are `claude`, `copilot`, `codex`, `opencode`, and `grok`.
-`profiles codex` uses the assets from `prepare-agent codex`. It tests the shared
-profile integration with fabricated accounts; local tests cover all five root
-catalogs and identity adapters. The restart check requires the second VM and
+The agent choices are `claude`, `copilot`, `codex`, `opencode`, `grok`, and
+`antigravity`. `profiles codex` and `profiles antigravity` use the assets from
+the matching `prepare-agent` command. They test the shared profile integration
+with fabricated accounts; local tests cover every root catalog and identity adapter. The restart check requires the second VM and
 image import.
 
 Preparation uses explicit version pins in `internal/vmdev/config.go`.
@@ -197,7 +197,7 @@ stops waiting; it does not prove that every remote child process is killed.
 
 Development and release tests share `runVMSmokeChecks`, `mountRefreshScript`,
 and the selected-agent state helpers in `internal/vme2e`. The release matrix
-still checks all five agents. Removing its duplicate home-path invocation
+checks every built-in agent. Removing its duplicate home-path invocation
 reduced the source inventory from 18 starts, 18 imports, and 14 exports to
 13 starts, 13 imports, and nine exports. A cold base can add one preparation
 VM. Complete runtime confirmation of these counts remains a next-release
@@ -227,3 +227,7 @@ Linux block `stat` counts write sectors in 512-byte units. These counters
 measure device I/O, not SSD-internal NAND writes. Tmpfs can use swap. See
 [Linux block statistics](https://docs.kernel.org/block/stat.html) and
 [Linux tmpfs documentation](https://docs.kernel.org/filesystems/tmpfs.html).
+
+For new harnesses, follow [Add a built-in agent](adding-an-agent.md). Antigravity
+parity also runs its installed native client against a local model fixture and
+checks conversation restoration, without using an external account.

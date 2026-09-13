@@ -302,6 +302,9 @@ func ensureTestImagesLocked(name string) error {
 		return nil
 	}
 	logf(name, "shared Docker test images need rebuild (%s)", reason)
+	if _, err := config.RefreshDesiredToolVersions(cfg, config.DesiredVersionRefreshOptions{}); err != nil {
+		return fmt.Errorf("resolve shared image versions: %w", err)
+	}
 
 	if _, err := os.Stat(buildDir); err == nil {
 		if err := FixOwnership(buildDir); err != nil {
@@ -662,6 +665,7 @@ func sharedBuiltToolNames() []sharedToolSpec {
 		{Name: "codex"},
 		{Name: "opencode"},
 		{Name: "grok"},
+		{Name: "antigravity"},
 	}
 }
 

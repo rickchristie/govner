@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/config"
@@ -115,8 +116,22 @@ func (a *ConfigureApp) SetProgrammingTools(tools []config.ToolConfig) {
 
 // SetAITools updates the AI CLI tools configuration.
 func (a *ConfigureApp) SetAITools(tools []config.ToolConfig) {
-	a.cfg.AITools = append([]config.ToolConfig(nil), tools...)
-	// Reconcile Grok's exact default hosts whenever the enabled set changes.
+	updated := config.CloneConfig(&config.Config{AITools: tools}).AITools
+	for i := range updated {
+		if len(updated[i].AntigravityReleases) != 0 {
+			continue
+		}
+		for _, previous := range a.cfg.AITools {
+			if previous.Name == updated[i].Name {
+				// The TUI edits version choices. It does not own resolved archive
+				// metadata. Preserve those records for the next strict refresh.
+				updated[i].AntigravityReleases = slices.Clone(previous.AntigravityReleases)
+				break
+			}
+		}
+	}
+	a.cfg.AITools = updated
+	// Reconcile managed exact hosts whenever the enabled set changes.
 	a.cfg.MergeDefaultDomains()
 }
 
@@ -231,8 +246,8 @@ func (a *ConfigureApp) saveWithProgress(allowStaleFallback bool, onProgress func
 	warnings = append(warnings, implicitWarnings...)
 	report(2, nil)
 
-	if err := templates.ValidateGrokOutputDir(cliDir); err != nil {
-		err = fmt.Errorf("validate reserved Grok CLI directory: %w", err)
+	if err := templates.ValidateBuiltinOutputDirs(cliDir); err != nil {
+		err = fmt.Errorf("validate reserved built-in CLI directory: %w", err)
 		report(2, err)
 		return warnings, nil, err
 	}

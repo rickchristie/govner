@@ -78,7 +78,7 @@ func TestVMDevelopment(t *testing.T) {
 		_, valid = developmentAgentVersions[selection]
 	}
 	if mode == "profiles" {
-		valid = selection == "codex"
+		valid = (selection == "codex" || selection == "antigravity")
 	}
 	if mode == "lifecycle" {
 		valid = contains([]string{"restart", "resources", "relay", "agent"}, selection)

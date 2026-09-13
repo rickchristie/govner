@@ -47,6 +47,8 @@ func (Reader) Read(ctx context.Context, harness string, mounts []workload.MountS
 		identity, err = view.opencode()
 	case "grok":
 		identity, err = view.grok()
+	case "antigravity":
+		identity, err = view.antigravity()
 	default:
 		return profiles.Identity{}, fmt.Errorf("profiles do not support harness %q", harness)
 	}

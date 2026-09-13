@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/aitool"
+	"github.com/rickchristie/govner/cooper/internal/antigravity"
 	"github.com/rickchristie/govner/cooper/internal/auth"
 	"github.com/rickchristie/govner/cooper/internal/barrelenv"
 	"github.com/rickchristie/govner/cooper/internal/bridge"
@@ -523,11 +524,12 @@ func (ctx *ProofContext) phaseTools() {
 
 	// AI tool installations — check in each tool's own barrel.
 	aiCmds := map[string]string{
-		"claude":   "claude --version",
-		"copilot":  "copilot --version 2>/dev/null || github-copilot-cli --version",
-		"codex":    "codex --version",
-		"opencode": "opencode --version",
-		"grok":     "grok --version",
+		"claude":      "claude --version",
+		"copilot":     "copilot --version 2>/dev/null || github-copilot-cli --version",
+		"codex":       "codex --version",
+		"opencode":    "opencode --version",
+		"grok":        "grok --version",
+		"antigravity": "agy --version",
 	}
 	for _, t := range ctx.Cfg.AITools {
 		if !t.Enabled {
@@ -691,6 +693,9 @@ func (ctx *ProofContext) phaseAICLI() {
 		var cmd string
 		var name string
 		switch t.Name {
+		case "antigravity":
+			name = "Antigravity CLI"
+			cmd = antigravity.ProofCommand
 		case "claude":
 			name = "Claude Code"
 			cmd = `claude -p "Reply with only the word: ok" --max-turns 1 2>&1`
@@ -727,6 +732,14 @@ func (ctx *ProofContext) phaseAICLI() {
 		elapsed := time.Since(start).Round(100 * time.Millisecond)
 
 		switch t.Name {
+		case "antigravity":
+			if err == nil && antigravity.CompleteProof(out) {
+				ctx.pass(name, fmt.Sprintf("complete model response (%s)", elapsed))
+			} else {
+				// Native output can include account details. Keep failed proof
+				// reports free of raw model responses and authentication data.
+				ctx.fail(name, "no complete model response; check agy login and the proxy request log")
+			}
 		case "claude", "grok":
 			// Chat CLIs — require a successful response containing the marker.
 			lower := strings.ToLower(out)

@@ -43,7 +43,10 @@ func HostAgentStateRoots(homeDir string) ([]string, error) {
 		return nil, err
 	}
 	values := HostPathEnvironment()
-	var roots []string
+	// Cleanup must protect ADC state even after the user leaves ADC mode.
+	// Protect the default root as well as an explicit credential parent.
+	values["AGY_ADC_AUTH"] = "true"
+	roots := []string{filepath.Join(homeDir, ".config", "gcloud")}
 	for tool := range agentStatePaths {
 		paths, err := ResolveAgentPaths(tool, homeDir, launchDir, values)
 		if err != nil {

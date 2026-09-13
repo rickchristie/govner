@@ -12,7 +12,7 @@ import (
 )
 
 func TestSelectionUsesCompleteCatalogWithSameTargets(t *testing.T) {
-	for _, harness := range []string{"claude", "codex", "copilot", "opencode", "grok"} {
+	for _, harness := range []string{"claude", "codex", "copilot", "opencode", "grok", "antigravity"} {
 		t.Run(harness, func(t *testing.T) {
 			f := newFixture(t)
 			f.service.options.Reader = ReaderFunc(func(context.Context, string, []workload.MountSpec, map[string]string) (Identity, error) {

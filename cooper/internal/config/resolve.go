@@ -66,6 +66,8 @@ func ResolveLatestVersion(toolName string) (string, error) {
 		return ResolveNPMPackageLatest(pkg)
 	case "grok":
 		return ResolveGrokLatest()
+	case "antigravity":
+		return resolveAntigravityLatest()
 	default:
 		return "", fmt.Errorf("unknown tool for version resolution: %q", toolName)
 	}
@@ -89,6 +91,8 @@ func ValidateVersion(toolName, version string) (bool, error) {
 		return validateNPMVersion(pkg, version)
 	case "grok":
 		return validateGrokVersion(version)
+	case "antigravity":
+		return validateAntigravityVersion(version)
 	default:
 		return false, fmt.Errorf("unknown tool for version validation: %q", toolName)
 	}

@@ -23,6 +23,9 @@ type TokenResult struct {
 // toolTokenDefs maps AI tool names to the tokens they require.
 // Each entry is a list of token definitions for that tool.
 var toolTokenDefs = map[string][]tokenDef{
+	"antigravity": {
+		{envVars: []string{"GEMINI_API_KEY"}, outputName: "GEMINI_API_KEY"},
+	},
 	// claude: auth handled via mounted ~/.claude directory, no env var needed.
 	"claude": {},
 	// copilot: GH_TOKEN or GITHUB_TOKEN env var, or ~/.copilot/.gh_token file.
@@ -156,6 +159,15 @@ func ResolveTokens(workspacePath, cooperDir string, enabledTools []string) ([]To
 
 	// Resolve tokens for each enabled tool.
 	for _, tool := range enabledTools {
+		if tool == "antigravity" {
+			// Provider selectors must stay with the selected harness. An API
+			// key must not change the host's provider or billing mode.
+			for _, name := range []string{"GOOGLE_GEMINI_BASE_URL", "AGY_ADC_AUTH", "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_CONFIG", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "CLOUD_CODE_URL", "BAICODE_ENDPOINT_URL", "JETSKI_OAUTH_TOKEN"} {
+				if value, present := os.LookupEnv(name); present {
+					results = append(results, TokenResult{Name: name, Value: value, Source: "env"})
+				}
+			}
+		}
 		defs, ok := toolTokenDefs[tool]
 		if !ok {
 			continue

@@ -616,7 +616,7 @@ fi
 section "File Permissions"
 # ============================================================================
 
-for dir in ~/.claude ~/.copilot ~/.codex ~/.config/opencode ~/.local/share/opencode ~/.local/state/opencode ~/.opencode ~/.grok; do
+for dir in ~/.claude ~/.copilot ~/.codex ~/.config/opencode ~/.local/share/opencode ~/.local/state/opencode ~/.opencode ~/.grok ~/.gemini; do
     if [ -d "$dir" ]; then
         if [ -w "$dir" ]; then
             pass "${dir} writable"

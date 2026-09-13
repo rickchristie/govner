@@ -52,7 +52,8 @@ sessions. A new profile cannot start a named runtime until its login is bound
 by `save`.
 
 These examples use Codex. The harness choices are `claude`, `codex`, `copilot`,
-`grok`, and `opencode`. The supported login forms are listed below.
+`grok`, `opencode`, and `antigravity`. The supported login forms are listed below.
+For Antigravity, see [the native CLI guide](antigravity.md): `.gemini` is shared Google state, and keyring/ADC/WIF logins have explicit limits.
 
 ## Use the host or a saved profile
 
@@ -142,6 +143,7 @@ and unsupported credentials fail without putting token contents in errors.
 | Claude | Linux OAuth account UUID plus organization UUID, with stored access/refresh credentials; Anthropic API credential | Keychain OAuth on macOS, external OAuth tokens/helpers, and third-party cloud modes are not copied as a supported login. |
 | Copilot | Host plus login from a stored plaintext token; supported token environment | OS keychain state is outside the root snapshot. A file login must explicitly use plaintext storage or disable keytar. |
 | OpenCode | Sorted provider identity set; API credentials; OAuth records with stable account IDs | An opaque OAuth token without a stable account ID cannot safely select a profile. External cloud/helper credentials need separate support. |
+| Antigravity | Linux file OAuth Google subject/audience plus auth method/project/region; Gemini API credential with explicit Gemini provider | Shared `.gemini` state. OS keyring, ADC, WIF, and external credential helpers are not supported named identities. |
 | Grok | Stored scope set and stable user/organization IDs for Grok/OIDC; API credentials | External auth providers, arbitrary auth-file paths, and legacy web-login records are not supported profile identities. |
 
 OAuth token refresh keeps an identity when the stable account identifiers stay
@@ -152,7 +154,7 @@ therefore creates a new identity. OpenCode can store several providers at once;
 adding or replacing a provider changes that complete identity set.
 
 The initial fixtures cover Codex 0.117.0, Claude 2.1.87, Copilot 1.0.12,
-OpenCode 1.3.7, and Grok 1.0.4. A future login format needs an adapter test before
+OpenCode 1.3.7, Grok 1.0.4, and Antigravity 1.2.2. A future login format needs an adapter test before
 Cooper can use it to replace an existing profile. Normal host-state launches
 remain available for login modes that profiles cannot identify.
 

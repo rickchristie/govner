@@ -126,6 +126,11 @@ func ProtectedRuntimeEnvNamesForTool(toolName string, extra []string) []string {
 			appendUnique(name)
 		}
 	}
+	if toolName == "antigravity" {
+		for _, name := range []string{"AGY_CLI_DISABLE_AUTO_UPDATE", "PLAYWRIGHT_DRIVER_PATH", "PLAYWRIGHT_NODEJS_PATH"} {
+			appendUnique(name)
+		}
+	}
 	for _, name := range extra {
 		appendUnique(strings.TrimSpace(name))
 	}

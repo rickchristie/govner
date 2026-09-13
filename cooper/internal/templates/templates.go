@@ -61,7 +61,8 @@ type baseDockerfileData struct {
 // cliToolDockerfileData holds template data for per-tool Dockerfiles.
 type cliToolDockerfileData struct {
 	BaseImage       string   // "cooper-base" or "{prefix}cooper-base"
-	ToolName        string   // "claude", "copilot", "codex", "opencode", or "grok"
+	ToolName        string   // Stable Cooper tool identity
+	ToolExecutable  string   // Native terminal command; can differ from identity
 	ToolDisplayName string   // "Claude Code", "Copilot CLI", etc.
 	Version         string   // Resolved image version
 	AutoApproveFlag string   // Tool-specific auto-approve CLI flag
@@ -365,7 +366,13 @@ func RenderCLIToolDockerfile(cfg *config.Config, toolName string) (string, error
 	}
 
 	version := getToolVersion(cfg.AITools, toolName)
-	installCmds, err := renderInstallCommands(toolName, version)
+	var installCmds string
+	var err error
+	if toolName == "antigravity" {
+		installCmds, err = renderAntigravityInstall(cfg, version)
+	} else {
+		installCmds, err = renderInstallCommands(toolName, version)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -378,6 +385,7 @@ func RenderCLIToolDockerfile(cfg *config.Config, toolName string) (string, error
 	data := cliToolDockerfileData{
 		BaseImage:       docker.GetImageBase(),
 		ToolName:        toolName,
+		ToolExecutable:  aitool.Executable(toolName),
 		ToolDisplayName: def.DisplayName,
 		Version:         version,
 		AutoApproveFlag: def.AutoApproveArgs,
@@ -495,6 +503,13 @@ func RenderEntrypoint(cfg *config.Config) (string, error) {
 }
 
 func toolRuntimeEnvs(toolName string) []runtimeEnv {
+	if toolName == "antigravity" {
+		return []runtimeEnv{
+			{Name: "AGY_CLI_DISABLE_AUTO_UPDATE", Value: "true"},
+			{Name: "PLAYWRIGHT_DRIVER_PATH", Value: "/opt/cooper/agy-playwright"},
+			{Name: "PLAYWRIGHT_NODEJS_PATH", Value: "/usr/local/bin/node"},
+		}
+	}
 	if toolName != "grok" {
 		return nil
 	}
@@ -516,7 +531,11 @@ func generatedCLIDockerfilePrefix(displayName string) string {
 // isGeneratedGrokOutputDir reports whether toolDir is Cooper-generated Grok
 // output. Only the exact generated Dockerfile header makes it replaceable.
 func isGeneratedGrokOutputDir(toolDir string) bool {
-	def, ok := aitool.Lookup("grok")
+	return isGeneratedToolOutputDir(toolDir, "grok")
+}
+
+func isGeneratedToolOutputDir(toolDir, toolName string) bool {
+	def, ok := aitool.Lookup(toolName)
 	if !ok {
 		return false
 	}
@@ -527,11 +546,18 @@ func isGeneratedGrokOutputDir(toolDir string) bool {
 	return strings.HasPrefix(string(data), generatedCLIDockerfilePrefix(def.DisplayName))
 }
 
-// ValidateGrokOutputDir fails before a write when cli/grok is user-managed.
-// Grok is the only new reserved name. The four older built-in names already
-// had reserved directory behavior before Cooper added this migration check.
-func ValidateGrokOutputDir(cliDir string) error {
-	const toolName = "grok"
+// ValidateBuiltinOutputDirs protects custom directories when a new built-in
+// reserves their names. The older four names were reserved before this check.
+func ValidateBuiltinOutputDirs(cliDir string) error {
+	for _, toolName := range []string{"grok", "antigravity"} {
+		if err := validateToolOutputDir(cliDir, toolName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateToolOutputDir(cliDir, toolName string) error {
 	toolDir := filepath.Join(cliDir, toolName)
 	info, err := os.Lstat(toolDir)
 	if err != nil {
@@ -540,7 +566,7 @@ func ValidateGrokOutputDir(cliDir string) error {
 		}
 		return fmt.Errorf("stat reserved CLI directory %s: %w", toolDir, err)
 	}
-	if info.IsDir() && isGeneratedGrokOutputDir(toolDir) {
+	if info.IsDir() && isGeneratedToolOutputDir(toolDir, toolName) {
 		return nil
 	}
 	return fmt.Errorf("custom image path %s uses the reserved built-in name %q and is not Cooper-generated. Rename it (for example, to %q) and update its `cooper cli` command. Cooper will not overwrite this path", toolDir, toolName, toolName+"-custom")
@@ -551,7 +577,7 @@ func ValidateGrokOutputDir(cliDir string) error {
 // baseDir is the path to ~/.cooper/base/.
 // cliDir is the path to ~/.cooper/cli/.
 func WriteAllTemplates(baseDir, cliDir string, cfg *config.Config, implicit []config.ImplicitToolConfig) error {
-	if err := ValidateGrokOutputDir(cliDir); err != nil {
+	if err := ValidateBuiltinOutputDirs(cliDir); err != nil {
 		return err
 	}
 	// Old Cooper versions put a requirements file in generated Grok output.
