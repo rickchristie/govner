@@ -109,6 +109,9 @@ func TestHostSetupPreservesShellFilesAndIsRepeatable(t *testing.T) {
 
 func TestNewShellSelectsWrapperAndKeepsOtherCommands(t *testing.T) {
 	f := newHostFixture(t)
+	// Ubuntu prints a sudo hint for a new home. Keep shell startup messages
+	// out of the exact wrapper output check without changing the host home.
+	writeTestFile(t, filepath.Join(f.home, ".hushlogin"), "", 0o600)
 	writeTestFile(t, filepath.Join(f.home, ".bashrc"), "agy() { false; }\nalias agy='false'\n", 0o600)
 	f.install(t)
 	command := exec.Command("bash", "--noprofile", "--rcfile", filepath.Join(f.home, ".bashrc"), "-ic", "command -v agy; printf '%s\\n' \"$DBUS_SESSION_BUS_ADDRESS\"; agy 'shell argument'")
