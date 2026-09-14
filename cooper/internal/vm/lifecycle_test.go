@@ -23,6 +23,84 @@ type recordingRunner struct {
 	output   func(command string) ([]byte, error)
 }
 
+type mountRecordRunner struct {
+	*recordingRunner
+	check func() error
+}
+
+func (r *mountRecordRunner) Run(context.Context, io.Reader, io.Writer, io.Writer, string, ...string) error {
+	return r.check()
+}
+
+func TestStartLockedRecordsRotatedTokenMount(t *testing.T) {
+	home := t.TempDir()
+	cooperDir := filepath.Join(home, ".cooper")
+	workspace := filepath.Join(home, "project")
+	for _, directory := range []string{workspace, filepath.Join(cooperDir, "ca")} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executable := filepath.Join(home, "cooper")
+	for _, path := range []string{executable, filepath.Join(cooperDir, "ca", "cooper-ca.pem")} {
+		if err := os.WriteFile(path, []byte("test fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	imageID := "sha256:" + strings.Repeat("a", 64)
+	archive, err := EnsureImageArchive(context.Background(), cooperDir, "test-agent", &imageArchiveRunner{imageID: imageID, payload: "test archive"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := StartRequest{
+		RuntimeID: "unit-vm-project-test-aabbccddeeff", ToolName: "test-agent", ImageRef: "test-agent",
+		WorkspaceDir: workspace, ClipboardMode: "shim", CPUs: 2, MemoryMiB: 2048, DiskGiB: 8,
+	}
+	runtime := runtimeFor(cooperDir, request, 1)
+	if _, err := clipboard.WriteRuntimeToken(cooperDir, runtime.ID, "old-token", clipboard.RuntimeVM, request.ToolName, request.ClipboardMode); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{
+		CooperDir: cooperDir, HomeDir: home, Namespace: "unit", ProxyName: "unit-proxy",
+		Config: config.DefaultConfig(), Executable: executable, Out: io.Discard,
+		SkipPrepare: true, PreparedBase: "test-base", PreparedArchive: &archive,
+	}
+	stop := errors.New("stop before Docker startup")
+	var recordedDigest, activeDigest string
+	manager.Runner = &mountRecordRunner{
+		recordingRunner: &recordingRunner{output: func(command string) ([]byte, error) {
+			if command == "docker image inspect test-agent" {
+				return []byte(fmt.Sprintf(`[{"Id":%q,"Config":{"Labels":{%q:%q}}}]`, imageID, workload.VMImageContractLabel, workload.VMImageContractVersion)), nil
+			}
+			return nil, errors.New("no such object")
+		}},
+		// Inspect the complete startup record before the first Docker command.
+		// No Docker daemon, KVM device, or real guest image is needed.
+		check: func() error {
+			metadata, err := loadRuntimeMetadata(cooperDir, runtime.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recordedDigest = metadata.MountPlanSHA256
+			_, _, activeDigest, err = manager.resolveMountPlan(request, runtime.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			token, err := clipboard.ReadTokenMetadata(clipboard.TokenFilePath(cooperDir, runtime.ID))
+			if err != nil || token.Token == "old-token" {
+				t.Fatalf("startup did not rotate the token: %v", err)
+			}
+			return stop
+		},
+	}
+	if _, err := manager.startLocked(context.Background(), request, runtime, request.ImageRef, imageID); !errors.Is(err, stop) {
+		t.Fatalf("startup error = %v, want the test stop", err)
+	}
+	if recordedDigest == "" || recordedDigest != activeDigest {
+		t.Fatalf("recorded mount digest %q differs from active token mount %q", recordedDigest, activeDigest)
+	}
+}
+
 func (r *recordingRunner) Run(context.Context, io.Reader, io.Writer, io.Writer, string, ...string) error {
 	return errors.New("unexpected Run call")
 }

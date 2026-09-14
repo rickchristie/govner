@@ -24,12 +24,17 @@ cooper_accept() {
         -u GOOGLE_APPLICATION_CREDENTIALS -u CLOUDSDK_CONFIG \
         -u GOOGLE_CLOUD_PROJECT -u GOOGLE_CLOUD_LOCATION \
         -u CLOUD_CODE_URL -u BAICODE_ENDPOINT_URL -u JETSKI_OAUTH_TOKEN \
-        HOME="$cooper_accept_home" "$cooper_accept_binary" \
+        SHELL=/bin/false HOME="$cooper_accept_home" "$cooper_accept_binary" \
         --config "$cooper_accept_home/.cooper" \
         --prefix agy-acceptance- --runtime-namespace agy-acceptance "$@"
 }
 cooper_accept configure
 ```
+
+The private setup disables login-shell credential lookup. Clearing environment
+variables alone does not prevent Cooper from finding a key in shell startup
+files. Use a new private home so no earlier lookup cache can select an API key.
+The Cooper session still uses its normal Bash shell.
 
 Select Antigravity 1.2.2 in Pin mode and disable other AI tools. Use unused
 proxy and bridge ports if another Cooper instance is active. Build with this
@@ -80,6 +85,12 @@ and conversation. Start a named Work Docker session and VM session; confirm
 that both use Work while the host remains on Default. Check outgoing state
 preservation, unknown-account refusal, restart, and cleanup. Do not force a
 save if Cooper cannot identify the current account.
+
+On a Linux desktop, Cooper also checks for `/run/user/<uid>/bus`. Clearing
+`DBUS_SESSION_BUS_ADDRESS` alone does not select file-only account state.
+If that bus is present, record the file-OAuth profile check as unsupported.
+Use the reviewed Gemini API mode or a host account without a session bus for
+the supported profile check. Do not stop the desktop bus to force a pass.
 
 Keep the private home until results are recorded and the user chooses to
 remove its test credentials. `cooper_accept down` stops this isolated runtime.

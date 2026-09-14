@@ -1,5 +1,11 @@
 # Antigravity CLI
 
+Antigravity is experimental in Cooper 0.5.0. Host keyring authentication is
+not shared with Docker or VM sessions. Physical-host login reuse, conversation
+continuity, token refresh, and clipboard acceptance remain open. These checks
+are deferred from the 0.5.0 release; the private file-account results below
+do not establish full host compatibility.
+
 Cooper uses Google's native terminal executable, `agy`. The Cooper tool name
 is `antigravity`. This integration does not install the Antigravity desktop
 application, an extension, or a Python package with the same name.

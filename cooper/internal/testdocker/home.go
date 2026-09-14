@@ -80,7 +80,9 @@ USER ${COOPER_USER_NAME}
 			continue
 		}
 		saved = append(saved, savedImage{name: image, id: id})
-		args := map[string]string{"SOURCE_IMAGE": id, "TEST_HOME": home, "COOPER_ACCOUNT": account.Label()}
+		// BuildKit treats a bare image ID as a registry reference. The shared
+		// Docker lock keeps this local tag stable until its build completes.
+		args := map[string]string{"SOURCE_IMAGE": image, "TEST_HOME": home, "COOPER_ACCOUNT": account.Label()}
 		if err := docker.BuildImage(image, dockerfile, contextDir, args, false); err != nil {
 			restore()
 			return nil, fmt.Errorf("build private test home: %w", err)

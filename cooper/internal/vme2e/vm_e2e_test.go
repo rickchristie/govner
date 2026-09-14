@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/aitool"
+	"github.com/rickchristie/govner/cooper/internal/antigravity"
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
@@ -1345,6 +1346,10 @@ func appendSelfHostDomains(cfg *config.Config) {
 		"proxy.golang.org",
 		"sum.golang.org",
 		"go.dev",
+		// Go version checks follow go.dev redirects to this artifact host.
+		"dl.google.com",
+		// Python version validation reads this release catalog before builds.
+		"endoflife.date",
 		"pypi.org",
 		// PyPI serves package metadata and package files from different hosts.
 		// The self-host test needs both hosts to rebuild Cooper's Python tools.
@@ -1362,6 +1367,10 @@ func appendSelfHostDomains(cfg *config.Config) {
 		"downloads.claude.ai",
 		"release-assets.githubusercontent.com",
 		"x.ai",
+		// The outer fixture enables only Codex, but the nested suite builds
+		// every agent. Include the native Antigravity install hosts as well.
+		antigravity.ManifestHost,
+		"storage.googleapis.com",
 	} {
 		cfg.WhitelistedDomains = append(cfg.WhitelistedDomains, config.DomainEntry{Domain: domain, Source: "user"})
 	}

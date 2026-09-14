@@ -1019,6 +1019,12 @@ func TestRemoveCooperConfigDirPreservesEveryBuiltInAgentState(t *testing.T) {
 	t.Setenv("GROK_HOME", "")
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	// Keep the selected roots inside this fixture even when the host uses
+	// path overrides. Changing HOME alone does not change those overrides.
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(homeDir, ".claude"))
+	t.Setenv("COPILOT_HOME", filepath.Join(homeDir, ".copilot"))
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(homeDir, ".cache"))
 	for _, stateRoot := range []string{
 		filepath.Join(homeDir, ".claude"),
 		filepath.Join(homeDir, ".copilot"),
@@ -1035,8 +1041,9 @@ func TestRemoveCooperConfigDirPreservesEveryBuiltInAgentState(t *testing.T) {
 			if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := removeCooperConfigDir(cooperDir); err == nil {
-				t.Fatal("removeCooperConfigDir() removed a directory inside host agent state")
+			err := removeCooperConfigDir(cooperDir)
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("host-owned agent state %q overlaps", stateRoot)) {
+				t.Fatalf("removeCooperConfigDir() = %v, want overlap with %s", err, stateRoot)
 			}
 			if data, err := os.ReadFile(marker); err != nil || string(data) != "keep" {
 				t.Fatalf("host state changed: data=%q err=%v", data, err)

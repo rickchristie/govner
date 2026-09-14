@@ -4,6 +4,13 @@
 and private profile switching passed. All automated regression gates passed
 after the required-domain fix. Final physical-host acceptance remains open.**
 
+On 2026-09-14, the user authorized releasing Cooper 0.5.0 with Antigravity's
+known limitations so Codex development can move into the updated Cooper VM.
+Antigravity remains experimental. Host keyring sharing and the remaining
+physical-host acceptance checks are deferred. This scope decision does not
+mark those checks as passed or close the host-continuity requirement. Keep
+this plan for that work. The general Cooper release gates still apply.
+
 ## Current implementation and authorization
 
 The account-profile feature is committed as `3b34dec`. After the automated

@@ -201,6 +201,12 @@ func (m Manager) startLocked(ctx context.Context, request StartRequest, runtime 
 			return Runtime{}, fmt.Errorf("rotate VM clipboard token: %w", err)
 		}
 		tokenChanged = true
+		// Token replacement changes the file inode. Record the new mount
+		// identity, or the next launch will replace this healthy VM again.
+		mounts, environment, mountDigest, err = m.resolveMountPlan(request, runtime.ID)
+		if err != nil {
+			return Runtime{}, err
+		}
 	}
 
 	base := m.PreparedBase
