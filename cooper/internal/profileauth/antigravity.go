@@ -38,8 +38,9 @@ func (v stateView) antigravity() (profiles.Identity, error) {
 		return profiles.Identity{}, errUnknown
 	}
 	// A present file cannot prove that a desktop host selects that file over
-	// another account in its keyring. Never read or forward the session bus.
-	if runtime.GOOS == "darwin" || v.environment["DBUS_SESSION_BUS_ADDRESS"] != "" {
+	// another account in its keyring. The checked host wrapper establishes
+	// file selection on Linux. Never read or forward the session bus.
+	if runtime.GOOS == "darwin" || (v.environment["DBUS_SESSION_BUS_ADDRESS"] != "" && !v.antigravityFileAuth) {
 		return profiles.Identity{}, errUnknown
 	}
 	var stored struct {

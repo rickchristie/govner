@@ -65,6 +65,9 @@ func PrepareSession(request SessionRequest) (*Session, []string, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve tokens: %w", err)
 	}
+	if err := checkAntigravityAuth(request, tokens); err != nil {
+		return nil, nil, err
+	}
 	session := &Session{
 		Name: names.Generate(request.WorkspaceDir), Title: filepath.Base(request.WorkspaceDir) + "-" + request.ToolName,
 		Interactive: request.OneShot == "",

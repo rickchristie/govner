@@ -161,6 +161,11 @@ Codex. Put real test versions of the other harnesses in a private tools
 directory and add that directory to `PATH` for the gate. A version-output
 stub does not verify mirror behavior.
 
+On Linux, the shell E2E gate also requires `ss` from `iproute2` to check the
+host relay's listening address. A minimal agent image can omit this host test
+dependency. Install it in the test environment or put a real executable with
+its required libraries in a private tools directory before running the gate.
+
 ## Validation evidence
 
 Initial validation ran inside a depth-one Cooper VM. All runtime profiles

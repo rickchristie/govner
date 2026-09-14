@@ -49,11 +49,14 @@ RUN set -eu; \
     printf '%%s  %%s\n' "$agy_digest" "$agy_archive" | sha512sum -c -; \
     test "$(tar -tzf "$agy_archive")" = antigravity; \
     test "$(tar -tvzf "$agy_archive" | cut -c1)" = -; \
-    mkdir -p /opt/cooper/bin; \
-    tar -xOzf "$agy_archive" antigravity > /opt/cooper/bin/agy; \
-    chmod 0755 /opt/cooper/bin/agy; \
-    test "$(/opt/cooper/bin/agy --version)" = '%s'; \
+    mkdir -p /opt/cooper/bin /opt/cooper/libexec; \
+    tar -xOzf "$agy_archive" antigravity > /opt/cooper/libexec/agy; \
+    chmod 0755 /opt/cooper/libexec/agy; \
+    test "$(/opt/cooper/libexec/agy --version)" = '%s'; \
     rm "$agy_archive"
+
+# Both execution modes use file state, even if a workload starts its own bus.
+RUN %s
 
 # Native 1.2.2 expects Playwright 1.57.0. Its old driver CDN returns 404.
 # Use the same official driver via npm and the image's Linux Node runtime.
@@ -61,5 +64,6 @@ RUN set -eu; \
 RUN npm install --prefix /opt/cooper/agy-playwright --ignore-scripts --no-audit --no-fund playwright@1.57.0 \
     && ln -s node_modules/playwright /opt/cooper/agy-playwright/package \
     && test "$(node /opt/cooper/agy-playwright/package/cli.js --version)" = 'Version 1.57.0'
-`, amd.URL, amd.SHA512, arm.URL, arm.SHA512, version), nil
+`, amd.URL, amd.SHA512, arm.URL, arm.SHA512, version,
+		antigravity.FileWrapperCommand("/opt/cooper/libexec/agy", "/opt/cooper/bin/agy")), nil
 }

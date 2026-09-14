@@ -60,10 +60,11 @@ Custom tools can be added by placing a Dockerfile in `~/.cooper/cli/{tool-name}/
 
 ### Antigravity CLI
 
-Antigravity is experimental in 0.5.0. Host keyring authentication is not shared
-with Docker or VM sessions. Complete physical-host account and clipboard
-acceptance is deferred; this release does not claim transparent host login
-or conversation continuity for Antigravity.
+Antigravity remains experimental. On Linux, `cooper build` sets up a host `agy`
+wrapper for file authentication. Activate its printed shell setup, sign in on the host,
+then use the mounted state or saved profiles in Docker and VM sessions.
+Cooper does not share the host keyring. See the native guide below for setup,
+token refresh, shell integration, and platform limits.
 
 Antigravity uses the native `agy` executable and the complete host `~/.gemini` state root at the same path. Named profiles use that same root catalog. The reviewed release is 1.2.2. See [Antigravity CLI](docs/antigravity.md) for version pins, the image-owned browser driver, ADC paths, supported profile logins, and keyring limits. The built-in name `antigravity` is reserved; rename a custom directory with that name before configuration.
 

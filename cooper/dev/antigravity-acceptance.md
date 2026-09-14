@@ -1,17 +1,16 @@
 # Antigravity account acceptance
 
-Run this check on the physical host after the automated gates pass. The VM
-used for development cannot prove access to the physical host's keyring or
-clipboard. Use a test account. Enter credentials and the authorization code
-only in Google's browser page and the native `agy` prompt.
+Run these checks on the physical Linux host after the automated gates pass.
+The development VM cannot prove the host's browser, shell startup, or clipboard
+behavior. Use test accounts. Enter credentials and authorization codes only
+in Google's browser page and the native agy prompt.
 
 ## Private setup
 
 Use a separate home, workspace, config, image prefix, and runtime namespace.
-A separate home does not isolate an OS keyring. Start the first login inside
-Cooper, which does not receive the host session bus or keyring. Do not run a
-host `agy` with this private home while a host keyring can supply another
-account.
+A separate home alone does not isolate an OS keyring. The generated host
+wrapper selects file authentication before any login. Do not run the original
+native executable directly with this private home.
 
 From the repository root on the physical host:
 
@@ -19,80 +18,127 @@ From the repository root on the physical host:
 cooper_accept_binary="$PWD/cooper/cooper"
 cooper_accept_home=$(mktemp -d "$HOME/cooper-antigravity-acceptance.XXXXXX")
 mkdir "$cooper_accept_home/workspace"
-cooper_accept() {
+cooper_accept_env() {
     env -u GEMINI_API_KEY -u GOOGLE_GEMINI_BASE_URL -u AGY_ADC_AUTH \
         -u GOOGLE_APPLICATION_CREDENTIALS -u CLOUDSDK_CONFIG \
         -u GOOGLE_CLOUD_PROJECT -u GOOGLE_CLOUD_LOCATION \
         -u CLOUD_CODE_URL -u BAICODE_ENDPOINT_URL -u JETSKI_OAUTH_TOKEN \
-        SHELL=/bin/false HOME="$cooper_accept_home" "$cooper_accept_binary" \
+        HOME="$cooper_accept_home" ZDOTDIR="$cooper_accept_home" \
+        PATH="$cooper_accept_home/.local/share/cooper/antigravity/bin:$PATH" "$@"
+}
+cooper_accept() {
+    cooper_accept_env env SHELL=/bin/false "$cooper_accept_binary" \
         --config "$cooper_accept_home/.cooper" \
         --prefix agy-acceptance- --runtime-namespace agy-acceptance "$@"
+}
+cooper_accept_agy() {
+    cooper_accept_env "$cooper_accept_home/.local/share/cooper/antigravity/bin/agy" "$@"
 }
 cooper_accept configure
 ```
 
-The private setup disables login-shell credential lookup. Clearing environment
-variables alone does not prevent Cooper from finding a key in shell startup
-files. Use a new private home so no earlier lookup cache can select an API key.
-The Cooper session still uses its normal Bash shell.
+The Cooper command disables login-shell credential lookup. Native agy keeps
+the host shell setting. Both use a new home with no credential cache and
+retain the physical desktop bus. The agy
+wrapper must select file authentication even while that bus remains available.
+`ZDOTDIR` keeps shell setup inside the private home too.
 
-Select Antigravity 1.2.2 in Pin mode and disable other AI tools. Use unused
-proxy and bridge ports if another Cooper instance is active. Build with this
-same private home, then start the control panel:
+Select Antigravity 1.2.2 in Pin mode and disable other AI tools. Select unused
+proxy and bridge ports if another Cooper instance is active. Native host agy
+must already be installed. Build with the same private home:
 
 ```sh
 cooper_accept build
+test -x "$cooper_accept_home/.local/share/cooper/antigravity/bin/agy"
 cd "$cooper_accept_home/workspace"
+cooper_accept_agy
+```
+
+## Host login and fresh shell
+
+1. Complete Google OAuth through the wrapped host command. Check browser
+   opening and the manual URL/code path if the browser cannot open. Do not
+   log in inside a Cooper runtime.
+2. Exit agy normally. Check only file presence, without printing credentials:
+
+   ```sh
+   test -s "$cooper_accept_home/.gemini/antigravity-cli/antigravity-oauth-token"
+   cooper_accept save antigravity
+   ```
+
+   The first profile must be `Default`. This save must work while the physical
+   desktop bus is still available.
+3. Start a fresh interactive Bash process. Enter ordinary `agy` in that shell,
+   with no D-Bus prefix. Check that it restores the same account, then exit:
+
+   ```sh
+   cooper_accept_env bash --noprofile --rcfile "$cooper_accept_home/.bashrc" -i
+   ```
+
+   `command -v agy` must select the private Cooper wrapper. Repeat with Zsh if
+   it is the user's normal shell. Automated tests also start a shell whose
+   initial PATH does not contain the wrapper.
+4. Repeat `cooper_accept build`. Existing shell content must remain intact,
+   and a fresh wrapped host launch must still restore the file account.
+
+## Host, Docker, and VM conversation
+
+Start the control panel in one terminal:
+
+```sh
 cooper_accept up
 ```
 
-Keep that terminal open. In another terminal, use the same variable values
-and function. Do not create a second temporary home.
+Keep it open. Use the same variable values and functions in another terminal;
+do not create a second temporary home.
 
-## Real account and conversation
-
-1. Run `cooper_accept cli antigravity`, then `agy`. Select Google OAuth. The
-   native screen offers a browser URL and a place to paste the returned code.
-   This flow passed with a real consumer file-OAuth account in the private
-   development fixture. Complete the login yourself for host acceptance.
-2. Ask for a short answer with a unique harmless marker. Record the native
-   conversation ID. Exit `agy` normally, then leave the Cooper shell.
-3. Run `cooper_accept vm antigravity`, then `agy --conversation=<id>`. Ask it to
-   recall the marker. Make one small file change through a native tool, check
-   its content, and exit normally.
-4. Return to the Docker barrel and restore the same conversation. Check the
-   VM turn and file change. Check text/image paste through the native UI in
-   each mode. Record only outcomes, versions, and required hostnames.
-5. Repeat after native token expiry to check refresh. Do not change token
-   contents or print token files to accelerate this test. Exit each writer
-   before switching runtime or account.
+1. Start `cooper_accept_agy` on the host. Ask for a short answer with a unique
+   harmless marker. Record the conversation ID and exit agy.
+2. Run `cooper_accept cli antigravity`, then `agy --conversation=<id>`. Confirm
+   the same account and marker. Add a second marker, exit agy, and leave the
+   Cooper shell.
+3. Run `cooper_accept vm antigravity --cpus 4 --memory 4096m --disk 24g`,
+   then restore that conversation. Confirm
+   both markers and make a small workspace file change through a native tool.
+   Check its content, then exit agy and the Cooper shell.
+4. Restore the conversation through `cooper_accept_agy` on the host. Confirm
+   the VM turn and file change. Check text/image paste in each execution mode.
+   Record only outcomes, versions, and required hostnames.
+5. Repeat after natural token expiry to check refresh and restoration by a
+   fresh process. Do not print or change token contents to accelerate this
+   check. Exit each writer before starting the next one.
 
 The default policy must allow the core flow without added approvals. If a
 host is denied, record the operation and exact hostname. Add a justified
-managed default or document it as optional; do not use allow-all to pass.
+managed default or document the optional feature; do not use allow-all to pass.
+Use these same VM resource overrides for the named-profile checks. They match
+the passed development tests and limit memory use while the Codex VM is active.
 
-## Host continuity and profiles
+## Profiles and refreshed state
 
-Host continuity needs a separate check with the same whole `.gemini` root,
-workspace, and native version. It is supported only when the host actually
-uses portable file state or the reviewed Gemini API-key mode. A desktop
-keyring account is an open compatibility limit, not a passed test.
+Close host Google state writers and stop related Docker/VM runtimes before
+save/load. A named session changes the saved profile's files, not the active
+host account. Loading that profile restores its updated state to the host.
 
-For a supported file account, exit all Google state writers, save Default,
-create Work with `cooper_accept load antigravity Work`, and log in to Work.
-Save without a destination name. Return to Default and confirm its account
-and conversation. Start a named Work Docker session and VM session; confirm
-that both use Work while the host remains on Default. Check outgoing state
-preservation, unknown-account refusal, restart, and cleanup. Do not force a
-save if Cooper cannot identify the current account.
+1. Save Default again. Run `cooper_accept load antigravity Work` to create a
+   fresh account state. Sign in to Work with `cooper_accept_agy`, exit it, and
+   run `cooper_accept save antigravity` without a destination name.
+2. Load Default and confirm its account and conversation on the host. Exit agy.
+3. Start a named Work Docker session and VM session in turn. Both must use
+   Work while the active host files remain Default. Record a new conversation
+   in Work. After a runtime refresh, stop the related runtimes.
+4. Load Work on the host and confirm its account, updated conversation, and
+   refreshed login. Return to Default and confirm its account is preserved.
+5. Check restart and normal cache cleanup. Saved profiles and the host wrapper
+   must remain usable. Unknown-account refusal and recovery are also covered
+   by automated tests; do not force a save when identity cannot be verified.
 
-On a Linux desktop, Cooper also checks for `/run/user/<uid>/bus`. Clearing
-`DBUS_SESSION_BUS_ADDRESS` alone does not select file-only account state.
-If that bus is present, record the file-OAuth profile check as unsupported.
-Use the reviewed Gemini API mode or a host account without a session bus for
-the supported profile check. Do not stop the desktop bus to force a pass.
+The desktop bus must remain running throughout these checks. File profiles
+are supported because Cooper verifies its selected host wrapper. Clearing
+`DBUS_SESSION_BUS_ADDRESS` alone is not the setup procedure.
 
 Keep the private home until results are recorded and the user chooses to
-remove its test credentials. `cooper_accept down` stops this isolated runtime.
-The final report must separate passed Docker/VM file-state behavior, actual
-host continuity, token refresh, and unsupported keyring/ADC/WIF profiles.
+remove its test credentials. `cooper_accept down` stops the isolated runtime.
+The report must separate host login, fresh-shell restoration, conversation
+continuity, real token refresh, profile switching, and clipboard results.
+macOS Keychain, ADC, and WIF profiles remain outside this file-OAuth check.

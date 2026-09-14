@@ -1,8 +1,53 @@
 # Antigravity support in Cooper
 
-**Status: Real file-OAuth login, natural token refresh, conversation restore,
-and private profile switching passed. All automated regression gates passed
-after the required-domain fix. Final physical-host acceptance remains open.**
+**Status: Cooper 0.5.0 passed its release gates with experimental Antigravity.
+The Linux file-auth goal passed with native agy 1.2.2 on amd64. Local, native,
+full regression, prepared VM, and physical-host checks pass. The verification
+report records the remaining browser, account, and platform test limits.
+Earlier account results are retained below.**
+
+The user authorized the complete file-auth implementation as a goal on
+2026-09-14. The current change installs a separate Linux host wrapper during
+build, selects it in Bash/Zsh, uses the same rule in agent images, and checks
+the managed wrapper before desktop OAuth profile saves. It preserves complete
+state mounts and the profile format. Login, logout, and account changes stay
+on the host; automatic token refresh writes the mounted files.
+
+Implementation and verification work:
+
+- [x] Host wrapper, native executable preservation, shell setup, and repeated
+  setup checks, with no keyring access or credential migration.
+- [x] Desktop file-profile checks, launch rejection with host instructions,
+  and the common Docker/VM wrapper.
+- [x] Local tests for arguments, exit status, shell state, wrapper changes,
+  profile save/load, and refreshed-profile restoration.
+- [x] Full Go suite, shell E2E, Docker-build all gate, and development build.
+- [x] Prepared Antigravity parity and profile tests, including atomic token
+  replacement across Docker, VM restart, and host load.
+- [x] Native private-keyring test of the generated wrapper in fresh Bash and
+  Zsh shells, with separate fabricated file and keyring accounts.
+- [x] Physical-host file login, profile save, and fresh Bash restore, confirmed
+  by the user with the normal home and desktop bus.
+- [x] Physical-host refresh, conversation, named-profile runtime and host
+  restoration, and clipboard checks.
+
+The physical-host run completed on 2026-09-15 in Asia/Jakarta. It used the
+normal host home and one real consumer OAuth account. It proved live
+host/Docker/VM conversation continuity, VM file writes, named-profile state
+isolation, VM restart, natural OAuth refresh in the saved profile, host load
+of the refreshed state, and native X11 text/image paste in all three modes.
+Final save and runtime shutdown preserved the host state, saved profile,
+and host wrapper. Automatic browser opening and a second real account were
+not verified in this run; distinct account selection has automated coverage.
+
+See [the current verification report](cooper/dev/antigravity-file-auth-verification.md)
+for test results and limits.
+
+## Earlier release and design decisions
+
+This section records decisions made before the current goal. Statements about
+proposed work describe that earlier state; the checklist above tracks the
+current implementation.
 
 On 2026-09-14, the user authorized releasing Cooper 0.5.0 with Antigravity's
 known limitations so Codex development can move into the updated Cooper VM.
@@ -10,6 +55,40 @@ Antigravity remains experimental. Host keyring sharing and the remaining
 physical-host acceptance checks are deferred. This scope decision does not
 mark those checks as passed or close the host-continuity requirement. Keep
 this plan for that work. The general Cooper release gates still apply.
+
+Development resumed inside Cooper VM on 2026-09-14. Private keyring probes
+confirmed that access to the Secret Service can expose unrelated entries,
+and that native 1.2.2 selects file storage when Docker's `/.dockerenv` marker
+is present even with a working keyring. See the
+[keyring access findings](cooper/dev/antigravity-keyring-findings.md) for the
+test limits and required broker access controls. This investigation does not
+implement a broker or close the host-continuity condition.
+
+A later six-case probe confirmed that a process-local unavailable D-Bus
+address makes native 1.2.2 read file credentials on Linux, while
+`GEMINI_FORCE_FILE_STORAGE=true` and an unset bus variable do not override an
+available keyring. A host launcher with explicit shared-file selection is
+therefore a candidate that does not grant access to the host keyring. Login
+writes, refresh, logout, profiles, and desktop effects still need verification
+before this becomes a configure or build feature. See the same findings record.
+
+The user also proposed a private runtime keyring populated only with the
+selected agent's credentials. A native Codex 0.154.0 probe passed local save
+and restore checks with a fabricated API key in such a keyring. This avoids
+live host keyring exposure, but a copy at startup does not preserve later
+credential changes on both sides. Antigravity's Docker file-storage selection
+also remains unresolved. The findings record describes these limits; no
+credential transfer or runtime keyring feature is implemented.
+
+The next proposal is a host `agy` wrapper created during build that selects
+file authentication on every launch. Login, logout, and account changes would
+stay on the host. A private native probe passed two wrapped file selections
+and an unwrapped keyring control. Shared file mounts already carry automatic
+refresh writes; named profile writes return to active host state through the
+existing load operation. The current desktop profile rejection still needs
+an explicit managed-file contract. See the findings record for the Linux
+limit and remaining host checks. This is a design proposal, not an installed
+wrapper or an implemented change.
 
 ## Current implementation and authorization
 
@@ -39,7 +118,7 @@ The original research remains below to retain its sources and open questions.
   inputs outside the TUI. Exact managed hosts retain user rules and other
   enabled features' hosts.
 - `internal/templates`: pure rendering, checked SHA-512, one regular tar member,
-  `/opt/cooper/bin/agy`, exact native version, and an image-owned Playwright
+  `/opt/cooper/bin/agy` wrapper, native `/opt/cooper/libexec/agy`, exact native version, and an image-owned Playwright
   1.57.0 driver. No moving native install script. Custom `cli/antigravity`
   directories are refused and preserved. The interactive alias uses `agy`.
 - `internal/workload`: complete `.gemini`, and a conditional complete ADC

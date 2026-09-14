@@ -1407,6 +1407,18 @@ Selected state roots retain their host absolute paths and are mounted read-write
 - Named profiles use the common profile service and local identity adapter.
   Stable Google subject, audience, auth method, project, and region determine
   OAuth identity. Gemini API keys require the matching native provider setting.
+- A Linux host build with Antigravity enabled installs a separate `agy` wrapper
+  and Bash/Zsh shell setup. The wrapper selects native file authentication with
+  a process-local unavailable D-Bus address. It preserves the original native
+  executable, existing shell content, host credentials, and desktop bus.
+  Builds inside Cooper cannot install physical-host shell integration.
+- Docker and VM use the same wrapper rule. Ordinary OAuth sessions require
+  portable file credentials. A desktop host profile is accepted only while
+  the checked host wrapper is selected. No host keyring endpoint, database,
+  credential export, or credential synchronization service is added.
+- Login, logout, and account changes occur on the host. Automatic refresh
+  writes the mounted state. Named-profile refresh writes return to active
+  host state through the existing load, conflict, and recovery rules.
 - Unknown identity, keyring-only auth, ADC, and WIF cannot overwrite a saved
   account. Shared Google state requires all known writers to stop first.
 - Native proof checks complete machine output and has an outer timeout.

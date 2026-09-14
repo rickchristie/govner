@@ -81,7 +81,11 @@ for root in %s; do test "$(cat "$HOME/$root/profile-sentinel")" = work; done
 test "${%s-unset}" = unset
 session="$HOME/%s/session"
 `, strings.Join(roots, " "), credential, stateRoot)
-	command, env, closeSession := f.profileSession(name, selection, checks+`test "$(cat "$session")" = work; printf docker > "$session"`)
+	dockerWrite := checks + `test "$(cat "$session")" = work; printf docker > "$session"`
+	if f.tool == "antigravity" {
+		dockerWrite += antigravityRefreshScript("fake-access", "docker-refreshed-access")
+	}
+	command, env, closeSession := f.profileSession(name, selection, dockerWrite)
 	args := []string{"exec"}
 	for _, value := range env {
 		args = append(args, "-e", value)
@@ -97,7 +101,11 @@ session="$HOME/%s/session"
 		f.t.Fatal(err)
 	}
 	f.startVMWithProfile(selection.ID)
-	f.execProfile(selection, checks+`test "$(cat "$session")" = docker; printf vm > "$session"`)
+	vmWrite := checks + `test "$(cat "$session")" = docker; printf vm > "$session"`
+	if f.tool == "antigravity" {
+		vmWrite += antigravityRefreshScript("docker-refreshed-access", "vm-refreshed-access")
+	}
+	f.execProfile(selection, vmWrite)
 	original := f.state.ID
 	f.state, err = f.manager.Restart(f.ctx, f.state.ID)
 	if err != nil {
@@ -107,7 +115,11 @@ session="$HOME/%s/session"
 	if f.state.ID != original {
 		f.t.Fatal("restart changed selected runtime identity")
 	}
-	f.execProfile(selection, checks+`test "$(cat "$session")" = vm`)
+	restartCheck := checks + `test "$(cat "$session")" = vm`
+	if f.tool == "antigravity" {
+		restartCheck += antigravityRefreshScript("vm-refreshed-access", "vm-refreshed-access")
+	}
+	f.execProfile(selection, restartCheck)
 	infos, err := vm.ListInfo(f.ctx, f.run.Namespace, nil)
 	if err != nil {
 		f.t.Fatal(err)
@@ -137,10 +149,40 @@ session="$HOME/%s/session"
 			f.t.Fatal("VM cleanup removed saved sessions")
 		}
 	}
+	if f.tool == "antigravity" {
+		if _, err := service.Load(f.ctx, profiles.LoadRequest{Harness: f.tool, Name: "Work"}); err != nil {
+			f.t.Fatal(err)
+		}
+		stored := readFile(f.t, filepath.Join(f.home, ".gemini", "antigravity-cli", "antigravity-oauth-token"))
+		if !strings.Contains(stored, "vm-refreshed-access") {
+			f.t.Fatal("host load lost the profile token written in the VM")
+		}
+	}
 	if f.starts != 2 || f.loads != 2 {
 		f.t.Fatalf("profile check used %d starts and %d imports; want two", f.starts, f.loads)
 	}
 	f.report["checks"] = []string{"profile-source-only-mapping", "complete-selected-roots", "host-state-isolation", "credential-isolation", "Docker-to-VM-session", "profile-restart", "profile-status-labels", "cache-cleanup-preserves-profiles"}
+	if f.tool == "antigravity" {
+		f.report["auth_checks"] = []string{"atomic-token-replacement", "Docker-to-VM-refreshed-token", "refreshed-token-after-restart", "load-refreshed-profile-on-host"}
+	}
+}
+
+// A fabricated refresh replaces the whole file, as native clients can do.
+// Directory mounts must carry the new inode across Docker, VM, and host load.
+// This does not claim a successful OAuth request to a real provider.
+func antigravityRefreshScript(before, after string) string {
+	return fmt.Sprintf(`
+node - <<'JS'
+const fs = require('fs');
+const path = process.env.HOME + '/.gemini/antigravity-cli/antigravity-oauth-token';
+const token = JSON.parse(fs.readFileSync(path, 'utf8'));
+if (token.token.access_token !== %q) throw new Error('profile refresh was not shared');
+token.token.access_token = %q;
+token.token.refresh_token = %q;
+fs.writeFileSync(path + '.next', JSON.stringify(token), {mode: 0o600});
+fs.renameSync(path + '.next', path);
+JS
+`, before, after, after+"-refresh")
 }
 
 func (f *developmentFixture) profileSession(id string, selection profiles.Selection, script string) ([]string, []string, func()) {

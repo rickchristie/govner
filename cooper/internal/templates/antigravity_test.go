@@ -20,6 +20,7 @@ func TestAntigravityNativeImageContract(t *testing.T) {
 		"COOPER_CLI_TOOL=antigravity", "COOPER_CLI_EXECUTABLE=agy", "COOPER_CLIPBOARD_MODE=x11",
 		"COOPER_CLI_AUTO_APPROVE=\"--dangerously-skip-permissions\"", "AGY_CLI_DISABLE_AUTO_UPDATE=true",
 		"sha512sum -c -", "tar -xOzf", "/opt/cooper/bin/agy", "playwright@1.57.0",
+		"/opt/cooper/libexec/agy", "export DBUS_SESSION_BUS_ADDRESS=" + antigravity.FileBusAddress,
 		"PLAYWRIGHT_DRIVER_PATH=/opt/cooper/agy-playwright", "PLAYWRIGHT_NODEJS_PATH=/usr/local/bin/node",
 	} {
 		if !strings.Contains(text, want) {

@@ -19,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/rickchristie/govner/cooper/internal/antigravity"
 	"github.com/rickchristie/govner/cooper/internal/profiles"
 	"github.com/rickchristie/govner/cooper/internal/workload"
 )
@@ -27,9 +28,13 @@ const maximumDocument = 2 << 20
 
 var errUnknown = errors.New("local account identity is not available for this login method")
 
-type Reader struct{}
+type Reader struct {
+	// AntigravityHostHome is optional. Host profile operations supply it so
+	// the reader can check the managed wrapper without querying the keyring.
+	AntigravityHostHome string
+}
 
-func (Reader) Read(ctx context.Context, harness string, mounts []workload.MountSpec, env map[string]string) (profiles.Identity, error) {
+func (reader Reader) Read(ctx context.Context, harness string, mounts []workload.MountSpec, env map[string]string) (profiles.Identity, error) {
 	if err := ctx.Err(); err != nil {
 		return profiles.Identity{}, err
 	}
@@ -48,6 +53,7 @@ func (Reader) Read(ctx context.Context, harness string, mounts []workload.MountS
 	case "grok":
 		identity, err = view.grok()
 	case "antigravity":
+		view.antigravityFileAuth = reader.AntigravityHostHome != "" && antigravity.HostFileAuthActive(reader.AntigravityHostHome)
 		identity, err = view.antigravity()
 	default:
 		return profiles.Identity{}, fmt.Errorf("profiles do not support harness %q", harness)
@@ -59,8 +65,9 @@ func (Reader) Read(ctx context.Context, harness string, mounts []workload.MountS
 }
 
 type stateView struct {
-	mounts      []workload.MountSpec
-	environment map[string]string
+	mounts              []workload.MountSpec
+	environment         map[string]string
+	antigravityFileAuth bool
 }
 
 func (v stateView) root(id string) (workload.MountSpec, error) {

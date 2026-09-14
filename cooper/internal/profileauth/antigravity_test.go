@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rickchristie/govner/cooper/internal/antigravity"
 	"github.com/rickchristie/govner/cooper/internal/profiles"
 	"github.com/rickchristie/govner/cooper/internal/usercontext"
 )
@@ -20,6 +21,86 @@ func googleToken(subject, method, project, region, access string) map[string]any
 		"token":       map[string]string{"access_token": access, "refresh_token": "fake-refresh", "expiry": "2099-01-01T00:00:00Z"},
 		"id_token":    "fixture." + base64.RawURLEncoding.EncodeToString(claims) + ".fake-signature",
 		"auth_method": method, "project_id": project, "region": region,
+	}
+}
+
+func TestAntigravityDesktopProfilesUseCheckedHostWrapper(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("managed file authentication requires Linux")
+	}
+	f := antigravityFixture(t)
+	home := filepath.Dir(f.path("antigravity-state", ""))
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "agy"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	f.env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/cooper-fake-desktop-bus"
+	account, err := usercontext.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	account.Home = home
+	service := profiles.New(profiles.Options{CooperDir: t.TempDir(), Workspace: t.TempDir(), Account: account,
+		Environment: f.env, CredentialNames: CredentialNames, Reader: Reader{AntigravityHostHome: home},
+		Guard: profiles.GuardFunc(func(context.Context, []string) error { return nil })})
+	write := func(subject, access string) {
+		if err := os.MkdirAll(f.path("antigravity-state", "antigravity-cli"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		f.write("antigravity-state", "antigravity-cli/antigravity-oauth-token", googleToken(subject, "consumer", "", "", access))
+	}
+	save := func() {
+		if _, err := service.Save(t.Context(), profiles.SaveRequest{Harness: "antigravity"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	load := func(name string) {
+		if _, err := service.Load(t.Context(), profiles.LoadRequest{Harness: "antigravity", Name: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("personal", "personal-access")
+	if _, err := service.Save(t.Context(), profiles.SaveRequest{Harness: "antigravity"}); err == nil {
+		t.Fatal("unwrapped desktop authorized a file account")
+	}
+	setup, err := antigravity.InstallHostFileAuth(t.Context(), home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Dir(setup.Wrapper)+":"+os.Getenv("PATH"))
+	save()
+	load("Work")
+	write("work", "work-access")
+	save()
+	load("Default")
+	work, err := service.Select(t.Context(), "antigravity", "Work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A runtime refresh changes the selected profile's token, not its account.
+	// Load must carry that write back to the active host root.
+	refreshed, err := json.Marshal(googleToken("work", "consumer", "", "", "refreshed-work-access"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mount := range work.Paths.Mounts {
+		if mount.ID == "antigravity-state" {
+			if err := os.WriteFile(filepath.Join(mount.Source, "antigravity-cli/antigravity-oauth-token"), refreshed, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	load("Work")
+	data, err := os.ReadFile(f.path("antigravity-state", "antigravity-cli/antigravity-oauth-token"))
+	if err != nil || !strings.Contains(string(data), "refreshed-work-access") {
+		t.Fatal("load lost the saved profile's refreshed credential")
+	}
+	// This service existed before setup. It must also detect a later PATH
+	// change rather than retaining permission from an earlier observation.
+	t.Setenv("PATH", bin+":/usr/bin:/bin")
+	if _, err := service.Save(t.Context(), profiles.SaveRequest{Harness: "antigravity"}); err == nil {
+		t.Fatal("a stale wrapper observation authorized a desktop save")
 	}
 }
 

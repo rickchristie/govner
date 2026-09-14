@@ -152,7 +152,7 @@ and unsupported credentials fail without putting token contents in errors.
 | Claude | Linux OAuth account UUID plus organization UUID, with stored access/refresh credentials; Anthropic API credential | Keychain OAuth on macOS, external OAuth tokens/helpers, and third-party cloud modes are not copied as a supported login. |
 | Copilot | Host plus login from a stored plaintext token; supported token environment | OS keychain state is outside the root snapshot. A file login must explicitly use plaintext storage or disable keytar. |
 | OpenCode | Sorted provider identity set; API credentials; OAuth records with stable account IDs | An opaque OAuth token without a stable account ID cannot safely select a profile. External cloud/helper credentials need separate support. |
-| Antigravity | Linux file OAuth Google subject/audience plus auth method/project/region; Gemini API credential with explicit Gemini provider | Shared `.gemini` state. OS keyring, ADC, WIF, and external credential helpers are not supported named identities. |
+| Antigravity | Linux file OAuth Google subject/audience plus auth method/project/region; Gemini API credential with explicit Gemini provider | Shared `.gemini` state. Desktop OAuth requires Cooper's checked host `agy` wrapper from `cooper build`. OS keyring, ADC, WIF, and external credential helpers are not supported named identities. |
 | Grok | Stored scope set and stable user/organization IDs for Grok/OIDC; API credentials | External auth providers, arbitrary auth-file paths, and legacy web-login records are not supported profile identities. |
 
 OAuth token refresh keeps an identity when the stable account identifiers stay

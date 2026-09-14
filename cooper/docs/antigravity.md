@@ -1,16 +1,26 @@
 # Antigravity CLI
 
-Antigravity is experimental in Cooper 0.5.0. Host keyring authentication is
-not shared with Docker or VM sessions. Physical-host login reuse, conversation
-continuity, token refresh, and clipboard acceptance remain open. These checks
-are deferred from the 0.5.0 release; the private file-account results below
-do not establish full host compatibility.
+Antigravity remains experimental. Linux host setup uses a Cooper wrapper to
+select file authentication.
+Docker and VM sessions use the same file-storage rule. Cooper does not share
+the host keyring. The checks below distinguish local test results from real
+host login, refresh, and clipboard acceptance.
 
 Cooper uses Google's native terminal executable, `agy`. The Cooper tool name
 is `antigravity`. This integration does not install the Antigravity desktop
 application, an extension, or a Python package with the same name.
 
-Enable Antigravity in `cooper configure`, then build. These commands open the
+Install native agy on the Linux host and enable Antigravity in
+`cooper configure`. Build, activate the wrapper, and sign in on the host:
+
+```sh
+cooper build
+. "$HOME/.local/share/cooper/antigravity/shell.sh"
+agy
+```
+
+The build also adds shell setup for new Bash and Zsh sessions. Use the host
+wrapper for login, logout, and account changes. Then these commands open the
 usual Cooper shell:
 
 ```sh
@@ -35,7 +45,8 @@ Mirror and Pin never substitute Latest for an unavailable historical release.
 Cooper retains reviewed 1.2.2 records for offline resolution. A later native
 release needs review of its helper dependency before Cooper can build it.
 
-The image installs `agy` in `/opt/cooper/bin`, outside state mounts. Native
+The image installs the wrapper at `/opt/cooper/bin/agy` and the native binary
+at `/opt/cooper/libexec/agy`, outside state mounts. Native
 1.2.2 uses a Playwright 1.57.0 driver whose old download endpoints return 404.
 Cooper installs that exact official driver through npm and selects the image's
 Linux Node runtime. It does not use a host executable cache that can contain
@@ -72,10 +83,37 @@ limit. The ordinary Cooper Docker/VM boundary remains in force.
 
 ## Accounts and profiles
 
-For an ordinary launch, sign in with the host CLI first. A login that is
-stored only in an OS keyring cannot be restored by a directory mount. Cooper
-does not forward the host session bus or copy keyring databases. Such a login
-can require a separate native login in the workload.
+For an ordinary launch, sign in through the host wrapper first. It sets
+`DBUS_SESSION_BUS_ADDRESS=unix:path=/dev/null` only for agy and its children.
+Native 1.2.2 then uses its token file inside `~/.gemini/antigravity-cli`.
+The desktop bus and unrelated applications keep their normal environment.
+Child applications that need D-Bus can be affected. The
+[file-auth verification report](../dev/antigravity-file-auth-verification.md)
+records physical-host browser and clipboard coverage.
+
+An existing keyring login is not migrated or deleted. The first wrapped launch
+can therefore show a sign-in screen. Complete that login on the host. The
+credential is stored in an ordinary file, subject to filesystem permissions,
+instead of the host keyring. Cooper does not export secrets from the keyring.
+An OAuth launch without supported file credentials stops and shows the host
+login command. Explicit API and external-provider modes retain their native
+selection rules; they are not silently changed to OAuth.
+
+The wrapper and its non-secret installation record live under
+`~/.local/share/cooper/antigravity`. The original native executable remains at
+its installed path, so replacement of that executable does not replace the
+wrapper. Build appends a marked block to `.bashrc`, the selected Bash login
+file, and `.zshrc` (under `ZDOTDIR` when exported to the build). It preserves existing content and
+symlinks. The block selects the wrapper before other `agy` commands and clears
+an existing `agy` alias or function in that shell. Changed Cooper setup files
+are retained and reported, rather than overwritten.
+
+Build cannot change the current parent shell. Use the printed source command
+or open a new terminal. A build inside Cooper skips host shell setup; run it
+on the physical host. If native agy is absent, build reports the missing host
+setup while still permitting image preparation. Re-run build after installing
+the native host CLI. The D-Bus workaround is Linux-specific; it does not
+disable macOS Keychain.
 
 Named profiles use the existing profile service:
 
@@ -92,6 +130,12 @@ The first profile is `Default`. Loading another profile saves outgoing changes
 first. Profile selection changes mount sources only. It keeps targets, the
 workspace, and the built OS account unchanged.
 
+Ordinary sessions write refreshed tokens directly to the mounted host files.
+Named sessions write them to the selected saved profile. `cooper load` restores
+that updated profile to the active host root. No separate token synchronization
+service is needed. Exit the current writer before moving between host, Docker,
+and VM sessions; stop related runtimes before save/load.
+
 The local identity adapter supports the reviewed Linux file OAuth schema for
 consumer and GCP accounts. It uses Google's subject and audience plus auth
 method, project, and region. Email is only a display label. Access-token
@@ -99,8 +143,15 @@ refresh does not select another profile. Gemini API-key profiles require
 `modelProvider: gemini` in the native settings and include the key and endpoint
 in their identity. A key alone does not select API billing.
 
+On a Linux desktop, the identity reader checks that `agy` resolves to Cooper's
+unchanged wrapper and that the original executable still exists. This permits
+file profiles even while the desktop session bus is available. A changed
+wrapper or PATH causes the desktop file identity check to fail. Keep normal
+host launches on the managed wrapper.
+
 Named profiles do not support ADC, WIF, external credential helpers, macOS
-keychain auth, or a file account that can be superseded by a host keyring.
+keychain auth, or an unwrapped desktop file account whose active keyring
+identity is unknown.
 Unknown or conflicting identity cannot overwrite a known account. Cooper
 keeps recovery state and reports the issue. See [Account profiles](profiles.md)
 for environment-credential load limits and recovery procedures.
@@ -142,8 +193,21 @@ This private fixture ran inside a released Cooper VM. A separate local-model
 probe verified native Ctrl+V image paste from X11 with exact image bytes.
 Concurrent containers created separate conversations in one shared state root,
 then restored each other's conversations. Their observed TCP listeners used
-loopback addresses. Physical-host continuity and clipboard bridge acceptance
-remain separate checks.
+loopback addresses.
+
+A later physical-host run verified wrapped file login, fresh Bash account
+restore, host/Docker/VM conversation continuity, named-profile save/load and
+VM restart, natural VM token refresh followed by host load, and native
+text/image paste in all three modes through physical X11. It used one real
+consumer OAuth account. See the
+[file-auth verification report](../dev/antigravity-file-auth-verification.md)
+for profile and refresh results and the remaining test limits.
 
 The [account acceptance procedure](../dev/antigravity-acceptance.md) uses an
 isolated setup and records the real-login checks separately.
+
+To remove host shell integration, remove the marked Cooper Antigravity blocks
+from the shell startup files and the Cooper-owned
+`~/.local/share/cooper/antigravity` directory, then open a new terminal. This
+does not remove native agy, file credentials, or saved profiles. Normal Cooper
+runtime cleanup preserves this host setup so cleanup cannot change login mode.

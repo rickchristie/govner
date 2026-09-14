@@ -39,7 +39,8 @@ func New(cooperDir, workspace, home string) (*profiles.Service, error) {
 		noteSessionBus(environment, filepath.Join("/run/user", strconv.Itoa(account.UID), "bus"))
 	}
 	return profiles.New(profiles.Options{CooperDir: cooperDir, Workspace: workspace, Account: account,
-		Environment: environment, CredentialNames: profileauth.CredentialNames, Reader: profileauth.Reader{}, Guard: HostUsage{}}), nil
+		Environment: environment, CredentialNames: profileauth.CredentialNames,
+		Reader: profileauth.Reader{AntigravityHostHome: home}, Guard: HostUsage{}}), nil
 }
 
 // The native keyring library can find the default user bus without an env

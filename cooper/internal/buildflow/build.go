@@ -304,6 +304,9 @@ func (p *Prepared) Build(opts Options) error {
 	if err != nil {
 		return err
 	}
+	if err := p.prepareHostAuth(opts, account.Home); err != nil {
+		return err
+	}
 	uidGidArgs := account.BuildArgs()
 
 	// Step 0: build the proxy image first because the base/tool images depend on shared runtime assets.

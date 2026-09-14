@@ -3,11 +3,11 @@ package workload
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
+
+	"github.com/rickchristie/govner/cooper/internal/hostpath"
 )
 
 // ValidateAgentStatePath checks a complete state root before profile copying
@@ -119,55 +119,4 @@ func hostStateOverlapError(hostPath, cooperDir string) error {
 // resolveExistingPath follows existing links even when their targets are absent.
 // Profile rollback moves whole roots, so an unchanged link can be temporarily
 // dangling. Walking upward with EvalSymlinks would lose that link's target.
-func resolveExistingPath(path string) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	volume := filepath.VolumeName(abs)
-	resolved := volume + string(filepath.Separator)
-	pending := strings.Split(strings.TrimPrefix(abs, volume), string(filepath.Separator))
-	links := 0
-	for len(pending) > 0 {
-		part := pending[0]
-		pending = pending[1:]
-		if part == "" || part == "." {
-			continue
-		}
-		if part == ".." {
-			resolved = filepath.Dir(resolved)
-			continue
-		}
-		next := filepath.Join(resolved, part)
-		info, err := os.Lstat(next)
-		if errors.Is(err, fs.ErrNotExist) {
-			resolved = next
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
-		if info.Mode()&os.ModeSymlink == 0 {
-			if len(pending) > 0 && !info.IsDir() {
-				return "", &os.PathError{Op: "resolve", Path: next, Err: syscall.ENOTDIR}
-			}
-			resolved = next
-			continue
-		}
-		links++
-		if links > 255 {
-			return "", &os.PathError{Op: "resolve", Path: path, Err: syscall.ELOOP}
-		}
-		target, err := os.Readlink(next)
-		if err != nil {
-			return "", err
-		}
-		if filepath.IsAbs(target) {
-			volume = filepath.VolumeName(target)
-			resolved = volume + string(filepath.Separator)
-			target = strings.TrimPrefix(target, volume)
-		}
-		pending = append(strings.Split(target, string(filepath.Separator)), pending...)
-	}
-	return resolved, nil
-}
+func resolveExistingPath(path string) (string, error) { return hostpath.Resolve(path) }
