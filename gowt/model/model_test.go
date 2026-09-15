@@ -321,6 +321,7 @@ func TestPackageTerminalReconcilesNestedUnfinishedWorkloads(t *testing.T) {
 			const pkg = "example.com/project/pkg"
 			tree := NewTestTree()
 			processEvents(t, tree,
+				TestEvent{Action: "run", Package: pkg, Test: "TestParent"},
 				TestEvent{Action: "run", Package: pkg, Test: "TestParent/child"},
 				TestEvent{Action: tt.action, Package: pkg},
 			)
@@ -498,7 +499,7 @@ func assertTreeAggregates(t *testing.T, tree *TestTree, step int) {
 func expectedNodeState(t *testing.T, node *TestNode, step int) expectedTreeState {
 	t.Helper()
 	state := expectedTreeState{status: node.eventStatus}
-	if node.Parent != nil {
+	if node.Parent != nil && node.eventStatus != "" {
 		state.total = 1
 		switch node.eventStatus {
 		case StatusPassed:
@@ -708,7 +709,7 @@ func TestNestedTestsBuildHierarchyAndPropagateAggregates(t *testing.T) {
 	assert.Same(t, pkgNode, parent.Parent)
 	assert.Same(t, parent, child.Parent)
 	assert.Same(t, child, leaf.Parent)
-	assert.Equal(t, []int{3, 3, 3, 1}, []int{
+	assert.Equal(t, []int{1, 1, 1, 1}, []int{
 		tree.TotalCount,
 		pkgNode.TotalCount,
 		parent.TotalCount,
@@ -736,7 +737,7 @@ func TestRepeatedEventsReuseExistingNodes(t *testing.T) {
 	assert.Same(t, first, tree.GetNode("pkg/TestOne/subtest"))
 	assert.Len(t, tree.Packages["pkg"].Children, 1)
 	assert.Len(t, tree.Packages["pkg"].Children[0].Children, 1)
-	assert.Equal(t, 2, tree.TotalCount)
+	assert.Equal(t, 1, tree.TotalCount)
 	assert.Equal(t, 1, tree.RunningCount, "a duplicate run event must not double-count running tests")
 }
 

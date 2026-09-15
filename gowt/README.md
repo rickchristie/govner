@@ -158,6 +158,11 @@ Press `Space` to toggle Focus mode, which filters the tree to show only:
 
 This is useful for quickly identifying and fixing failing tests in large test suites.
 
+Go test names can contain `/` without a separate test at each path level. Gowt
+shows those levels as groups. Their status comes from their children, and they
+do not add to the test counts. A package failure does not change a group of
+passed tests into a failed test. Go's explicit parent test results still count.
+
 ## Clipboard Support
 
 The `c` key in log view copies test output to your clipboard. Supported clipboard tools:

@@ -66,16 +66,18 @@ type TestNode struct {
 	// eventStatus is the status from this node's own test2json event. Status can
 	// also become failed because a child failed. Keep these values separate so a
 	// child result cannot hide this node's running state or corrupt its counters.
+	// An empty eventStatus marks a group created only by a slash in a test name.
+	// Such a group has no result or count of its own.
 	eventStatus           TestStatus
 	nonTestFailureCounted bool
 
-	// Aggregated counts (includes self + all descendants)
+	// Aggregated counts include tests with direct events, from self and descendants.
 	PassedCount  int // Count of passed tests
 	FailedCount  int // Count of failed tests
 	SkippedCount int // Count of skipped tests
 	RunningCount int // Count of running tests
 	CachedCount  int // Count of cached tests
-	TotalCount   int // Total test count (excludes packages)
+	TotalCount   int // Total test count (excludes packages and groups without events)
 }
 
 // TestTree holds the entire test hierarchy
@@ -166,14 +168,17 @@ func (t *TestTree) ProcessEvent(event TestEvent) bool {
 	}
 
 	// Test-level event
-	testPath := pkgPath + "/" + event.Test
-	_, testExisted := t.NodeIndex[testPath]
 	testNode := t.getOrCreateTest(pkgNode, event.Test)
 	if testNode == nil {
 		return false // Skip invalid test names
 	}
+	firstTestEvent := testNode.eventStatus == ""
+	if firstTestEvent {
+		testNode.eventStatus = StatusPending
+		t.propagateCountDelta(testNode, 1, "total")
+	}
 	changed := t.handleTestEvent(testNode, event)
-	return packageCreated || !testExisted || changed
+	return packageCreated || firstTestEvent || changed
 }
 
 // PackagePathForEvent returns the package that owns an event in the Gowt tree.
@@ -419,21 +424,21 @@ func (t *TestTree) getOrCreateTest(pkgNode *TestNode, testName string) *TestNode
 		child := findChild(current, part)
 		if child == nil {
 			child = &TestNode{
-				Name:        part,
-				NameWidth:   runewidth.StringWidth(part),
-				FullPath:    fullPath,
-				Package:     pkgNode.Package,
-				Status:      StatusPending,
-				eventStatus: StatusPending,
-				Parent:      current,
-				Children:    make([]*TestNode, 0),
-				Expanded:    false,
-				Depth:       i + 1, // Depth relative to package (TestFoo=1, TestFoo/sub=2, etc.)
+				Name:      part,
+				NameWidth: runewidth.StringWidth(part),
+				FullPath:  fullPath,
+				Package:   pkgNode.Package,
+				Status:    StatusPending,
+				Parent:    current,
+				Children:  make([]*TestNode, 0),
+				Expanded:  false,
+				Depth:     i + 1, // Depth relative to package (TestFoo=1, TestFoo/sub=2, etc.)
 			}
 			current.Children = append(current.Children, child)
 			t.NodeIndex[fullPath] = child // Add to index for O(1) lookup
-			// Propagate TotalCount to node and all ancestors
-			t.propagateCountDelta(child, 1, "total")
+			// A slash can belong to a case name passed to t.Run. Intermediate
+			// rows are groups until an event names them as tests. Count only
+			// the row named by the event in ProcessEvent.
 		}
 		current = child
 	}
@@ -504,6 +509,8 @@ func (t *TestTree) handlePackageEvent(node *TestNode, event TestEvent) bool {
 // versions emit run and output records but no test-level pass or bench record.
 // A terminal package event is authoritative, so no descendant may remain in a
 // pending or running state after it arrives.
+// Groups with no direct event keep their empty eventStatus. Their status comes
+// from their children; a package failure must not fail a group of passed tests.
 func (t *TestTree) finalizeUnfinishedTests(node *TestNode, status TestStatus) {
 	for _, child := range node.Children {
 		t.finalizeUnfinishedTests(child, status)

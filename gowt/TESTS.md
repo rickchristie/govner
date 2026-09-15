@@ -135,6 +135,10 @@ and does not use wall-clock values for status.
   - missing load arguments, usage, terminal errors, and final exit propagation
 - `storybook_test.go`
   - deterministic fixture states and injected terminal startup
+- `test_replay_test.go`
+  - anonymized parallel test replay through saved-file loading and live messages
+  - slash-created groups keep child results when a different test fails
+  - exact failure rows, test counts, and Focus filtering
 
 `runLoadModeWithProgram`, `runLiveModeWithProgram`, and
 `runStorybookModeWithProgram` accept the terminal runner as an internal
@@ -160,6 +164,11 @@ exercise orchestration without opening a TTY.
 - `logbuffer_test.go`
   - references, invalid bounds, node-log metrics, full/incremental rendering,
     empty logs, overlapping references, prepended diagnostics, and rebuilds
+- `test_groups_test.go`
+  - only names with direct Go events add to the test counts
+  - groups keep child results across package pass, skip, and fail events
+  - a later direct event makes a group count as a test exactly once
+  - paused real tests still receive a result when the package ends
 
 Event tests call real `TestTree.ProcessEvent`; they do not pre-fill derived
 counts. This catches drift between event transitions and rendered aggregates.
@@ -321,6 +330,10 @@ and counters. Focused transition tests assert each direct event state.
 
 ## State ownership invariants
 
+- A slash in a case name can create a tree group without a Go test event.
+  Its direct event status stays empty and its result comes from its children.
+  Package completion applies only to unfinished tests with direct events.
+  This prevents a failed package from adding failures to passed groups.
 - `Update` is the only application state-transition owner. Commands return
   typed facts and never call `TestTree.ProcessEvent`.
 - `View` is pure. Tree rendering computes presentation without writing cache
