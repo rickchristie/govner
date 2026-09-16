@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -3575,3 +3576,22 @@ var (
 	_ = auth.ResolveTokens
 	_ = names.Generate
 )
+
+func TestCopyLogTextDoesNotStageClipboardAccess(t *testing.T) {
+	a := NewCooperApp(config.DefaultConfig(), t.TempDir())
+	writer := &recordingClipboardWriter{}
+	a.SetClipboardWriter(writer)
+	if err := a.CopyText(context.Background(), "full log line"); err != nil {
+		t.Fatal(err)
+	}
+	if a.ClipboardSnapshot() != nil {
+		t.Fatal("copy granted workload clipboard access")
+	}
+	if !writer.contains("full log line") {
+		t.Fatal("selected log text was not written")
+	}
+	writer.err = errors.New("copy denied")
+	if err := a.CopyText(context.Background(), "other line"); !errors.Is(err, writer.err) {
+		t.Fatalf("copy error=%v", err)
+	}
+}

@@ -52,7 +52,7 @@ func TestRootFrameClampsOversizedScreenAndRoutesMouse(t *testing.T) {
 		t.Fatalf("fixed footer missing from final row: %q", lines[len(lines)-1])
 	}
 
-	m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	m.Update(tea.MouseMsg{Y: 5, Button: tea.MouseButtonWheelDown})
 	if child.mouseEvents != 1 {
 		t.Fatalf("active screen mouse events = %d, want 1", child.mouseEvents)
 	}

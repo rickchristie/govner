@@ -142,7 +142,12 @@ func (m *Model) Init() tea.Cmd {
 
 // Update satisfies theme.SubModel.
 func (m *Model) Update(msg tea.Msg) (theme.SubModel, tea.Cmd) {
+	// Keep scroll geometry ready before the first key or mouse event.
+	defer func() { m.viewport.SetContent(m.renderBody(max(2, m.width))) }()
+
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = max(2, msg.Width), msg.Height
 	case tea.MouseMsg:
 		if !m.editing {
 			m.viewport.HandleMouse(msg, m.bodyHeight())
@@ -305,6 +310,11 @@ func (m *Model) bodyHeight() int {
 
 // View satisfies the SubModel interface.
 func (m *Model) View(width, height int) string {
+	view := *m
+	return view.renderView(width, height)
+}
+
+func (m *Model) renderView(width, height int) string {
 	if width < 2 {
 		width = 2
 	}

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/rickchristie/govner/cooper/internal/tableutil"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
@@ -24,22 +25,6 @@ func (m *Model) render(width, height int) string {
 	sections = append(sections, listView)
 
 	result := strings.Join(sections, "\n")
-
-	// Detail shown as modal overlay when open.
-	if m.detailOpen {
-		if entry := m.selectedEntry(); entry != nil {
-			// Pad result to fill height so the overlay covers the full area.
-			resultLines := strings.Split(result, "\n")
-			for len(resultLines) < height {
-				resultLines = append(resultLines, "")
-			}
-			bg := strings.Join(resultLines, "\n")
-
-			modal := m.renderDetailModal(*entry, width, height)
-			return lipgloss.Place(width, height, lipgloss.Left, lipgloss.Top,
-				components.DimContent(bg)) + "\r" + modal
-		}
-	}
 
 	return result
 }
@@ -106,6 +91,15 @@ func (m *Model) renderDetailModal(entry HistoryEntry, width, height int) string 
 
 // renderColumnHeader renders the table column header.
 func (m *Model) renderColumnHeader(width int) string {
+	if m.mode == ModeAll {
+		filter := "All"
+		if m.filter == ModeAllowed {
+			filter = "Allowed"
+		} else if m.filter == ModeBlocked {
+			filter = "Blocked"
+		}
+		return theme.ColumnHeaderStyle.Render(" TIME      RESULT    DOMAIN / SOURCE / REASON   [f " + filter + "]")
+	}
 	var tbl *tableutil.TableRenderer
 	if m.mode == ModeAllowed {
 		tbl = tableutil.NewTable("TIME", "DOMAIN", "SOURCE", "METHOD", "STATUS", "TYPE")
@@ -137,6 +131,24 @@ func (m *Model) renderList(width, height int) string {
 
 // renderRow renders a single list row.
 func (m *Model) renderRow(entry HistoryEntry, selected bool, width int) string {
+	if m.mode == ModeAll {
+		result := theme.FlameStyle.Render("Blocked")
+		if entry.Allowed {
+			result = theme.ProofStyle.Render("Allowed")
+		}
+		arrow := "  "
+		if selected {
+			arrow = theme.SelectionArrowStyle.Render("▶ ")
+		}
+		domainWidth := max(10, width-52)
+		row := arrow + theme.TimestampStyle.Render(entry.Timestamp.Format("15:04:05")) + "  " + result + "  " +
+			lipgloss.NewStyle().Width(domainWidth).Render(ansi.Truncate(entry.Request.Domain, domainWidth, "…")) + "  " +
+			theme.SourceStyle.Render(entry.Request.SourceIP) + "  " + m.renderType(entry.Decision)
+		if selected {
+			return theme.RowSelectedStyle.Width(width).Render(ansi.Truncate(row, width, ""))
+		}
+		return ansi.Truncate(row, width, "")
+	}
 	// Indicator arrow for selected row.
 	arrow := "  "
 	if selected {

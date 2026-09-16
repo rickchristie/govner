@@ -59,6 +59,8 @@ func NewTestApp(cfg *config.Config, aclCh chan ACLRequest, bridgeCh chan Executi
 func (t *TestApp) Start(_ context.Context, _ func(int, int, string, error)) error { return nil }
 func (t *TestApp) Stop() error                                                    { return nil }
 
+func (t *TestApp) CopyText(context.Context, string) error { return nil }
+
 func (t *TestApp) ACLRequests() <-chan ACLRequest     { return t.aclCh }
 func (t *TestApp) ACLDecisions() <-chan DecisionEvent { return t.decisionCh }
 func (t *TestApp) BridgeLogs() <-chan ExecutionLog    { return t.bridgeCh }

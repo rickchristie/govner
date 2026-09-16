@@ -1115,6 +1115,12 @@ func (a *CooperApp) SetClipboardWriter(writer clipboard.Writer) {
 	a.clipboardWriter = writer
 }
 
+// CopyText writes an explicit user selection without staging a clipboard grant
+// for workloads. The caller supplies a deadline for the desktop backend.
+func (a *CooperApp) CopyText(ctx context.Context, text string) error {
+	return a.clipboardWriter.WriteText(ctx, []byte(text))
+}
+
 // ----- Internal helpers -----
 
 // ensurePlaywrightSupportDirs creates the host directories for Playwright

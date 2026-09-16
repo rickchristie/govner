@@ -1,11 +1,13 @@
 package launch
 
 import (
+	"errors"
 	"os"
-	"strings"
+	"runtime"
 	"testing"
 
 	"github.com/rickchristie/govner/cooper/internal/config"
+	"github.com/rickchristie/govner/cooper/internal/profileauth"
 	"github.com/rickchristie/govner/cooper/internal/profiles"
 )
 
@@ -18,8 +20,11 @@ func TestAntigravityLaunchStopsBeforeCreatingSessionFiles(t *testing.T) {
 	dir := t.TempDir()
 	request := SessionRequest{Config: config.DefaultConfig(), CooperDir: dir, RuntimeID: "agy-file-test", ToolName: "antigravity", WorkspaceDir: t.TempDir()}
 	session, _, err := PrepareSession(request)
-	if err == nil || session != nil || !strings.Contains(err.Error(), "Antigravity") {
+	if err == nil || session != nil {
 		t.Fatalf("missing OAuth files started a session: %v", err)
+	}
+	if runtime.GOOS == "linux" && !errors.Is(err, profileauth.ErrAntigravitySetupRequired) {
+		t.Fatalf("missing OAuth files did not request setup: %v", err)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 0 {

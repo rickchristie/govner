@@ -11,6 +11,10 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/workload"
 )
 
+// ErrAntigravitySetupRequired stops launch before a session starts. The CLI
+// and VM commands show this normal setup instruction and exit successfully.
+var ErrAntigravitySetupRequired = errors.New("Please run cooper build and then run agy to relogin")
+
 // CheckAntigravityLaunch rejects an OAuth session that would need the host
 // keyring. Explicit API and external-provider modes retain their native rules.
 // Credential values never appear in a launch error.
@@ -38,13 +42,16 @@ func CheckAntigravityLaunch(home string, mounts []workload.MountSpec, environmen
 		busPresent = true
 	}
 	if busPresent && !antigravity.HostFileAuthActive(home) {
-		return errors.New("Antigravity needs the host file-auth wrapper. Run cooper build on the host, then activate the printed shell setup")
+		return ErrAntigravitySetupRequired
 	}
 	// Native OAuth ignores Gemini API variables until modelProvider is gemini.
 	// Validate the portable OAuth record without treating an unused key as an
 	// account switch. Named profiles keep their stricter ambiguity checks.
 	view.environment = map[string]string{}
 	if _, err := view.antigravity(); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrAntigravitySetupRequired
+		}
 		return errors.New("Antigravity needs file authentication. Sign in on the host:\n  DBUS_SESSION_BUS_ADDRESS=unix:path=/dev/null agy")
 	}
 	return nil

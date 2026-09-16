@@ -265,19 +265,41 @@ cooper proof
 
 ## TUI Control Panel
 
-The control panel (`cooper up`) is the nerve center. It has these tabs:
+The control panel (`cooper up`) has these tabs:
 
 | Tab | What it does |
 |-----|-------------|
 | **Runtimes** | Live CPU, memory, disk, and health data for the proxy, barrels, and VMs. Stop or restart workloads |
 | **Monitor** | Real-time pending requests with countdown. Approve/deny once, or allow an exact hostname for this `cooper up` session |
-| **Blocked** | History of denied requests with full details |
-| **Allowed** | History of approved requests with response status codes and headers |
-| **Bridge Logs** | Execution bridge invocations -- route, script, status, duration, stdout/stderr |
+| **Profiles** | Saved agent accounts and profile actions |
+| **History** | Allowed and blocked requests in one list. Press `f` to filter and Enter for details |
+| **Squid Logs** | The last 200 access log lines, followed by live output. Select and copy text |
+| **Bridge** | Routes and execution logs in two panes. Edit host script mappings and inspect full output |
 | **Ports** | Port forwarding rules. Add/edit/delete live (applied via SIGHUP, no restart) |
-| **Routes** | Execution bridge mappings (API path to host script). Add/edit/delete at runtime |
-| **Runtime** | Monitor timeout, history limits, clipboard TTL/size, and proxy alert sound toggle. Changes take effect immediately |
-| **About** | Version info, installed tool versions vs host versions, implicit language servers, startup warnings |
+| **Runtime** | Settings and About in two panes: live settings, tool versions, and startup warnings |
+
+In Monitor, `w` immediately allows the selected exact hostname for every
+barrel until this `cooper up` exits. The session host count stays visible.
+Press `s` to open the full list, then `r` to remove a host. This does not
+save a permanent whitelist rule.
+
+In Bridge and Runtime, click a pane or press `[` or `]` to move focus. Bridge
+uses stacked panes in a narrow terminal. Runtime keeps Settings above About.
+Each pane scrolls on its own.
+
+Squid Logs opens at the latest records. At startup, Cooper reads only the
+last 200 lines from the file, then follows new lines. The tab keeps a rolling
+200-line history so old traffic cannot fill its event queue on entry. The
+complete file remains in `~/.cooper/logs/access.log`.
+
+In either log view, click a line or drag across lines, then press `y` to copy.
+Arrow keys select lines; Shift+Up/Down extends the selection. Left/Right pans
+long lines. Copy includes the full selected lines, including text outside
+the pane. Selection pauses following; `G` resumes it. In Bridge, Enter opens
+full execution output and `y` on a list row copies the complete record.
+These copy actions write to the desktop clipboard. They do not grant a
+workload access to the clipboard. Terminal-native selection is also available
+with the terminal's mouse modifier, often Shift.
 
 **Clipboard bar** is always visible at the top -- press `c` to copy an image from your host clipboard so AI tools can paste it, `x` to clear.
 

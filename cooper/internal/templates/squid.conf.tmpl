@@ -74,7 +74,9 @@ http_access deny !Safe_ports
 # ============================================================================
 # EXTERNAL ACL - For non-whitelisted domain approval
 # ============================================================================
-external_acl_type cooper_acl ttl=0 negative_ttl=0 children-max=20 children-startup=5 %DST %SRC \
+# Keep the destination port explicit. Squid emits '-' for empty ACL data;
+# this final field is not a source address or a port.
+external_acl_type cooper_acl ttl=0 negative_ttl=0 children-max=20 children-startup=5 %DST %>rP %SRC %DATA \
     /usr/lib/squid/cooper-acl-helper --socket /var/run/cooper/acl.sock
 
 acl pending_review external cooper_acl

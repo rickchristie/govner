@@ -92,5 +92,13 @@ type SquidLogLineMsg struct {
 	Line string
 }
 
+// TabActivatedMsg lets a screen refresh its view when it becomes visible.
+type TabActivatedMsg struct{}
+
+type RuntimeLimitsChangedMsg struct {
+	MonitorTimeoutSecs int
+	BridgeLogLimit     int
+}
+
 // ClipboardTickMsg is sent on each UI tick to check clipboard TTL expiry.
 type ClipboardTickMsg struct{}

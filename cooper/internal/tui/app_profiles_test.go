@@ -19,7 +19,7 @@ func TestProfilesReceiveResultsAfterTabChange(t *testing.T) {
 	m := NewModel(fake)
 	screen := profileui.New(fake)
 	m.SetProfilesModel(screen)
-	m.SetActiveTab(theme.TabAbout)
+	m.SetActiveTab(theme.TabRuntime)
 	m.Update(profileui.ProfilesListedMsg{Items: app.ProfileStory()})
 	m.Update(profileui.ProfileActionCompletedMsg{Action: "save", Result: profiles.Result{Saved: "Default"}})
 	if !strings.Contains(screen.View(100, 25), "Saved Default") {

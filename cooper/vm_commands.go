@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -15,6 +16,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/launch"
+	"github.com/rickchristie/govner/cooper/internal/profileauth"
 	"github.com/rickchristie/govner/cooper/internal/runtimefs"
 	"github.com/rickchristie/govner/cooper/internal/statelock"
 	"github.com/rickchristie/govner/cooper/internal/vm"
@@ -222,6 +224,10 @@ func runVM(cmd *cobra.Command, args []string) error {
 		ToolName: toolName, WorkspaceDir: workspaceDir, OneShot: vmOneShot,
 		State: &selection,
 	})
+	if errors.Is(err, profileauth.ErrAntigravitySetupRequired) {
+		fmt.Fprintln(cmd.OutOrStdout(), profileauth.ErrAntigravitySetupRequired)
+		return nil
+	}
 	if err != nil {
 		return err
 	}

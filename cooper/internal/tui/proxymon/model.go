@@ -1,6 +1,7 @@
 package proxymon
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -27,11 +28,17 @@ type ACLApprover interface {
 	SessionAllowedDomains() []string
 }
 
+// SessionAccessChangedMsg reports one explicit session permission change.
+type SessionAccessChangedMsg struct {
+	Domain  string
+	Removed bool
+	Err     error
+}
+
 type sessionDialog uint8
 
 const (
 	sessionDialogNone sessionDialog = iota
-	sessionDialogAllow
 	sessionDialogManage
 )
 
@@ -43,23 +50,30 @@ type Model struct {
 	pending     []*app.PendingRequest
 	approver    ACLApprover
 	timeout     time.Duration
+	now         func() time.Time
 	sessionList components.ScrollableList
 
-	dialog               sessionDialog
-	allowModal           *components.Modal
-	pendingSessionDomain string
-	sessionDomains       []string
-	sessionMessage       string
-	sessionMessageUntil  time.Time
-	sessionError         string
+	dialog              sessionDialog
+	width, height       int
+	sessionDomains      []string
+	sessionMessage      string
+	sessionMessageUntil time.Time
+	sessionError        string
+	sessionBusy         bool
 }
 
 // New creates a new proxy monitor tab model. The approver is used to
 // approve/deny requests. timeout is the per-request approval window.
 func New(approver ACLApprover, timeout time.Duration) *Model {
+	return NewWithClock(approver, timeout, time.Now)
+}
+
+// NewWithClock gives fixtures and tests a fixed approval deadline.
+func NewWithClock(approver ACLApprover, timeout time.Duration, now func() time.Time) *Model {
 	m := &Model{
 		list:        components.NewScrollableList(0, 0),
 		approver:    approver,
+		now:         now,
 		timeout:     timeout,
 		sessionList: components.NewScrollableList(0, 0),
 	}
@@ -80,11 +94,49 @@ func (m *Model) Init() tea.Cmd {
 // Update satisfies theme.SubModel.
 func (m *Model) Update(msg tea.Msg) (theme.SubModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case SessionAccessChangedMsg:
+		m.sessionBusy = false
+		if msg.Err != nil {
+			m.sessionError = msg.Err.Error()
+			return m, nil
+		}
+		m.sessionError = ""
+		m.sessionMessage = msg.Domain + " is allowed until Cooper exits."
+		if msg.Removed {
+			m.sessionMessage = msg.Domain + " will require approval again."
+		} else {
+			m.removeRequestsForDomain(msg.Domain)
+		}
+		m.sessionMessageUntil = m.now().Add(3 * time.Second)
+		m.refreshSessionDomains()
+
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		m.list.Width, m.list.Height = msg.Width*2/5, max(1, (msg.Height-4)/2)
+		m.list.ClampScroll()
+		m.sessionList.Width, m.sessionList.Height = msg.Width, max(1, msg.Height-6)
+		m.sessionList.ClampScroll()
+	case events.RuntimeLimitsChangedMsg:
+		m.timeout = time.Duration(msg.MonitorTimeoutSecs) * time.Second
 	case tea.MouseMsg:
 		if m.dialog == sessionDialogManage {
-			m.sessionList.HandleMouse(msg)
+			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y >= 4 && msg.Y < m.height-2 {
+				index := m.sessionList.ScrollOffset + msg.Y - 4
+				if index < len(m.sessionDomains) {
+					m.sessionList.SelectedIdx = index
+				}
+			} else {
+				m.sessionList.HandleMouse(msg)
+			}
 		} else if m.dialog == sessionDialogNone {
-			m.list.HandleMouse(msg)
+			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.X < m.list.Width && msg.Y >= 4 && msg.Y < m.height {
+				index := m.list.ScrollOffset + (msg.Y-4)/2
+				if index < len(m.pending) {
+					m.list.SelectedIdx = index
+				}
+			} else {
+				m.list.HandleMouse(msg)
+			}
 		}
 		return m, nil
 	case tea.KeyMsg:
@@ -106,7 +158,7 @@ func (m *Model) Update(msg tea.Msg) (theme.SubModel, tea.Cmd) {
 		return m, nil
 	case events.AnimTickMsg:
 		m.pruneExpired()
-		if !m.sessionMessageUntil.IsZero() && time.Now().After(m.sessionMessageUntil) {
+		if !m.sessionMessageUntil.IsZero() && m.now().After(m.sessionMessageUntil) {
 			m.sessionMessage = ""
 			m.sessionMessageUntil = time.Time{}
 		}
@@ -123,9 +175,9 @@ func (m *Model) ModalActive() bool {
 
 // View satisfies SubModel. Renders the two-pane layout or empty state.
 func (m *Model) View(width, height int) string {
-	// Sort pending by time remaining (most urgent first).
-	m.sortByUrgency()
-	m.rebuildListItems()
+	if m.dialog == sessionDialogManage {
+		return m.renderSessionManager(width, height)
+	}
 
 	// Reserve a compact two-row session-access rail above the existing panes.
 	paneHeight := height - 2
@@ -244,7 +296,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 		m.pending = nil
 		m.rebuildListItems()
 	case "w":
-		m.openSessionAllowDialog()
+		return m, m.allowSelectedDomainForSession()
 	case "s":
 		m.openSessionManager()
 	}
@@ -252,117 +304,69 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 }
 
 func (m *Model) handleDialogKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
-	switch m.dialog {
-	case sessionDialogAllow:
-		switch msg.String() {
-		case "esc":
-			m.closeSessionDialog()
-		case "up", "down", "left", "right", "tab", "shift+tab":
-			if m.allowModal != nil {
-				m.allowModal.FocusConfirm = !m.allowModal.FocusConfirm
-			}
-		case "enter":
-			if m.allowModal == nil || !m.allowModal.FocusConfirm {
-				m.closeSessionDialog()
-				return m, nil
-			}
-			m.allowPendingDomainForSession()
-		}
-
-	case sessionDialogManage:
-		switch msg.String() {
-		case "esc", "s":
-			m.closeSessionDialog()
-		case "up", "k":
-			m.sessionList.MoveUp()
-		case "down", "j":
-			m.sessionList.MoveDown()
-		case "r":
-			m.revokeSelectedSessionDomain()
-		}
+	switch msg.String() {
+	case "esc", "s":
+		m.closeSessionDialog()
+	case "up", "k":
+		m.sessionList.MoveUp()
+	case "down", "j":
+		m.sessionList.MoveDown()
+	case "r", "delete":
+		return m, m.revokeSelectedSessionDomain()
 	}
 	return m, nil
 }
 
-func (m *Model) openSessionAllowDialog() {
+func (m *Model) allowSelectedDomainForSession() tea.Cmd {
+	if m.sessionBusy {
+		return nil
+	}
 	selected := m.list.Selected()
 	if selected == nil {
-		m.sessionError = "Select a pending request before allowing session access."
-		return
+		m.sessionError = "Select a pending request first."
+		return nil
 	}
-	request, ok := selected.Data.(*app.PendingRequest)
-	if !ok {
-		return
-	}
-
-	m.pendingSessionDomain = request.Request.Domain
-	body := "Automatically approve this exact hostname\n" +
-		"for every barrel until Cooper exits?\n\n" +
-		theme.DomainStyle.Bold(true).Render(request.Request.Domain) + "\n\n" +
-		"No proxy settings will be changed."
-	modal := components.NewModal(
-		theme.ModalSessionAllowDomain,
-		theme.IconShield+" Allow for This Session?",
-		body,
-		"Allow Exact Host",
-		"Cancel",
-	)
-	m.allowModal = &modal
-	m.dialog = sessionDialogAllow
-	m.sessionError = ""
-}
-
-func (m *Model) allowPendingDomainForSession() {
-	domain := m.pendingSessionDomain
-	m.closeSessionDialog()
 	if m.approver == nil {
 		m.sessionError = "Session access is unavailable."
-		return
+		return nil
 	}
-
-	normalized, err := m.approver.AllowDomainForSession(domain)
-	if err != nil {
-		m.sessionError = err.Error()
-		return
+	domain := selected.Data.(*app.PendingRequest).Request.Domain
+	approver := m.approver
+	m.sessionBusy = true
+	return func() tea.Msg {
+		normalized, err := approver.AllowDomainForSession(domain)
+		return SessionAccessChangedMsg{Domain: normalized, Err: err}
 	}
-	m.sessionError = ""
-	m.sessionMessage = normalized + " is allowed until Cooper exits."
-	m.sessionMessageUntil = time.Now().Add(3 * time.Second)
-	m.refreshSessionDomains()
-	m.removeRequestsForDomain(normalized)
 }
 
 func (m *Model) openSessionManager() {
 	m.refreshSessionDomains()
 	m.dialog = sessionDialogManage
-	m.allowModal = nil
-	m.pendingSessionDomain = ""
 	m.sessionError = ""
 }
 
-func (m *Model) revokeSelectedSessionDomain() {
+func (m *Model) revokeSelectedSessionDomain() tea.Cmd {
+	if m.sessionBusy {
+		return nil
+	}
 	selected := m.sessionList.Selected()
 	if selected == nil || m.approver == nil {
-		return
+		return nil
 	}
-	domain, ok := selected.Data.(string)
-	if !ok {
-		return
+	domain := selected.Data.(string)
+	approver := m.approver
+	m.sessionBusy = true
+	return func() tea.Msg {
+		result := SessionAccessChangedMsg{Domain: domain, Removed: true}
+		if !approver.RevokeDomainForSession(domain) {
+			result.Err = fmt.Errorf("could not remove session access for %s", domain)
+		}
+		return result
 	}
-	if !m.approver.RevokeDomainForSession(domain) {
-		m.sessionError = "Could not revoke session access for " + domain + "."
-		return
-	}
-	m.sessionError = ""
-	m.sessionMessage = domain + " will require approval again."
-	m.sessionMessageUntil = time.Now().Add(3 * time.Second)
-	m.refreshSessionDomains()
 }
 
 func (m *Model) closeSessionDialog() {
 	m.dialog = sessionDialogNone
-	m.allowModal = nil
-	m.pendingSessionDomain = ""
 }
 
 func (m *Model) refreshSessionDomains() {
@@ -400,7 +404,7 @@ func canonicalDomain(domain string) string {
 func (m *Model) addRequest(req app.ACLRequest) {
 	pr := &app.PendingRequest{
 		Request:  req,
-		Deadline: time.Now().Add(m.timeout),
+		Deadline: m.now().Add(m.timeout),
 	}
 	// decision defaults to zero value (DecisionPending).
 	m.pending = append(m.pending, pr)
@@ -421,7 +425,7 @@ func (m *Model) removeRequest(id string) {
 
 // pruneExpired removes requests whose deadline has passed.
 func (m *Model) pruneExpired() {
-	now := time.Now()
+	now := m.now()
 	var kept []*app.PendingRequest
 	for _, pr := range m.pending {
 		if now.Before(pr.Deadline) && pr.GetDecision() == app.DecisionPending {

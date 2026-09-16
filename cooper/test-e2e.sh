@@ -13,7 +13,7 @@
 #
 # No stubs, no mocks — the full flow from build to cleanup.
 #
-# Prerequisites: Docker Engine running, Go installed.
+# Prerequisites: Docker Engine running, Go installed, and ss on Linux.
 # Usage: ./test-e2e.sh
 # Cleanup only: ./test-e2e.sh clean
 set -euo pipefail
@@ -178,6 +178,13 @@ cleanup() {
 if [ "${1:-}" = "clean" ]; then
     cleanup
     exit 0
+fi
+
+# Check before image builds. Otherwise pipefail stops the loopback check
+# without a useful error after the earlier test phases have completed.
+if [ "$HOST_OS" != "Darwin" ] && ! command -v ss >/dev/null 2>&1; then
+    echo "ss is required for the loopback test; install iproute2." >&2
+    exit 1
 fi
 
 # Register cleanup on exit so we never leave containers/networks dangling.
@@ -773,6 +780,7 @@ CONFIGEOF
         pass "${fixture_name}: cooper build succeeded"
     else
         fail "${fixture_name}: cooper build failed"
+        info "Build log: /tmp/cooper-${fixture_name}-build.txt"
         docker image rm "${fixture_prefix}cooper-proxy" "${fixture_prefix}cooper-base" "$fixture_image" >/dev/null 2>&1 || true
         rm -rf "$fixture_dir"
         return

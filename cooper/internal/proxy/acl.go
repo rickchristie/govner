@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -105,14 +106,14 @@ func (pr *PendingRequest) resolve(decision ACLDecision, reason string) bool {
 // from the Squid external ACL helper running inside the proxy container, and
 // returns approve/deny decisions.
 //
-// The ACL helper connects, sends "domain port source_ip\n", and waits for
+// The ACL helper connects, sends "domain port source_ip -\n", and waits for
 // "OK\n" or "ERR\n". The listener pushes requests to the TUI via requestCh,
 // then polls for a decision until one is set or the deadline passes.
 //
 // Fail-closed: if no decision arrives before the deadline, the request is
 // automatically denied.
 // DecisionEvent is emitted when a request is resolved (approved, denied, or timed out).
-// The TUI routes these to the Blocked or Allowed history tabs.
+// The TUI routes these to the request history tab.
 type DecisionEvent struct {
 	Request  ACLRequest
 	Decision ACLDecision
@@ -413,8 +414,35 @@ func (l *ACLListener) acceptLoop() {
 	}
 }
 
+// parseACLFields reads the generated Squid format: domain port source_ip -.
+// Older generated configs omit the port. Keep their HTTPS default until the
+// user rebuilds, but never treat their source IP as a port. Squid appends '-'
+// for empty ACL data even when the template does not name %DATA.
+func parseACLFields(line string) (domain, port, sourceIP string, valid bool) {
+	parts := strings.Fields(line)
+	if len(parts) >= 3 && parts[len(parts)-1] == "-" {
+		parts = parts[:len(parts)-1]
+	}
+	switch len(parts) {
+	case 2:
+		domain, port, sourceIP = parts[0], "443", parts[1]
+	case 3:
+		domain, port, sourceIP = parts[0], parts[1], parts[2]
+	default:
+		return "", "", "", false
+	}
+	number, err := strconv.Atoi(port)
+	if err != nil || number < 1 || number > 65535 || strconv.Itoa(number) != port {
+		return "", "", "", false
+	}
+	if net.ParseIP(sourceIP) == nil {
+		return "", "", "", false
+	}
+	return domain, port, sourceIP, true
+}
+
 // handleConnection processes a single connection from the ACL helper.
-// Protocol: helper sends "domain port source_ip\n", listener responds
+// Protocol: helper sends "domain port source_ip -\n", listener responds
 // with "OK\n" or "ERR\n".
 func (l *ACLListener) handleConnection(conn net.Conn) {
 	defer conn.Close()
@@ -430,9 +458,8 @@ func (l *ACLListener) handleConnection(conn net.Conn) {
 		return
 	}
 
-	line := strings.TrimSpace(scanner.Text())
-	parts := strings.Fields(line)
-	if len(parts) < 2 {
+	domain, port, sourceIP, valid := parseACLFields(scanner.Text())
+	if !valid {
 		// Malformed request -- fail closed.
 		conn.Write([]byte("ERR\n"))
 		return
@@ -441,19 +468,9 @@ func (l *ACLListener) handleConnection(conn net.Conn) {
 	id := generateID()
 	now := time.Now()
 
-	// Squid sends: %DST %SRC (domain and source IP).
-	// Port defaults to 443 (HTTPS CONNECT tunnels).
-	port := "443"
-	sourceIP := parts[1]
-	if len(parts) >= 3 {
-		// If 3 fields provided, middle is port.
-		port = parts[1]
-		sourceIP = parts[2]
-	}
-
 	req := ACLRequest{
 		ID:        id,
-		Domain:    parts[0],
+		Domain:    domain,
 		Port:      port,
 		SourceIP:  sourceIP,
 		Timestamp: now,

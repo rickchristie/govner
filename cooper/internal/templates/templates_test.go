@@ -1284,6 +1284,7 @@ func TestRenderSquidConf(t *testing.T) {
 
 	// Should have external ACL for non-whitelisted domain approval
 	assertContains(t, result, "external_acl_type cooper_acl")
+	assertContains(t, result, "%DST %>rP %SRC %DATA")
 	assertContains(t, result, "cooper-acl-helper")
 	assertContains(t, result, "acl.sock")
 

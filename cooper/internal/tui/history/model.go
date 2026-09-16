@@ -1,5 +1,5 @@
 // Package history provides a reusable two-pane list+detail model for the
-// Blocked and Allowed history tabs.
+// combined request history and filtered views.
 package history
 
 import (
@@ -9,6 +9,7 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
+	"github.com/rickchristie/govner/cooper/internal/tui/events"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
@@ -23,6 +24,7 @@ const (
 	ModeBlocked Mode = iota
 	// ModeAllowed renders the tab as Proxy Allowed.
 	ModeAllowed
+	ModeAll
 )
 
 // HistoryEntry is a single resolved request shown in the history list.
@@ -32,19 +34,33 @@ type HistoryEntry struct {
 	ResponseStatus  int    // HTTP status code (only meaningful for Allowed)
 	ResponseHeaders string // raw response headers (only meaningful for Allowed)
 	Timestamp       time.Time
+	Allowed         bool
 }
 
 // Model is the BubbleTea sub-model for a history tab (Blocked or Allowed).
 // It implements the tui.SubModel interface.
 type Model struct {
-	Items       []HistoryEntry
-	list        components.ScrollableList
-	detailOpen  bool
-	mode        Mode
-	maxCapacity int
-	width       int
-	height      int
+	Items                      []HistoryEntry
+	list                       components.ScrollableList
+	detailOpen                 bool
+	mode                       Mode
+	maxCapacity                int
+	width                      int
+	height                     int
+	blockedLimit, allowedLimit int
+	filter                     Mode
 }
+
+// NewCombined keeps both decisions in one time-ordered list while retaining
+// the user's separate history limits.
+func NewCombined(blockedLimit, allowedLimit int) *Model {
+	m := NewWithCapacity(ModeAll, blockedLimit+allowedLimit)
+	m.blockedLimit, m.allowedLimit = blockedLimit, allowedLimit
+	m.filter = ModeAll
+	return m
+}
+
+type LimitsChangedMsg struct{ Blocked, Allowed int }
 
 // New creates a new history Model for the given mode with the default capacity.
 func New(mode Mode) *Model {
@@ -86,7 +102,24 @@ func (m *Model) Init() tea.Cmd {
 // Update handles messages forwarded from the root model.
 func (m *Model) Update(msg tea.Msg) (theme.SubModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		m.syncListGeometry()
+	case events.ACLDecisionMsg:
+		m.AddEntry(HistoryEntry{Request: msg.Event.Request, Decision: msg.Event.Reason, Timestamp: msg.Event.Request.Timestamp, Allowed: msg.Event.Decision == app.DecisionAllow})
+	case LimitsChangedMsg:
+		m.blockedLimit, m.allowedLimit = msg.Blocked, msg.Allowed
+		m.trimEntries()
+		m.rebuildListItems()
 	case tea.MouseMsg:
+		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+			index := msg.Y - 1 + m.list.ScrollOffset
+			if index >= 0 && index < len(m.list.Items) {
+				m.list.SelectedIdx = index
+				m.list.ClampScroll()
+			}
+			return m, nil
+		}
 		m.list.HandleMouse(msg)
 		return m, nil
 	case tea.KeyMsg:
@@ -97,32 +130,78 @@ func (m *Model) Update(msg tea.Msg) (theme.SubModel, tea.Cmd) {
 
 // View renders the history tab content within the given dimensions.
 func (m *Model) View(width, height int) string {
-	m.width = width
-	m.height = height
-	m.syncListGeometry()
-
-	if len(m.Items) == 0 {
-		return m.renderEmpty(width, height)
+	view := *m
+	view.width, view.height = width, height
+	view.syncListGeometry()
+	if m.detailOpen {
+		if entry := m.selectedEntry(); entry != nil {
+			if m.mode == ModeAll {
+				if entry.Allowed {
+					view.mode = ModeAllowed
+				} else {
+					view.mode = ModeBlocked
+				}
+			}
+			return view.renderDetailModal(*entry, width, height)
+		}
 	}
 
-	return m.render(width, height)
+	if len(m.list.Items) == 0 {
+		return m.renderColumnHeader(width) + "\nNo requests match this filter. Press f to change it."
+	}
+
+	return view.render(width, height)
 }
+
+func (m *Model) ModalActive() bool { return m.detailOpen }
 
 // ----- Public API -----
 
 // AddEntry prepends an entry to the history list and trims to max capacity.
 func (m *Model) AddEntry(entry HistoryEntry) {
-	m.Items = append([]HistoryEntry{entry}, m.Items...)
-	if len(m.Items) > m.maxCapacity {
-		m.Items = m.Items[:m.maxCapacity]
+	if m.mode == ModeAllowed {
+		entry.Allowed = true
 	}
+	m.Items = append([]HistoryEntry{entry}, m.Items...)
+	m.trimEntries()
 	m.rebuildListItems()
+}
+
+func (m *Model) trimEntries() {
+	if m.mode != ModeAll {
+		if len(m.Items) > m.maxCapacity {
+			m.Items = m.Items[:m.maxCapacity]
+		}
+		return
+	}
+	allowed, blocked := 0, 0
+	kept := m.Items[:0]
+	for _, entry := range m.Items {
+		if entry.Allowed {
+			allowed++
+			if allowed > m.allowedLimit {
+				continue
+			}
+		} else {
+			blocked++
+			if blocked > m.blockedLimit {
+				continue
+			}
+		}
+		kept = append(kept, entry)
+	}
+	m.Items = kept
 }
 
 // ----- Key handling -----
 
 func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 	switch msg.String() {
+	case "f":
+		if m.mode == ModeAll {
+			m.filter = (m.filter + 1) % 3
+			m.rebuildListItems()
+		}
 	case "up", "k":
 		m.list.MoveUp()
 	case "down", "j":
@@ -138,7 +217,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 		m.list.SelectedIdx = 0
 		m.list.ClampScroll()
 	case "enter":
-		m.detailOpen = !m.detailOpen
+		m.detailOpen = m.selectedEntry() != nil && !m.detailOpen
 	case "esc":
 		if m.detailOpen {
 			m.detailOpen = false
@@ -165,14 +244,29 @@ func (m *Model) syncListGeometry() {
 
 // rebuildListItems converts the HistoryEntry slice into ScrollableList items.
 func (m *Model) rebuildListItems() {
-	items := make([]components.ListItem, len(m.Items))
-	for i, entry := range m.Items {
-		items[i] = components.ListItem{
+	selectedID := ""
+	if selected := m.list.Selected(); selected != nil {
+		selectedID = selected.ID
+	}
+
+	items := make([]components.ListItem, 0, len(m.Items))
+	for _, entry := range m.Items {
+		if m.mode == ModeAll && (m.filter == ModeAllowed && !entry.Allowed || m.filter == ModeBlocked && entry.Allowed) {
+			continue
+		}
+		items = append(items, components.ListItem{
 			ID:   entry.Request.ID,
 			Data: entry,
-		}
+		})
 	}
 	m.list.SetItems(items)
+	for i, item := range items {
+		if item.ID == selectedID {
+			m.list.SelectedIdx = i
+			break
+		}
+	}
+	m.list.ClampScroll()
 }
 
 // selectedEntry returns the currently selected HistoryEntry, or nil.

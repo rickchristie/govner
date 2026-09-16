@@ -26,7 +26,6 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tui/profileui"
 	"github.com/rickchristie/govner/cooper/internal/tui/proxymon"
 	"github.com/rickchristie/govner/cooper/internal/tui/settings"
-	squidlogui "github.com/rickchristie/govner/cooper/internal/tui/squidlog"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
@@ -96,6 +95,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case events.ExternalSignalMsg:
 		m.exitReason = fmt.Sprintf("received OS signal %s", msg.Signal)
 		return m, tea.Quit
+
+	case proxymon.SessionAccessChangedMsg:
+		return m, routeMessage(&m.proxyMonModel, msg)
+	case components.TextCopiedMsg:
+		return m, tea.Batch(routeMessage(&m.squidLogModel, msg), routeMessage(&m.bridgeModel, msg))
+	case tea.MouseMsg:
+		// Mouse coordinates include the fixed header and tab bar.
+		if m.modal != nil || msg.Y < 4 || msg.Y >= m.height-2 {
+			return m, nil
+		}
+		msg.Y -= 4
+		return m, m.forwardToActive(msg)
 
 	// ---- Keyboard input ----
 	case tea.KeyMsg:
@@ -176,25 +187,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.proxyMonModel = sm
 		}
 
-		// Route decision to the appropriate history tab.
-		entry := history.HistoryEntry{
-			Request:   msg.Event.Request,
-			Decision:  msg.Event.Reason, // "approved", "session", "denied", "timeout"
-			Timestamp: msg.Event.Request.Timestamp,
-		}
-		if msg.Event.Decision == app.DecisionAllow {
-			if m.allowedModel != nil {
-				if hm, ok := m.allowedModel.(*history.Model); ok {
-					hm.AddEntry(entry)
-				}
-			}
-		} else {
-			if m.blockedModel != nil {
-				if hm, ok := m.blockedModel.(*history.Model); ok {
-					hm.AddEntry(entry)
-				}
-			}
-		}
+		historyCmd := routeMessage(&m.historyModel, msg)
 		// Re-listen for next decision.
 		var listenCmd tea.Cmd
 		if m.app != nil {
@@ -202,14 +195,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				listenCmd = listenACLDecisions(ch)
 			}
 		}
-		return m, tea.Batch(monitorCmd, listenCmd)
+		return m, tea.Batch(monitorCmd, historyCmd, listenCmd)
 
 	case events.BridgeLogMsg:
 		var cmd tea.Cmd
-		if m.bridgeLogsModel != nil {
+		if m.bridgeModel != nil {
 			var sm SubModel
-			sm, cmd = m.bridgeLogsModel.Update(msg)
-			m.bridgeLogsModel = sm
+			sm, cmd = m.bridgeModel.Update(msg)
+			m.bridgeModel = sm
 		}
 		var listenCmd tea.Cmd
 		if m.app != nil {
@@ -220,18 +213,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, listenCmd)
 
 	case events.SquidLogLineMsg:
-		if m.squidLogModel != nil {
-			if sm, ok := m.squidLogModel.(*squidlogui.Model); ok {
-				sm.AddLine(msg.Line)
-			}
-		}
+		logCmd := routeMessage(&m.squidLogModel, msg)
 		var listenCmd tea.Cmd
 		if m.app != nil {
 			if ch := m.app.SquidLogs(); ch != nil {
 				listenCmd = listenSquidLogs(ch)
 			}
 		}
-		return m, listenCmd
+		return m, tea.Batch(logCmd, listenCmd)
 
 	case events.WorkloadStatsMsg:
 		var cmd tea.Cmd
@@ -284,29 +273,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				log.Printf("cooper: failed to update proxy alert sound: %v", err)
 			}
 		}
-		// Propagate new values to live TUI components.
-		newTimeout := time.Duration(msg.MonitorTimeoutSecs) * time.Second
-		if m.proxyMonModel != nil {
-			if pm, ok := m.proxyMonModel.(*proxymon.Model); ok {
-				pm.SetTimeout(newTimeout)
-			}
-		}
-		if m.blockedModel != nil {
-			if hm, ok := m.blockedModel.(*history.Model); ok {
-				hm.SetMaxCapacity(msg.BlockedHistoryLimit)
-			}
-		}
-		if m.allowedModel != nil {
-			if hm, ok := m.allowedModel.(*history.Model); ok {
-				hm.SetMaxCapacity(msg.AllowedHistoryLimit)
-			}
-		}
-		if m.bridgeLogsModel != nil {
-			if lm, ok := m.bridgeLogsModel.(*bridgeui.LogsModel); ok {
-				lm.SetMaxCapacity(msg.BridgeLogLimit)
-			}
-		}
-		return m, nil
+		limits := events.RuntimeLimitsChangedMsg{MonitorTimeoutSecs: msg.MonitorTimeoutSecs, BridgeLogLimit: msg.BridgeLogLimit}
+		return m, tea.Batch(
+			routeMessage(&m.proxyMonModel, limits),
+			routeMessage(&m.bridgeModel, limits),
+			routeMessage(&m.historyModel, history.LimitsChangedMsg{Blocked: msg.BlockedHistoryLimit, Allowed: msg.AllowedHistoryLimit}),
+		)
 
 	case portfwd.PortForwardChangedMsg:
 		// Show a "Reloading..." modal and run the reload in the background.
@@ -477,11 +449,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		m.tabBar.Next()
 		m.activeTab = m.tabBar.ActiveTab
-		return m, nil
+		return m, m.forwardToActive(events.TabActivatedMsg{})
 	case "shift+tab":
 		m.tabBar.Prev()
 		m.activeTab = m.tabBar.ActiveTab
-		return m, nil
+		return m, m.forwardToActive(events.TabActivatedMsg{})
 	}
 
 	// --- Clipboard shortcuts (only when not editing a text field) ---
@@ -545,19 +517,8 @@ func (m *Model) clearPendingWorkloadModal() {
 // editing mode. Clipboard shortcuts (c/x) are suppressed in this state
 // so keystrokes reach the sub-model's input buffer instead.
 func (m *Model) isTextInputActive() bool {
-	switch m.activeTab {
-	case theme.TabBridgeRoutes:
-		if rm, ok := m.bridgeRoutesModel.(*bridgeui.RoutesModel); ok {
-			return rm.IsEditing()
-		}
-	case theme.TabRuntime:
-		if sm, ok := m.runtimeModel.(*settings.Model); ok {
-			return sm.IsEditing()
-		}
-	case theme.TabPortForward:
-		if pm, ok := m.portForwardModel.(*portfwd.Model); ok {
-			return pm.IsEditing()
-		}
+	if editor, ok := m.activeSubModel().(interface{ IsEditing() bool }); ok {
+		return editor.IsEditing()
 	}
 	return false
 }
@@ -840,22 +801,16 @@ func (m *Model) setActiveSubModel(sm SubModel) {
 		m.runtimesModel = sm
 	case theme.TabMonitor:
 		m.proxyMonModel = sm
-	case theme.TabBlocked:
-		m.blockedModel = sm
-	case theme.TabAllowed:
-		m.allowedModel = sm
+	case theme.TabHistory:
+		m.historyModel = sm
 	case theme.TabSquidLogs:
 		m.squidLogModel = sm
-	case theme.TabBridgeLogs:
-		m.bridgeLogsModel = sm
-	case theme.TabBridgeRoutes:
-		m.bridgeRoutesModel = sm
+	case theme.TabBridge:
+		m.bridgeModel = sm
 	case theme.TabRuntime:
 		m.runtimeModel = sm
 	case theme.TabPortForward:
 		m.portForwardModel = sm
-	case theme.TabAbout:
-		m.aboutModel = sm
 	case theme.TabProfiles:
 		m.profilesModel = sm
 	}
@@ -1104,6 +1059,10 @@ func (m *Model) clipboardHeaderSegment() string {
 
 // helpBar renders context-sensitive keybindings at the bottom of the screen.
 func (m *Model) helpBar(width int) string {
+	if owner, ok := m.activeSubModel().(interface{ ModalActive() bool }); ok && owner.ModalActive() {
+		return theme.HelpDescStyle.Render("Esc Close  ·  Use the controls in the active form")
+	}
+
 	bindings := []HelpBinding{
 		{Key: "q", Desc: "Quit"},
 		{Key: "Tab", Desc: "Switch"},
@@ -1132,15 +1091,15 @@ func (m *Model) helpBar(width int) string {
 			HelpBinding{Key: "s", Desc: "Stop"},
 			HelpBinding{Key: "r", Desc: "Restart"},
 		)
-	case theme.TabBridgeRoutes:
+	case theme.TabBridge:
 		bindings = append(bindings,
-			HelpBinding{Key: "n", Desc: "New"},
-			HelpBinding{Key: "x", Desc: "Delete"},
+			HelpBinding{Key: "[]", Desc: "Pane"},
+			HelpBinding{Key: "Enter", Desc: "Edit/Details"},
 		)
 	case theme.TabRuntime:
 		bindings = append(bindings,
 			HelpBinding{Key: "Enter", Desc: "Edit/Toggle"},
-			HelpBinding{Key: "Space", Desc: "Toggle"},
+			HelpBinding{Key: "[]", Desc: "Pane"},
 		)
 	case theme.TabPortForward:
 		bindings = append(bindings,
@@ -1148,9 +1107,11 @@ func (m *Model) helpBar(width int) string {
 			HelpBinding{Key: "x", Desc: "Delete"},
 			HelpBinding{Key: "Enter", Desc: "Edit"},
 		)
+	case theme.TabHistory:
+		bindings = append(bindings, HelpBinding{Key: "f", Desc: "Filter"}, HelpBinding{Key: "Enter", Desc: "Details"})
 	case theme.TabSquidLogs:
 		bindings = append(bindings,
-			HelpBinding{Key: "G", Desc: "Bottom"},
+			HelpBinding{Key: "y", Desc: "Copy"}, HelpBinding{Key: "G", Desc: "Follow"},
 		)
 	}
 

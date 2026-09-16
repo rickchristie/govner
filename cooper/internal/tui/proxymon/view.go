@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/rickchristie/govner/cooper/internal/proxy"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
@@ -25,8 +26,6 @@ func renderPendingList(m *Model, width, height int) string {
 	if visibleItems < 1 {
 		visibleItems = 1
 	}
-	m.list.Width = width
-	m.list.Height = visibleItems
 
 	// Render manually since each item is 2 rows.
 	var rows []string
@@ -38,7 +37,7 @@ func renderPendingList(m *Model, width, height int) string {
 	for i := m.list.ScrollOffset; i < end; i++ {
 		selected := i == m.list.SelectedIdx
 		pr := m.pending[i]
-		row := renderPendingItem(pr, selected, width)
+		row := renderPendingItem(pr, selected, width, m.now())
 		rows = append(rows, row)
 	}
 
@@ -48,7 +47,7 @@ func renderPendingList(m *Model, width, height int) string {
 // renderPendingItem renders a single pending request as two lines:
 // Line 1: [arrow] domain  [timer bar]
 // Line 2: time remaining  source container  method badge
-func renderPendingItem(pr *proxy.PendingRequest, selected bool, width int) string {
+func renderPendingItem(pr *proxy.PendingRequest, selected bool, width int, now time.Time) string {
 	// Timer bar: use roughly 40% of the width.
 	timerWidth := width * 2 / 5
 	if timerWidth < 8 {
@@ -72,10 +71,10 @@ func renderPendingItem(pr *proxy.PendingRequest, selected bool, width int) strin
 		domainStyled = lipgloss.NewStyle().Foreground(theme.ColorLinen).Render(pr.Request.Domain)
 	}
 
-	timerView := tb.View()
+	timerView := tb.ViewAt(now)
 
 	// Line 1: arrow + domain + padding + timer bar.
-	domainPart := arrow + domainStyled
+	domainPart := ansi.Truncate(arrow+domainStyled, max(3, width-lipgloss.Width(timerView)-1), "…")
 	domainW := lipgloss.Width(domainPart)
 	timerW := lipgloss.Width(timerView)
 	gap := width - domainW - timerW
@@ -85,11 +84,11 @@ func renderPendingItem(pr *proxy.PendingRequest, selected bool, width int) strin
 	line1 := domainPart + strings.Repeat(" ", gap) + timerView
 
 	// Line 2: time remaining, source, method badge.
-	remaining := time.Until(pr.Deadline)
+	remaining := pr.Deadline.Sub(now)
 	if remaining < 0 {
 		remaining = 0
 	}
-	progress := tb.Progress()
+	progress := tb.ProgressAt(now)
 	timeColor := theme.TimerColor(progress)
 	timeStyle := lipgloss.NewStyle().Foreground(timeColor)
 	timeStr := timeStyle.Render(fmt.Sprintf("%.1fs", remaining.Seconds()))
@@ -130,11 +129,11 @@ func renderDetailPane(m *Model, width, height int) string {
 		return detailEmptyState(width, height)
 	}
 
-	return renderRequestDetail(pr, width, height)
+	return renderRequestDetail(pr, width, height, m.now())
 }
 
 // renderRequestDetail renders the full detail for a pending request.
-func renderRequestDetail(pr *proxy.PendingRequest, width, height int) string {
+func renderRequestDetail(pr *proxy.PendingRequest, width, height int, now time.Time) string {
 	labelStyle := theme.DetailLabelStyle
 	valueStyle := theme.DetailValueStyle
 
@@ -162,168 +161,62 @@ func renderRequestDetail(pr *proxy.PendingRequest, width, height int) string {
 	lines = append(lines, "")
 
 	// Countdown.
-	remaining := time.Until(pr.Deadline)
+	remaining := pr.Deadline.Sub(now)
 	if remaining < 0 {
 		remaining = 0
 	}
-	tb := components.NewTimerBar(pr.Deadline, pr.Deadline.Sub(pr.Request.Timestamp), width-6)
-	lines = append(lines, labelStyle.Render("  Timer   ")+tb.View())
+	tb := components.NewTimerBar(pr.Deadline, pr.Deadline.Sub(pr.Request.Timestamp), max(1, width-20))
+	lines = append(lines, labelStyle.Render("  Timer   ")+tb.ViewAt(now))
 
 	return strings.Join(lines, "\n")
 }
 
-// renderWithSessionAccess adds the session-only access rail and owns local
-// modal presentation. The underlying monitor remains visible but dimmed so
-// confirmation and management dialogs stay anchored to the current request.
+// Session access remains visible while requests change. The manager replaces
+// the body so screen clipping cannot hide its host list or controls.
 func (m *Model) renderWithSessionAccess(base string, width, height int) string {
-	rail := renderSessionAccessRail(m, width)
-	divider := theme.DividerStyle.Render(repeatToWidth(theme.BorderH, width))
-	content := rail + "\n" + divider + "\n" + base
-	if m.dialog == sessionDialogNone {
-		return content
-	}
-
-	lines := strings.Split(content, "\n")
-	for len(lines) < height {
-		lines = append(lines, "")
-	}
-	if len(lines) > height {
-		lines = lines[:height]
-	}
-	background := strings.Join(lines, "\n")
-
-	var modal string
-	switch m.dialog {
-	case sessionDialogAllow:
-		if m.allowModal != nil {
-			modal = m.allowModal.View(width, height)
-		}
-	case sessionDialogManage:
-		modal = m.renderSessionManagerModal(width, height)
-	}
-	return lipgloss.Place(width, height, lipgloss.Left, lipgloss.Top,
-		components.DimContent(background)) + "\r" + modal
+	return renderSessionAccessRail(m, width) + "\n" + theme.DividerStyle.Render(repeatToWidth(theme.BorderH, width)) + "\n" + base
 }
 
 func renderSessionAccessRail(m *Model, width int) string {
-	title := theme.PaneLabelStyle.Render(theme.IconShield + " SESSION ACCESS")
-	var status string
-	switch {
-	case m.sessionError != "":
-		status = theme.ErrorStyle.Render(theme.IconWarn + " " + m.sessionError)
-	case m.sessionMessage != "":
-		status = theme.ProofStyle.Render(theme.IconCheck+" ") +
-			theme.DetailValueStyle.Render(m.sessionMessage)
-	case len(m.sessionDomains) == 0:
-		status = theme.DimStyle.Render("None") + "  " +
-			theme.HelpDescStyle.Render("["+theme.HelpKeyStyle.Render("w")+" allow selected exact host]")
-	default:
-		count := fmt.Sprintf("%d exact host", len(m.sessionDomains))
-		if len(m.sessionDomains) != 1 {
-			count += "s"
-		}
-		preview := strings.Join(m.sessionDomains, "  ·  ")
-		status = theme.StatusRunningStyle.Bold(true).Render(count) + "  " +
-			theme.DomainStyle.Render(preview)
+	title := theme.PaneLabelStyle.Render(" SESSION ACCESS  ") + theme.ProofStyle.Render(sessionHostCount(len(m.sessionDomains)))
+	controls := theme.HelpDescStyle.Render("  w Allow host  s Manage  · cleared on exit")
+	if m.sessionError != "" {
+		return ansi.Truncate(title+"  "+theme.ErrorStyle.Render(m.sessionError), width, "")
 	}
-
-	suffix := theme.HelpDescStyle.Render(
-		"[" + theme.HelpKeyStyle.Render("s") + " manage]  ·  cleared on exit",
-	)
-	line := " " + title + "  " + status
-	gap := width - lipgloss.Width(line) - lipgloss.Width(suffix) - 1
-	if gap > 1 {
-		line += strings.Repeat(" ", gap) + suffix
-	} else {
-		line += "  " + suffix
-	}
-	return lipgloss.NewStyle().MaxWidth(width).Width(width).Render(line)
+	return ansi.Truncate(title+controls, width, "")
 }
 
-func (m *Model) renderSessionManagerModal(width, height int) string {
-	boxWidth := min(68, width-8)
-	if boxWidth < 36 {
-		boxWidth = 36
+func sessionHostCount(count int) string {
+	if count == 1 {
+		return "1 exact host"
 	}
-	innerWidth := boxWidth - 6
+	return fmt.Sprintf("%d exact hosts", count)
+}
 
-	title := lipgloss.NewStyle().
-		Foreground(theme.ColorParchment).
-		Bold(true).
-		Width(innerWidth).
-		Align(lipgloss.Center).
-		Render(theme.IconShield + " Session Access")
-	subtitle := lipgloss.NewStyle().
-		Foreground(theme.ColorDusty).
-		Width(innerWidth).
-		Align(lipgloss.Center).
-		Render("Exact hostnames automatically approved for every barrel\nuntil this Cooper instance exits.")
-	divider := theme.ModalDividerStyle.Width(innerWidth).
-		Render(strings.Repeat(theme.BorderH, max(1, innerWidth-4)))
-
-	listHeight := min(8, max(3, height-14))
+func (m *Model) renderSessionManager(width, height int) string {
+	footer := "↑↓ Select   r Remove host   Esc Close"
+	status := m.sessionMessage
+	if m.sessionError != "" {
+		status = m.sessionError
+	}
+	frame := components.FixedFrame{Width: width, Height: height, Footer: theme.HelpDescStyle.Render(footer)}
 	list := m.sessionList
-	list.Width = innerWidth
-	list.Height = listHeight
+	list.Width, list.Height = width, max(0, frame.BodyHeight()-4)
 	list.ClampScroll()
-
-	var listView string
-	if len(m.sessionDomains) == 0 {
-		empty := theme.EmptyStateStyle.Render(
-			"No active session access.\n\nApprove a pending request with [w].",
-		)
-		listView = lipgloss.Place(innerWidth, listHeight,
-			lipgloss.Center, lipgloss.Center, empty)
-	} else {
-		listView = list.View(func(item components.ListItem, selected bool, rowWidth int) string {
-			domain, _ := item.Data.(string)
-			arrow := "  "
-			style := theme.RowNormalStyle
+	title := theme.PaneLabelStyle.Render(" Session Access · " + sessionHostCount(len(m.sessionDomains)))
+	subtitle := theme.DimStyle.Render(" Hosts are allowed for every barrel until Cooper exits.")
+	header := title + "\n" + subtitle + "\n" + theme.DimStyle.Render(status) + "\n" + theme.DividerStyle.Render(strings.Repeat(theme.BorderH, max(0, width)))
+	body := "No hosts allowed for this session. Use w on a pending request."
+	if len(m.sessionDomains) > 0 {
+		body = list.View(func(item components.ListItem, selected bool, rowWidth int) string {
+			marker, style := "  ", theme.RowNormalStyle
 			if selected {
-				arrow = theme.SelectionArrowStyle.Render(theme.IconArrowRight) + " "
-				style = theme.RowSelectedStyle
+				marker, style = "▶ ", theme.RowSelectedStyle
 			}
-			badge := theme.ProofStyle.Render("exact")
-			left := arrow + theme.DomainStyle.Render(domain)
-			gap := rowWidth - lipgloss.Width(left) - lipgloss.Width(badge)
-			if gap < 1 {
-				gap = 1
-			}
-			return style.Width(rowWidth).Render(left + strings.Repeat(" ", gap) + badge)
+			return style.Width(rowWidth).Render(ansi.Truncate(marker+item.Data.(string), rowWidth, "…"))
 		})
 	}
-
-	help := lipgloss.NewStyle().
-		Foreground(theme.ColorDusty).
-		Width(innerWidth).
-		Align(lipgloss.Center).
-		Render("[" + theme.HelpKeyStyle.Render("↑↓") + " Navigate]   [" +
-			theme.HelpKeyStyle.Render("r") + " Revoke]   [" +
-			theme.HelpKeyStyle.Render("Esc") + " Close]")
-
-	inner := lipgloss.JoinVertical(lipgloss.Center,
-		"",
-		title,
-		"",
-		subtitle,
-		"",
-		divider,
-		"",
-		listView,
-		"",
-		divider,
-		"",
-		help,
-		"",
-	)
-	box := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
-		BorderForeground(theme.ColorAmber).
-		Background(theme.ColorOakDark).
-		Padding(0, 2).
-		Width(boxWidth).
-		Render(inner)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+	return frame.View(header + "\n" + body)
 }
 
 // pendingEmptyState renders the empty state for the left pane.

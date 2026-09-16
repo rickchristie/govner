@@ -195,6 +195,7 @@ func TestHandleKey_ScreenModalOwnsGlobalKeys(t *testing.T) {
 	model := NewModel(mockApp)
 	model.SetProxyMonModel(recorder)
 	model.SetActiveTab(theme.TabMonitor)
+	recorder.messages = nil
 
 	initialTab := model.activeTab
 	_, cmd := model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
@@ -286,8 +287,8 @@ func TestHandleKey_PasteFilePathWhileEditingTextInputDoesNotStageFile(t *testing
 	routesModel := bridgeui.NewRoutesModel()
 
 	model := NewModel(mockApp)
-	model.SetBridgeRoutesModel(routesModel)
-	model.SetActiveTab(theme.TabBridgeRoutes)
+	model.SetBridgeModel(routesModel)
+	model.SetActiveTab(theme.TabBridge)
 
 	model.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	model.handleKey(tea.KeyMsg{Type: tea.KeyDown})

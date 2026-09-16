@@ -1,6 +1,7 @@
 package profileauth
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,7 +11,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/antigravity"
 )
 
-func TestAntigravityLaunchRejectsMissingFileAndChangedHostWrapper(t *testing.T) {
+func TestAntigravityLaunchRequestsSetupForMissingFileAndChangedHostWrapper(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("managed file authentication requires Linux")
 	}
@@ -22,7 +23,7 @@ func TestAntigravityLaunchRejectsMissingFileAndChangedHostWrapper(t *testing.T) 
 	}
 	t.Setenv("PATH", bin+":/usr/bin:/bin")
 	f.env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/cooper-fake-desktop-bus"
-	if err := CheckAntigravityLaunch(home, f.mounts, f.env); err == nil || !strings.Contains(err.Error(), "cooper build") {
+	if err := CheckAntigravityLaunch(home, f.mounts, f.env); !errors.Is(err, ErrAntigravitySetupRequired) {
 		t.Fatalf("unwrapped host did not get setup instructions: %v", err)
 	}
 	setup, err := antigravity.InstallHostFileAuth(t.Context(), home, "")
@@ -30,7 +31,7 @@ func TestAntigravityLaunchRejectsMissingFileAndChangedHostWrapper(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", filepath.Dir(setup.Wrapper)+":"+os.Getenv("PATH"))
-	if err := CheckAntigravityLaunch(home, f.mounts, f.env); err == nil || !strings.Contains(err.Error(), "DBUS_SESSION_BUS_ADDRESS=unix:path=/dev/null agy") {
+	if err := CheckAntigravityLaunch(home, f.mounts, f.env); !errors.Is(err, ErrAntigravitySetupRequired) {
 		t.Fatalf("missing file did not get the host login command: %v", err)
 	}
 	f.write("antigravity-state", "antigravity-cli/antigravity-oauth-token", googleToken("person", "consumer", "", "", "never-print-this-access-token"))
@@ -43,7 +44,7 @@ func TestAntigravityLaunchRejectsMissingFileAndChangedHostWrapper(t *testing.T) 
 	}
 	t.Setenv("PATH", bin+":/usr/bin:/bin")
 	err = CheckAntigravityLaunch(home, f.mounts, f.env)
-	if err == nil || strings.Contains(err.Error(), "never-print-this-access-token") {
+	if !errors.Is(err, ErrAntigravitySetupRequired) || strings.Contains(err.Error(), "never-print-this-access-token") {
 		t.Fatalf("changed wrapper selection was not safely rejected: %v", err)
 	}
 }

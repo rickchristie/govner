@@ -20,7 +20,7 @@ const DefaultHelperReadTimeout = 65 * time.Second
 // the proxy container. It is spawned by Squid as an external_acl_type helper.
 //
 // Protocol:
-//   - Reads lines from stdin (one per request): "domain port source_ip"
+//   - Reads lines from stdin (one per request): "domain port source_ip -"
 //   - For each line, connects to the Unix socket at socketPath
 //   - Writes the line to the socket
 //   - Reads the response: "OK" or "ERR"
@@ -54,7 +54,7 @@ func RunHelper(socketPath string, stdin io.Reader, stdout io.Writer) {
 // host-side listener, sending the request, and reading the response.
 // Returns "OK" or "ERR". Every error path returns "ERR" (fail-closed).
 func processHelperRequest(socketPath string, line string) string {
-	// Validate input has the expected format: "domain port source_ip"
+	// Validate input has the expected format: "domain port source_ip -"
 	parts := strings.Fields(line)
 	if len(parts) < 2 {
 		return "ERR"

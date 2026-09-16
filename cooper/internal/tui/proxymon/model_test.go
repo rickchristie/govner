@@ -12,6 +12,7 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/tui/events"
+	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
 type fakeACLApprover struct {
@@ -77,7 +78,7 @@ func (f *fakeACLApprover) SessionAllowedDomains() []string {
 	return domains
 }
 
-func TestSessionAllowConfirmsScopeAndRemovesSameDomainRequests(t *testing.T) {
+func TestSessionAllowIsImmediateAndRemovesSameDomainRequests(t *testing.T) {
 	approver := newFakeACLApprover()
 	model := New(approver, 30*time.Second)
 	for _, request := range []app.ACLRequest{
@@ -89,31 +90,10 @@ func TestSessionAllowConfirmsScopeAndRemovesSameDomainRequests(t *testing.T) {
 		model = updated.(*Model)
 	}
 
-	updated, _ := model.Update(runeKey('w'))
-	model = updated.(*Model)
-	if !model.ModalActive() || model.dialog != sessionDialogAllow {
-		t.Fatal("w did not open the session confirmation dialog")
-	}
-	if len(approver.allowCalls) != 0 {
-		t.Fatal("domain was allowed before confirmation")
-	}
-	view := model.View(110, 28)
-	for _, want := range []string{
-		"Allow for This Session?",
-		"API.Example.com.",
-		"every barrel",
-		"No proxy settings will be changed",
-		"Allow Exact Host",
-	} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("confirmation view missing %q:\n%s", want, view)
-		}
-	}
-
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := applySessionKey(model, runeKey('w'))
 	model = updated.(*Model)
 	if model.ModalActive() {
-		t.Fatal("confirmation dialog remained open after allow")
+		t.Fatal("w must allow the selected host without a dialog")
 	}
 	if len(approver.allowCalls) != 1 || approver.allowCalls[0] != "API.Example.com." {
 		t.Fatalf("allow calls = %v, want selected exact domain", approver.allowCalls)
@@ -124,12 +104,12 @@ func TestSessionAllowConfirmsScopeAndRemovesSameDomainRequests(t *testing.T) {
 	if got := model.sessionDomains; len(got) != 1 || got[0] != "api.example.com" {
 		t.Fatalf("session domains = %v, want api.example.com", got)
 	}
-	if !strings.Contains(model.View(110, 28), "allowed until Cooper exits") {
-		t.Fatal("success feedback is not visible after session allow")
+	if !strings.Contains(model.View(110, 28), "1 exact host") {
+		t.Fatal("session host count is not visible after allow")
 	}
 }
 
-func TestSessionAllowCancellationAndFailurePreserveRequest(t *testing.T) {
+func TestSessionAllowFailurePreservesRequest(t *testing.T) {
 	approver := newFakeACLApprover()
 	model := New(approver, 30*time.Second)
 	updated, _ := model.Update(events.ACLRequestMsg{Request: app.ACLRequest{
@@ -137,20 +117,8 @@ func TestSessionAllowCancellationAndFailurePreserveRequest(t *testing.T) {
 	}})
 	model = updated.(*Model)
 
-	updated, _ = model.Update(runeKey('w'))
-	model = updated.(*Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyLeft})
-	model = updated.(*Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model = updated.(*Model)
-	if len(approver.allowCalls) != 0 || len(model.pending) != 1 {
-		t.Fatal("cancelled session allow changed application or pending state")
-	}
-
 	approver.allowErr = errors.New("invalid exact hostname")
-	updated, _ = model.Update(runeKey('w'))
-	model = updated.(*Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = applySessionKey(model, runeKey('w'))
 	model = updated.(*Model)
 	if len(model.pending) != 1 {
 		t.Fatal("failed session allow removed the pending request")
@@ -174,9 +142,9 @@ func TestSessionManagerListsAndRevokesExactDomains(t *testing.T) {
 		"Session Access",
 		"a.example.com",
 		"z.example.com",
-		"automatically approved for every barrel",
-		"until this Cooper instance exits",
-		"Revoke",
+		"allowed for every barrel",
+		"until Cooper exits",
+		"Remove",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("session manager missing %q:\n%s", want, view)
@@ -186,7 +154,7 @@ func TestSessionManagerListsAndRevokesExactDomains(t *testing.T) {
 	// Domains are sorted, so the second row is z.example.com.
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(*Model)
-	updated, _ = model.Update(runeKey('r'))
+	updated, _ = applySessionKey(model, runeKey('r'))
 	model = updated.(*Model)
 	if len(approver.revokeCalls) != 1 || approver.revokeCalls[0] != "z.example.com" {
 		t.Fatalf("revoke calls = %v, want z.example.com", approver.revokeCalls)
@@ -248,7 +216,7 @@ func TestSessionAccessRailFitsAndExplainsLifetime(t *testing.T) {
 
 func TestSessionAllowWithoutSelectionShowsConcreteError(t *testing.T) {
 	model := New(newFakeACLApprover(), 30*time.Second)
-	updated, _ := model.Update(runeKey('w'))
+	updated, _ := applySessionKey(model, runeKey('w'))
 	model = updated.(*Model)
 	if model.ModalActive() {
 		t.Fatal("session dialog opened without a pending request")
@@ -260,4 +228,12 @@ func TestSessionAllowWithoutSelectionShowsConcreteError(t *testing.T) {
 
 func runeKey(value rune) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{value}}
+}
+
+func applySessionKey(model *Model, key tea.KeyMsg) (theme.SubModel, tea.Cmd) {
+	_, cmd := model.Update(key)
+	if cmd != nil {
+		model.Update(cmd())
+	}
+	return model, nil
 }

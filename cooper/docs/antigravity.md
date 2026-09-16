@@ -95,9 +95,19 @@ An existing keyring login is not migrated or deleted. The first wrapped launch
 can therefore show a sign-in screen. Complete that login on the host. The
 credential is stored in an ordinary file, subject to filesystem permissions,
 instead of the host keyring. Cooper does not export secrets from the keyring.
-An OAuth launch without supported file credentials stops and shows the host
-login command. Explicit API and external-provider modes retain their native
-selection rules; they are not silently changed to OAuth.
+When an ordinary Linux OAuth launch needs the host wrapper or a file login, both
+`cooper cli antigravity` and `cooper vm antigravity` print:
+
+```text
+Please run cooper build and then run agy to relogin
+```
+
+They exit with status 0 and do not start a session. This is a normal setup
+step for an existing keyring login. Run the commands on the physical host;
+activate the shell setup printed by the build before running `agy`.
+File read or validation failures keep their nonzero status after setup.
+Explicit API and external-provider modes retain their native selection rules;
+they are not silently changed to OAuth.
 
 The wrapper and its non-secret installation record live under
 `~/.local/share/cooper/antigravity`. The original native executable remains at

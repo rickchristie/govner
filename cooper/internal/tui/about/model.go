@@ -47,6 +47,7 @@ type Model struct {
 	// Scrollable viewport for content.
 	viewport   components.ScrollableContent
 	lastHeight int
+	lastWidth  int
 }
 
 // New creates a new about model populated from the given config.
@@ -61,6 +62,7 @@ func New(cfg *config.Config) *Model {
 	copy(m.aiTools, cfg.AITools)
 	m.implicitTools = config.VisibleImplicitLSPs(cfg.ImplicitTools)
 	m.checkMismatches()
+	m.viewport.SetContent(m.renderContent(100))
 	return m
 }
 
@@ -112,11 +114,15 @@ func (m *Model) Init() tea.Cmd {
 // Update satisfies theme.SubModel.
 func (m *Model) Update(msg tea.Msg) (theme.SubModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.lastWidth, m.lastHeight = msg.Width, msg.Height
+		m.viewport.SetContent(m.renderContent(msg.Width))
 	case StartupWarningsMsg:
 		m.startupWarnings = msg.Warnings
 		if len(msg.Warnings) > 0 {
 			m.hasMismatch = true
 		}
+		m.viewport.SetContent(m.renderContent(max(2, m.lastWidth)))
 		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -134,7 +140,12 @@ func (m *Model) Update(msg tea.Msg) (theme.SubModel, tea.Cmd) {
 
 // View satisfies the SubModel interface.
 func (m *Model) View(width, height int) string {
-	m.lastHeight = height
+	viewport := m.viewport
+	viewport.SetContent(m.renderContent(width))
+	return viewport.View(width, height)
+}
+
+func (m *Model) renderContent(width int) string {
 
 	// Render all content into a string, then display through the viewport.
 	var b strings.Builder
@@ -195,8 +206,7 @@ func (m *Model) View(width, height int) string {
 	b.WriteString(renderInfraRow("Proxy Port", fmt.Sprintf("%d", m.proxyPort)))
 	b.WriteString(renderInfraRow("Bridge Port", fmt.Sprintf("%d", m.bridgePort)))
 
-	m.viewport.SetContent(b.String())
-	return m.viewport.View(width, height)
+	return b.String()
 }
 
 // ----- Rendering helpers -----
@@ -250,7 +260,7 @@ func renderToolTable(tools []config.ToolConfig, width int) string {
 
 	var b strings.Builder
 	b.WriteString(" " + tbl.RenderHeader() + "\n")
-	b.WriteString(theme.DividerStyle.Render(" "+strings.Repeat(theme.BorderH, width-2)) + "\n")
+	b.WriteString(theme.DividerStyle.Render(" "+strings.Repeat(theme.BorderH, max(0, width-2))) + "\n")
 	_, rows := tbl.RenderRows(0)
 	for _, row := range rows {
 		b.WriteString(" " + row + "\n")
@@ -332,7 +342,7 @@ func renderImplicitToolTable(tools []config.ImplicitToolConfig, width int) strin
 
 	var b strings.Builder
 	b.WriteString(" " + tbl.RenderHeader() + "\n")
-	b.WriteString(theme.DividerStyle.Render(" "+strings.Repeat(theme.BorderH, width-2)) + "\n")
+	b.WriteString(theme.DividerStyle.Render(" "+strings.Repeat(theme.BorderH, max(0, width-2))) + "\n")
 	_, rows := tbl.RenderRows(0)
 	for _, row := range rows {
 		b.WriteString(" " + row + "\n")

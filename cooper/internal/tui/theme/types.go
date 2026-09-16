@@ -26,16 +26,13 @@ type TabID int
 
 const (
 	TabRuntimes TabID = iota
-	TabMonitor
-	TabBlocked
-	TabAllowed
-	TabSquidLogs
-	TabBridgeLogs
-	TabBridgeRoutes
-	TabRuntime
-	TabPortForward
-	TabAbout
 	TabProfiles
+	TabMonitor
+	TabHistory
+	TabSquidLogs
+	TabBridge
+	TabPortForward
+	TabRuntime
 )
 
 // ModalType identifies which modal dialog is active.
@@ -48,7 +45,6 @@ const (
 	ModalRestartWorkload
 	ModalUpdateInfo
 	ModalReloadSocat
-	ModalSessionAllowDomain
 )
 
 // TabInfo holds display metadata for a tab.
@@ -61,17 +57,14 @@ type TabInfo struct {
 
 // AllTabs is the ordered list of all top-level tabs with their metadata.
 var AllTabs = []TabInfo{
-	{ID: TabRuntimes, Label: "Runtimes", Icon: CaskEmoji, ShortcutKey: "1"},
+	{ID: TabRuntimes, Label: "Runtimes", Icon: CaskEmoji},
 	{ID: TabProfiles, Label: "Profiles", Icon: "◈"},
-	{ID: TabMonitor, Label: "Monitor", Icon: "🔍", ShortcutKey: "2"},
-	{ID: TabBlocked, Label: "Blocked", Icon: IconCross, ShortcutKey: "3"},
-	{ID: TabAllowed, Label: "Allowed", Icon: IconCheck, ShortcutKey: "4"},
-	{ID: TabSquidLogs, Label: "Squid Logs", Icon: "🦑", ShortcutKey: "5"},
-	{ID: TabBridgeLogs, Label: "Bridge Logs", Icon: IconPlug, ShortcutKey: "6"},
-	{ID: TabPortForward, Label: "Ports", Icon: IconPlug, ShortcutKey: "7"},
-	{ID: TabBridgeRoutes, Label: "Routes", Icon: IconGear, ShortcutKey: "8"},
-	{ID: TabRuntime, Label: "Runtime", Icon: IconGear, ShortcutKey: "9"},
-	{ID: TabAbout, Label: "About", Icon: "ℹ", ShortcutKey: "0"},
+	{ID: TabMonitor, Label: "Monitor", Icon: "🔍"},
+	{ID: TabHistory, Label: "History", Icon: "↕"},
+	{ID: TabSquidLogs, Label: "Squid Logs", Icon: "🦑"},
+	{ID: TabBridge, Label: "Bridge", Icon: IconPlug},
+	{ID: TabPortForward, Label: "Ports", Icon: IconPlug},
+	{ID: TabRuntime, Label: "Runtime", Icon: IconGear},
 }
 
 // ----- Animation timing constants -----

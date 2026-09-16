@@ -35,8 +35,10 @@ func NewTimerBar(deadline time.Time, duration time.Duration, width int) TimerBar
 }
 
 // Progress returns a value between 0.0 (expired) and 1.0 (full).
-func (t TimerBar) Progress() float64 {
-	remaining := time.Until(t.Deadline)
+func (t TimerBar) Progress() float64 { return t.ProgressAt(time.Now()) }
+
+func (t TimerBar) ProgressAt(now time.Time) float64 {
+	remaining := t.Deadline.Sub(now)
 	if remaining <= 0 {
 		return 0.0
 	}
@@ -56,8 +58,10 @@ func (t TimerBar) Expired() bool {
 }
 
 // View renders the timer bar with the format: [---] X.Xs
-func (t TimerBar) View() string {
-	progress := t.Progress()
+func (t TimerBar) View() string { return t.ViewAt(time.Now()) }
+
+func (t TimerBar) ViewAt(now time.Time) string {
+	progress := t.ProgressAt(now)
 	filled := int(float64(t.Width) * progress)
 	if filled > t.Width {
 		filled = t.Width
@@ -70,7 +74,7 @@ func (t TimerBar) View() string {
 	bar := filledStyle.Render(strings.Repeat(theme.ProgressFull, filled)) +
 		theme.TimerBarEmptyStyle.Render(strings.Repeat(theme.ProgressEmpty, empty))
 
-	remaining := time.Until(t.Deadline)
+	remaining := t.Deadline.Sub(now)
 	if remaining < 0 {
 		remaining = 0
 	}

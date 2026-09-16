@@ -7,6 +7,7 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
+	"github.com/rickchristie/govner/cooper/internal/tui/events"
 	"github.com/rickchristie/govner/cooper/internal/tui/loading"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
@@ -47,19 +48,15 @@ type Model struct {
 	pendingWorkloadAction string
 	pendingWorkloadName   string
 
-	// Sub-models, one per tab. These are nil until the corresponding tab
-	// package supplies a concrete implementation (Work Packages 4C-4I).
-	runtimesModel     SubModel
-	proxyMonModel     SubModel
-	blockedModel      SubModel
-	allowedModel      SubModel
-	squidLogModel     SubModel
-	bridgeLogsModel   SubModel
-	bridgeRoutesModel SubModel
-	runtimeModel      SubModel
-	portForwardModel  SubModel
-	aboutModel        SubModel
-	profilesModel     SubModel
+	// Sub-models are optional until the caller wires each screen.
+	runtimesModel    SubModel
+	proxyMonModel    SubModel
+	historyModel     SubModel
+	squidLogModel    SubModel
+	bridgeModel      SubModel
+	runtimeModel     SubModel
+	portForwardModel SubModel
+	profilesModel    SubModel
 
 	// Loading screen (nil after startup completes).
 	loadingModel SubModel
@@ -126,9 +123,10 @@ func (m *Model) SetSize(w, h int) {
 	m.width = w
 	m.height = h
 	m.tabBar.Width = w
-	if m.profilesModel != nil {
-		m.profilesModel, _ = m.profilesModel.Update(tea.WindowSizeMsg{Width: w, Height: m.contentHeight()})
+	for _, screen := range m.screens() {
+		routeMessage(screen, tea.WindowSizeMsg{Width: w, Height: m.contentHeight()})
 	}
+
 }
 
 // SetRuntimesModel wires the runtimes tab.
@@ -137,29 +135,20 @@ func (m *Model) SetRuntimesModel(sm SubModel) { m.runtimesModel = sm }
 // SetProxyMonModel wires the proxy monitor tab.
 func (m *Model) SetProxyMonModel(sm SubModel) { m.proxyMonModel = sm }
 
-// SetBlockedModel wires the blocked-history tab.
-func (m *Model) SetBlockedModel(sm SubModel) { m.blockedModel = sm }
-
-// SetAllowedModel wires the allowed-history tab.
-func (m *Model) SetAllowedModel(sm SubModel) { m.allowedModel = sm }
+// SetHistoryModel wires the combined request history.
+func (m *Model) SetHistoryModel(sm SubModel) { m.historyModel = sm }
 
 // SetSquidLogModel wires the squid logs tab.
 func (m *Model) SetSquidLogModel(sm SubModel) { m.squidLogModel = sm }
 
-// SetBridgeLogsModel wires the bridge logs tab.
-func (m *Model) SetBridgeLogsModel(sm SubModel) { m.bridgeLogsModel = sm }
-
-// SetBridgeRoutesModel wires the bridge routes tab.
-func (m *Model) SetBridgeRoutesModel(sm SubModel) { m.bridgeRoutesModel = sm }
+// SetBridgeModel wires routes and execution logs.
+func (m *Model) SetBridgeModel(sm SubModel) { m.bridgeModel = sm }
 
 // SetRuntimeModel wires the runtime settings tab.
 func (m *Model) SetRuntimeModel(sm SubModel) { m.runtimeModel = sm }
 
 // SetPortForwardModel wires the port forwarding tab.
 func (m *Model) SetPortForwardModel(sm SubModel) { m.portForwardModel = sm }
-
-// SetAboutModel wires the about tab.
-func (m *Model) SetAboutModel(sm SubModel) { m.aboutModel = sm }
 
 func (m *Model) SetProfilesModel(sm SubModel) {
 	m.profilesModel, _ = sm.Update(tea.WindowSizeMsg{Width: m.width, Height: m.contentHeight()})
@@ -175,6 +164,7 @@ func (m *Model) SetAlertPlayer(p AlertPlayer) { m.alertPlayer = p }
 func (m *Model) SetActiveTab(tab theme.TabID) {
 	m.activeTab = tab
 	m.tabBar.SetActive(tab)
+	m.forwardToActive(events.TabActivatedMsg{})
 }
 
 // SetOnShutdown sets the callback invoked when the user confirms exit.
@@ -201,24 +191,31 @@ func (m *Model) activeSubModel() SubModel {
 		return m.runtimesModel
 	case theme.TabMonitor:
 		return m.proxyMonModel
-	case theme.TabBlocked:
-		return m.blockedModel
-	case theme.TabAllowed:
-		return m.allowedModel
+	case theme.TabHistory:
+		return m.historyModel
 	case theme.TabSquidLogs:
 		return m.squidLogModel
-	case theme.TabBridgeLogs:
-		return m.bridgeLogsModel
-	case theme.TabBridgeRoutes:
-		return m.bridgeRoutesModel
+	case theme.TabBridge:
+		return m.bridgeModel
 	case theme.TabRuntime:
 		return m.runtimeModel
 	case theme.TabPortForward:
 		return m.portForwardModel
-	case theme.TabAbout:
-		return m.aboutModel
 	case theme.TabProfiles:
 		return m.profilesModel
 	}
 	return nil
+}
+
+func (m *Model) screens() []*SubModel {
+	return []*SubModel{&m.runtimesModel, &m.profilesModel, &m.proxyMonModel, &m.historyModel, &m.squidLogModel, &m.bridgeModel, &m.portForwardModel, &m.runtimeModel}
+}
+
+func routeMessage(screen *SubModel, msg tea.Msg) tea.Cmd {
+	if *screen == nil {
+		return nil
+	}
+	var cmd tea.Cmd
+	*screen, cmd = (*screen).Update(msg)
+	return cmd
 }

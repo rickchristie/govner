@@ -14,11 +14,20 @@ import (
 // Compile-time check that MockApp satisfies App.
 var _ App = (*MockApp)(nil)
 
+func (m *MockApp) CopyText(_ context.Context, text string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.CopiedText = text
+	return m.CopyTextErr
+}
+
 // MockApp implements the App interface with controllable behavior for unit
 // testing the TUI without Docker or any real infrastructure. Tests inject
 // events via the public fields and verify actions through recorded calls.
 type MockApp struct {
-	mu sync.Mutex
+	CopiedText  string
+	CopyTextErr error
+	mu          sync.Mutex
 
 	cfg       *config.Config
 	cooperDir string

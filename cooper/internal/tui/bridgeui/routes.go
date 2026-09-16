@@ -7,9 +7,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
-	"github.com/rickchristie/govner/cooper/internal/tableutil"
 	"github.com/rickchristie/govner/cooper/internal/tui/components"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
@@ -101,9 +101,19 @@ func (m *RoutesModel) Init() tea.Cmd {
 // Update satisfies SubModel.
 func (m *RoutesModel) Update(msg tea.Msg) (theme.SubModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.list.Width, m.list.Height = msg.Width, max(1, msg.Height-4)
+		m.list.ClampScroll()
 	case tea.MouseMsg:
 		if m.editMode == routeNone {
-			m.list.HandleMouse(msg)
+			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y >= 2 && msg.Y < m.list.Height+2 {
+				index := m.list.ScrollOffset + msg.Y - 2
+				if index < len(m.routes) {
+					m.list.SelectedIdx = index
+				}
+			} else {
+				m.list.HandleMouse(msg)
+			}
 		}
 		return m, nil
 	case tea.KeyMsg:
@@ -245,123 +255,28 @@ func (m *RoutesModel) handleDeleteConfirm(msg tea.KeyMsg) (theme.SubModel, tea.C
 // View satisfies the SubModel interface.
 func (m *RoutesModel) View(width, height int) string {
 	if m.editMode == routeAdding || m.editMode == routeEditing {
-		bg := m.renderRouteList(width, height)
-		modal := m.renderEditModal(width, height)
-		dimmed := components.DimContent(bg)
-		return lipgloss.Place(width, height, lipgloss.Left, lipgloss.Top, dimmed) +
-			"\r" + modal
+		return m.renderEditModal(width, height)
 	}
 	if m.editMode == routeDeleting {
-		bg := m.renderRouteList(width, height)
-		modal := m.renderDeleteModal(width, height)
-		dimmed := components.DimContent(bg)
-		return lipgloss.Place(width, height, lipgloss.Left, lipgloss.Top, dimmed) +
-			"\r" + modal
+		return m.renderDeleteModal(width, height)
 	}
-	return m.renderRouteList(width, height)
-}
-
-// renderRouteList renders the main route table.
-func (m *RoutesModel) renderRouteList(width, height int) string {
+	frame := components.FixedFrame{Width: width, Height: height, Header: theme.PaneLabelStyle.Render(" API PATH → HOST SCRIPT"), Footer: theme.HelpDescStyle.Render("n New  Enter Edit  x Delete")}
 	if len(m.routes) == 0 {
-		return renderRoutesEmpty(width, height)
+		return frame.View("No routes. Press n to add a host script.")
 	}
-
-	m.list.Width = width - 2
-	listHeight := height - 8 // Header, divider, info box.
-	if listHeight < 1 {
-		listHeight = 1
-	}
-	m.list.Height = listHeight
-
-	// Build a table to compute column widths for alignment.
-	tbl := tableutil.NewTable("API PATH", "SCRIPT")
-	tbl.SetHeaderStyle(theme.ColorDusty, true)
-	for _, r := range m.routes {
-		api := lipgloss.NewStyle().Foreground(theme.ColorParchment).Render(r.APIPath)
-		script := lipgloss.NewStyle().Foreground(theme.ColorVerdigris).Render(
-			truncate(r.ScriptPath, 38),
-		)
-		tbl.AddRow(api, script)
-	}
-
-	var b strings.Builder
-
-	// Column header using the table renderer for proper alignment.
-	b.WriteString(" " + tbl.RenderHeader() + "\n")
-	b.WriteString(theme.DividerStyle.Render(" "+strings.Repeat(theme.BorderH, width-2)) + "\n")
-
-	// Compute column widths so the renderRouteRow callback can use them.
-	colWidths, _ := tbl.RenderRows(0)
-
-	// Route list.
-	listView := m.list.View(func(item components.ListItem, selected bool, w int) string {
-		r, ok := item.Data.(config.BridgeRoute)
-		if !ok {
-			return ""
+	list := m.list
+	list.Width, list.Height = width, frame.BodyHeight()
+	list.ClampScroll()
+	return frame.View(list.View(func(item components.ListItem, selected bool, w int) string {
+		route := item.Data.(config.BridgeRoute)
+		marker, style := "  ", theme.RowNormalStyle
+		if selected {
+			marker, style = "▶ ", theme.RowSelectedStyle
 		}
-		return renderRouteRow(r, selected, w, colWidths)
-	})
-	b.WriteString(listView)
-
-	// Info box at bottom.
-	b.WriteString("\n\n")
-	b.WriteString(renderRouteInfoBox(width - 2))
-
-	return b.String()
+		return style.Width(w).Render(ansi.Truncate(marker+route.APIPath+" → "+route.ScriptPath, w, "…"))
+	}))
 }
 
-func renderRouteRow(r config.BridgeRoute, selected bool, width int, colWidths []int) string {
-	apiWidth := 22
-	scriptWidth := 40
-	if len(colWidths) >= 2 {
-		apiWidth = colWidths[0]
-		scriptWidth = colWidths[1]
-	}
-
-	api := lipgloss.NewStyle().Foreground(theme.ColorParchment).Width(apiWidth).Render(r.APIPath)
-	script := lipgloss.NewStyle().Foreground(theme.ColorVerdigris).Width(scriptWidth).Render(
-		truncate(r.ScriptPath, scriptWidth-2),
-	)
-	row := api + "  " + script
-
-	if selected {
-		arrow := theme.SelectionArrowStyle.Render(theme.IconArrowRight)
-		return arrow + " " + row
-	}
-	return "  " + row
-}
-
-func renderRouteInfoBox(width int) string {
-	infoStyle := theme.InfoTextStyle
-	emphStyle := theme.InfoEmphasisStyle
-
-	lines := []string{
-		infoStyle.Render("  Best practice: Bridge scripts should take ") + emphStyle.Render("NO input") + infoStyle.Render("."),
-		infoStyle.Render("  If scripts take input, they must validate religiously."),
-		infoStyle.Render("  Scripts run on the ") + emphStyle.Render("HOST") + infoStyle.Render(" machine with your user's permissions."),
-	}
-
-	box := theme.InfoBoxStyle.Width(width).Render(strings.Join(lines, "\n"))
-	return box
-}
-
-func renderRoutesEmpty(width, height int) string {
-	content := lipgloss.JoinVertical(lipgloss.Center,
-		"",
-		"",
-		theme.EmptyStateStyle.Render(theme.IconPlug),
-		"",
-		theme.EmptyStateStyle.Render("No bridge routes configured."),
-		"",
-		theme.EmptyStateStyle.Render("Press  n  to add your first route."),
-		theme.EmptyStateStyle.Render("Routes let AI tools execute host scripts"),
-		theme.EmptyStateStyle.Render("via the bridge API."),
-	)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, content)
-}
-
-// renderEditModal renders the add/edit route modal overlay.
 func (m *RoutesModel) renderEditModal(width, height int) string {
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.DoubleBorder()).
@@ -390,6 +305,10 @@ func (m *RoutesModel) renderEditModal(width, height int) string {
 		if active {
 			display += cursor
 		}
+		// Keep the end and the cursor visible without adding input rows.
+		if inputWidth := ansi.StringWidth(display); inputWidth > 30 {
+			display = ansi.TruncateLeft(display, inputWidth-29, "…")
+		}
 		return lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder()).
 			BorderForeground(borderColor).
@@ -416,6 +335,10 @@ func (m *RoutesModel) renderEditModal(width, height int) string {
 		"    " + lipgloss.NewStyle().Foreground(theme.ColorDusty).Render("[Esc Cancel]")
 
 	modal := boxStyle.Render(inner)
+	if lipgloss.Height(modal) > height {
+		// Drop blank rows so validation and Save fit on a small terminal.
+		modal = boxStyle.Padding(0, 3).Render(strings.ReplaceAll(inner, "\n\n", "\n"))
+	}
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
 }
 

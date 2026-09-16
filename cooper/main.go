@@ -27,6 +27,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/fontsync"
 	"github.com/rickchristie/govner/cooper/internal/launch"
 	"github.com/rickchristie/govner/cooper/internal/logging"
+	"github.com/rickchristie/govner/cooper/internal/profileauth"
 	"github.com/rickchristie/govner/cooper/internal/proof"
 	"github.com/rickchristie/govner/cooper/internal/proxy"
 	"github.com/rickchristie/govner/cooper/internal/runtimefs"
@@ -35,6 +36,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/tui"
 	"github.com/rickchristie/govner/cooper/internal/tui/about"
 	"github.com/rickchristie/govner/cooper/internal/tui/bridgeui"
+	"github.com/rickchristie/govner/cooper/internal/tui/components"
 	"github.com/rickchristie/govner/cooper/internal/tui/containers"
 	"github.com/rickchristie/govner/cooper/internal/tui/events"
 	"github.com/rickchristie/govner/cooper/internal/tui/history"
@@ -218,7 +220,7 @@ func init() {
 	initVMCommands()
 
 	tuiTestCmd.Flags().StringVar(&tuiTestScreen, "screen", "",
-		"Jump to a specific screen: runtimes, profiles, monitor, blocked, allowed, bridge-logs, bridge-routes, settings, ports, about, loading, configure, build")
+		"Jump to a specific screen: runtimes, profiles, monitor, history, squid-logs, bridge, runtime, ports, loading, configure, build")
 	tuiTestCmd.Flags().StringVar(&tuiTestProfileScenario, "profile-scenario", "populated", "Profile fixture: populated, empty, unmapped, conflict, busy, or error")
 }
 
@@ -615,52 +617,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	mainModel := tui.NewModel(cooperApp)
 	mainModel.SetAlertPlayer(alertPlayer)
 
-	// Wire all tab sub-models.
-	runtimesModel := containers.New(cooperApp)
-	mainModel.SetRuntimesModel(runtimesModel)
-	mainModel.SetProfilesModel(profileui.New(cooperApp))
-
-	timeout := time.Duration(cfg.MonitorTimeoutSecs) * time.Second
-	proxyMonModel := proxymon.New(cooperApp, timeout)
-	mainModel.SetProxyMonModel(proxyMonModel)
-
-	blockedModel := history.NewWithCapacity(history.ModeBlocked, cfg.BlockedHistoryLimit)
-	mainModel.SetBlockedModel(blockedModel)
-
-	allowedModel := history.NewWithCapacity(history.ModeAllowed, cfg.AllowedHistoryLimit)
-	mainModel.SetAllowedModel(allowedModel)
-
-	squidLogModel := squidlogui.New()
-	mainModel.SetSquidLogModel(squidLogModel)
-
-	bridgeLogsModel := bridgeui.NewLogsModel(cfg.BridgeLogLimit)
-	mainModel.SetBridgeLogsModel(bridgeLogsModel)
-
-	bridgeRoutesModel := bridgeui.NewRoutesModel()
-	bridgeRoutesModel.SetRoutes(cfg.BridgeRoutes)
-	mainModel.SetBridgeRoutesModel(bridgeRoutesModel)
-
-	runtimeModel := settings.New(
-		cfg.MonitorTimeoutSecs,
-		cfg.BlockedHistoryLimit,
-		cfg.AllowedHistoryLimit,
-		cfg.BridgeLogLimit,
-		cfg.ClipboardTTLSecs,
-		cfg.ClipboardMaxBytes/(1024*1024), // Convert bytes to MB for display.
-		cfg.ProxyAlertSound,
-	)
-	mainModel.SetRuntimeModel(runtimeModel)
-
-	portForwardModel := portfwd.New()
-	portForwardModel.SetPortForwardRules(cfg.PortForwardRules)
-	mainModel.SetPortForwardModel(portForwardModel)
-
-	aboutModel := about.New(aboutCfg)
-	// Send startup version warnings collected during loading.
-	if warnings := cooperApp.StartupWarnings(); len(warnings) > 0 {
-		aboutModel.Update(about.StartupWarningsMsg{Warnings: warnings})
-	}
-	mainModel.SetAboutModel(aboutModel)
+	wireMainScreens(mainModel, cooperApp, cfg, aboutCfg, time.Now)
 
 	// Create the main TUI program so we can reference it in the shutdown
 	// callback for sending ShutdownCompleteMsg. Cooper handles OS signals here
@@ -863,6 +820,10 @@ func runCLI(cmd *cobra.Command, args []string) error {
 		ToolName: toolName, WorkspaceDir: workspaceDir, OneShot: cliOneShot,
 		State: &selection,
 	})
+	if errors.Is(err, profileauth.ErrAntigravitySetupRequired) {
+		fmt.Fprintln(cmd.OutOrStdout(), profileauth.ErrAntigravitySetupRequired)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -1342,45 +1303,10 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 		{APIPath: "/go-mod-tidy", ScriptPath: "~/scripts/go-mod-tidy.sh"},
 	}
 
-	// Create mock ACL request channel with sample pending requests.
-	aclCh := make(chan app.ACLRequest, 10)
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		mockRequests := []app.ACLRequest{
-			{ID: "req-1", Domain: "stackoverflow.com", Port: "443", SourceIP: "172.20.0.3", Timestamp: time.Now()},
-			{ID: "req-2", Domain: "docs.python.org", Port: "443", SourceIP: "172.20.0.3", Timestamp: time.Now()},
-			{ID: "req-3", Domain: "pkg.go.dev", Port: "443", SourceIP: "172.20.0.4", Timestamp: time.Now()},
-		}
-		for _, r := range mockRequests {
-			aclCh <- r
-		}
-	}()
-
-	// Create mock bridge log channel.
-	bridgeLogCh := make(chan app.ExecutionLog, 10)
-	go func() {
-		time.Sleep(800 * time.Millisecond)
-		bridgeLogCh <- app.ExecutionLog{
-			Timestamp:  time.Now().Add(-2 * time.Minute),
-			Route:      "/deploy-staging",
-			ScriptPath: "~/scripts/deploy-staging.sh",
-			ExitCode:   0,
-			Stdout:     "Deploying to staging...\nDone.",
-			Stderr:     "",
-			Duration:   3200 * time.Millisecond,
-		}
-		bridgeLogCh <- app.ExecutionLog{
-			Timestamp:  time.Now().Add(-30 * time.Second),
-			Route:      "/go-mod-tidy",
-			ScriptPath: "~/scripts/go-mod-tidy.sh",
-			ExitCode:   1,
-			Stdout:     "",
-			Stderr:     "go: module not found",
-			Duration:   450 * time.Millisecond,
-			Error:      "exit status 1",
-		}
-	}()
-
+	// Fixed records and a fixed clock make terminal captures repeatable.
+	fixtureTime := time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC)
+	aclCh := make(chan app.ACLRequest)
+	bridgeLogCh := make(chan app.ExecutionLog)
 	// Build the test app and TUI model.
 	testApp := app.NewTestApp(cfg, aclCh, bridgeLogCh)
 	if err := testApp.SetProfileScenario(tuiTestProfileScenario); err != nil {
@@ -1392,37 +1318,8 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 	// the test UI quiet unless the user toggles proxy alerts on.
 	mainModel.SetAlertPlayer(alertsound.NewController())
 
-	// Wire sub-models.
-	mainModel.SetRuntimesModel(containers.New(testApp))
-	mainModel.SetProfilesModel(profileui.New(testApp))
-	mainModel.SetProxyMonModel(proxymon.New(testApp, time.Duration(cfg.MonitorTimeoutSecs)*time.Second))
-	mainModel.SetBlockedModel(history.NewWithCapacity(history.ModeBlocked, cfg.BlockedHistoryLimit))
-	mainModel.SetAllowedModel(history.NewWithCapacity(history.ModeAllowed, cfg.AllowedHistoryLimit))
-	mainModel.SetSquidLogModel(squidlogui.New())
-
-	logsModel := bridgeui.NewLogsModel(cfg.BridgeLogLimit)
-	mainModel.SetBridgeLogsModel(logsModel)
-
-	routesModel := bridgeui.NewRoutesModel()
-	routesModel.SetRoutes(cfg.BridgeRoutes)
-	mainModel.SetBridgeRoutesModel(routesModel)
-
-	tuiRuntimeModel := settings.New(
-		cfg.MonitorTimeoutSecs,
-		cfg.BlockedHistoryLimit,
-		cfg.AllowedHistoryLimit,
-		cfg.BridgeLogLimit,
-		cfg.ClipboardTTLSecs,
-		cfg.ClipboardMaxBytes/(1024*1024),
-		cfg.ProxyAlertSound,
-	)
-	mainModel.SetRuntimeModel(tuiRuntimeModel)
-
-	tuiPortFwdModel := portfwd.New()
-	tuiPortFwdModel.SetPortForwardRules(cfg.PortForwardRules)
-	mainModel.SetPortForwardModel(tuiPortFwdModel)
-
-	mainModel.SetAboutModel(about.New(cfg))
+	wireMainScreens(mainModel, testApp, cfg, cfg, func() time.Time { return fixtureTime })
+	seedTUIRecords(mainModel, fixtureTime)
 
 	// Jump to requested screen if --screen flag is set.
 	if tuiTestScreen != "" {
@@ -1433,22 +1330,18 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 			mainModel.SetActiveTab(theme.TabProfiles)
 		case "monitor":
 			mainModel.SetActiveTab(theme.TabMonitor)
-		case "blocked":
-			mainModel.SetActiveTab(theme.TabBlocked)
-		case "allowed":
-			mainModel.SetActiveTab(theme.TabAllowed)
+		case "history", "blocked", "allowed":
+			mainModel.SetActiveTab(theme.TabHistory)
 		case "squid-logs", "squid":
 			mainModel.SetActiveTab(theme.TabSquidLogs)
-		case "bridge-logs":
-			mainModel.SetActiveTab(theme.TabBridgeLogs)
-		case "bridge-routes":
-			mainModel.SetActiveTab(theme.TabBridgeRoutes)
+		case "bridge", "bridge-logs", "bridge-routes":
+			mainModel.SetActiveTab(theme.TabBridge)
 		case "settings", "runtime":
 			mainModel.SetActiveTab(theme.TabRuntime)
 		case "ports", "portforward", "port-forward":
 			mainModel.SetActiveTab(theme.TabPortForward)
 		case "about":
-			mainModel.SetActiveTab(theme.TabAbout)
+			mainModel.SetActiveTab(theme.TabRuntime)
 		case "loading":
 			// The loading screen uses a non-standard tea.Model (returns Model, not tea.Model).
 			// It's tested via the real `cooper up` startup flow. For tui-test, print a note.
@@ -1468,7 +1361,7 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 			_, err := p.Run()
 			return err
 		default:
-			return fmt.Errorf("unknown screen: %s\nAvailable: runtimes, profiles, monitor, blocked, allowed, squid-logs, bridge-logs, bridge-routes, settings, ports, about, loading, configure, build", tuiTestScreen)
+			return fmt.Errorf("unknown screen: %s\nAvailable: runtimes, profiles, monitor, history, squid-logs, bridge, runtime, ports, loading, configure, build", tuiTestScreen)
 		}
 	}
 
@@ -1517,4 +1410,47 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(out, in)
 	return err
+}
+
+// wireMainScreens keeps production and visual fixtures on the same screen tree.
+func wireMainScreens(model *tui.Model, a app.App, cfg, aboutCfg *config.Config, now func() time.Time) {
+	model.SetRuntimesModel(containers.New(a))
+	model.SetProfilesModel(profileui.New(a))
+	model.SetProxyMonModel(proxymon.NewWithClock(a, time.Duration(cfg.MonitorTimeoutSecs)*time.Second, now))
+	model.SetHistoryModel(history.NewCombined(cfg.BlockedHistoryLimit, cfg.AllowedHistoryLimit))
+	model.SetSquidLogModel(squidlogui.New(a))
+	routes := bridgeui.NewRoutesModel()
+	routes.SetRoutes(cfg.BridgeRoutes)
+	model.SetBridgeModel(components.NewSplit("Routes", routes, "Bridge Logs", bridgeui.NewLogsModel(cfg.BridgeLogLimit, a)))
+	runtimeSettings := settings.New(cfg.MonitorTimeoutSecs, cfg.BlockedHistoryLimit, cfg.AllowedHistoryLimit, cfg.BridgeLogLimit, cfg.ClipboardTTLSecs, cfg.ClipboardMaxBytes/(1024*1024), cfg.ProxyAlertSound)
+	info := about.New(aboutCfg)
+	info.Update(about.StartupWarningsMsg{Warnings: a.StartupWarnings()})
+	runtimeScreen := components.NewSplit("Settings", runtimeSettings, "About", info)
+	runtimeScreen.Stacked = true
+	model.SetRuntimeModel(runtimeScreen)
+	ports := portfwd.New()
+	ports.SetPortForwardRules(cfg.PortForwardRules)
+	model.SetPortForwardModel(ports)
+}
+
+func seedTUIRecords(model *tui.Model, now time.Time) {
+	for i, domain := range []string{"antigravity-unleash.goog", "play.googleapis.com", "x.ai"} {
+		model.Update(events.ACLRequestMsg{Request: app.ACLRequest{ID: fmt.Sprintf("pending-%d", i), Domain: domain, Port: "443", SourceIP: "172.19.0.3", Timestamp: now}})
+	}
+	for i := 0; i < 15; i++ {
+		decision, reason := app.DecisionAllow, "approved"
+		if i%2 == 0 {
+			decision, reason = app.DecisionDeny, "denied"
+		}
+		if i%3 == 0 {
+			reason = "session"
+			decision = app.DecisionAllow
+		}
+		model.Update(events.ACLDecisionMsg{Event: app.DecisionEvent{Request: app.ACLRequest{ID: fmt.Sprintf("history-%d", i), Domain: fmt.Sprintf("package-%02d.example.test", i), Port: "443", SourceIP: "172.19.0.4", Timestamp: now.Add(time.Duration(i-15) * time.Minute)}, Decision: decision, Reason: reason}})
+	}
+	for i := 0; i < 260; i++ {
+		model.Update(events.SquidLogLineMsg{Line: fmt.Sprintf("12:00:%02d  TCP_TUNNEL/200  172.19.0.3  CONNECT package-%03d.example.test:443  HIER_DIRECT/192.0.2.8", i%60, i)})
+	}
+	model.Update(events.BridgeLogMsg{Log: app.ExecutionLog{Timestamp: now, Route: "/deploy-staging", ScriptPath: "~/scripts/deploy-staging.sh", ExitCode: 0, Stdout: "Deploying to staging...\nChecking service readiness...\nReady: https://staging.example.test/health\nDone.", Duration: 3200 * time.Millisecond}})
+	model.Update(events.BridgeLogMsg{Log: app.ExecutionLog{Timestamp: now.Add(time.Second), Route: "/go-mod-tidy", ScriptPath: "~/scripts/go-mod-tidy.sh", ExitCode: 1, Stderr: "go: module not found", Error: "exit status 1", Duration: 450 * time.Millisecond}})
 }

@@ -108,7 +108,7 @@ func TestACLRequestTriggersAlertOutsideMonitorTab(t *testing.T) {
 	player := &fakeAlertPlayer{enabled: true}
 	m := NewModel(nil)
 	m.SetAlertPlayer(player)
-	m.SetActiveTab(theme.TabAbout)
+	m.SetActiveTab(theme.TabRuntime)
 
 	_, cmd := m.Update(events.ACLRequestMsg{Request: app.ACLRequest{ID: "req-1", Timestamp: time.Now()}})
 	runCmdAndBatchSubcommands(t, cmd)

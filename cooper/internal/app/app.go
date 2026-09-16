@@ -68,6 +68,7 @@ type App interface {
 	StageFile(path string) (*clipboard.ClipboardEvent, error)
 	ClearClipboard()
 	ClipboardSnapshot() *clipboard.StagedSnapshot
+	CopyText(context.Context, string) error
 
 	// State
 	Config() *config.Config
