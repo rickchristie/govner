@@ -1,6 +1,6 @@
 # Account profiles
 
-A profile is a writable copy of one harness's complete state roots. It includes
+A profile contains one harness's complete state roots. It includes
 credentials stored in those roots, configuration, sessions, history, plugins,
 memory, and new files added by the harness. Profiles use the same root catalog
 as live host mounts. Cooper does not select individual session files or change
@@ -9,6 +9,22 @@ paths inside a database.
 Use profiles to keep personal, work, and test accounts separate. The Linux or
 macOS account used to build the image stays the same. Switching an AI account
 does not require an image rebuild.
+
+## Storage setup
+
+On Linux, `cooper build` always sets up live directory profiles. It initializes
+new stores and converts existing copies before building images. The same step
+runs from configure's Save & Build. There is no storage-mode choice.
+Normal save/load does not copy or hash history. Host
+and selected profile writes use the same directory data. Save checks the
+account; an independent backup is a separate command. See
+[live profiles](managed-profiles.md) for migration, shared roots, standalone
+files, backup, restore, detach, and recovery.
+
+Run `cooper build` before the workflow below. Sections about full copies and
+common directory digests describe legacy stores, detached recovery stores, and
+macOS, where live directory conversion is not supported. Linux live profiles
+only reconcile standalone files; their directory state is already shared.
 
 ## Start with two accounts
 
@@ -78,8 +94,9 @@ targets, and path environment stay the same. Thus, a stored absolute session
 path still points to the correct location. The complete profile store and
 other profiles are not mounted into the runtime.
 
-Changes made in a named session are saved directly in that profile. They do
-not appear in the host harness until `cooper load` loads the profile. A named
+Changes made in a named session are saved directly in that profile. In copy
+mode they reach the host on load. In managed mode, writes to the selected
+profile are already visible through the host links. A named
 session does not change the host's selected profile. Two profiles can have
 separate runtimes in the same workspace. VM restart keeps its profile selection.
 The Runtimes details and session title show the profile name.
@@ -92,7 +109,7 @@ conversation locks still apply.
 
 ## Save without choosing the wrong destination
 
-`cooper save <harness>` reads the current local account identity. It does not
+In copy mode, `cooper save <harness>` reads the current local account identity. It does not
 trust the last-loaded marker alone, and it does not accept an existing profile
 name as a destination. For example, `cooper save codex Default` is invalid.
 
@@ -116,7 +133,11 @@ identity check does not contact the provider or prove that a token is valid.
 An expired login may still need renewal on the host. Renew it, exit the
 harness, and save again.
 
-## When both copies changed
+In managed mode, load a new empty profile before changing accounts. Save
+refuses a different login inside an already mapped live profile. It cannot
+recover overwritten credentials without a separate backup.
+
+## When both copies changed (copy mode)
 
 Cooper records a common state digest when it saves or loads. It compares the
 host, saved profile, and common state before replacing a profile:
@@ -214,7 +235,7 @@ by running containers cannot be deleted. Load another profile and stop related
 runtimes first. Deletion removes that saved profile and its retained generation;
 it does not remove host roots or unresolved recovery copies.
 
-## Storage, recovery, and cleanup
+## Copy-mode storage, recovery, and cleanup
 
 Data lives under `<Cooper directory>/profiles`. Store directories have mode
 0700; metadata and captured environment files have mode 0600. State files keep
@@ -254,22 +275,27 @@ attributes, or sparse allocation. Sparse file bytes are preserved. A symlink
 to an external path still needs that path to be available under normal mounts.
 
 Cooper's per-UID lock coordinates its own launches and profile operations,
-including other runtime namespaces. Use checks inspect actual Docker mounts
-and known host harness processes. Other tools do not take this lock. Close
+including other runtime namespaces. Use checks inspect actual Docker mounts,
+known host harness processes, and visible open state files. Other tools do not take this lock. Close
 writers before copying; copy digests detect concurrent changes but do not
 turn live databases into an atomic filesystem snapshot.
 
 `down`, runtime cleanup, VM cache cleanup, and normal builds preserve profiles.
-Full configuration removal refuses a Cooper directory with a `profiles` entry.
-Move the complete profile store to a safe location before intentional full
+Full configuration removal permits the exact unused empty store created by
+build. It refuses saved profile data, recovery data, extra files, and invalid metadata.
+For a store that has used managed mode, detach and retain its required
+[compatibility paths](managed-profiles.md#detach-and-move-the-store). Native
+session records can still depend on the old locations. A store that has only
+used copy mode can be moved to a safe location before intentional full
 configuration deletion. Review recorded host recovery siblings too.
 
 ## Extend and test the feature
 
 `internal/workload/agentpaths.go` is the one root catalog. New children of an
 existing root need no change. Add a new root there and test its source, target,
-absence, and override rules. Old profiles then require an explicit host save
-before named use. No new root is silently mounted from live host state.
+absence, and override rules. Copy-mode profiles then require an explicit host save before named use.
+Managed profiles require detach with the previous compatible version before
+a root-catalog change. No new root is silently mounted from live host state.
 
 `internal/profiles` owns storage, copying, account mapping, conflicts, recovery,
 and selection. It uses injected identity/use checks and narrow copy, rename,
@@ -290,7 +316,8 @@ barrels. For the VM boundary, prepare Codex once and run:
 ./cooper/test-vm-dev.sh profiles codex
 ```
 
-This checks Docker-to-VM saved state, all Codex roots, credentials, restart,
+This converts a fabricated profile store and checks Docker-to-VM live state,
+all Codex roots, credentials, restart,
 status, and cleanup. It starts two VMs and performs two guest image imports;
 restart is the reason for the second. It does not rebuild or export a host
 image during the runtime check. The full release gate stays separate.

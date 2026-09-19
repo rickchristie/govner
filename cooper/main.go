@@ -28,6 +28,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/launch"
 	"github.com/rickchristie/govner/cooper/internal/logging"
 	"github.com/rickchristie/govner/cooper/internal/profileauth"
+	"github.com/rickchristie/govner/cooper/internal/profiles"
 	"github.com/rickchristie/govner/cooper/internal/proof"
 	"github.com/rickchristie/govner/cooper/internal/proxy"
 	"github.com/rickchristie/govner/cooper/internal/runtimefs"
@@ -92,8 +93,11 @@ var configureCmd = &cobra.Command{
 var buildCmd = &cobra.Command{
 	Use:   "build",
 	Short: "Build proxy and CLI container images",
-	Long:  `Builds the proxy and CLI container Docker images from generated Dockerfiles.`,
-	RunE:  runBuild,
+	Long: `Sets up live profile storage on Linux, then builds the proxy and CLI container images.
+Existing saved profiles are converted automatically. Original state is retained for
+recovery. Stop agents and related Cooper sessions before the first conversion.
+Later builds check the live store without copying history.`,
+	RunE: runBuild,
 }
 
 var upCmd = &cobra.Command{
@@ -1036,9 +1040,10 @@ func removeCooperConfigDir(cooperDir string) error {
 		return err
 	}
 	defer lock.Close()
-	// Account copies and recovery records are user data, not runtime cache.
-	// This also refuses a symlink in place of the store.
-	if _, err := os.Lstat(filepath.Join(cooperDir, "profiles")); !errors.Is(err, os.ErrNotExist) {
+	// Build creates an empty live store even before the first saved account.
+	// Only that exact unused layout is disposable. Account copies, recovery,
+	// unknown entries, and redirected stores remain protected user data.
+	if !profiles.CanRemoveUnusedStore(cooperDir) {
 		return errors.New("Cooper directory contains profile data; move its profiles directory to a safe location before configuration cleanup")
 	}
 	homeDir, err := os.UserHomeDir()

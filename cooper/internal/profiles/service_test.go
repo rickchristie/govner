@@ -14,12 +14,12 @@ import (
 )
 
 type fixture struct {
-	t       *testing.T
+	t       testing.TB
 	service *Service
 	home    string
 }
 
-func newFixture(t *testing.T) fixture {
+func newFixture(t testing.TB) fixture {
 	t.Helper()
 	base := t.TempDir()
 	home, workspace := filepath.Join(base, "home"), filepath.Join(base, "workspace")

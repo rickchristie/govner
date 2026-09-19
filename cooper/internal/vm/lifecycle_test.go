@@ -485,6 +485,43 @@ func TestSupervisorDockerArgsRejectHooksOutsideWorkspace(t *testing.T) {
 	}
 }
 
+func TestSupervisorProtectsHooksInEveryStateExport(t *testing.T) {
+	t.Parallel()
+	for _, workspace := range []string{"/host/.codex/worktrees/project", "/profiles/codex/worktrees/project"} {
+		t.Run(workspace, func(t *testing.T) {
+			runtime := Runtime{ID: "cooper-vm-test", ContainerName: "cooper-vm-test", RuntimeDir: "/state/run", Depth: 1}
+			request := StartRequest{WorkspaceDir: workspace, ToolName: "codex", CPUs: 4, MemoryMiB: 4096, DiskGiB: 16}
+			hooks := "/profiles/codex/worktrees/project/.git/hooks"
+			mounts := []workload.MountSpec{
+				{ID: "workspace", Source: "/profiles/codex/worktrees/project", Target: workspace, Access: workload.ReadWrite, Kind: workload.Directory, Ownership: workload.HostWorkspace},
+				{ID: "codex-state", Source: "/profiles/codex", Target: "/host/.codex", Access: workload.ReadWrite, Kind: workload.Directory, Ownership: workload.ProfileState},
+				{ID: "codex-state-canonical-0", Source: "/profiles/codex", Target: "/profiles/codex", Access: workload.ReadWrite, Kind: workload.Directory, Ownership: workload.ProfileState},
+				{ID: "codex-state-canonical-1", Source: "/profiles/codex", Target: "/profiles/old-codex", Access: workload.ReadWrite, Kind: workload.Directory, Ownership: workload.ProfileState},
+				{ID: "shared-agents", Source: "/host/.agents", Target: "/host/.agents", Access: workload.ReadWrite, Kind: workload.Directory, Ownership: workload.HostState},
+				{ID: "git-hooks", Source: hooks, Target: workspace + "/.git/hooks", Access: workload.ReadOnly, Kind: workload.Directory, Ownership: workload.HostWorkspace},
+			}
+			args, err := supervisorDockerArgs(runtime, request, ImageArchive{ImageID: "sha256:" + strings.Repeat("a", 64)}, "/state/base.qcow2", mounts, strings.Repeat("b", 64), "", "/state/seccomp.json", 1001, 1002, 993)
+			if err != nil {
+				t.Fatal(err)
+			}
+			joined := strings.Join(args, " ")
+			for _, path := range []string{
+				"/cooper/mounts/000-workspace/.git/hooks",
+				"/cooper/mounts/001-codex-state/worktrees/project/.git/hooks",
+				"/cooper/mounts/002-codex-state-canonical-0/worktrees/project/.git/hooks",
+				"/cooper/mounts/003-codex-state-canonical-1/worktrees/project/.git/hooks",
+			} {
+				if !strings.Contains(joined, workload.DockerBindMount(hooks, path, true)) {
+					t.Errorf("hooks remain writable through export %s", path)
+				}
+			}
+			if strings.Contains(joined, "dst=/cooper/mounts/004-shared-agents/") {
+				t.Fatal("hook overlay exposed workspace files through unrelated state")
+			}
+		})
+	}
+}
+
 func TestStopResourcesDerivesProxyNameAndRetriesActiveNetwork(t *testing.T) {
 	t.Parallel()
 	cooperDir := t.TempDir()

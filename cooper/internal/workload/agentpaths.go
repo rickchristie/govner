@@ -11,6 +11,8 @@ import (
 	"strconv"
 
 	"golang.org/x/text/unicode/norm"
+
+	"github.com/rickchristie/govner/cooper/internal/profilelink"
 )
 
 // AgentStatePolicy changes when a supported root rule changes. A saved view
@@ -315,7 +317,10 @@ func resolveStateBase(base, home, launchDir string, values, environment map[stri
 	}
 	path = filepath.Clean(path)
 	if base == "codex" {
-		resolved, err := filepath.EvalSymlinks(path)
+		resolved, owner, _, err := profilelink.Locate(path)
+		if err == nil && owner == "" {
+			resolved, err = filepath.EvalSymlinks(path)
+		}
 		if includeAbsent && os.IsNotExist(err) {
 			resolved, err = resolveExistingPath(path)
 		}
@@ -383,13 +388,19 @@ func removeCoveredStateMounts(mounts []MountSpec) []MountSpec {
 // private environment; production callers supply HostPathEnvironment.
 func ResolveMountInput(in MountInput) (MountInput, error) {
 	if in.Agent != nil {
-		return in, nil
+		agent, err := ResolveManagedPaths(*in.Agent, in.CooperDir)
+		in.Agent = &agent
+		return in, err
 	}
 	values := make(map[string]string, len(in.Environment)+1)
 	for name, value := range in.Environment {
 		values[name] = value
 	}
 	agent, err := ResolveAgentPaths(in.ToolName, in.HomeDir, in.WorkspaceDir, values)
+	if err != nil {
+		return in, err
+	}
+	agent, err = ResolveManagedPaths(agent, in.CooperDir)
 	if err != nil {
 		return in, err
 	}

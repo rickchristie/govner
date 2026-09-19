@@ -2,6 +2,7 @@ package profilemanager
 
 import (
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,5 +34,33 @@ func TestLiveHostHarnessBlocksItsRoots(t *testing.T) {
 	}
 	if err := processUsage(t.Context(), []string{t.TempDir()}); err != nil {
 		t.Fatalf("unrelated host roots were blocked: %v", err)
+	}
+}
+
+func TestUnknownWriterWithOpenStateBlocksSwitch(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session")
+	if err := os.WriteFile(path, []byte("state"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("bash", "-c", `exec 9<> "$1"; printf ready; read answer`, "fixture", path)
+	input, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { input.Close(); command.Wait() }()
+	ready := make([]byte, 5)
+	if _, err := io.ReadFull(output, ready); err != nil {
+		t.Fatal(err)
+	}
+	if err := processUsage(t.Context(), []string{root}); err == nil {
+		t.Fatal("unknown writer was ignored")
 	}
 }

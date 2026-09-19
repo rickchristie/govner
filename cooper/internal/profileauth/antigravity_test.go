@@ -25,6 +25,14 @@ func googleToken(subject, method, project, region, access string) map[string]any
 }
 
 func TestAntigravityDesktopProfilesUseCheckedHostWrapper(t *testing.T) {
+	for _, mode := range []string{"copy", "managed"} {
+		t.Run(mode, func(t *testing.T) {
+			testAntigravityDesktopProfilesUseCheckedHostWrapper(t, mode == "managed")
+		})
+	}
+}
+
+func testAntigravityDesktopProfilesUseCheckedHostWrapper(t *testing.T, managed bool) {
 	if runtime.GOOS != "linux" {
 		t.Skip("managed file authentication requires Linux")
 	}
@@ -70,6 +78,11 @@ func TestAntigravityDesktopProfilesUseCheckedHostWrapper(t *testing.T) {
 	}
 	t.Setenv("PATH", filepath.Dir(setup.Wrapper)+":"+os.Getenv("PATH"))
 	save()
+	if managed {
+		if _, err := service.Migrate(t.Context(), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
 	load("Work")
 	write("work", "work-access")
 	save()
@@ -101,6 +114,11 @@ func TestAntigravityDesktopProfilesUseCheckedHostWrapper(t *testing.T) {
 	t.Setenv("PATH", bin+":/usr/bin:/bin")
 	if _, err := service.Save(t.Context(), profiles.SaveRequest{Harness: "antigravity"}); err == nil {
 		t.Fatal("a stale wrapper observation authorized a desktop save")
+	}
+	if managed {
+		if _, err := service.Select(t.Context(), "antigravity", ""); err == nil {
+			t.Fatal("an unwrapped desktop authorized an ordinary managed launch")
+		}
 	}
 }
 

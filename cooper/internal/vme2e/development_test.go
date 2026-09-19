@@ -552,8 +552,12 @@ func (f *developmentFixture) recordInfrastructure() {
 func (f *developmentFixture) startVM() { f.startVMWithProfile("") }
 
 func (f *developmentFixture) startVMWithProfile(profileID string) {
+	f.startVMAtWorkspace(profileID, f.run.Workspace)
+}
+
+func (f *developmentFixture) startVMAtWorkspace(profileID, workspace string) {
 	started := time.Now()
-	id, err := vm.ProfileRuntimeID(f.run.Namespace, f.run.Workspace, f.tool, profileID)
+	id, err := vm.ProfileRuntimeID(f.run.Namespace, workspace, f.tool, profileID)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -567,7 +571,7 @@ func (f *developmentFixture) startVMWithProfile(profileID string) {
 			f.t.Fatal(err)
 		}
 	}
-	f.request = vm.StartRequest{RuntimeID: id, ProfileID: profileID, WorkspaceDir: f.run.Workspace, ToolName: f.tool, ImageRef: docker.GetImageCLI(f.tool), ClipboardMode: mode, CPUs: f.manifest.Config.VM.CPUs, MemoryMiB: f.manifest.Config.VM.MemoryMiB, DiskGiB: f.manifest.Config.VM.DiskGiB}
+	f.request = vm.StartRequest{RuntimeID: id, ProfileID: profileID, WorkspaceDir: workspace, ToolName: f.tool, ImageRef: docker.GetImageCLI(f.tool), ClipboardMode: mode, CPUs: f.manifest.Config.VM.CPUs, MemoryMiB: f.manifest.Config.VM.MemoryMiB, DiskGiB: f.manifest.Config.VM.DiskGiB}
 	f.state, err = f.manager.Start(f.ctx, f.request)
 	if err != nil {
 		// A failed boot can still create a VM and import an image. Keep its

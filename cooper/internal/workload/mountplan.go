@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -82,8 +83,12 @@ func BuildMountPlan(in MountInput) ([]MountSpec, error) {
 		return nil, err
 	}
 
+	workspaceSource, _, err := selectedProfileChild(in.WorkspaceDir, in.Agent.Mounts, in.CooperDir)
+	if err != nil {
+		return nil, err
+	}
 	mounts := []MountSpec{{
-		ID: "workspace", Source: in.WorkspaceDir, Target: in.WorkspaceDir,
+		ID: "workspace", Source: workspaceSource, Target: in.WorkspaceDir,
 		Access: ReadWrite, Kind: Directory, Ownership: HostWorkspace,
 	}}
 	// A private home supplies writable shell and application scratch files.
@@ -96,6 +101,10 @@ func BuildMountPlan(in MountInput) ([]MountSpec, error) {
 		return nil, err
 	}
 	if hasHooks {
+		hooks.Source, _, err = selectedProfileChild(hooks.Source, in.Agent.Mounts, in.CooperDir)
+		if err != nil {
+			return nil, err
+		}
 		mounts = append(mounts, hooks)
 	}
 
@@ -145,6 +154,42 @@ func BuildMountPlan(in MountInput) ([]MountSpec, error) {
 	timezone := filepath.Join(runtimefs.SessionDir(in.CooperDir, in.RuntimeID), runtimefs.TimezoneFilename)
 	if pathIsFile(timezone) {
 		mounts = append(mounts, MountSpec{ID: "timezone", Source: timezone, Target: TimezoneContainerPath, Access: ReadOnly, Kind: File, Ownership: CooperRuntime})
+	}
+	aliases, err := profileAliases(mounts)
+	if err != nil {
+		return nil, err
+	}
+	mounts = append(mounts, aliases...)
+	// A worktree below state is reachable through the public root and its
+	// canonical aliases. Cover each target, even when the launch path is
+	// canonical; protecting only aliases leaves the public hooks writable.
+	if hasHooks {
+		canonical, err := resolveExistingPath(hooks.Source)
+		if err != nil {
+			return nil, err
+		}
+		protected := map[string]bool{hooks.Target: true}
+		for position, state := range mounts {
+			if (state.Ownership != ProfileState && state.Ownership != HostState) || state.Kind != Directory {
+				continue
+			}
+			source, err := resolveExistingPath(state.Source)
+			if err != nil {
+				return nil, err
+			}
+			if !pathContains(source, canonical) {
+				continue
+			}
+			relative, _ := filepath.Rel(source, canonical)
+			duplicate := hooks
+			duplicate.ID = "git-hooks-canonical-" + strconv.Itoa(position)
+			duplicate.Target = filepath.Join(state.Target, relative)
+			if protected[duplicate.Target] {
+				continue
+			}
+			protected[duplicate.Target] = true
+			mounts = append(mounts, duplicate)
+		}
 	}
 
 	if err := ValidateMountPlan(mounts, in.CooperDir); err != nil {
@@ -200,7 +245,12 @@ func RequiredDirectories(in MountInput) ([]DirectorySpec, error) {
 	for _, relative := range []string{".config", ".cache", ".local/share", ".local/state"} {
 		dirs = append(dirs, DirectorySpec{Path: filepath.Join(privateHome, relative), Mode: 0o755})
 	}
-	for _, mount := range agentStateMounts(in) {
+	stateMounts := agentStateMounts(in)
+	aliases, err := profileAliases(stateMounts)
+	if err != nil {
+		return nil, err
+	}
+	for _, mount := range append(stateMounts, aliases...) {
 		parent := filepath.Dir(mount.Target)
 		if parent == in.HomeDir || !pathContains(in.HomeDir, parent) {
 			continue
@@ -374,6 +424,9 @@ func ValidateMountPlan(mounts []MountSpec, cooperDir string) error {
 				return err
 			}
 		}
+		if err := validateProfileAlias(mount, mounts); err != nil {
+			return err
+		}
 		if mount.Ownership == HostState || mount.Ownership == ProfileState {
 			resolved, err := resolveExistingPath(mount.Source)
 			if err != nil {
@@ -391,7 +444,16 @@ func ValidateMountPlan(mounts []MountSpec, cooperDir string) error {
 				return fmt.Errorf("validate host-owned path %s: %w", mount.Source, err)
 			}
 			if overlaps {
-				return fmt.Errorf("host-owned path %q overlaps Cooper-owned directory %q", mount.Source, cooperDir)
+				allowed := false
+				if mount.Ownership == HostWorkspace && (mount.ID == "workspace" || isGitHooksMount(mount)) {
+					_, allowed, err = selectedProfileChild(mount.Source, mounts, cooperDir)
+					if err != nil {
+						return err
+					}
+				}
+				if !allowed {
+					return fmt.Errorf("host-owned path %q overlaps Cooper-owned directory %q", mount.Source, cooperDir)
+				}
 			}
 		}
 		info, err := os.Stat(mount.Source)
@@ -422,6 +484,28 @@ func ValidateMountPlan(mounts []MountSpec, cooperDir string) error {
 }
 
 func allowedTargetOverlay(parent, child MountSpec, mounts []MountSpec) bool {
+	// A selected profile can cover a workspace state alias. The workspace and
+	// read-only hooks can also be children of its already approved root.
+	if parent.ID == "workspace" && child.Ownership == ProfileState {
+		return true
+	}
+	if (parent.Ownership == ProfileState || parent.Ownership == HostState) && child.Ownership == HostWorkspace {
+		if isGitHooksMount(child) && child.Access == ReadOnly {
+			return true
+		}
+		if child.ID == "workspace" {
+			source, err := resolveExistingPath(child.Source)
+			if err != nil {
+				return false
+			}
+			root, err := resolveExistingPath(parent.Source)
+			if err != nil {
+				return false
+			}
+			return source != root && pathContains(root, source)
+		}
+	}
+
 	// Agent worktrees can be below state, and a relative state override can
 	// be below the workspace. Both mounts expose the same host paths.
 	if parent.Source == parent.Target && child.Source == child.Target && parent.Access == ReadWrite &&
@@ -483,7 +567,14 @@ func validateHostOwnedRoots(in MountInput) error {
 	if err := validateMountInput(in); err != nil {
 		return err
 	}
-	paths := []string{in.WorkspaceDir}
+	paths := []string{}
+	_, insideProfile, err := selectedProfileChild(in.WorkspaceDir, in.Agent.Mounts, in.CooperDir)
+	if err != nil {
+		return err
+	}
+	if !insideProfile {
+		paths = append(paths, in.WorkspaceDir)
+	}
 	for _, mount := range agentStateMounts(in) {
 		if mount.Ownership == ProfileState {
 			if err := ValidateProfileSource(mount, in.CooperDir); err != nil {

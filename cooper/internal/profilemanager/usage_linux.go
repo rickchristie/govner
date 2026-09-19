@@ -3,11 +3,13 @@ package profilemanager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 
+	"github.com/rickchristie/govner/cooper/internal/profiles"
 	"github.com/rickchristie/govner/cooper/internal/workload"
 )
 
@@ -23,7 +25,7 @@ func processUsage(ctx context.Context, roots []string) error {
 			return err
 		}
 		pid, valid := parsePID(entry.Name())
-		if !valid {
+		if !valid || pid == os.Getpid() {
 			continue
 		}
 		info, err := entry.Info()
@@ -31,6 +33,9 @@ func processUsage(ctx context.Context, roots []string) error {
 			continue
 		}
 		base := filepath.Join("/proc", entry.Name())
+		if err := openStateUse(ctx, base, pid, roots); err != nil {
+			return err
+		}
 		command, err := os.ReadFile(filepath.Join(base, "cmdline"))
 		if err != nil {
 			continue
@@ -65,6 +70,47 @@ func processUsage(ctx context.Context, roots []string) error {
 			}
 			if overlapsAny(path, roots) {
 				return processInUse(pid, harness)
+			}
+		}
+	}
+	return nil
+}
+
+// Scripts and database clients can write state without a known harness name.
+// Existing open files therefore also block switches. Native process discovery
+// below still catches a known harness before it opens its first state file.
+func openStateUse(ctx context.Context, base string, pid int, roots []string) error {
+	entries, err := os.ReadDir(filepath.Join(base, "fd"))
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	if errors.Is(err, os.ErrPermission) {
+		// Unrelated non-dumpable services can hide their fd table. The known
+		// harness check still refuses unreadable environments below. Open-file
+		// discovery is an extra check, not a lock on arbitrary native writers.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect process %d files: %w", pid, err)
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		path, err := os.Readlink(filepath.Join(base, "fd", entry.Name()))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return processInUse(pid, "unreadable")
+		}
+		path = strings.TrimSuffix(path, " (deleted)")
+		if !filepath.IsAbs(path) {
+			continue
+		}
+		for _, root := range roots {
+			if contains(root, path) {
+				return &profiles.Issue{Kind: profiles.StateInUse, Message: fmt.Sprintf("process %d has profile state open; stop it before changing profiles", pid)}
 			}
 		}
 	}

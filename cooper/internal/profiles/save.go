@@ -101,6 +101,7 @@ func (s *Service) save(ctx context.Context, store *os.Root, state *index, reques
 	snapshot.ID, snapshot.Generation, snapshot.Name = profile.ID, generation, profile.Name
 	snapshot.PreviousGeneration = previous
 	snapshot.Identity, snapshot.Created, snapshot.Saved = identity, profile.Created, s.now().UTC()
+	preserveCanonicalPaths(&snapshot, profile)
 	if err := writeJSON(store, filepath.Join(path, "snapshot.json"), snapshot); err != nil {
 		return Result{}, err
 	}

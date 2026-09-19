@@ -193,8 +193,12 @@ func (f *developmentFixture) parity() {
 			selected = agent
 		}
 	}
+	f.prepareManagedParity()
 	writeFile(f.t, filepath.Join(f.run.Workspace, "parity-workspace"), selected.name+"\n")
 	writeNativeProbe(f.t, selected.name, f.run.Workspace)
+	if f.tool == "codex" {
+		f.seedNativeCanonicalSession()
+	}
 	barrel, err := f.driver.StartBarrelInWorkspace(selected.name, f.run.Workspace)
 	if err != nil {
 		f.t.Fatal(err)

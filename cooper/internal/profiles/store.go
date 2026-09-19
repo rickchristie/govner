@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"unicode"
 
+	"github.com/rickchristie/govner/cooper/internal/profilelink"
 	"github.com/rickchristie/govner/cooper/internal/workload"
 )
 
@@ -89,14 +90,29 @@ func (i *index) put(profile Manifest) {
 }
 
 func readIndex(root *os.Root) (index, error) {
+	managed, err := profilelink.Managed(root)
+	if err != nil {
+		return index{}, err
+	}
+	if managed {
+		view, err := profilelink.Read(root)
+		if err != nil {
+			return index{}, err
+		}
+		return viewIndex(view)
+	}
 	var state index
-	err := readJSON(root, "index.json", &state)
+	err = readJSON(root, "index.json", &state)
 	if errors.Is(err, os.ErrNotExist) {
 		return newIndex(), nil
 	}
 	if err != nil {
 		return index{}, fmt.Errorf("read profile index: %w", err)
 	}
+	return validateIndex(state)
+}
+
+func validateIndex(state index) (index, error) {
 	if state.Schema != Schema || state.Hosts == nil {
 		return index{}, errors.New("unsupported or incomplete profile index")
 	}
@@ -125,6 +141,9 @@ func readIndex(root *os.Root) (index, error) {
 }
 
 func validateManifest(profile Manifest) error {
+	if profile.CredentialRevision != "" && !storedID.MatchString(profile.CredentialRevision) {
+		return errors.New("profile has an invalid credential revision")
+	}
 	if profile.Schema != Schema || !storedID.MatchString(profile.ID) || !storedID.MatchString(profile.Generation) {
 		return errors.New("profile has an invalid schema or storage identity")
 	}
@@ -162,6 +181,16 @@ func validateManifest(profile Manifest) error {
 				return errors.New("profile has an invalid state path")
 			}
 		}
+		seen := map[string]bool{}
+		for _, alias := range root.Aliases {
+			if _, err := profilelink.CanonicalStore(alias, profile.Harness, profile.ID, root.ID); err != nil || root.Kind != workload.Directory || seen[alias] {
+				return errors.New("profile has an invalid canonical root path")
+			}
+			if err := workload.ValidateCanonicalTarget(alias, profile.Account.Home); err != nil {
+				return err
+			}
+			seen[alias] = true
+		}
 	}
 	for position, root := range profile.Roots {
 		for _, other := range profile.Roots[position+1:] {
@@ -189,6 +218,9 @@ func privatePath(root *os.Root, path string, create bool) error {
 		info, err := root.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) && create {
 			if err := root.Mkdir(current, 0o700); err != nil {
+				return err
+			}
+			if err := syncRoot(root, filepath.Dir(current)); err != nil {
 				return err
 			}
 			continue
@@ -236,6 +268,9 @@ func writeJSON(root *os.Root, path string, value any) error {
 	id, err := newID()
 	if err != nil {
 		return err
+	}
+	if len(data)+1 > 4<<20 {
+		return errors.New("profile metadata exceeds 4 MiB; no change was published")
 	}
 	temporary := path + "." + id + ".part"
 	defer root.Remove(temporary)

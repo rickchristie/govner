@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/rickchristie/govner/cooper/internal/profilelink"
 	"github.com/rickchristie/govner/cooper/internal/statelock"
 	"github.com/rickchristie/govner/cooper/internal/workload"
 )
@@ -31,6 +32,11 @@ func (s *Service) SelectID(ctx context.Context, harness, id string) (Selection, 
 }
 
 func (s *Service) selectProfile(ctx context.Context, harness, key string, byID bool) (Selection, error) {
+	if managed, err := s.usesManaged(); err != nil {
+		return Selection{}, err
+	} else if managed {
+		return s.managedSelect(ctx, harness, key, byID)
+	}
 	lock, err := statelock.Acquire(ctx, false)
 	if err != nil {
 		return Selection{}, err
@@ -41,6 +47,10 @@ func (s *Service) selectProfile(ctx context.Context, harness, key string, byID b
 	}
 	if key == "" {
 		paths, err := workload.ResolveAgentPaths(harness, s.options.Account.Home, s.options.Workspace, s.options.Environment)
+		if err != nil {
+			return Selection{}, err
+		}
+		paths, err = s.copyHostCanonicalPaths(harness, paths)
 		return Selection{Paths: paths}, err
 	}
 	if byID && !storedID.MatchString(key) {
@@ -59,6 +69,9 @@ func (s *Service) selectProfile(ctx context.Context, harness, key string, byID b
 	if _, err := store.Lstat(transactionFile); err == nil {
 		return Selection{}, errors.New("a profile load needs recovery; run 'cooper save <harness>' on the host first")
 	} else if !errors.Is(err, os.ErrNotExist) {
+		return Selection{}, err
+	}
+	if err := requireCopyMode(store); err != nil {
 		return Selection{}, err
 	}
 	state, err := readIndex(store)
@@ -100,7 +113,7 @@ func (s *Service) selectProfile(ctx context.Context, harness, key string, byID b
 				return Selection{}, err
 			}
 		}
-		mount := workload.MountSpec{ID: root.ID, Source: source, Target: root.Target, Access: workload.ReadWrite, Kind: root.Kind, Ownership: workload.ProfileState}
+		mount := workload.MountSpec{ID: root.ID, Source: source, Target: root.Target, Access: workload.ReadWrite, Kind: root.Kind, Ownership: workload.ProfileState, CanonicalPaths: root.Aliases}
 		if err := workload.ValidateProfileSource(mount, s.options.CooperDir); err != nil {
 			return Selection{}, err
 		}
@@ -125,14 +138,23 @@ func CheckReady(cooperDir string) error {
 	} else if err != nil {
 		return err
 	}
-	_, err = parent.Lstat(filepath.Join("profiles", transactionFile))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
+	store, err := parent.OpenRoot("profiles")
 	if err != nil {
 		return err
 	}
-	return errors.New("a profile load needs recovery; run 'cooper save <harness>' on the host before starting a session")
+	defer store.Close()
+	if err := profilelink.Ready(store); err != nil {
+		return err
+	}
+	managed, err := profilelink.Managed(store)
+	if err != nil || !managed {
+		return err
+	}
+	view, err := profilelink.Read(store)
+	if err != nil {
+		return err
+	}
+	return profilelink.CheckAliases(cooperDir, view)
 }
 
 func (s *Service) checkSavedIdentity(ctx context.Context, profile Manifest, credentials []workload.EnvVar) error {

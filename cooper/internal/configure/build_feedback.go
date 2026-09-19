@@ -28,8 +28,8 @@ type dockerBuildFinishedMsg struct {
 
 type dockerBuildCloseMsg struct{}
 
-// buildFeedbackModel is presentation-only state for the long Docker phase.
-// Docker execution stays in buildflow; this model receives typed facts and
+// buildFeedbackModel is presentation-only state for profile setup and image builds.
+// Execution stays in buildflow; this model receives typed facts and
 // renders a fixed frame around a scrollable combined stdout/stderr viewport.
 type buildFeedbackModel struct {
 	steps     []string
@@ -57,15 +57,18 @@ func newBuildFeedbackModel(steps []string) *buildFeedbackModel {
 // scrolling behavior without running Docker.
 func NewBuildFeedbackPreviewModel() tea.Model {
 	m := newBuildFeedbackModel([]string{
+		"Setting up live profiles...",
 		"Building proxy image...",
 		"Building base image...",
 		"Building claude image...",
 		"Building codex image...",
 	})
 	m.preview = true
-	m.completed = 1
-	m.current = 1
+	m.completed = 2
+	m.current = 2
 	sample := []string{
+		"Setting up live profiles...",
+		"Live profile storage is ready.",
 		"#0 building with \"default\" instance using docker driver",
 		"",
 		"#1 [internal] load build definition from Dockerfile",
@@ -194,14 +197,14 @@ func (m *buildFeedbackModel) header() string {
 	total := len(m.steps)
 	progress := fmt.Sprintf("%d/%d", m.completed, total)
 	statusStyle := lipgloss.NewStyle().Foreground(theme.ColorAmber)
-	status := "Preparing Docker build output..."
+	status := "Preparing build output..."
 	switch {
 	case m.err != nil:
 		statusStyle = lipgloss.NewStyle().Foreground(theme.ColorFlame).Bold(true)
-		status = theme.IconCross + " Docker build failed"
+		status = theme.IconCross + " Build failed"
 	case m.done:
 		statusStyle = lipgloss.NewStyle().Foreground(theme.ColorProof).Bold(true)
-		status = theme.IconCheck + " Docker build complete"
+		status = theme.IconCheck + " Build complete"
 	case total > 0:
 		idx := m.current
 		if idx >= total {

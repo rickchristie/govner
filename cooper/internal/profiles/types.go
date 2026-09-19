@@ -27,6 +27,7 @@ type Root struct {
 	HostPath string            `json:"host_path"`
 	Kind     workload.PathKind `json:"kind"`
 	Present  bool              `json:"present"`
+	Aliases  []string          `json:"canonical_paths,omitempty"`
 }
 
 type Manifest struct {
@@ -45,6 +46,7 @@ type Manifest struct {
 	PathEnvironment    map[string]string   `json:"path_environment"`
 	Environment        []workload.EnvVar   `json:"environment"`
 	Digest             string              `json:"digest"`
+	CredentialRevision string              `json:"credential_revision,omitempty"`
 }
 
 type HostSelection struct {
@@ -54,10 +56,17 @@ type HostSelection struct {
 	RecoveryID string `json:"recovery_id,omitempty"`
 }
 
+type HostRoot struct {
+	Path, Harness, Profile string
+	Selected               bool
+}
+
 type Summary struct {
 	ID, Harness, Name, Account string
 	Saved                      time.Time
 	Loaded, Pending, InUse     bool
+	Managed, Mixed, Mismatch   bool
+	HostRoots                  []HostRoot
 }
 
 type SaveRequest struct {
@@ -84,6 +93,7 @@ type Result struct {
 	Saved, Loaded, Recovery     string
 	Warning                     string
 	Created, Pending, Unchanged bool
+	Managed                     bool
 }
 
 type IssueKind string
@@ -94,6 +104,7 @@ const (
 	AccountConflict IssueKind = "account-conflict"
 	StateConflict   IssueKind = "state-conflict"
 	StateInUse      IssueKind = "state-in-use"
+	MixedState      IssueKind = "mixed-state"
 )
 
 // Issue is a domain result that needs an explicit user action. UI code uses

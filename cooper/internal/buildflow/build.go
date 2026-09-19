@@ -53,7 +53,7 @@ type plan struct {
 // templates and staged the CA files. Build updates only the built-state fields
 // on the owned configuration as each image succeeds. Keeping this boundary
 // explicit lets interactive callers finish their deterministic preparation UI
-// before the slower Docker phase starts streaming output.
+// before profile setup and the slower Docker phase start streaming output.
 type Prepared struct {
 	cfg        *config.Config
 	cooperDir  string
@@ -277,7 +277,7 @@ func stagePrepared(
 	}, nil
 }
 
-// StepNames returns the Docker image steps that Build will execute.
+// StepNames returns the profile setup and Docker image steps that Build executes.
 func (p *Prepared) StepNames() []string {
 	if p == nil {
 		return nil
@@ -285,7 +285,7 @@ func (p *Prepared) StepNames() []string {
 	return p.plan.buildStepNames()
 }
 
-// Build executes the slow Docker phase and streams every combined
+// Build sets up profile storage, executes the Docker phase, and streams every combined
 // stdout/stderr line through Options.OnOutput and Options.Out.
 func (p *Prepared) Build(opts Options) error {
 	if p == nil {
@@ -302,28 +302,36 @@ func (p *Prepared) Build(opts Options) error {
 	proxyDockerfile := filepath.Join(p.proxyDir, "proxy.Dockerfile")
 	account, err := usercontext.Current()
 	if err != nil {
+		report(0, err)
 		return err
 	}
+	// Host authentication setup can be needed to validate an existing profile.
 	if err := p.prepareHostAuth(opts, account.Home); err != nil {
+		report(0, err)
 		return err
 	}
-	uidGidArgs := account.BuildArgs()
-
-	// Step 0: build the proxy image first because the base/tool images depend on shared runtime assets.
-	emitOutput(opts, "Building proxy image...")
-	if err := buildImage(opts, docker.GetImageProxy(), proxyDockerfile, p.proxyDir, uidGidArgs, opts.NoCache); err != nil {
-		err = fmt.Errorf("build proxy image: %w", err)
+	if err := p.prepareProfiles(opts, account.Home); err != nil {
 		report(0, err)
 		return err
 	}
 	report(0, nil)
+	uidGidArgs := account.BuildArgs()
 
-	// Step 1: build the base image and persist its built-state immediately.
+	// Step 1: build the proxy image first because the base/tool images depend on shared runtime assets.
+	emitOutput(opts, "Building proxy image...")
+	if err := buildImage(opts, docker.GetImageProxy(), proxyDockerfile, p.proxyDir, uidGidArgs, opts.NoCache); err != nil {
+		err = fmt.Errorf("build proxy image: %w", err)
+		report(1, err)
+		return err
+	}
+	report(1, nil)
+
+	// Step 2: build the base image and persist its built-state immediately.
 	emitOutput(opts, "Building base image...")
 	baseDockerfile := filepath.Join(p.baseDir, "Dockerfile")
 	if err := buildImage(opts, docker.GetImageBase(), baseDockerfile, p.baseDir, uidGidArgs, opts.NoCache); err != nil {
 		err = fmt.Errorf("build base image: %w", err)
-		report(1, err)
+		report(2, err)
 		return err
 	}
 	updateProgrammingToolContainerVersions(p.cfg)
@@ -331,12 +339,12 @@ func (p *Prepared) Build(opts Options) error {
 	setBuiltImplicitTools(p.cfg, p.implicit)
 	if err := config.SaveConfig(p.configPath, p.cfg); err != nil {
 		err = fmt.Errorf("save config after base build: %w", err)
-		report(1, err)
+		report(2, err)
 		return err
 	}
-	report(1, nil)
+	report(2, nil)
 
-	step := 2
+	step := 3
 	for _, toolName := range p.plan.enabledAITools {
 		toolDir := filepath.Join(p.cliDir, toolName)
 		dockerfile := filepath.Join(toolDir, "Dockerfile")
@@ -392,6 +400,7 @@ func buildPlan(cfg *config.Config, cooperDir string) (plan, error) {
 
 func (p plan) buildStepNames() []string {
 	steps := []string{
+		profileStepName,
 		"Building proxy image...",
 		"Building base image...",
 	}

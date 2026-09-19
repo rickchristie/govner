@@ -40,8 +40,8 @@ Choose the smallest runtime check for the change:
 | `lifecycle relay` | 2 | Lost relay, unhealthy-start refusal, recovery |
 | `lifecycle agent` | 2 | Lost agent, health change, recovery |
 | `prepare-agent codex` | 0, or 1 cold base | Prepare only the selected real agent and its required base/helpers |
-| `parity codex` | 1 | Real CLI/VM version, account, same paths, selected state, isolation, writes |
-| `profiles codex` | 2 | Saved profile in Docker and VM, complete roots, credential isolation, restart, status, cleanup |
+| `parity codex` | 1 | Real CLI/VM version, account, same paths, selected state, isolation, writes; managed host roots for all six agents |
+| `profiles codex` | 2 | Managed profile in Docker and VM, complete roots, credential isolation, restart, status, cleanup |
 
 The agent choices are `claude`, `copilot`, `codex`, `opencode`, `grok`, and
 `antigravity`. `profiles codex` and `profiles antigravity` use the assets from
@@ -236,3 +236,28 @@ measure device I/O, not SSD-internal NAND writes. Tmpfs can use swap. See
 For new harnesses, follow [Add a built-in agent](adding-an-agent.md). Antigravity
 parity also runs its installed native client against a local model fixture and
 checks conversation restoration, without using an external account.
+
+## Managed profile development
+
+See [the managed profile report](symlink-profile-report.md) for conversion
+choices, fault tests, native probes, performance, and host acceptance. The
+`parity <agent>` commands convert fabricated stores for all six built-in
+agents. `profiles codex` and `profiles antigravity` also test restored named
+roots, retained canonical paths, restart, credential isolation, and cleanup.
+The VM starts from a canonical worktree below the selected root. The test
+checks read-only hooks through the public and canonical paths and inside
+each host-side state export, before and after restart. This uses the same
+two VM starts as the existing profile check.
+They do not convert real state. Codex parity creates a native conversation
+through a host-style root link, then resumes it in Docker and the VM with a
+local model fixture. Antigravity parity also uses a local model fixture.
+
+The local native probe uses already prepared mirror images without network
+or host mounts:
+
+```bash
+./cooper/dev/test-profile-links.sh > /tmp/cooper-native-profile-links.txt 2>&1
+```
+
+This checks local native writes where a non-login command exists. It does not
+claim a real provider login, refresh, or cross-boundary conversation resume.

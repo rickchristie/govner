@@ -980,6 +980,14 @@ func builtInAgents(homeDir string) []builtInAgent {
 
 func writeNativeProbe(t *testing.T, tool, workspace string) {
 	t.Helper()
+	if tool == "codex" {
+		data, err := os.ReadFile(filepath.Join(repositoryRoot(t), "cooper/internal/profiles/testdata/codex-native.mjs"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(workspace, "codex_profile_probe.mjs"), string(data))
+		return
+	}
 	if tool != "antigravity" {
 		return
 	}
@@ -1044,11 +1052,24 @@ printf '%%s\n' "$version" | tr -d '\r' | head -n 1
 	if selected.name == "antigravity" {
 		fmt.Fprintf(&checks, "timeout --kill-after=5s 60s node native_probe.mjs %s\n", shellQuote(runtimeKind))
 	}
+	if selected.name == "codex" {
+		checks.WriteString(codexNativeResumeScript())
+	}
 	// Some agents can refresh or replace a cache root while they start. Write
 	// after the version command so the assertion measures the mounted root,
 	// not the tool's valid cache cleanup policy.
 	fmt.Fprintf(&checks, "printf %s > %s\n", shellQuote(runtimeKind+"\n"), shellQuote(filepath.Join(firstDir.guestPath, ".cooper-vm-write-"+runtimeKind)))
 	return checks.String()
+}
+
+func codexNativeResumeScript() string {
+	return `record="$HOME/.codex/cooper-profile-probe.json"
+thread=""
+if test -f "$record"; then thread=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).thread' "$record"); fi
+node codex_profile_probe.mjs "$(command -v codex)" "$HOME" "$thread" > "$record.next"
+mv "$record.next" "$record"
+printf 'Codex native resume passed\n'
+`
 }
 
 func stateIsSelected(target stateTarget, selected builtInAgent) bool {

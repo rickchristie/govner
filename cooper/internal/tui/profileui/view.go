@@ -38,7 +38,7 @@ func (m *Model) listFrame(width, height int) components.FixedFrame {
 	heading := lipgloss.NewStyle().Bold(true).Foreground(theme.ColorAmber).Render("Profiles")
 	header := heading + "  ·  Host save harness: " + m.harness
 	if height >= 12 {
-		header += "\nSaved account state for Docker, VM, and the host."
+		header += "\nAccount state for Docker, VM, and the host. Live profiles change as you work."
 	}
 	foot := "s Save  ·  h Harness  ·  n New/load  ·  Enter Load  ·  d Delete  ·  i Details  ·  r Refresh"
 	if width < 90 {
@@ -60,11 +60,23 @@ func (m *Model) listFrame(width, height int) components.FixedFrame {
 func renderProfile(item components.ListItem, selected bool, width int) string {
 	profile := item.Data.(profiles.Summary)
 	state := "Saved"
+	if profile.Managed {
+		state = "Live"
+	}
 	if profile.Loaded {
 		state = "Host"
+		if profile.Managed {
+			state = "Host · Live"
+		}
+	}
+	if profile.Mixed {
+		state = "Shared roots differ"
+	}
+	if profile.Mismatch {
+		state = "Account mismatch"
 	}
 	if profile.Pending {
-		state += " · Login needed"
+		state = "Login needed"
 	}
 	if profile.InUse {
 		state += " · In use"
@@ -94,7 +106,7 @@ func (m *Model) formView(width, height int) string {
 		body = "This account has no saved profile.\nUse a new name. Existing names are protected.\n\nProfile name: " + m.form.Name + "_"
 	case formDelete:
 		title, confirm = "Delete saved profile", "Delete"
-		body = "Delete " + m.form.Pending.Load.Harness + "/" + m.form.Pending.Load.Name + "?\n\nThis removes its saved state and recovery generation."
+		body = "Delete " + m.form.Pending.Load.Harness + "/" + m.form.Pending.Load.Name + "?\n\nThis removes unused state. Required recovery must be kept."
 	case formConflict:
 		title, confirm = "Both copies changed", "h: Host / s: Saved"
 		body = "The host and saved profile have different changes.\nBoth copies are preserved.\n\nPress h to keep host changes as the saved profile.\nPress s to keep the saved profile changes.\nEsc cancels."
@@ -123,6 +135,30 @@ func (m *Model) detailsText() string {
 	if selected := m.list.Selected(); selected != nil {
 		profile := selected.Data.(profiles.Summary)
 		body = fmt.Sprintf("%s / %s\nAccount: %s\nLast saved: %s\n\n%s", profile.Harness, profile.Name, profile.Account, profile.Saved.Format("2006-01-02 15:04 MST"), body)
+		if profile.Managed {
+			if profile.Mixed {
+				body += "\nShared host roots differ. Reload this profile before save."
+			}
+			if profile.Mismatch {
+				body += "\nAccount mismatch. Restore the original login or an independent backup."
+			}
+			if profile.Pending {
+				body += "\nLogin needed on the host, then save this profile."
+			}
+			if profile.InUse {
+				body += "\nState is in use. Stop its writers before changing profiles."
+			}
+			body += "\n\nLive profile: writes are saved as you work. Save checks the account.\nUse cooper profiles backup for an independent copy."
+			for _, root := range profile.HostRoots {
+				owner := root.Harness + "/" + root.Profile
+				if root.Harness == "" {
+					owner = "unmanaged"
+				}
+				body += "\nHost " + root.Path + " uses " + owner
+			}
+		} else {
+			body += "\n\nCopy mode. Preview conversion with cooper profiles migrate --dry-run."
+		}
 	}
 	return body
 }

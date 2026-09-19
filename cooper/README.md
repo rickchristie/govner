@@ -23,8 +23,9 @@ AI coding assistants need broad system access to be useful -- but that access is
 ## Account profiles
 
 Save and switch personal, work, and test accounts without rebuilding images.
-Profiles copy the selected harness's complete state roots and keep the same
-absolute paths in Docker and VM sessions.
+Profiles keep the selected harness's complete state roots and the same absolute
+paths in Docker and VM sessions. On Linux, `cooper build` sets up live
+directory profiles automatically for fast account switches.
 
 ```bash
 cooper save codex              # First save is Default.
@@ -42,6 +43,18 @@ Save selects the account by its local identity, so it cannot accept the wrong
 existing profile name as a destination. Manage profiles in the new Profiles
 tab or with `cooper profiles`. See [Account profiles](docs/profiles.md) for
 supported logins, credential environment, conflicts, and recovery.
+
+```bash
+cooper build
+```
+
+Build includes a required `Setting up live profiles...` step. It converts
+existing saved profiles once and retains original state for recovery. Close
+agents and related Cooper sessions before that first conversion. Later builds
+check the live store without copying history. Save checks live state; it is not
+a backup. See
+[live profiles](docs/managed-profiles.md) for backup, restore, detach, and
+supported layouts.
 
 ## Supported AI Tools
 

@@ -152,7 +152,7 @@ func (m *Model) key(key tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 	case "d":
 		if item := m.list.Selected(); item != nil {
 			profile := item.Data.(profiles.Summary)
-			if profile.Loaded || profile.InUse {
+			if profile.Loaded || profile.Mixed || profile.InUse {
 				m.message, m.failed = "Load another profile and stop its sessions before deletion.", true
 				return m, nil
 			}
@@ -270,7 +270,11 @@ func resultText(message ProfileActionCompletedMsg) string {
 	result := message.Result
 	var parts []string
 	if result.Saved != "" {
-		parts = append(parts, "Saved "+result.Saved+".")
+		if result.Managed {
+			parts = append(parts, "Validated live profile "+result.Saved+".")
+		} else {
+			parts = append(parts, "Saved "+result.Saved+".")
+		}
 	}
 	if result.Loaded != "" {
 		parts = append(parts, "Loaded "+result.Loaded+" on the host.")

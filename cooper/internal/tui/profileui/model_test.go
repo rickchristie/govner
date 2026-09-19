@@ -171,3 +171,22 @@ func TestDetailsUseSharedViewportForKeysAndMouse(t *testing.T) {
 		t.Fatal("detail View changed scroll state")
 	}
 }
+
+func TestManagedDetailsAndPartialDelete(t *testing.T) {
+	m, _ := readyModel(t)
+	m.Update(ProfilesListedMsg{Items: []profiles.Summary{{ID: "managed", Harness: "codex", Name: "Default", Managed: true, Mixed: true, HostRoots: []profiles.HostRoot{{Path: "/home/demo/.agents", Harness: "grok", Profile: "Work"}}}}})
+	if !strings.Contains(m.View(100, 24), "Shared roots") {
+		t.Fatal("mixed state hidden")
+	}
+	_, cmd := m.Update(key("d"))
+	if cmd != nil || m.ModalActive() {
+		t.Fatal("partial host profile can be deleted")
+	}
+	m.Update(key("i"))
+	text := m.detailsText()
+	for _, want := range []string{"Live profile", "cooper profiles backup", "/home/demo/.agents uses grok/Work"} {
+		if !strings.Contains(text, want) {
+			t.Fatal("missing detail", want)
+		}
+	}
+}

@@ -44,7 +44,9 @@ new root or changed override cannot silently reuse a previous state view.
 `internal/workload/agentpaths.go` is the runtime root list. Each entry states
 its base rule, relative path, file or directory kind, and whether it is
 optional. The resolver produces `MountSpec` values with separate source and
-target fields. Live host state uses identical sources and targets. A named profile changes the sources and keeps those targets.
+target fields. Ordinary directory roots use the host paths. Named profiles
+and live profiles prepared by Linux builds use private fixed sources and keep
+the original targets. See [Live profiles](managed-profiles.md).
 
 | Agent | Roots |
 | --- | --- |
@@ -53,6 +55,7 @@ target fields. Live host state uses identical sources and targets. A named profi
 | Codex | `CODEX_HOME` or `~/.codex`; `~/.agents`; `~/.claude-plugin`; `~/.cursor-plugin` |
 | OpenCode | Each effective XDG root plus `/opencode`; `~/.opencode`; configured extra paths described below |
 | Grok | `GROK_HOME` or `~/.grok`; `~/.agents` |
+| Antigravity | Complete `~/.gemini`; existing supported Google ADC directory |
 
 All selected roots are host-owned and mounted read-write, including auth,
 settings, sessions, memory, plugins, and future children. `.agents` is shared
@@ -96,8 +99,9 @@ home directories are installation preparation, not runtime mount policy.
   selected OpenCode database and its related files. A path that would export
   the complete home or overlap Cooper runtime data is rejected.
 
-Mount and cleanup checks examine direct paths and resolved symlinks. State
-cannot contain the Cooper directory or be contained by it. State cannot
+Mount and cleanup checks examine direct paths and resolved symlinks. Ordinary
+state cannot overlap the Cooper directory. Build's live-profile conversion
+permits only exact registered aliases to private profile roots. State cannot
 replace protected workload system paths or expose the complete host home.
 Symlinks inside a selected root do not grant access to arbitrary external
 targets; those targets need their own supported root or workspace mount.
@@ -124,7 +128,8 @@ They still use the outer proxy and have no direct network route.
 
 ## Account profiles
 
-A named profile selects a complete copied state view from this same catalog.
+A named profile selects complete roots from this same catalog. Copy-mode
+stores use independent snapshots; converted stores use live directories.
 It preserves the built account, mount targets, path environment, and absolute
 paths in stored records. Runtime identity includes the profile ID; a new saved
 generation changes the mount digest. Named sessions use their captured
@@ -132,5 +137,9 @@ credential environment and never fall back to live host credentials.
 
 Profile roots use a separate durable ownership class. Their sources must be
 validated private profile storage; their targets retain the normal state-path
-checks. Ordinary sessions still mount live host roots directly. See
+checks. Ordinary managed sessions resolve registered host aliases to fixed
+profile sources. Each recorded physical root path also receives the same
+selected root. This permits native clients to open stored canonical session
+paths without mounting the profile index, selector, parent store, or another
+account. Read-only hook overlays apply to each alias. See
 [Account profiles](profiles.md) for save/load policy and recovery.

@@ -32,10 +32,12 @@ type Service struct {
 	rename  func(*os.Root, string, string) error
 	publish func(*os.Root, index) error
 	copy    func(context.Context, string, string) error
+	// Fault tests can stop a subprocess after a durable managed-state step.
+	managedCheckpoint func(string) error
 }
 
 func New(options Options) *Service {
-	return &Service{options: options, now: time.Now, copy: copyTree, rename: func(root *os.Root, from, to string) error { return root.Rename(from, to) }, publish: func(root *os.Root, state index) error { return writeJSON(root, "index.json", state) }}
+	return &Service{options: options, now: time.Now, copy: copyTree, managedCheckpoint: func(string) error { return nil }, rename: func(root *os.Root, from, to string) error { return root.Rename(from, to) }, publish: func(root *os.Root, state index) error { return writeJSON(root, "index.json", state) }}
 }
 
 func (s *Service) storePath() string { return filepath.Join(s.options.CooperDir, "profiles") }
@@ -77,12 +79,8 @@ func (s *Service) hostScope(harness string) (workload.AgentPaths, []Root, error)
 		if err != nil {
 			return workload.AgentPaths{}, nil, err
 		}
-		workspace, err := workload.ResolvedPath(s.options.Workspace)
-		if err != nil {
+		if err := s.checkWorkspaceOutside(resolved); err != nil {
 			return workload.AgentPaths{}, nil, err
-		}
-		if containsPath(resolved, workspace) {
-			return workload.AgentPaths{}, nil, fmt.Errorf("agent state %s contains the working directory; run the profile command from outside that root", mount.Source)
 		}
 		_, err = os.Stat(resolved)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -98,6 +96,19 @@ func (s *Service) hostScope(harness string) (workload.AgentPaths, []Root, error)
 		}
 	}
 	return paths, roots, nil
+}
+
+// A root rename leaves the shell in the retained directory. Check resolved
+// paths before copying or replacing a root, including its first live save.
+func (s *Service) checkWorkspaceOutside(resolvedRoot string) error {
+	workspace, err := workload.ResolvedPath(s.options.Workspace)
+	if err != nil {
+		return err
+	}
+	if containsPath(resolvedRoot, workspace) {
+		return fmt.Errorf("agent state %s contains the working directory; run the profile command from outside that root", resolvedRoot)
+	}
+	return nil
 }
 
 func containsPath(parent, child string) bool {
@@ -158,6 +169,11 @@ func (s *Service) checkProfilePaths(profile Manifest) error {
 }
 
 func (s *Service) List(ctx context.Context) ([]Summary, error) {
+	if managed, err := s.usesManaged(); err != nil {
+		return nil, err
+	} else if managed {
+		return s.managedList(ctx)
+	}
 	lock, err := statelock.Acquire(ctx, false)
 	if err != nil {
 		return nil, err
@@ -171,6 +187,9 @@ func (s *Service) List(ctx context.Context) ([]Summary, error) {
 		return nil, err
 	}
 	defer root.Close()
+	if err := requireCopyMode(root); err != nil {
+		return nil, err
+	}
 	state, err := readIndex(root)
 	if err != nil {
 		return nil, err
@@ -199,6 +218,11 @@ func (s *Service) List(ctx context.Context) ([]Summary, error) {
 }
 
 func (s *Service) Save(ctx context.Context, request SaveRequest) (Result, error) {
+	if managed, err := s.usesManaged(); err != nil {
+		return Result{}, err
+	} else if managed {
+		return s.managedSave(ctx, request)
+	}
 	if err := validateConflictChoice(request.ConflictChoice); err != nil {
 		return Result{}, err
 	}
@@ -216,6 +240,9 @@ func (s *Service) Save(ctx context.Context, request SaveRequest) (Result, error)
 		return Result{}, err
 	}
 	defer store.Close()
+	if err := requireCopyMode(store); err != nil {
+		return Result{}, err
+	}
 	state, err := readIndex(store)
 	if err != nil {
 		return Result{}, err
@@ -231,6 +258,11 @@ func (s *Service) Save(ctx context.Context, request SaveRequest) (Result, error)
 }
 
 func (s *Service) Delete(ctx context.Context, harness, name string) error {
+	if managed, err := s.usesManaged(); err != nil {
+		return err
+	} else if managed {
+		return s.managedDelete(ctx, harness, name)
+	}
 	if err := ValidateName(name); err != nil {
 		return err
 	}
@@ -244,6 +276,9 @@ func (s *Service) Delete(ctx context.Context, harness, name string) error {
 		return err
 	}
 	defer store.Close()
+	if err := requireCopyMode(store); err != nil {
+		return err
+	}
 	state, err := readIndex(store)
 	if err != nil {
 		return err

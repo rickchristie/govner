@@ -22,7 +22,7 @@ func init() {
 
 func newSaveCommand() *cobra.Command {
 	command := &cobra.Command{Use: "save <harness>", Short: "Save host state to the profile for the current account", Args: cobra.ExactArgs(1),
-		Long: "Copy the complete host state for this harness. The first profile is Default.\nLater saves use the detected account mapping. A new name can only create a new\nprofile for an unmapped account; it can never replace another named account."}
+		Long: "Save complete state in copy mode, or validate the selected live account in managed mode.\nManaged save is not a backup. Use profiles backup for an independent copy. The first profile is Default.\nLater saves use the detected account mapping. A new name can only create a new\nprofile for an unmapped account; it can never replace another named account."}
 	command.Flags().String("name", "", "New unused profile name for an unmapped account")
 	command.Flags().String("conflict", "", "Resolve different changes with host or saved; retain recovery copies")
 	command.RunE = func(cmd *cobra.Command, args []string) error {
@@ -53,7 +53,7 @@ func newSaveCommand() *cobra.Command {
 
 func newLoadCommand() *cobra.Command {
 	command := &cobra.Command{Use: "load <harness> <profile>", Short: "Save the current account and load another profile on the host", Args: cobra.ExactArgs(2),
-		Long: "Save the current account before replacing host state with a saved profile.\nA missing profile starts with empty state. Log in on the host, then run\n'cooper save <harness>' to bind that new account to the pending profile."}
+		Long: "Preserve the current account and select another profile on the host.\nCopy mode copies complete roots. Live mode switches directory links and\nreconciles standalone files. A missing profile starts with empty state.\nLoad that new profile before changing accounts, log in on the host, then run\n'cooper save <harness>' to bind the account."}
 	command.Flags().String("name", "", "New unused name for the outgoing account if it is unmapped")
 	command.Flags().String("conflict", "", "Resolve outgoing changes with host or saved; retain recovery copies")
 	command.RunE = func(cmd *cobra.Command, args []string) error {
@@ -102,8 +102,20 @@ func newProfilesCommand() *cobra.Command {
 		fmt.Fprintln(writer, "HARNESS\tPROFILE\tACCOUNT\tSTATE")
 		for _, item := range items {
 			status := "saved"
+			if item.Managed {
+				status = "live"
+			}
 			if item.Loaded {
 				status = "loaded on host"
+				if item.Managed {
+					status = "live on host"
+				}
+			}
+			if item.Mixed {
+				status += ", shared roots changed"
+			}
+			if item.Mismatch {
+				status += ", account mismatch"
 			}
 			if item.Pending {
 				status += ", login needed"
@@ -143,7 +155,7 @@ func newProfilesCommand() *cobra.Command {
 		fmt.Fprintf(cmd.OutOrStdout(), "Deleted %s/%s.\n", args[0], args[1])
 		return nil
 	}
-	command.AddCommand(remove)
+	command.AddCommand(remove, newProfileMigrateCommand(), newProfileRecoverCommand(), newProfileBackupCommand(), newProfileDetachCommand(), newProfilePruneCommand(), newProfileRestoreCommand())
 	return command
 }
 
@@ -199,7 +211,11 @@ func promptProfileName(cmd *cobra.Command) (string, error) {
 
 func printProfileResult(cmd *cobra.Command, harness string, result profiles.Result) {
 	if result.Saved != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "Saved %s/%s.\n", harness, result.Saved)
+		if result.Managed {
+			fmt.Fprintf(cmd.OutOrStdout(), "Validated live profile %s/%s. Changes are already in its state.\n", harness, result.Saved)
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "Saved %s/%s.\n", harness, result.Saved)
+		}
 	}
 	if result.Loaded != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "Loaded %s/%s on the host.\n", harness, result.Loaded)
@@ -208,7 +224,7 @@ func printProfileResult(cmd *cobra.Command, harness string, result profiles.Resu
 		fmt.Fprintf(cmd.OutOrStdout(), "Log in with %s on the host, then run cooper save %s.\n", harness, harness)
 	}
 	if result.Recovery != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "Previous host state: %s\n", result.Recovery)
+		fmt.Fprintf(cmd.OutOrStdout(), "Recovery record: %s\n", result.Recovery)
 	}
 	if result.Warning != "" {
 		fmt.Fprintln(cmd.ErrOrStderr(), result.Warning)

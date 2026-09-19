@@ -16,10 +16,13 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/profiles"
 	"github.com/rickchristie/govner/cooper/internal/usercontext"
 	"github.com/rickchristie/govner/cooper/internal/vmcontext"
-	"github.com/rickchristie/govner/cooper/internal/workload"
 )
 
 func New(cooperDir, workspace, home string) (*profiles.Service, error) {
+	return newService(cooperDir, workspace, home, HostUsage{})
+}
+
+func newService(cooperDir, workspace, home string, guard profiles.UsageGuard) (*profiles.Service, error) {
 	account, err := usercontext.Current()
 	if err != nil {
 		return nil, err
@@ -40,7 +43,7 @@ func New(cooperDir, workspace, home string) (*profiles.Service, error) {
 	}
 	return profiles.New(profiles.Options{CooperDir: cooperDir, Workspace: workspace, Account: account,
 		Environment: environment, CredentialNames: profileauth.CredentialNames,
-		Reader: profileauth.Reader{AntigravityHostHome: home}, Guard: HostUsage{}}), nil
+		Reader: profileauth.Reader{AntigravityHostHome: home}, Guard: guard}), nil
 }
 
 // The native keyring library can find the default user bus without an env
@@ -59,10 +62,7 @@ func SelectID(ctx context.Context, cooperDir, workspace, home, harness, id strin
 	if err := profiles.CheckReady(cooperDir); err != nil {
 		return profiles.Selection{}, err
 	}
-	if id == "" {
-		paths, err := workload.ResolveAgentPaths(harness, home, workspace, workload.HostPathEnvironment())
-		return profiles.Selection{Paths: paths}, err
-	}
+
 	service, err := New(cooperDir, workspace, home)
 	if err != nil {
 		return profiles.Selection{}, err

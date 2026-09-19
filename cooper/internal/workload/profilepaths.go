@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+
+	"github.com/rickchristie/govner/cooper/internal/profilelink"
 )
 
 var profileStorageID = regexp.MustCompile(`^[a-f0-9]{24}$`)
@@ -16,24 +18,36 @@ var profileStorageID = regexp.MustCompile(`^[a-f0-9]{24}$`)
 // A profile is durable account data, so it has its own ownership kind rather
 // than being accepted as a cache or an exception to host-state validation.
 func ValidateProfileSource(mount MountSpec, cooperDir string) error {
+	rootID := mount.ID
+	if isProfileAlias(mount) {
+		rootID = profilePrimaryID(mount.ID)
+		if mount.Kind != Directory {
+			return errors.New("canonical profile aliases require a directory root")
+		}
+	}
 	relative, err := filepath.Rel(cooperDir, mount.Source)
 	if err != nil {
 		return err
 	}
 	parts := strings.Split(relative, string(filepath.Separator))
 	if len(parts) != 7 || parts[0] != "profiles" || parts[1] != "harnesses" || parts[5] != "roots" ||
-		!profileStorageID.MatchString(parts[3]) || !profileStorageID.MatchString(parts[4]) || parts[6] != mount.ID {
+		!profileStorageID.MatchString(parts[3]) || !profileStorageID.MatchString(parts[4]) || parts[6] != rootID {
 		return errors.New("profile source must be one root in a saved profile generation")
 	}
 	supported := false
 	for _, spec := range agentStatePaths[parts[2]] {
-		if spec.ID == mount.ID {
+		if spec.ID == rootID {
 			supported = true
 			break
 		}
 	}
 	if !supported || mount.Access != ReadWrite {
 		return errors.New("profile source is not a supported writable agent root")
+	}
+	for _, alias := range mount.CanonicalPaths {
+		if _, err := profilelink.CanonicalStore(alias, parts[2], parts[3], rootID); err != nil {
+			return err
+		}
 	}
 	parent, err := os.OpenRoot(cooperDir)
 	if err != nil {

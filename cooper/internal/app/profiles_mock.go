@@ -152,8 +152,9 @@ func ProfileStory() []profiles.Summary {
 	return []profiles.Summary{
 		{ID: "fixture-claude-default", Harness: "claude", Name: "Default", Account: "personal@example.test / Personal", Loaded: true, Saved: date},
 		{ID: "fixture-claude-work", Harness: "claude", Name: "Work", Account: "developer@example.test / Example Enterprise", Saved: date},
-		{ID: "fixture-codex-default", Harness: "codex", Name: "Default", Account: "personal@example.test / Personal", Loaded: true, Saved: date},
-		{ID: "fixture-codex-work", Harness: "codex", Name: "Work", Account: "developer@example.test / Example Enterprise", InUse: true, Saved: date},
-		{ID: "fixture-opencode-playground", Harness: "opencode", Name: "Playground", Loaded: true, Pending: true, Saved: date},
+		{ID: "fixture-codex-default", Harness: "codex", Name: "Default", Account: "personal@example.test / Personal", Managed: true, Mixed: true, Saved: date, HostRoots: []profiles.HostRoot{{Path: "/home/demo/.codex", Harness: "codex", Profile: "Default", Selected: true}, {Path: "/home/demo/.agents", Harness: "grok", Profile: "Default"}}},
+		{ID: "fixture-codex-work", Harness: "codex", Name: "Work", Account: "developer@example.test / Example Enterprise", Managed: true, InUse: true, Saved: date},
+		{ID: "fixture-grok-default", Harness: "grok", Name: "Default", Account: "user@example.test", Managed: true, Mismatch: true, Saved: date},
+		{ID: "fixture-opencode-playground", Harness: "opencode", Name: "Playground", Loaded: true, Pending: true, Managed: true, Saved: date},
 	}
 }

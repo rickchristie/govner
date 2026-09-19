@@ -141,10 +141,11 @@ first. Profile selection changes mount sources only. It keeps targets, the
 workspace, and the built OS account unchanged.
 
 Ordinary sessions write refreshed tokens directly to the mounted host files.
-Named sessions write them to the selected saved profile. `cooper load` restores
-that updated profile to the active host root. No separate token synchronization
-service is needed. Exit the current writer before moving between host, Docker,
-and VM sessions; stop related runtimes before save/load.
+Named sessions write them to the selected profile. Linux builds set up
+[live profiles](managed-profiles.md), so the selected host root and profile
+share the same directory. No separate token synchronization service is needed.
+Exit the current writer before moving between host, Docker, and VM sessions;
+stop related runtimes before save/load.
 
 The local identity adapter supports the reviewed Linux file OAuth schema for
 consumer and GCP accounts. It uses Google's subject and audience plus auth
@@ -166,8 +167,9 @@ Unknown or conflicting identity cannot overwrite a known account. Cooper
 keeps recovery state and reports the issue. See [Account profiles](profiles.md)
 for environment-credential load limits and recovery procedures.
 
-`.gemini` is shared by other Google products. Saving or loading a profile
-copies or replaces that **whole root**, including their state. Exit `agy`,
+`.gemini` is shared by other Google products. Profiles include that **whole
+root**, including their state. Copy mode copies or replaces it; live mode
+changes its selected directory. Exit `agy`,
 Gemini CLI, and Antigravity desktop before profile changes. Cooper also checks
 known host writers and running Docker/VM mounts.
 

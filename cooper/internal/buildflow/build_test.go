@@ -44,6 +44,7 @@ func TestStepNamesSplitPreparationFromDockerBuilds(t *testing.T) {
 		}
 	}
 	wantBuilds := []string{
+		profileStepName,
 		"Building proxy image...",
 		"Building base image...",
 		"Building claude image...",
@@ -94,8 +95,8 @@ func TestPreparedBuildStreamsOutputAndReportsEachImage(t *testing.T) {
 			if stepErr != nil {
 				t.Fatalf("step %d failed: %v", step, stepErr)
 			}
-			if total != 3 {
-				t.Fatalf("progress total = %d, want 3", total)
+			if total != 4 {
+				t.Fatalf("progress total = %d, want 4", total)
 			}
 			completed = append(completed, step)
 		},
@@ -108,10 +109,11 @@ func TestPreparedBuildStreamsOutputAndReportsEachImage(t *testing.T) {
 	if !reflect.DeepEqual(calls, wantCalls) {
 		t.Fatalf("image calls = %v, want %v", calls, wantCalls)
 	}
-	if !reflect.DeepEqual(completed, []int{0, 1, 2}) {
-		t.Fatalf("completed steps = %v, want [0 1 2]", completed)
+	if !reflect.DeepEqual(completed, []int{0, 1, 2, 3}) {
+		t.Fatalf("completed steps = %v, want [0 1 2 3]", completed)
 	}
 	for _, want := range []string{
+		profileStepName,
 		"Building proxy image...",
 		docker.GetImageProxy() + " stdout",
 		docker.GetImageProxy() + " stderr",
@@ -151,8 +153,8 @@ func TestRunPreservesCombinedCLIFlowAcrossPhaseBoundary(t *testing.T) {
 			if stepErr != nil {
 				t.Fatalf("step %d failed: %v", step, stepErr)
 			}
-			if total != 7 {
-				t.Fatalf("combined progress total = %d, want 7", total)
+			if total != 8 {
+				t.Fatalf("combined progress total = %d, want 8", total)
 			}
 			progress = append(progress, step)
 		},
@@ -160,8 +162,8 @@ func TestRunPreservesCombinedCLIFlowAcrossPhaseBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() failed: %v", err)
 	}
-	if !reflect.DeepEqual(progress, []int{0, 1, 2, 3, 4, 5, 6}) {
-		t.Fatalf("combined progress = %v, want [0 1 2 3 4 5 6]", progress)
+	if !reflect.DeepEqual(progress, []int{0, 1, 2, 3, 4, 5, 6, 7}) {
+		t.Fatalf("combined progress = %v, want [0 1 2 3 4 5 6 7]", progress)
 	}
 }
 
@@ -203,7 +205,7 @@ func TestStageFinishesSavedInputsWithoutRepeatingPreparation(t *testing.T) {
 			t.Fatalf("staged file %s missing: %v", path, err)
 		}
 	}
-	if got := prepared.StepNames(); !reflect.DeepEqual(got, []string{"Building proxy image...", "Building base image..."}) {
+	if got := prepared.StepNames(); !reflect.DeepEqual(got, []string{profileStepName, "Building proxy image...", "Building base image..."}) {
 		t.Fatalf("prepared Docker steps = %v", got)
 	}
 }

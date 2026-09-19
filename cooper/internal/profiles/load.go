@@ -13,6 +13,11 @@ import (
 )
 
 func (s *Service) Load(ctx context.Context, request LoadRequest) (Result, error) {
+	if managed, err := s.usesManaged(); err != nil {
+		return Result{}, err
+	} else if managed {
+		return s.managedLoad(ctx, request)
+	}
 	if err := validateConflictChoice(request.ConflictChoice); err != nil {
 		return Result{}, err
 	}
@@ -33,6 +38,9 @@ func (s *Service) Load(ctx context.Context, request LoadRequest) (Result, error)
 		return Result{}, err
 	}
 	defer store.Close()
+	if err := requireCopyMode(store); err != nil {
+		return Result{}, err
+	}
 	state, err := readIndex(store)
 	if err != nil {
 		return Result{}, err
@@ -221,7 +229,14 @@ func (s *Service) readStoredCredentials(store *os.Root, profile Manifest) ([]wor
 		return nil, err
 	}
 	var values []workload.EnvVar
-	if err := readJSON(store, filepath.Join(path, "credentials.json"), &values); err != nil {
+	credentialPath := filepath.Join(path, "credentials.json")
+	if profile.CredentialRevision != "" {
+		credentialPath = filepath.Join("credentials", profile.CredentialRevision+".json")
+		if err := privatePath(store, "credentials", false); err != nil {
+			return nil, err
+		}
+	}
+	if err := readJSON(store, credentialPath, &values); err != nil {
 		return nil, err
 	}
 	allowed := map[string]bool{}
@@ -260,6 +275,7 @@ func (s *Service) createEmpty(ctx context.Context, store *os.Root, harness, name
 	}
 	for index := range profile.Roots {
 		root := &profile.Roots[index]
+		root.Aliases = nil // A new account cannot inherit another account's paths.
 		root.Present = root.Kind == workload.Directory
 		if root.Present {
 			if err := store.Mkdir(filepath.Join(path, "roots", root.ID), 0o700); err != nil {

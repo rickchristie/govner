@@ -21,7 +21,6 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/profilemanager"
-	"github.com/rickchristie/govner/cooper/internal/profiles"
 	"github.com/rickchristie/govner/cooper/internal/statelock"
 	"github.com/rickchristie/govner/cooper/internal/usercontext"
 	"github.com/rickchristie/govner/cooper/internal/vmcontext"
@@ -316,9 +315,6 @@ func (m Manager) resolveMountPlan(request StartRequest, runtimeID string) ([]wor
 }
 
 func (m Manager) resolveProfile(ctx context.Context, request *StartRequest) error {
-	if request.ProfileID == "" {
-		return profiles.CheckReady(m.CooperDir)
-	}
 	selection, err := profilemanager.SelectID(ctx, m.CooperDir, request.WorkspaceDir, m.HomeDir, request.ToolName, request.ProfileID)
 	if err != nil {
 		return err
@@ -684,9 +680,43 @@ func supervisorDockerArgs(runtime Runtime, request StartRequest, archive ImageAr
 				return nil, errors.New("git hooks mount is outside the workspace export")
 			}
 			args = append(args, "--mount", workload.DockerBindMount(mount.Source, filepath.Join(workspaceExport, relative), true))
+			stateHooks, err := stateHookOverlays(mount.Source, mounts)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, stateHooks...)
 		}
 	}
 	args = append(args, SupervisorImageName(prefix), "--config-file", "/cooper/runtime/supervisor.json")
+	return args, nil
+}
+
+// State exports can contain the workspace too. Protect each source before
+// virtiofs exports it; guest root can remount any tag without guest overlays.
+func stateHookOverlays(hooks string, mounts []workload.MountSpec) ([]string, error) {
+	canonical, err := workload.ResolvedPath(hooks)
+	if err != nil {
+		return nil, err
+	}
+	var args []string
+	for index, mount := range mounts {
+		if (mount.Ownership != workload.ProfileState && mount.Ownership != workload.HostState) || mount.Kind != workload.Directory {
+			continue
+		}
+		source, err := workload.ResolvedPath(mount.Source)
+		if err != nil {
+			return nil, err
+		}
+		relative, err := filepath.Rel(source, canonical)
+		if err != nil {
+			return nil, err
+		}
+		if relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		export := fmt.Sprintf("/cooper/mounts/%03d-%s", index, cleanNamePart(mount.ID))
+		args = append(args, "--mount", workload.DockerBindMount(hooks, filepath.Join(export, relative), true))
+	}
 	return args, nil
 }
 
