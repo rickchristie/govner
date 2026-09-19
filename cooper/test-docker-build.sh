@@ -484,7 +484,8 @@ run_build_test() {
         test "$COOPER_CLI_AUTO_APPROVE" = --dangerously-skip-permissions
         test "$COOPER_CLIPBOARD_MODE" = x11
         test "$AGY_CLI_DISABLE_AUTO_UPDATE" = true
-        test "$(node "$PLAYWRIGHT_DRIVER_PATH/package/cli.js" --version)" = "Version 1.57.0"
+        driver_version=$(/opt/cooper/libexec/agy-driver-version /opt/cooper/libexec/agy)
+        test "$(node "$PLAYWRIGHT_DRIVER_PATH/package/cli.js" --version)" = "Version $driver_version"
         ! command -v claude
     ' fixture "$(get_tool_version ai_tools antigravity)"; then
         pass "${mode}: Antigravity native version, helper, and runtime settings are exact"

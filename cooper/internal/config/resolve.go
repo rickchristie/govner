@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"runtime"
 	"strings"
@@ -305,12 +306,6 @@ func validatePythonVersion(version string) (bool, error) {
 // npmRegistryURL is the base URL for the npm registry.
 var npmRegistryURL = "https://registry.npmjs.org"
 
-// npmPackageResponse represents the subset of the npm registry response we need.
-type npmPackageResponse struct {
-	DistTags map[string]string          `json:"dist-tags"`
-	Versions map[string]json.RawMessage `json:"versions"`
-}
-
 // NPMPackageMetadata is the subset of version-specific npm metadata used by
 // implicit tooling compatibility checks.
 type NPMPackageMetadata struct {
@@ -322,29 +317,19 @@ type NPMPackageMetadata struct {
 
 // ResolveNPMPackageLatest fetches the latest version of an npm package from the registry.
 func ResolveNPMPackageLatest(packageName string) (string, error) {
-	url := npmRegistryURL + "/" + packageName
-	body, err := httpGet(url)
+	meta, err := ResolveNPMPackageMetadata(packageName, "latest")
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch npm package %q: %w", packageName, err)
+		return "", err
 	}
-
-	var pkg npmPackageResponse
-	if err := json.Unmarshal(body, &pkg); err != nil {
-		return "", fmt.Errorf("failed to parse npm registry response for %q: %w", packageName, err)
-	}
-
-	latest, ok := pkg.DistTags["latest"]
-	if !ok || latest == "" {
-		return "", fmt.Errorf("no 'latest' dist-tag found for npm package %q", packageName)
-	}
-
-	return latest, nil
+	return meta.Version, nil
 }
 
 // ResolveNPMPackageMetadata fetches version-specific npm metadata.
+// The registry also accepts "latest" here. Avoid the full package history:
+// large histories can time out even when this small version record is available.
 func ResolveNPMPackageMetadata(packageName, version string) (NPMPackageMetadata, error) {
-	url := npmRegistryURL + "/" + packageName + "/" + version
-	body, err := httpGet(url)
+	endpoint := npmRegistryURL + "/" + packageName + "/" + url.PathEscape(version)
+	body, err := httpGet(endpoint)
 	if err != nil {
 		return NPMPackageMetadata{}, fmt.Errorf("failed to fetch npm package %q version %q: %w", packageName, version, err)
 	}
@@ -353,25 +338,25 @@ func ResolveNPMPackageMetadata(packageName, version string) (NPMPackageMetadata,
 	if err := json.Unmarshal(body, &meta); err != nil {
 		return NPMPackageMetadata{}, fmt.Errorf("failed to parse npm metadata for %q version %q: %w", packageName, version, err)
 	}
+	if meta.Version == "" {
+		return NPMPackageMetadata{}, fmt.Errorf("npm metadata for %q version %q has no version", packageName, version)
+	}
 
 	return meta, nil
 }
 
 // validateNPMVersion checks if a specific version exists for an npm package.
 func validateNPMVersion(packageName, version string) (bool, error) {
-	url := npmRegistryURL + "/" + packageName
-	body, err := httpGet(url)
+	meta, err := ResolveNPMPackageMetadata(packageName, version)
 	if err != nil {
-		return false, fmt.Errorf("failed to fetch npm package %q: %w", packageName, err)
+		var status *httpStatusError
+		if errors.As(err, &status) && status.status == http.StatusNotFound {
+			return false, nil
+		}
+		return false, err
 	}
-
-	var pkg npmPackageResponse
-	if err := json.Unmarshal(body, &pkg); err != nil {
-		return false, fmt.Errorf("failed to parse npm registry response for %q: %w", packageName, err)
-	}
-
-	_, exists := pkg.Versions[version]
-	return exists, nil
+	// A tag or range must not silently replace an exact Mirror or Pin request.
+	return meta.Version == version, nil
 }
 
 // --- Grok native CLI release channel ---

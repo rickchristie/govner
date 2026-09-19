@@ -10,32 +10,42 @@ import (
 
 func TestRetainedReleasesNeedNoNetwork(t *testing.T) {
 	client := Client{ManifestURL: func(string) string { t.Fatal("retained release fetched a moving manifest"); return "" }}
-	for _, arch := range []string{"amd64", "arm64"} {
-		release, err := client.Resolve("1.2.2", arch, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := release.Validate(); err != nil {
-			t.Fatal(err)
-		}
-		if release.Arch != arch || release.Version != "1.2.2" {
-			t.Fatalf("wrong release: %+v", release)
+	for _, version := range []string{"1.2.2", "1.2.7"} {
+		for _, arch := range []string{"amd64", "arm64"} {
+			release, err := client.Resolve(version, arch, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := release.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			if release.Arch != arch || release.Version != version {
+				t.Fatalf("wrong release: %+v", release)
+			}
 		}
 	}
 }
 
 func TestLatestAndUnavailableVersion(t *testing.T) {
+	// A new official release must work without an entry in the retained cache.
+	release := retained[0]
+	release.Version = "24.7.3"
+	release.URL = strings.Replace(release.URL, "/1.2.2-", "/24.7.3-", 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/amd64" {
 			t.Errorf("wrong platform URL: %s", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(retained[0])
+		_ = json.NewEncoder(w).Encode(release)
 	}))
 	defer server.Close()
 	client := Client{HTTP: server.Client(), ManifestURL: func(arch string) string { return server.URL + "/" + arch }}
 	got, err := client.Latest("amd64")
-	if err != nil || got != retained[0] {
+	if err != nil || got != release {
 		t.Fatalf("latest = %+v, %v", got, err)
+	}
+	got, err = client.Resolve(release.Version, "amd64", nil)
+	if err != nil || got != release {
+		t.Fatalf("resolve new release = %+v, %v", got, err)
 	}
 	if _, err := client.Resolve("1.1.0", "amd64", nil); err == nil || !strings.Contains(err.Error(), "no retained verified release record") {
 		t.Fatalf("missing version silently changed: %v", err)

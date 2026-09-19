@@ -79,7 +79,7 @@ then use the mounted state or saved profiles in Docker and VM sessions.
 Cooper does not share the host keyring. See the native guide below for setup,
 token refresh, shell integration, and platform limits.
 
-Antigravity uses the native `agy` executable and the complete host `~/.gemini` state root at the same path. Named profiles use that same root catalog. The reviewed release is 1.2.2. See [Antigravity CLI](docs/antigravity.md) for version pins, the image-owned browser driver, ADC paths, supported profile logins, and keyring limits. The built-in name `antigravity` is reserved; rename a custom directory with that name before configuration.
+Antigravity uses the native `agy` executable and the complete host `~/.gemini` state root at the same path. Named profiles use that same root catalog. Mirror, Latest, and Pin select the native version; the build reads its required browser driver from that executable. See [Antigravity CLI](docs/antigravity.md) for version pins, the image-owned browser driver, ADC paths, supported profile logins, and keyring limits. The built-in name `antigravity` is reserved; rename a custom directory with that name before configuration.
 
 ### Grok Build
 

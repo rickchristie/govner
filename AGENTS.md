@@ -30,6 +30,7 @@ Read README.md of the project before starting.
 ## Cooper
 
 ### Design
+- Support Mirror, Latest, and Pin for every harness without a version allowlist.
 - Cooper supports the complete host state directories of all built-in CLI agents (e.g. `~/.grok`, `~/.codex`).
   Each `cooper cli [agent]` or `cooper vm [agent]` session mounts only the state directories of the selected agent.
   Mount the complete selected state read-write. This includes auth, sessions, all configs, conversation history, auto-memory, and future state.

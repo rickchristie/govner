@@ -378,18 +378,11 @@ func TestResolvePythonLatestFutureEOLNotFiltered(t *testing.T) {
 func TestResolveNPMPackageLatest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// Verify the request path includes the package name
-		pkg := npmPackageResponse{
-			DistTags: map[string]string{
-				"latest": "1.0.12",
-				"beta":   "1.1.0-beta.1",
-			},
-			Versions: map[string]json.RawMessage{
-				"1.0.11": json.RawMessage(`{}`),
-				"1.0.12": json.RawMessage(`{}`),
-			},
+		// Request only the selected version, not the complete release history.
+		if r.URL.Path != "/@anthropic-ai/claude-code/latest" {
+			t.Errorf("unexpected registry path: %s", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(pkg)
+		json.NewEncoder(w).Encode(NPMPackageMetadata{Version: "1.0.12"})
 	}))
 	defer server.Close()
 
@@ -406,10 +399,10 @@ func TestResolveNPMPackageLatest(t *testing.T) {
 	}
 }
 
-func TestResolveNPMPackageLatestNoDistTag(t *testing.T) {
+func TestResolveNPMPackageLatestMissingVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"dist-tags": {}, "versions": {}}`)
+		fmt.Fprint(w, `{}`)
 	}))
 	defer server.Close()
 
@@ -419,7 +412,7 @@ func TestResolveNPMPackageLatestNoDistTag(t *testing.T) {
 
 	_, err := ResolveNPMPackageLatest("@anthropic-ai/claude-code")
 	if err == nil {
-		t.Fatal("expected error when no latest dist-tag")
+		t.Fatal("expected error when the latest response has no version")
 	}
 }
 
@@ -441,6 +434,9 @@ func TestResolveNPMPackageLatestInvalidJSON(t *testing.T) {
 
 func TestResolveNPMPackageMetadata(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/typescript-language-server/5.1.3" {
+			t.Errorf("unexpected registry path: %s", r.URL.Path)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"version":"5.1.3","engines":{"node":">=20"}}`)
 	}))
@@ -518,11 +514,7 @@ func TestResolveNPMURLConstruction(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requestedPath = r.URL.Path
 				w.Header().Set("Content-Type", "application/json")
-				pkg := npmPackageResponse{
-					DistTags: map[string]string{"latest": "1.0.0"},
-					Versions: map[string]json.RawMessage{"1.0.0": json.RawMessage(`{}`)},
-				}
-				json.NewEncoder(w).Encode(pkg)
+				json.NewEncoder(w).Encode(NPMPackageMetadata{Version: "1.0.0"})
 			}))
 			defer server.Close()
 
@@ -535,7 +527,7 @@ func TestResolveNPMURLConstruction(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			wantPath := "/" + tt.wantPackage
+			wantPath := "/" + tt.wantPackage + "/latest"
 			if requestedPath != wantPath {
 				t.Errorf("requested path %q, want %q", requestedPath, wantPath)
 			}
@@ -561,11 +553,7 @@ func TestResolveLatestVersionDispatch(t *testing.T) {
 			fmt.Fprint(w, `[{"version": "v20.11.0", "lts": "Iron"}]`)
 		default:
 			// npm fallback
-			pkg := npmPackageResponse{
-				DistTags: map[string]string{"latest": "2.0.0"},
-				Versions: map[string]json.RawMessage{"2.0.0": json.RawMessage(`{}`)},
-			}
-			json.NewEncoder(w).Encode(pkg)
+			json.NewEncoder(w).Encode(NPMPackageMetadata{Version: "2.0.0"})
 		}
 	}))
 	defer server.Close()
@@ -805,14 +793,15 @@ func TestResolveValidatePythonVersion(t *testing.T) {
 func TestResolveValidateNPMVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		pkg := npmPackageResponse{
-			DistTags: map[string]string{"latest": "1.0.12"},
-			Versions: map[string]json.RawMessage{
-				"1.0.11": json.RawMessage(`{}`),
-				"1.0.12": json.RawMessage(`{}`),
-			},
+		switch r.URL.Path {
+		case "/@anthropic-ai/claude-code/1.0.12":
+			json.NewEncoder(w).Encode(NPMPackageMetadata{Version: "1.0.12"})
+		case "/@anthropic-ai/claude-code/99.0.0":
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			t.Errorf("unexpected registry path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
 		}
-		json.NewEncoder(w).Encode(pkg)
 	}))
 	defer server.Close()
 
@@ -834,6 +823,39 @@ func TestResolveValidateNPMVersion(t *testing.T) {
 	}
 	if exists {
 		t.Error("expected version 99.0.0 to not exist")
+	}
+}
+
+func TestValidateNPMVersionKeepsExactChoiceAndErrors(t *testing.T) {
+	for _, test := range []struct {
+		name, body string
+		status     int
+		wantError  bool
+	}{
+		{"different version", `{"version":"1.0.13"}`, http.StatusOK, false},
+		{"missing version", `{}`, http.StatusOK, true},
+		{"null", `null`, http.StatusOK, true},
+		{"invalid JSON", `{`, http.StatusOK, true},
+		{"server error", `{}`, http.StatusInternalServerError, true},
+		{"denied", `{}`, http.StatusForbidden, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/@openai/codex/1.0.12" {
+					t.Errorf("unexpected registry path: %s", r.URL.Path)
+				}
+				w.WriteHeader(test.status)
+				fmt.Fprint(w, test.body)
+			}))
+			defer server.Close()
+			oldURL := npmRegistryURL
+			npmRegistryURL = server.URL
+			t.Cleanup(func() { npmRegistryURL = oldURL })
+			exists, err := validateNPMVersion("@openai/codex", "1.0.12")
+			if exists || (err != nil) != test.wantError {
+				t.Fatalf("exact version check = %v, %v", exists, err)
+			}
+		})
 	}
 }
 

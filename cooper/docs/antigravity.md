@@ -34,24 +34,33 @@ Docker or a separate kernel. Use a CLI barrel for faster ordinary work.
 
 ## Version and state contract
 
-The reviewed native release is **1.2.2**, on Linux amd64 and arm64. Configure
-can detect the host with `agy --version`. Existing configs gain a disabled
+Mirror follows the host `agy --version`, Latest selects the current release,
+and Pin keeps the requested version. Linux images support amd64 and arm64.
+Cooper has no native-version allowlist. Existing configs gain a disabled
 Antigravity row. First-time configuration can mirror an installed host CLI.
 
 Google's archive paths include an opaque build ID. Cooper resolves exact
 platform URLs and SHA-512 digests before a build and saves both platform
 records in the config. Rendering uses those records without network access.
 Mirror and Pin never substitute Latest for an unavailable historical release.
-Cooper retains reviewed 1.2.2 records for offline resolution. A later native
-release needs review of its helper dependency before Cooper can build it.
+Cooper retains test release records for offline resolution and saves resolved
+records for other versions. An unavailable historical archive remains an error; Cooper
+does not replace the requested version with a different release.
 
 The image installs the wrapper at `/opt/cooper/bin/agy` and the native binary
-at `/opt/cooper/libexec/agy`, outside state mounts. Native
-1.2.2 uses a Playwright 1.57.0 driver whose old download endpoints return 404.
-Cooper installs that exact official driver through npm and selects the image's
-Linux Node runtime. It does not use a host executable cache that can contain
-macOS binaries. Browser installation remains the existing Cooper browser
-feature. Automatic native CLI updates are disabled to keep the built version.
+at `/opt/cooper/libexec/agy`, outside state mounts. After checking the archive
+digest and native version, the build reads the required Playwright version
+from the executable's compiled browser cache path. This does not start agy
+or read host state. A missing or ambiguous dependency stops the build with a
+dependency error. Each native version can select its own driver without a
+Cooper release or a change to the selected harness version.
+
+Older native releases use driver download endpoints that return 404. Cooper
+installs the exact official driver through npm, verifies its version, and
+selects the image's Linux Node runtime. It does not use a host executable cache
+that can contain macOS binaries. Browser installation remains the existing
+Cooper browser feature. Automatic native CLI updates are disabled to keep the
+built version.
 
 The complete `~/.gemini` root is mounted read-write at its host path in both
 runtimes. This includes CLI state and sibling Google state directories,

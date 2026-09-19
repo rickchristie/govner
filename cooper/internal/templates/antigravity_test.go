@@ -19,7 +19,8 @@ func TestAntigravityNativeImageContract(t *testing.T) {
 	for _, want := range []string{
 		"COOPER_CLI_TOOL=antigravity", "COOPER_CLI_EXECUTABLE=agy", "COOPER_CLIPBOARD_MODE=x11",
 		"COOPER_CLI_AUTO_APPROVE=\"--dangerously-skip-permissions\"", "AGY_CLI_DISABLE_AUTO_UPDATE=true",
-		"sha512sum -c -", "tar -xOzf", "/opt/cooper/bin/agy", "playwright@1.57.0",
+		"sha512sum -c -", "tar -xOzf", "/opt/cooper/bin/agy", `"playwright@$agy_driver_version"`,
+		"/opt/cooper/libexec/agy-driver-version /opt/cooper/libexec/agy",
 		"/opt/cooper/libexec/agy", "export DBUS_SESSION_BUS_ADDRESS=" + antigravity.FileBusAddress,
 		"PLAYWRIGHT_DRIVER_PATH=/opt/cooper/agy-playwright", "PLAYWRIGHT_NODEJS_PATH=/usr/local/bin/node",
 	} {
@@ -35,6 +36,29 @@ func TestAntigravityNativeImageContract(t *testing.T) {
 	for _, unwanted := range []string{"curl -fsSL", "install.sh", "pip install antigravity", "npm install -g antigravity", "ENV GEMINI_API_KEY", "ENV AGY_ADC_AUTH"} {
 		if strings.Contains(text, unwanted) {
 			t.Errorf("image changes native installation or host auth: %s", unwanted)
+		}
+	}
+}
+
+func TestAntigravityAcceptsSelectedVersionsInEveryMode(t *testing.T) {
+	for _, version := range []string{"1.2.2", "1.2.7", "24.7.3"} {
+		for _, mode := range []config.VersionMode{config.ModeMirror, config.ModeLatest, config.ModePin} {
+			t.Run(version+"/"+mode.String(), func(t *testing.T) {
+				releases := antigravity.KnownReleases("1.2.2")
+				for index := range releases {
+					releases[index].Version = version
+					releases[index].URL = strings.Replace(releases[index].URL, "/1.2.2-", "/"+version+"-", 1)
+				}
+				cfg := &config.Config{AITools: []config.ToolConfig{{Name: "antigravity", Enabled: true,
+					Mode: mode, HostVersion: version, PinnedVersion: version, AntigravityReleases: releases}}}
+				text, err := RenderCLIToolDockerfile(cfg, "antigravity")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(text, "test \"$(/opt/cooper/libexec/agy --version)\" = '"+version+"'") {
+					t.Fatal("the image does not check the selected native version")
+				}
+			})
 		}
 	}
 }

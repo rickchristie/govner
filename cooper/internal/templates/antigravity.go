@@ -8,12 +8,6 @@ import (
 )
 
 func renderAntigravityInstall(cfg *config.Config, version string) (string, error) {
-	// The native CLI embeds a Playwright Go client. Its driver must match that
-	// client, not the workspace's Playwright version. Review this dependency
-	// when accepting another native release; do not guess on a moving Latest.
-	if version != "1.2.2" {
-		return "", fmt.Errorf("Antigravity %q has no reviewed browser driver; supported native release: 1.2.2", version)
-	}
 	releases := map[string]antigravity.Release{}
 	for _, tool := range cfg.AITools {
 		if tool.Name != "antigravity" {
@@ -58,12 +52,15 @@ RUN set -eu; \
 # Both execution modes use file state, even if a workload starts its own bus.
 RUN %s
 
-# Native 1.2.2 expects Playwright 1.57.0. Its old driver CDN returns 404.
-# Use the same official driver via npm and the image's Linux Node runtime.
+# Read the driver required by this exact native executable. Old native
+# releases use a driver CDN that returns 404, so install it through npm.
 # These executables are image-owned; a shared macOS cache must not hide them.
-RUN npm install --prefix /opt/cooper/agy-playwright --ignore-scripts --no-audit --no-fund playwright@1.57.0 \
+RUN %s
+RUN agy_driver_version=$(/opt/cooper/libexec/agy-driver-version /opt/cooper/libexec/agy) \
+    && npm install --prefix /opt/cooper/agy-playwright --ignore-scripts --no-audit --no-fund "playwright@$agy_driver_version" \
     && ln -s node_modules/playwright /opt/cooper/agy-playwright/package \
-    && test "$(node /opt/cooper/agy-playwright/package/cli.js --version)" = 'Version 1.57.0'
+    && test "$(node /opt/cooper/agy-playwright/package/cli.js --version)" = "Version $agy_driver_version"
 `, amd.URL, amd.SHA512, arm.URL, arm.SHA512, version,
-		antigravity.FileWrapperCommand("/opt/cooper/libexec/agy", "/opt/cooper/bin/agy")), nil
+		antigravity.FileWrapperCommand("/opt/cooper/libexec/agy", "/opt/cooper/bin/agy"),
+		antigravity.DriverVersionCommand("/opt/cooper/libexec/agy-driver-version")), nil
 }

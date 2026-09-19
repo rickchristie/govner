@@ -54,12 +54,7 @@ func FileWrapper(executable string) string {
 
 // FileWrapperCommand writes the same wrapper into the selected agent image.
 func FileWrapperCommand(executable, target string) string {
-	var lines []string
-	for _, line := range strings.Split(strings.TrimSuffix(FileWrapper(executable), "\n"), "\n") {
-		lines = append(lines, shellQuote(line))
-	}
-	return "printf '%s\\n' " + strings.Join(lines, " ") + " > " + shellQuote(target) +
-		" && chmod 0755 " + shellQuote(target)
+	return shellScriptCommand(FileWrapper(executable), target)
 }
 
 // InstallHostFileAuth only changes Cooper-owned files and appends a marked

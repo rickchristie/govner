@@ -28,7 +28,7 @@ var versionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 var digestPattern = regexp.MustCompile(`^[a-f0-9]{128}$`)
 var buildPattern = regexp.MustCompile(`^[0-9]+$`)
 
-// KnownReleases returns independent records for an offline, reviewed release.
+// KnownReleases returns independent saved official records for offline use.
 // An empty result means the caller must resolve official metadata first.
 func KnownReleases(version string) []Release {
 	var result []Release
@@ -139,10 +139,14 @@ func (c Client) Resolve(version, arch string, saved []Release) (Release, error) 
 	return release, nil
 }
 
-// These records were read from both official manifests on 2026-09-13. Retain
-// exact URLs and digests; do not guess historical build IDs. Archive downloads
+// Retain exact official URLs and digests; do not guess historical build IDs.
+// These records are a cache, not a version allowlist. Archive downloads
 // are checked again inside the image build before any executable runs.
 var retained = []Release{
+	// Official manifests from 2026-09-13.
 	{Version: "1.2.2", Arch: "amd64", URL: "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.2.2-6061403484848128/linux-x64/cli_linux_x64.tar.gz", SHA512: "74342cf2a78b344392e573b638a648a6ad1f8e877f494b96e20f9c2b79158d5c423c40b2dcf788703362bb0a9150f09c707fde599d7557ce01c12208802a63cb"},
 	{Version: "1.2.2", Arch: "arm64", URL: "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.2.2-6061403484848128/linux-arm/cli_linux_arm64.tar.gz", SHA512: "a1645a30f36b767c7534c2f6a53e99a9bfade993267efcca715f7a45d797d47d6561df787e9d4a51a3bdfc9be855d49d23fa3f4b91b2c661fd17314050836048"},
+	// Official manifests from 2026-09-19; retained for the VM test input.
+	{Version: "1.2.7", Arch: "amd64", URL: "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.2.7-6731160148115456/linux-x64/cli_linux_x64.tar.gz", SHA512: "fec769d611c4afdf0ae72d38bdb2652c8e2c8e71e4f6de97a27b80dda3c50429160d9e03776a36a59b8857c20e76783c4a49cb0feb8b2f5c3bf925b0cc03bb77"},
+	{Version: "1.2.7", Arch: "arm64", URL: "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.2.7-6731160148115456/linux-arm/cli_linux_arm64.tar.gz", SHA512: "d39f939ffc80776bfd2dc10db7b9a1a1b58650f08115fa21065c11d10882c71210f368c2e6060f26966d1a33d6b2dd2bc19bfd641062305af6546c51d494511a"},
 }
