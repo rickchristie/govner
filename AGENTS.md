@@ -74,7 +74,7 @@ Read README.md of the project before starting.
 - **Cooper VM E2E gate:** Run the full gate only before a Cooper release,
   not during routine development or to obtain a cost baseline. Before every
   Cooper release, run
-  `timeout 90m ./cooper/test-vm.sh > /tmp/cooper-vm-gate.txt 2>&1`.
+  `timeout 120m ./cooper/test-vm.sh > /tmp/cooper-vm-gate.txt 2>&1`.
 - **Other Go modules:** validate Gowt with
   `go test -C ./gowt ./... > /tmp/gowt-go-test.txt 2>&1` and pgflock with
   `go test -C ./pgflock ./... > /tmp/pgflock-go-test.txt 2>&1`.

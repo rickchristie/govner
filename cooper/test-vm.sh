@@ -43,10 +43,12 @@ if [ ! -s "$PREPARED_BASE" ]; then
     exit 1
 fi
 
+# The matrix runs before a self-host test with two separate 30-minute inner
+# bounds. Keep the suite bound above their combined valid execution time.
 COOPER_RUN_VM_E2E=1 \
 COOPER_VM_PREPARED_BASE="$PREPARED_BASE" \
 COOPER_VM_BINARY="$REPO_ROOT/cooper/cooper" \
-go test -C ./cooper -v ./internal/vme2e -count=1 -timeout=75m >"$LOG_FILE" 2>&1
+go test -C ./cooper -v ./internal/vme2e -count=1 -timeout=105m >"$LOG_FILE" 2>&1
 
 echo "Cooper VM release gate passed."
 echo "Log: $LOG_FILE"

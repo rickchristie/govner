@@ -71,7 +71,7 @@ physical-host release check also tests different host and container ports.
 The full self-host build and two-level VM test stay in the release gate:
 
 ```bash
-timeout 90m ./cooper/test-vm.sh > /tmp/cooper-vm-gate.txt 2>&1
+timeout 120m ./cooper/test-vm.sh > /tmp/cooper-vm-gate.txt 2>&1
 ```
 
 Run it only before a Cooper release, from the physical Linux host. It is not

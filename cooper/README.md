@@ -545,7 +545,7 @@ For VM-specific diagnostics, use:
 cooper vm doctor
 ```
 
-The report distinguishes an unsupported host, missing prepared assets, missing infrastructure images, no running VM, and an unhealthy running VM. For source development, start with `./cooper/test-vm-dev.sh unit`, then use a small prepared VM profile from [the development guide](dev/README.md). Run the complete `timeout 90m ./cooper/test-vm.sh` gate only before a release on the physical Linux host.
+The report distinguishes an unsupported host, missing prepared assets, missing infrastructure images, no running VM, and an unhealthy running VM. For source development, start with `./cooper/test-vm-dev.sh unit`, then use a small prepared VM profile from [the development guide](dev/README.md). Run the complete `timeout 120m ./cooper/test-vm.sh` gate only before a release on the physical Linux host. This outer bound includes the agent matrix and the self-host test's two separate 30-minute inner bounds.
 
 ### Grok login, versions, or custom-directory collisions
 

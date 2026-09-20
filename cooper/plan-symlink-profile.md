@@ -1142,7 +1142,7 @@ screens in addition to behavior tests.
 
 Before a Cooper release, run the full gate on a suitable physical Linux host:
 
-    timeout 90m ./cooper/test-vm.sh > /tmp/cooper-vm-gate.txt 2>&1
+    timeout 120m ./cooper/test-vm.sh > /tmp/cooper-vm-gate.txt 2>&1
 
 Record the commit, versions, physical host, filesystem, commands, log paths,
 pass/fail results, and remaining limitations. A skipped host check is not
