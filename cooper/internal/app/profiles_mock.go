@@ -48,31 +48,19 @@ func (a *TestApp) ListProfiles(context.Context) ([]profiles.Summary, error) {
 func (a *TestApp) SaveProfile(ctx context.Context, request profiles.SaveRequest) (profiles.Result, error) {
 	a.profileMu.Lock()
 	defer a.profileMu.Unlock()
-	if a.profileScenario == "conflict" && request.ConflictChoice == "" {
-		return profiles.Result{}, &profiles.Issue{Kind: profiles.StateConflict, Message: "The host and saved profile have different changes. Both copies are preserved."}
+	if a.profileScenario == "mismatch" {
+		return profiles.Result{}, &profiles.Issue{Kind: profiles.AccountConflict, Message: "The login differs from the selected profile. Restore its original login or an independent backup."}
 	}
 	if a.profileScenario == "busy" {
 		return profiles.Result{}, &profiles.Issue{Kind: profiles.StateInUse, Message: "A running session uses this state. Stop it before saving."}
 	}
-	if a.profileScenario == "unmapped" && request.NewName == "" {
-		return profiles.Result{}, &profiles.Issue{Kind: profiles.NameRequired, Message: "This account has no profile"}
-	}
 	for _, item := range a.profileItems {
-		if item.Harness == request.Harness && item.Loaded && a.profileScenario != "unmapped" {
+		if item.Harness == request.Harness && item.Loaded {
 			if item.Pending {
 				return profiles.Result{}, &profiles.Issue{Kind: profiles.IdentityUnknown, Message: "Fixture: log in on the host before saving this profile"}
 			}
 			return profiles.Result{Saved: item.Name}, nil
 		}
-	}
-	if len(a.profileItems) == 0 {
-		request.NewName = "Default"
-	}
-	if request.NewName == "" {
-		return profiles.Result{}, &profiles.Issue{Kind: profiles.NameRequired, Message: "This account has no profile"}
-	}
-	if err := profiles.ValidateName(request.NewName); err != nil {
-		return profiles.Result{}, err
 	}
 	for index := range a.profileItems {
 		if a.profileItems[index].Harness == request.Harness {
@@ -80,8 +68,8 @@ func (a *TestApp) SaveProfile(ctx context.Context, request profiles.SaveRequest)
 		}
 	}
 	a.profileScenario = ""
-	a.profileItems = append(a.profileItems, profiles.Summary{ID: "fixture-" + request.NewName, Harness: request.Harness, Name: request.NewName, Account: "new@example.test", Loaded: true})
-	return profiles.Result{Saved: request.NewName, Created: true}, nil
+	a.profileItems = append(a.profileItems, profiles.Summary{ID: "fixture-" + request.Harness + "-default", Harness: request.Harness, Name: "Default", Account: "new@example.test", Loaded: true})
+	return profiles.Result{Saved: "Default", Created: true}, nil
 }
 
 // SetProfileScenario selects only fixed, fabricated account state. It does
@@ -90,12 +78,12 @@ func (a *TestApp) SetProfileScenario(name string) error {
 	a.profileMu.Lock()
 	defer a.profileMu.Unlock()
 	switch name {
-	case "", "populated", "unmapped", "conflict", "busy", "error":
+	case "", "populated", "mismatch", "busy", "error":
 		a.profileItems = ProfileStory()
 	case "empty":
 		a.profileItems = nil
 	default:
-		return errors.New("profile scenario must be populated, empty, unmapped, conflict, busy, or error")
+		return errors.New("profile scenario must be populated, empty, mismatch, busy, or error")
 	}
 	a.profileScenario = name
 	return nil
@@ -107,6 +95,20 @@ func (a *TestApp) LoadProfile(ctx context.Context, request profiles.LoadRequest)
 	}
 	a.profileMu.Lock()
 	defer a.profileMu.Unlock()
+	if a.profileScenario == "busy" {
+		return profiles.Result{}, &profiles.Issue{Kind: profiles.StateInUse, Message: "A running session uses this state. Stop it before switching."}
+	}
+	for _, item := range a.profileItems {
+		if item.Harness != request.Harness || !item.Loaded {
+			continue
+		}
+		if strings.EqualFold(item.Name, request.Name) {
+			return profiles.Result{Loaded: item.Name, Unchanged: true}, nil
+		}
+		if !request.Confirmed || (request.ExpectedProfileID != "" && request.ExpectedProfileID != item.ID) {
+			return profiles.Result{}, &profiles.Issue{Kind: profiles.ConfirmationRequired, ProfileID: item.ID, Message: "Close all " + request.Harness + " CLI instances and apps. Stop affected Cooper runtimes. Keep them closed until the switch completes. Switch " + item.Name + " to " + request.Name + "?"}
+		}
+	}
 	result := profiles.Result{Loaded: request.Name}
 	found := false
 	for index := range a.profileItems {
@@ -152,9 +154,9 @@ func ProfileStory() []profiles.Summary {
 	return []profiles.Summary{
 		{ID: "fixture-claude-default", Harness: "claude", Name: "Default", Account: "personal@example.test / Personal", Loaded: true, Saved: date},
 		{ID: "fixture-claude-work", Harness: "claude", Name: "Work", Account: "developer@example.test / Example Enterprise", Saved: date},
-		{ID: "fixture-codex-default", Harness: "codex", Name: "Default", Account: "personal@example.test / Personal", Managed: true, Mixed: true, Saved: date, HostRoots: []profiles.HostRoot{{Path: "/home/demo/.codex", Harness: "codex", Profile: "Default", Selected: true}, {Path: "/home/demo/.agents", Harness: "grok", Profile: "Default"}}},
-		{ID: "fixture-codex-work", Harness: "codex", Name: "Work", Account: "developer@example.test / Example Enterprise", Managed: true, InUse: true, Saved: date},
-		{ID: "fixture-grok-default", Harness: "grok", Name: "Default", Account: "user@example.test", Managed: true, Mismatch: true, Saved: date},
-		{ID: "fixture-opencode-playground", Harness: "opencode", Name: "Playground", Loaded: true, Pending: true, Managed: true, Saved: date},
+		{ID: "fixture-codex-default", Harness: "codex", Name: "Default", Account: "personal@example.test / Personal", Loaded: true, Saved: date},
+		{ID: "fixture-codex-work", Harness: "codex", Name: "Work", Account: "developer@example.test / Example Enterprise", InUse: true, Saved: date},
+		{ID: "fixture-grok-default", Harness: "grok", Name: "Default", Account: "user@example.test", Mismatch: true, Saved: date},
+		{ID: "fixture-opencode-playground", Harness: "opencode", Name: "Playground", Loaded: true, Pending: true, Saved: date},
 	}
 }

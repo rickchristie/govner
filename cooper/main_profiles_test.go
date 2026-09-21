@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -18,6 +19,9 @@ import (
 )
 
 func TestRunCLINamedProfilePersistsStateAndSeparatesHost(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("profiles are Linux-only")
+	}
 	driver, workspace := setupCLIBarrelEnvTest(t, func(cfg *config.Config) {
 		for index := range cfg.AITools {
 			cfg.AITools[index].Enabled = cfg.AITools[index].Name == "codex"
@@ -46,6 +50,15 @@ func TestRunCLINamedProfilePersistsStateAndSeparatesHost(t *testing.T) {
 	service := profiles.New(profiles.Options{CooperDir: driver.CooperDir(), Workspace: workspace, Account: account,
 		Environment: map[string]string{"CODEX_HOME": filepath.Join(home, ".codex")}, CredentialNames: profileauth.CredentialNames,
 		Reader: profileauth.Reader{}, Guard: profiles.GuardFunc(func(context.Context, []string) error { return nil })})
+	if _, err := service.Save(t.Context(), profiles.SaveRequest{Harness: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Load(t.Context(), profiles.LoadRequest{Harness: "codex", Name: "Work", Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".codex/auth.json"), []byte(`{"auth_mode":"apikey","OPENAI_API_KEY":"fake-work-key"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := service.Save(t.Context(), profiles.SaveRequest{Harness: "codex"}); err != nil {
 		t.Fatal(err)
 	}
@@ -81,6 +94,10 @@ func TestRunCLINamedProfilePersistsStateAndSeparatesHost(t *testing.T) {
 	if err != nil || string(after) != string(before) {
 		t.Fatal("unchanged named profile did not reuse its container")
 	}
+	t.Setenv("OPENAI_API_KEY", "")
+	if err := os.Unsetenv("OPENAI_API_KEY"); err != nil {
+		t.Fatal(err)
+	}
 	if output := run("codex"); output != "host-session" {
 		t.Fatalf("ordinary CLI did not use live host: %q", output)
 	}
@@ -111,7 +128,7 @@ func TestRunCLINamedProfilePersistsStateAndSeparatesHost(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".codex/session"), []byte("work-session"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Save(t.Context(), profiles.SaveRequest{Harness: "codex", NewName: "Work"}); err != nil {
+	if _, err := service.Save(t.Context(), profiles.SaveRequest{Harness: "codex"}); err != nil {
 		t.Fatal(err)
 	}
 	if output := run("codex", "Work"); output != "work-session" {

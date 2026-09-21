@@ -20,7 +20,7 @@ LIFECYCLES = {"restart", "resources", "relay", "agent"}
 PACKAGES = ["vm", "vmhost", "vmguest", "vmproto", "vmrelay", "vmstate", "vmcontext",
             "vmpayload", "workload", "runtimefs", "launch", "auth", "config",
             "templates", "clipboard", "usercontext", "vmdev", "profiles",
-            "profileauth", "profilemanager", "profilelink", "statelock", "aitool", "antigravity", "hostpath"]
+            "profileauth", "profilemanager", "statelock", "aitool", "antigravity", "hostpath"]
 
 DOCKER_GUARD = '''#!/bin/sh
 case "$1:$2" in

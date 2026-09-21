@@ -59,18 +59,9 @@ func (m *Model) listFrame(width, height int) components.FixedFrame {
 
 func renderProfile(item components.ListItem, selected bool, width int) string {
 	profile := item.Data.(profiles.Summary)
-	state := "Saved"
-	if profile.Managed {
-		state = "Live"
-	}
+	state := "Inactive"
 	if profile.Loaded {
 		state = "Host"
-		if profile.Managed {
-			state = "Host · Live"
-		}
-	}
-	if profile.Mixed {
-		state = "Shared roots differ"
 	}
 	if profile.Mismatch {
 		state = "Account mismatch"
@@ -96,37 +87,27 @@ func renderProfile(item components.ListItem, selected bool, width int) string {
 }
 
 func (m *Model) formView(width, height int) string {
-	if m.form.Kind == formDetails {
-		return m.detailsView(width, height)
+	if m.form.Kind == formDetails || m.form.Kind == formConfirm {
+		return m.textView(width, height)
 	}
 	title, body, confirm := "Load or create profile", "Harness: "+m.harness+"\n\nProfile name: "+m.form.Name+"_\n\nA new name starts with empty state.\nThe current account is saved first.", "Load"
 	switch m.form.Kind {
-	case formName:
-		title, confirm = "Name the current account", "Save"
-		body = "This account has no saved profile.\nUse a new name. Existing names are protected.\n\nProfile name: " + m.form.Name + "_"
 	case formDelete:
 		title, confirm = "Delete saved profile", "Delete"
 		body = "Delete " + m.form.Pending.Load.Harness + "/" + m.form.Pending.Load.Name + "?\n\nThis removes unused state. Required recovery must be kept."
-	case formConflict:
-		title, confirm = "Both copies changed", "h: Host / s: Saved"
-		body = "The host and saved profile have different changes.\nBoth copies are preserved.\n\nPress h to keep host changes as the saved profile.\nPress s to keep the saved profile changes.\nEsc cancels."
 	}
 	if m.form.Error != "" {
 		body += "\n\n" + m.form.Error
 	}
-	if m.form.Kind == formConflict {
-		confirm = "h Keep host  ·  s Keep saved"
-	} else {
-		confirm = "Enter " + confirm
-	}
+	confirm = "Enter " + confirm
 	frame := components.FixedFrame{Header: title, Footer: confirm + "  ·  Esc Cancel", Width: width, Height: height}
 	return frame.View(lipgloss.NewStyle().Width(max(1, width-4)).Padding(0, 2).Render(body))
 }
 
-func (m *Model) detailsView(width, height int) string {
-	frame := m.detailsFrame(width, height)
+func (m *Model) textView(width, height int) string {
+	frame := m.textFrame(width, height)
 	content := m.form.Content
-	content.SetContent(ansi.Wrap(m.detailsText(), max(1, width-1), ""))
+	content.SetContent(ansi.Wrap(m.formText(), max(1, width-1), ""))
 	return frame.View(content.View(width, frame.BodyHeight()))
 }
 
@@ -135,35 +116,32 @@ func (m *Model) detailsText() string {
 	if selected := m.list.Selected(); selected != nil {
 		profile := selected.Data.(profiles.Summary)
 		body = fmt.Sprintf("%s / %s\nAccount: %s\nLast saved: %s\n\n%s", profile.Harness, profile.Name, profile.Account, profile.Saved.Format("2006-01-02 15:04 MST"), body)
-		if profile.Managed {
-			if profile.Mixed {
-				body += "\nShared host roots differ. Reload this profile before save."
-			}
-			if profile.Mismatch {
-				body += "\nAccount mismatch. Restore the original login or an independent backup."
-			}
-			if profile.Pending {
-				body += "\nLogin needed on the host, then save this profile."
-			}
-			if profile.InUse {
-				body += "\nState is in use. Stop its writers before changing profiles."
-			}
-			body += "\n\nLive profile: writes are saved as you work. Save checks the account.\nUse cooper profiles backup for an independent copy."
-			for _, root := range profile.HostRoots {
-				owner := root.Harness + "/" + root.Profile
-				if root.Harness == "" {
-					owner = "unmanaged"
-				}
-				body += "\nHost " + root.Path + " uses " + owner
-			}
-		} else {
-			body += "\n\nCopy mode. Preview conversion with cooper profiles migrate --dry-run."
+		if profile.Mismatch {
+			body += "\nAccount mismatch. Restore the original login or an independent backup."
 		}
+		if profile.Pending {
+			body += "\nLogin needed on the host, then save this profile."
+		}
+		if profile.InUse {
+			body += "\nState is in use. Stop its readers and writers before changing profiles."
+		}
+		body += "\n\nLive profile: writes are saved as you work. Save checks the account.\nUse cooper profiles backup for an independent copy."
+		body += "\nLinux only. Inactive roots use sibling directories.\nThe .agents directory is shared and does not switch."
 	}
 	return body
 }
 
-func (m *Model) detailsFrame(width, height int) components.FixedFrame {
+func (m *Model) formText() string {
+	if m.form.Kind == formConfirm {
+		return m.form.Prompt + "\n\nThe use check cannot detect every reader or writer.\nThe default answer is No."
+	}
+	return m.detailsText()
+}
+
+func (m *Model) textFrame(width, height int) components.FixedFrame {
+	if m.form.Kind == formConfirm {
+		return components.FixedFrame{Header: "Close apps before switching", Footer: "↑/↓ Scroll · Y Continue\nEnter/N/Esc Cancel", Width: width, Height: height}
+	}
 	return components.FixedFrame{Header: "Profile details and last result", Footer: "↑/↓ Scroll  ·  Enter/Esc Close", Width: width, Height: height}
 }
 
@@ -171,7 +149,7 @@ func (m *Model) layout() {
 	m.list.Width = m.width
 	m.list.Height = max(1, m.listFrame(m.width, m.height).BodyHeight()-1)
 	m.list.ClampScroll()
-	if m.form.Kind == formDetails {
-		m.form.Content.SetContent(ansi.Wrap(m.detailsText(), max(1, m.width-1), ""))
+	if m.form.Kind == formDetails || m.form.Kind == formConfirm {
+		m.form.Content.SetContent(ansi.Wrap(m.formText(), max(1, m.width-1), ""))
 	}
 }

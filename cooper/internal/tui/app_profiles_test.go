@@ -22,7 +22,7 @@ func TestProfilesReceiveResultsAfterTabChange(t *testing.T) {
 	m.SetActiveTab(theme.TabRuntime)
 	m.Update(profileui.ProfilesListedMsg{Items: app.ProfileStory()})
 	m.Update(profileui.ProfileActionCompletedMsg{Action: "save", Result: profiles.Result{Saved: "Default"}})
-	if !strings.Contains(screen.View(100, 25), "Saved Default") {
+	if !strings.Contains(screen.View(100, 25), "Checked live profile Default") {
 		t.Fatal("late action result was lost on another tab")
 	}
 	m.SetActiveTab(theme.TabProfiles)

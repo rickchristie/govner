@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestManagedNativeCodexResume(t *testing.T) {
+func TestNativeCodexResume(t *testing.T) {
 	binary := os.Getenv("COOPER_NATIVE_PROFILE_CODEX")
 	if binary == "" {
 		t.Skip("set COOPER_NATIVE_PROFILE_CODEX to the reviewed native Codex executable")
@@ -19,7 +19,6 @@ func TestManagedNativeCodexResume(t *testing.T) {
 	f.write(".codex/account", "personal")
 	f.service.options.Environment["CODEX_HOME"] = filepath.Join(f.home, ".codex")
 	f.save("codex")
-	f.migrate()
 	turn := func(thread string) string {
 		t.Helper()
 		args := []string{"testdata/codex-native.mjs", binary, f.home}
@@ -49,11 +48,7 @@ func TestManagedNativeCodexResume(t *testing.T) {
 	if err := f.service.Backup(t.Context(), backup); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.service.Restore(t.Context(), "codex", "Default", backup); err != nil {
-		t.Fatal(err)
-	}
-	turn(thread)
-	if _, err := f.service.Detach(t.Context()); err != nil {
+	if _, err := f.service.Restore(t.Context(), RestoreRequest{Harness: "codex", Name: "Default", Backup: backup, Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
 	turn(thread)
@@ -63,19 +58,5 @@ func TestManagedNativeCodexResume(t *testing.T) {
 	if err := f.service.PruneRecovery(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	turn(thread)
-	f.migrate()
-	turn(thread)
-	// Relocation retains the small old-path aliases, while all live bytes move
-	// to the new store. Native absolute paths must still reach those new bytes.
-	relocated := t.TempDir()
-	if err := f.service.Backup(t.Context(), filepath.Join(relocated, "profiles")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.service.Detach(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	f.service.options.CooperDir = relocated
-	f.migrate()
 	turn(thread)
 }

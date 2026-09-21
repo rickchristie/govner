@@ -81,9 +81,8 @@ func newAICLIModel(existing []config.ToolConfig) aicliModel {
 		}
 	}
 
-	// If no existing config, auto-enable all detected tools with mirror mode
-	// (per REQUIREMENTS.md line 106: "AI CLI tools that are detected in the
-	// host machine is on with versions detected at the host machine as starting point").
+	// Start a new configuration with detected tools in Mirror mode so the
+	// initial image versions match the tools that the user already runs.
 	if len(existing) == 0 {
 		for i := range tools {
 			if tools[i].hostVersion != "" {

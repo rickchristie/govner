@@ -19,9 +19,9 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/vm"
 )
 
-// Parity uses ordinary managed host state; profiles() covers named state.
+// Parity uses registered public host state; profiles() covers inactive state.
 // Both use the existing VM start limits and fabricated local credentials.
-func (f *developmentFixture) prepareManagedParity() {
+func (f *developmentFixture) prepareProfileParity() {
 	environment := map[string]string{}
 	for _, name := range profileauth.CredentialNames(f.tool) {
 		f.t.Setenv(name, "")
@@ -62,33 +62,29 @@ func (f *developmentFixture) prepareManagedParity() {
 	if _, err := service.Save(f.ctx, profiles.SaveRequest{Harness: f.tool}); err != nil {
 		f.t.Fatal(err)
 	}
-	if _, err := service.Migrate(f.ctx, ""); err != nil {
-		f.t.Fatal(err)
-	}
-	f.report["managed_host_state"] = true
+	f.report["registered_host_state"] = true
 }
 
-// A disposable container acts as a host native process: its public state path
-// is a link to the physical root. The later ordinary barrel and VM must resume
-// this recorded physical path with only their selected-root mounts.
+// A disposable container acts as a host native process. The later ordinary
+// barrel and VM must resume its recorded public path with selected-root mounts.
 func (f *developmentFixture) seedNativeCanonicalSession() {
 	canonical, err := filepath.EvalSymlinks(filepath.Join(f.home, ".codex"))
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	script := fmt.Sprintf("set -eu\nrm -rf \"$HOME/.codex\"\nln -s %s \"$HOME/.codex\"\ncd %s\n", shellQuote(canonical), shellQuote(f.run.Workspace)) + codexNativeResumeScript()
+	script := fmt.Sprintf("set -eu\ncd %s\n", shellQuote(f.run.Workspace)) + codexNativeResumeScript()
 	f.command("docker", "run", "--rm", "--pull=never", "--network", "none", "--entrypoint", "sh",
 		"--mount", "type=bind,source="+canonical+",target="+canonical,
 		"--mount", "type=bind,source="+f.run.Workspace+",target="+f.run.Workspace,
 		docker.GetImageCLI(f.tool), "-c", script)
-	f.report["native_canonical_session_seed"] = "disposable container with host-style root link"
+	f.report["native_session_seed"] = "disposable container with public state directory"
 }
 
 // One selected agent tests the shared profile mount contract. The local tests
 // cover every catalog and identity adapter. A restart is the only second VM
 // import: it must retain the selected profile from persisted runtime metadata.
 func (f *developmentFixture) profiles() {
-	roots, stateRoot, credential := []string{".codex", ".agents", ".claude-plugin", ".cursor-plugin"}, ".codex", "OPENAI_API_KEY"
+	roots, stateRoot, credential := []string{".codex", ".claude-plugin", ".cursor-plugin"}, ".codex", "OPENAI_API_KEY"
 	if f.tool == "antigravity" {
 		roots, stateRoot, credential = []string{".gemini"}, ".gemini", "GEMINI_API_KEY"
 	}
@@ -121,17 +117,14 @@ func (f *developmentFixture) profiles() {
 	if _, err := service.Save(f.ctx, profiles.SaveRequest{Harness: f.tool}); err != nil {
 		f.t.Fatal(err)
 	}
-	if _, err := service.Migrate(f.ctx, ""); err != nil {
-		f.t.Fatal(err)
-	}
-	if _, err := service.Load(f.ctx, profiles.LoadRequest{Harness: f.tool, Name: "Work"}); err != nil {
+	if _, err := service.Load(f.ctx, profiles.LoadRequest{Harness: f.tool, Name: "Work", Confirmed: true}); err != nil {
 		f.t.Fatal(err)
 	}
 	seed("work")
 	if _, err := service.Save(f.ctx, profiles.SaveRequest{Harness: f.tool}); err != nil {
 		f.t.Fatal(err)
 	}
-	if _, err := service.Load(f.ctx, profiles.LoadRequest{Harness: f.tool, Name: "Default"}); err != nil {
+	if _, err := service.Load(f.ctx, profiles.LoadRequest{Harness: f.tool, Name: "Default", Confirmed: true}); err != nil {
 		f.t.Fatal(err)
 	}
 	selection, err := service.Select(f.ctx, f.tool, "Work")
@@ -141,10 +134,7 @@ func (f *developmentFixture) profiles() {
 	var canonicalSession string
 	for _, root := range selection.Paths.Mounts {
 		if root.ID == f.tool+"-state" {
-			canonicalSession, err = filepath.EvalSymlinks(filepath.Join(root.Source, "session"))
-			if err != nil {
-				f.t.Fatal(err)
-			}
+			canonicalSession = filepath.Join(root.Target, "session")
 			writeFile(f.t, filepath.Join(root.Source, "canonical-session-path"), canonicalSession)
 		}
 	}
@@ -152,15 +142,9 @@ func (f *developmentFixture) profiles() {
 	if err := service.Backup(f.ctx, backup); err != nil {
 		f.t.Fatal(err)
 	}
-	// Re-conversion creates a historical physical path. Restore keeps the new
-	// location fixed, and both names must remain usable inside the runtimes.
-	if _, err := service.Detach(f.ctx); err != nil {
-		f.t.Fatal(err)
-	}
-	if _, err := service.Migrate(f.ctx, ""); err != nil {
-		f.t.Fatal(err)
-	}
-	if _, err := service.Restore(f.ctx, f.tool, "Work", backup); err != nil {
+	// Restore replaces the entry at the same source path. Native sessions
+	// continue to use their unchanged public path inside both runtime modes.
+	if _, err := service.Restore(f.ctx, profiles.RestoreRequest{Harness: f.tool, Name: "Work", Backup: backup, Confirmed: true}); err != nil {
 		f.t.Fatal(err)
 	}
 	selection, err = service.Select(f.ctx, f.tool, "Work")
@@ -178,10 +162,7 @@ func (f *developmentFixture) profiles() {
 	var otherSession string
 	for _, root := range personal.Paths.Mounts {
 		if root.ID == f.tool+"-state" {
-			otherSession, err = filepath.EvalSymlinks(filepath.Join(root.Source, "session"))
-			if err != nil {
-				f.t.Fatal(err)
-			}
+			otherSession = root.Source + ".cooper-" + personal.ID
 		}
 	}
 	f.t.Setenv(credential, "fake-host-key-must-not-replace-profile")
@@ -274,7 +255,7 @@ test ! -e %s
 		}
 	}
 	if f.tool == "antigravity" {
-		if _, err := service.Load(f.ctx, profiles.LoadRequest{Harness: f.tool, Name: "Work"}); err != nil {
+		if _, err := service.Load(f.ctx, profiles.LoadRequest{Harness: f.tool, Name: "Work", Confirmed: true}); err != nil {
 			f.t.Fatal(err)
 		}
 		stored := readFile(f.t, filepath.Join(f.home, ".gemini", "antigravity-cli", "antigravity-oauth-token"))
@@ -285,7 +266,7 @@ test ! -e %s
 	if f.starts != 2 || f.loads != 2 {
 		f.t.Fatalf("profile check used %d starts and %d imports; want two", f.starts, f.loads)
 	}
-	f.report["checks"] = []string{"managed-host-aliases", "profile-source-only-mapping", "canonical-session-path", "complete-selected-roots", "canonical-workspace-hooks", "state-export-hooks", "host-state-isolation", "credential-isolation", "Docker-to-VM-session", "profile-restart", "profile-status-labels", "cache-cleanup-preserves-profiles"}
+	f.report["checks"] = []string{"sibling-profile-roots", "profile-source-only-mapping", "public-session-path", "complete-selected-roots", "workspace-hooks", "state-export-hooks", "host-state-isolation", "credential-isolation", "Docker-to-VM-session", "profile-restart", "profile-status-labels", "cache-cleanup-preserves-profiles"}
 	if f.tool == "antigravity" {
 		f.report["auth_checks"] = []string{"atomic-token-replacement", "Docker-to-VM-refreshed-token", "refreshed-token-after-restart", "load-refreshed-profile-on-host"}
 	}

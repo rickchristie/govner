@@ -155,14 +155,8 @@ func BuildMountPlan(in MountInput) ([]MountSpec, error) {
 	if pathIsFile(timezone) {
 		mounts = append(mounts, MountSpec{ID: "timezone", Source: timezone, Target: TimezoneContainerPath, Access: ReadOnly, Kind: File, Ownership: CooperRuntime})
 	}
-	aliases, err := profileAliases(mounts)
-	if err != nil {
-		return nil, err
-	}
-	mounts = append(mounts, aliases...)
-	// A worktree below state is reachable through the public root and its
-	// canonical aliases. Cover each target, even when the launch path is
-	// canonical; protecting only aliases leaves the public hooks writable.
+	// A worktree below state is reachable through its workspace mount and
+	// the public state root. Both mounts need the read-only hook overlay.
 	if hasHooks {
 		canonical, err := resolveExistingPath(hooks.Source)
 		if err != nil {
@@ -182,7 +176,7 @@ func BuildMountPlan(in MountInput) ([]MountSpec, error) {
 			}
 			relative, _ := filepath.Rel(source, canonical)
 			duplicate := hooks
-			duplicate.ID = "git-hooks-canonical-" + strconv.Itoa(position)
+			duplicate.ID = "git-hooks-state-" + strconv.Itoa(position)
 			duplicate.Target = filepath.Join(state.Target, relative)
 			if protected[duplicate.Target] {
 				continue
@@ -246,11 +240,7 @@ func RequiredDirectories(in MountInput) ([]DirectorySpec, error) {
 		dirs = append(dirs, DirectorySpec{Path: filepath.Join(privateHome, relative), Mode: 0o755})
 	}
 	stateMounts := agentStateMounts(in)
-	aliases, err := profileAliases(stateMounts)
-	if err != nil {
-		return nil, err
-	}
-	for _, mount := range append(stateMounts, aliases...) {
+	for _, mount := range stateMounts {
 		parent := filepath.Dir(mount.Target)
 		if parent == in.HomeDir || !pathContains(in.HomeDir, parent) {
 			continue
@@ -423,9 +413,6 @@ func ValidateMountPlan(mounts []MountSpec, cooperDir string) error {
 			if err := ValidateProfileSource(mount, cooperDir); err != nil {
 				return err
 			}
-		}
-		if err := validateProfileAlias(mount, mounts); err != nil {
-			return err
 		}
 		if mount.Ownership == HostState || mount.Ownership == ProfileState {
 			resolved, err := resolveExistingPath(mount.Source)

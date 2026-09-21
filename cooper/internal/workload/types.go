@@ -51,9 +51,6 @@ type MountSpec struct {
 	Access    Access
 	Kind      PathKind
 	Ownership Ownership
-	// CanonicalPaths are recorded native state paths for this selected root.
-	// Mount planning exposes only the same source at these exact aliases.
-	CanonicalPaths []string
 }
 
 // EnvVar keeps an environment name and value together without rendering it

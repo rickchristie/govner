@@ -1,118 +1,230 @@
 package profiles
 
 import (
-	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/rickchristie/govner/cooper/internal/workload"
 )
 
-func TestInterruptedLoadRecoversMissingSymlinkTarget(t *testing.T) {
-	for _, linkType := range []string{"absolute", "relative", "changed"} {
-		t.Run(linkType, func(t *testing.T) {
+func TestSwitchCrashChild(t *testing.T) {
+	base := os.Getenv("COOPER_RENAME_CRASH_BASE")
+	if base == "" {
+		t.Skip("subprocess fixture")
+	}
+	f := fixtureAt(t, base)
+	f.service.checkpoint = func(point string) error {
+		if point == os.Getenv("COOPER_RENAME_CRASH_POINT") {
+			os.Exit(73)
+		}
+		return nil
+	}
+	if os.Getenv("COOPER_RENAME_CRASH_OPERATION") == "restore" {
+		if _, err := f.service.Restore(t.Context(), RestoreRequest{Harness: "claude", Name: "Default", Backup: filepath.Join(base, "backup"), Confirmed: true}); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		f.load("claude", "Work")
+	}
+	t.Fatal("crash checkpoint was not reached")
+}
+
+func TestRestoreRecoversEveryDurableBoundary(t *testing.T) {
+	for _, point := range []string{"journal", "move-0", "sync-0", "move-1", "sync-1", "move-2", "sync-2", "move-3", "sync-3", "index"} {
+		t.Run(point, func(t *testing.T) {
 			f := newFixture(t)
-			f.write("state/account", "personal")
-			target := filepath.Join(f.home, "state")
-			if linkType == "relative" {
-				target = "state"
-			}
-			link := filepath.Join(f.home, ".codex")
-			if err := os.Symlink(target, link); err != nil {
+			f.write(".claude/account", "personal")
+			f.write(".claude/session", "backup")
+			f.write(".claude.json", "backup")
+			f.save("claude")
+			if err := f.service.Backup(t.Context(), filepath.Join(filepath.Dir(f.home), "backup")); err != nil {
 				t.Fatal(err)
 			}
-			f.save("codex")
-			f.service.rename = func(root *os.Root, from, to string) error {
-				if err := root.Rename(from, to); err != nil {
-					return err
-				}
-				panic("simulated process exit after moving the link target")
+			f.write(".claude/session", "current")
+			f.write(".claude.json", "current")
+			cmd := exec.Command(os.Args[0], "-test.run=^TestSwitchCrashChild$")
+			cmd.Env = append(os.Environ(), "COOPER_RENAME_CRASH_BASE="+filepath.Dir(f.home), "COOPER_RENAME_CRASH_POINT="+point, "COOPER_RENAME_CRASH_OPERATION=restore")
+			output, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 73 {
+				t.Fatalf("crash child: %v %s", err, output)
 			}
-			func() {
-				defer func() {
-					if recover() == nil {
-						t.Error("process exit was not injected")
-					}
-				}()
-				_, _ = f.service.Load(context.Background(), LoadRequest{Harness: "codex", Name: "Work"})
-			}()
-			if _, err := os.Stat(link); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("expected a missing link target after interruption: %v", err)
+			if err := f.service.Recover(t.Context()); err != nil {
+				t.Fatal(err)
 			}
-			f.service = New(f.service.options)
-			if linkType == "changed" {
-				if err := os.Remove(link); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink("other-state", link); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := f.service.Save(context.Background(), SaveRequest{Harness: "codex"}); err == nil {
-					t.Fatal("recovery accepted a changed symlink")
-				}
-				if _, err := os.Stat(filepath.Join(f.service.storePath(), transactionFile)); err != nil {
-					t.Fatalf("rejected recovery lost its journal: %v", err)
-				}
-				return
+			want := "current"
+			if point == "index" {
+				want = "backup"
 			}
-			f.save("codex")
-			if f.read(".codex/account") != "personal" {
-				t.Fatal("recovery lost account state")
+			if f.read(".claude/session") != want || f.read(".claude.json") != want {
+				t.Fatal("restore recovery chose mixed state")
 			}
-			if got, err := os.Readlink(link); err != nil || got != target {
-				t.Fatalf("recovery changed the symlink: %q, %v", got, err)
+			if err := f.service.PruneRecovery(t.Context()); err != nil {
+				t.Fatal(err)
 			}
-			if _, err := os.Stat(filepath.Join(f.service.storePath(), transactionFile)); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("journal remained after recovery: %v", err)
+			if f.read(".claude/session") != want {
+				t.Fatal("cleanup removed selected state")
 			}
 		})
 	}
 }
 
-func TestOpenCodeLoadProtectsHostExecutable(t *testing.T) {
-	for _, install := range []string{"state", "external"} {
-		t.Run(install, func(t *testing.T) {
+func TestIndexWriteFailureUsesDiskCommit(t *testing.T) {
+	for _, after := range []bool{false, true} {
+		t.Run(map[bool]string{false: "before-publication", true: "after-publication"}[after], func(t *testing.T) {
 			f := newFixture(t)
-			f.service.options.Reader = ReaderFunc(func(context.Context, string, []workload.MountSpec, map[string]string) (Identity, error) {
-				return Identity{Key: "personal", Label: "personal"}, nil
-			})
-			f.write(".opencode/session", "personal session")
-			binary := ".opencode/bin/opencode"
-			if install == "external" {
-				binary = ".local/bin/opencode"
+			f.write(".claude/account", "personal")
+			f.save("claude")
+			f.service.publish = func(root *os.Root, state index) error {
+				if state.LastTransaction == "" {
+					return writeJSON(root, "index.json", state)
+				}
+				if after {
+					if err := writeJSON(root, "index.json", state); err != nil {
+						return err
+					}
+				}
+				return errors.New("fixture index failure")
 			}
-			f.write(binary, "#!/bin/sh\nexit 0\n")
-			if err := os.Chmod(filepath.Join(f.home, binary), 0o700); err != nil {
+			if _, err := f.service.Load(t.Context(), LoadRequest{Harness: "claude", Name: "Work", Confirmed: true}); err == nil {
+				t.Fatal("index failure ignored")
+			}
+			state := f.state()
+			want := "Default"
+			if after {
+				want = "Work"
+			}
+			if state.byID(state.Hosts["claude"].ProfileID).Name != want {
+				t.Fatal("recovery ignored the disk commit")
+			}
+			if readFile(t, f.profilePath("Default", "claude-state", "account")) != "personal" {
+				t.Fatal("index failure lost state")
+			}
+		})
+	}
+}
+
+func TestSwitchRecoversEveryDurableBoundary(t *testing.T) {
+	for _, point := range []string{"journal", "move-0", "sync-0", "move-1", "sync-1", "move-2", "sync-2", "index"} {
+		t.Run(point, func(t *testing.T) {
+			f := newFixture(t)
+			f.write(".claude/account", "personal")
+			f.write(".claude/session", "keep")
+			f.write(".claude.json", "settings")
+			f.save("claude")
+			dir := inode(t, filepath.Join(f.home, ".claude"))
+			cmd := exec.Command(os.Args[0], "-test.run=^TestSwitchCrashChild$")
+			cmd.Env = append(os.Environ(), "COOPER_RENAME_CRASH_BASE="+filepath.Dir(f.home), "COOPER_RENAME_CRASH_POINT="+point)
+			output, err := cmd.CombinedOutput()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 73 {
+				t.Fatalf("crash child: %v %s", err, output)
+			}
+			if _, err := f.service.SelectID(t.Context(), "claude", ""); err == nil {
+				t.Fatal("ordinary startup crossed unfinished journal")
+			}
+			if err := f.service.Recover(t.Context()); err != nil {
 				t.Fatal(err)
 			}
-			f.save("opencode")
-			f.write(".opencode/session", "new personal session")
-			_, err := f.service.Load(context.Background(), LoadRequest{Harness: "opencode", Name: "Work"})
-			if install == "external" {
-				if err != nil {
+			if err := f.service.Recover(t.Context()); err != nil {
+				t.Fatal("recovery was not repeatable", err)
+			}
+			path := f.profilePath("Default", "claude-state", "")
+			if inode(t, path) != dir || readFile(t, filepath.Join(path, "session")) != "keep" {
+				t.Fatal("recovery changed outgoing data")
+			}
+			state := f.state()
+			selected := state.byID(state.Hosts["claude"].ProfileID).Name
+			want := "Default"
+			if point == "index" {
+				want = "Work"
+			}
+			if selected != want {
+				t.Fatalf("selected %s, want %s", selected, want)
+			}
+			f.load("claude", "Default")
+			if f.read(".claude.json") != "settings" {
+				t.Fatal("standalone file was lost")
+			}
+		})
+	}
+}
+
+func TestRenameFailureRollsBackWithoutCopy(t *testing.T) {
+	for fail := range 3 {
+		t.Run(string(rune('0'+fail)), func(t *testing.T) {
+			f := newFixture(t)
+			f.write(".claude/account", "personal")
+			f.write(".claude.json", "settings")
+			f.save("claude")
+			calls := 0
+			f.service.rename = func(parent *os.Root, from, to string) error {
+				calls++
+				if calls == fail+1 {
+					return errors.New("fixture rename failure")
+				}
+				return renameEntry(parent, from, to)
+			}
+			_, err := f.service.Load(t.Context(), LoadRequest{Harness: "claude", Name: "Work", Confirmed: true})
+			if err == nil {
+				t.Fatal("rename failure ignored")
+			}
+			if f.read(".claude/account") != "personal" || f.read(".claude.json") != "settings" {
+				t.Fatal("failed switch changed active state")
+			}
+			if err := CheckReady(f.service.options.CooperDir); err != nil {
+				t.Fatal("completed rollback left a journal", err)
+			}
+		})
+	}
+}
+
+func TestRecoveryRejectsForeignEntryAndChangedParent(t *testing.T) {
+	for _, changed := range []string{"entry", "parent", "journal"} {
+		t.Run(changed, func(t *testing.T) {
+			f := newFixture(t)
+			f.write(".claude/account", "personal")
+			f.save("claude")
+			f.service.checkpoint = func(point string) error {
+				if point == "move-0" {
+					return errors.New("interrupted")
+				}
+				return nil
+			}
+			_, err := f.service.Load(t.Context(), LoadRequest{Harness: "claude", Name: "Work", Confirmed: true})
+			if err == nil {
+				t.Fatal("checkpoint did not interrupt")
+			}
+			switch changed {
+			case "entry":
+				f.write(".claude/account", "unrelated new writer")
+			case "parent":
+				if err := os.Rename(f.home, f.home+"-old"); err != nil {
 					t.Fatal(err)
 				}
-				if entries, err := os.ReadDir(filepath.Join(f.home, ".opencode")); err != nil || len(entries) != 0 {
-					t.Fatalf("fresh profile retained old state: %v %v", entries, err)
+				if err := os.Mkdir(f.home, 0700); err != nil {
+					t.Fatal(err)
 				}
-			} else {
-				if err == nil || !strings.Contains(err.Error(), "executable") {
-					t.Fatalf("expected installation error before replacement: %v", err)
+				if err := os.Rename(filepath.Join(f.home+"-old", ".cooper"), filepath.Join(f.home, ".cooper")); err != nil {
+					t.Fatal(err)
 				}
-				state := f.state()
-				if f.read(".opencode/session") != "new personal session" || state.byName("opencode", "Work") != nil {
-					t.Fatal("rejected load changed the host or created Work")
-				}
-				data, err := os.ReadFile(f.profilePath("Default", "opencode-compat", "session"))
-				if err != nil || string(data) != "personal session" {
-					t.Fatalf("rejected load changed the saved profile: %q %v", data, err)
+			case "journal":
+				path := filepath.Join(f.service.storePath(), transactionFile)
+				data := readFile(t, path)
+				data = strings.Replace(data, `"Name": ".claude"`, `"Name": "../unrelated"`, 1)
+				// Entry fields use explicit lowercase JSON names.
+				data = strings.Replace(data, `"name": ".claude"`, `"name": "../unrelated"`, 1)
+				if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+					t.Fatal(err)
 				}
 			}
-			if _, err := os.Stat(filepath.Join(f.home, binary)); err != nil {
-				t.Fatalf("host executable was removed: %v", err)
+			if err := f.service.Recover(t.Context()); err == nil {
+				t.Fatal("recovery accepted changed authority")
+			}
+			if _, err := os.Stat(filepath.Join(f.service.storePath(), transactionFile)); err != nil {
+				t.Fatal("failed recovery removed its record")
 			}
 		})
 	}

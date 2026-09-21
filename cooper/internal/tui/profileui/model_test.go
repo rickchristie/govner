@@ -23,27 +23,18 @@ func readyModel(t *testing.T) (*Model, *app.MockApp) {
 	return m, fake
 }
 
-func TestSaveUsesHarnessAndNamePromptCannotSelectDestination(t *testing.T) {
+func TestSaveUsesHarnessAndReportsAccountMismatch(t *testing.T) {
 	m, fake := readyModel(t)
-	fake.ProfileActionErr = &profiles.Issue{Kind: profiles.NameRequired, Message: "unmapped account"}
+	fake.ProfileActionErr = &profiles.Issue{Kind: profiles.AccountConflict, Message: "account mismatch"}
 	_, command := m.Update(key("s"))
 	if command == nil || !m.busy || len(fake.SaveProfileCalls) != 0 {
 		t.Fatal("save ran in Update or did not enter busy state")
 	}
 	m.Update(command())
-	if m.form.Kind != formName {
-		t.Fatal("new account did not get a name form")
+	if m.ModalActive() || !m.failed {
+		t.Fatal("account mismatch was not reported")
 	}
-	m.Update(key("../Default"))
-	_, command = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if command != nil || m.form.Error == "" {
-		t.Fatal("unsafe name started a command")
-	}
-	m.form.Name = "Personal"
-	fake.ProfileActionErr = nil
-	_, command = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m.Update(command())
-	if len(fake.SaveProfileCalls) != 2 || fake.SaveProfileCalls[1].NewName != "Personal" || fake.SaveProfileCalls[1].Harness != "claude" {
+	if len(fake.SaveProfileCalls) != 1 || fake.SaveProfileCalls[0].Harness != "claude" {
 		t.Fatalf("save requests: %+v", fake.SaveProfileCalls)
 	}
 }
@@ -96,19 +87,25 @@ func TestDeleteCancelBusyAndFailure(t *testing.T) {
 	}
 }
 
-func TestConflictChoiceRetriesOriginalRequest(t *testing.T) {
+func TestConfirmationRetriesOriginalRequestAndDefaultsToNo(t *testing.T) {
 	m, fake := readyModel(t)
-	fake.ProfileActionErr = &profiles.Issue{Kind: profiles.StateConflict, Message: "both changed"}
+	fake.ProfileActionErr = &profiles.Issue{Kind: profiles.ConfirmationRequired, ProfileID: "outgoing", Message: "Close all claude CLI instances and apps."}
 	_, command := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m.Update(command())
-	if m.form.Kind != formConflict {
-		t.Fatal("conflict form missing")
+	if m.form.Kind != formConfirm {
+		t.Fatal("confirmation form missing")
 	}
-	fake.ProfileActionErr = nil
-	_, command = m.Update(key("s"))
+	_, canceled := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if canceled != nil || m.ModalActive() || len(fake.LoadProfileCalls) != 1 {
+		t.Fatal("default answer was not No")
+	}
+	_, command = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m.Update(command())
-	if fake.LoadProfileCalls[1].ConflictChoice != profiles.KeepSaved || fake.LoadProfileCalls[1].Name != "Default" {
-		t.Fatal("conflict changed its target")
+	fake.ProfileActionErr = nil
+	_, command = m.Update(key("Y"))
+	m.Update(command())
+	if !fake.LoadProfileCalls[2].Confirmed || fake.LoadProfileCalls[2].ExpectedProfileID != "outgoing" || fake.LoadProfileCalls[2].Name != "Default" {
+		t.Fatal("confirmation changed its target or lost the outgoing selection")
 	}
 }
 
@@ -172,21 +169,42 @@ func TestDetailsUseSharedViewportForKeysAndMouse(t *testing.T) {
 	}
 }
 
-func TestManagedDetailsAndPartialDelete(t *testing.T) {
+func TestLiveDetailsAndSelectedDelete(t *testing.T) {
 	m, _ := readyModel(t)
-	m.Update(ProfilesListedMsg{Items: []profiles.Summary{{ID: "managed", Harness: "codex", Name: "Default", Managed: true, Mixed: true, HostRoots: []profiles.HostRoot{{Path: "/home/demo/.agents", Harness: "grok", Profile: "Work"}}}}})
-	if !strings.Contains(m.View(100, 24), "Shared roots") {
-		t.Fatal("mixed state hidden")
-	}
+	m.Update(ProfilesListedMsg{Items: []profiles.Summary{{ID: "selected", Harness: "codex", Name: "Default", Loaded: true}}})
 	_, cmd := m.Update(key("d"))
 	if cmd != nil || m.ModalActive() {
-		t.Fatal("partial host profile can be deleted")
+		t.Fatal("selected profile can be deleted")
 	}
 	m.Update(key("i"))
 	text := m.detailsText()
-	for _, want := range []string{"Live profile", "cooper profiles backup", "/home/demo/.agents uses grok/Work"} {
+	for _, want := range []string{"Live profile", "cooper profiles backup", ".agents directory is shared", "Linux only"} {
 		if !strings.Contains(text, want) {
 			t.Fatal("missing detail", want)
 		}
+	}
+}
+
+func TestConfirmationScrollsWithoutConfirming(t *testing.T) {
+	m, fake := readyModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 60, Height: 12})
+	fake.ProfileActionErr = &profiles.Issue{Kind: profiles.ConfirmationRequired, ProfileID: "outgoing", Message: strings.Repeat("Close the affected apps.\n", 20)}
+	_, command := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m.Update(command())
+	m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	if m.form.Content.ScrollOffset == 0 {
+		t.Fatal("confirmation did not scroll with the mouse")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	if !strings.Contains(m.View(60, 12), "The default answer is No.") {
+		t.Fatal("confirmation end was not reachable")
+	}
+	if len(fake.LoadProfileCalls) != 1 || !m.ModalActive() {
+		t.Fatal("scrolling confirmed the switch")
+	}
+	before := m.form.Content.ScrollOffset
+	_ = m.View(35, 7)
+	if m.form.Content.ScrollOffset != before {
+		t.Fatal("confirmation View changed scroll state")
 	}
 }

@@ -107,8 +107,8 @@ func (v stateView) read(id, child string, target any, tomlFormat bool) error {
 	return decodeJSON(data, target)
 }
 
-// Reject symlinked credentials, including parent components. A profile copy
-// preserves links but cannot claim ownership of credentials outside its roots.
+// Reject symlinked credentials, including parent components. A profile keeps
+// child links but cannot claim ownership of credentials outside its roots.
 func boundedFile(path string) ([]byte, error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {

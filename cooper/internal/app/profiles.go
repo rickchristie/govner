@@ -83,7 +83,7 @@ func (a *CooperApp) DeleteProfile(ctx context.Context, harness, name string) err
 	return service.Delete(ctx, harness, name)
 }
 
-// Shutdown cancels copies and waits for their rollback before infrastructure
+// Shutdown cancels profile operations and waits for rollback before infrastructure
 // stops. The zero value is ready to use, including in application tests.
 type profileOperations struct {
 	mu      sync.Mutex

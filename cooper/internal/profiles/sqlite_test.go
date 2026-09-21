@@ -54,3 +54,37 @@ sys.stdin.read()
 		t.Fatalf("SQLite copy: %q %v", result, err)
 	}
 }
+
+func TestRenamePreservesCommittedSQLiteWAL(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is needed for the SQLite fixture")
+	}
+	f := newFixture(t)
+	f.write(".codex/account", "personal")
+	path := filepath.Join(f.home, ".codex", "sessions.db")
+	// Exit without closing SQLite so committed data remains in the WAL.
+	script := `import sqlite3, sys, os
+c = sqlite3.connect(sys.argv[1])
+c.execute('pragma journal_mode=wal')
+c.execute('pragma wal_autocheckpoint=0')
+c.execute('create table sessions (message text)')
+c.execute("insert into sessions values ('preserved session')")
+c.commit()
+os._exit(0)
+`
+	if output, err := exec.Command(python, "-c", script, path).CombinedOutput(); err != nil {
+		t.Fatalf("SQLite fixture: %v %s", err, output)
+	}
+	id := inode(t, path+"-wal")
+	f.save("codex")
+	f.load("codex", "Work")
+	f.load("codex", "Default")
+	if inode(t, path+"-wal") != id {
+		t.Fatal("switch copied or lost the WAL")
+	}
+	reader := exec.Command(python, "-c", `import sqlite3, sys; c=sqlite3.connect(sys.argv[1]); print(c.execute('pragma integrity_check').fetchone()[0]); print(c.execute('select message from sessions').fetchone()[0])`, path)
+	if output, err := reader.CombinedOutput(); err != nil || strings.TrimSpace(string(output)) != "ok\npreserved session" {
+		t.Fatalf("SQLite after switch: %v %s", err, output)
+	}
+}

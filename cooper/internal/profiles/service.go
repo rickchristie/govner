@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -28,21 +29,33 @@ type Options struct {
 type Service struct {
 	options Options
 	now     func() time.Time
-	// The replacement boundary is injectable for crash and rollback tests.
-	rename  func(*os.Root, string, string) error
-	publish func(*os.Root, index) error
-	copy    func(context.Context, string, string) error
-	// Fault tests can stop a subprocess after a durable managed-state step.
-	managedCheckpoint func(string) error
+	// These boundaries let tests stop real filesystem operations at commit
+	// points. The production path never substitutes a copy for a failed move.
+	rename     func(*os.Root, string, string) error
+	publish    func(*os.Root, index) error
+	copy       func(context.Context, string, string) error
+	checkpoint func(string) error
 }
 
 func New(options Options) *Service {
-	return &Service{options: options, now: time.Now, copy: copyTree, managedCheckpoint: func(string) error { return nil }, rename: func(root *os.Root, from, to string) error { return root.Rename(from, to) }, publish: func(root *os.Root, state index) error { return writeJSON(root, "index.json", state) }}
+	return &Service{options: options, now: time.Now, rename: renameEntry,
+		publish: func(root *os.Root, state index) error { return writeJSON(root, "index.json", state) },
+		copy:    copyTree, checkpoint: func(string) error { return nil }}
+}
+
+func Supported() error {
+	if runtime.GOOS != "linux" {
+		return errors.New("account profiles require Linux; macOS profiles are not supported")
+	}
+	return nil
 }
 
 func (s *Service) storePath() string { return filepath.Join(s.options.CooperDir, "profiles") }
 
 func (s *Service) open(create bool) (*os.Root, error) {
+	if err := Supported(); err != nil {
+		return nil, err
+	}
 	if err := s.options.Account.Validate(); err != nil {
 		return nil, err
 	}
@@ -50,7 +63,7 @@ func (s *Service) open(create bool) (*os.Root, error) {
 		return nil, errors.New("profile store requires a clean absolute Cooper directory")
 	}
 	if create {
-		if err := os.MkdirAll(s.options.CooperDir, 0o700); err != nil {
+		if err := os.MkdirAll(s.options.CooperDir, 0700); err != nil {
 			return nil, err
 		}
 	}
@@ -65,50 +78,31 @@ func (s *Service) open(create bool) (*os.Root, error) {
 	return parent.OpenRoot("profiles")
 }
 
-func (s *Service) hostScope(harness string) (workload.AgentPaths, []Root, error) {
-	paths, err := workload.ResolveAgentScope(harness, s.options.Account.Home, s.options.Workspace, s.options.Environment)
+// All operations take the same per-user lock as runtime startup. Human
+// confirmation is a typed result and is handled after this lock is released.
+func (s *Service) locked(ctx context.Context, create, exclusive bool) (*os.Root, *statelock.Lock, index, error) {
+	if err := Supported(); err != nil {
+		return nil, nil, index{}, err
+	}
+	lock, err := statelock.Acquire(ctx, exclusive)
 	if err != nil {
-		return workload.AgentPaths{}, nil, err
+		return nil, nil, index{}, err
 	}
-	var roots []Root
-	for _, mount := range paths.Mounts {
-		if err := workload.ValidateAgentStatePath(mount.Source, s.options.Account.Home, s.options.CooperDir); err != nil {
-			return workload.AgentPaths{}, nil, err
-		}
-		resolved, err := workload.ResolvedPath(mount.Source)
-		if err != nil {
-			return workload.AgentPaths{}, nil, err
-		}
-		if err := s.checkWorkspaceOutside(resolved); err != nil {
-			return workload.AgentPaths{}, nil, err
-		}
-		_, err = os.Stat(resolved)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return workload.AgentPaths{}, nil, err
-		}
-		roots = append(roots, Root{ID: mount.ID, Target: mount.Target, HostPath: resolved, Kind: mount.Kind, Present: err == nil})
-	}
-	for position, root := range roots {
-		for _, other := range roots[position+1:] {
-			if containsPath(root.HostPath, other.HostPath) || containsPath(other.HostPath, root.HostPath) {
-				return workload.AgentPaths{}, nil, errors.New("agent root aliases overlap; use separate complete state roots")
-			}
-		}
-	}
-	return paths, roots, nil
-}
-
-// A root rename leaves the shell in the retained directory. Check resolved
-// paths before copying or replacing a root, including its first live save.
-func (s *Service) checkWorkspaceOutside(resolvedRoot string) error {
-	workspace, err := workload.ResolvedPath(s.options.Workspace)
+	store, err := s.open(create)
 	if err != nil {
-		return err
+		lock.Close()
+		return nil, nil, index{}, err
 	}
-	if containsPath(resolvedRoot, workspace) {
-		return fmt.Errorf("agent state %s contains the working directory; run the profile command from outside that root", resolvedRoot)
+	state, err := readIndex(store)
+	if err == nil {
+		err = ready(store)
 	}
-	return nil
+	if err != nil {
+		store.Close()
+		lock.Close()
+		return nil, nil, index{}, err
+	}
+	return store, lock, state, nil
 }
 
 func containsPath(parent, child string) bool {
@@ -116,16 +110,57 @@ func containsPath(parent, child string) bool {
 	return err == nil && (relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))))
 }
 
-func rootPaths(roots []Root) []string {
-	paths := make([]string, 0, len(roots))
-	for _, root := range roots {
-		paths = append(paths, root.HostPath)
+// A rename leaves a shell's current directory in the outgoing profile.
+// Reject both direct and symlink spellings before moving any state root.
+func (s *Service) checkWorkspaceOutside(path string) error {
+	workspace, err := workload.ResolvedPath(s.options.Workspace)
+	if err != nil {
+		return err
 	}
-	return paths
+	if containsPath(path, workspace) {
+		return fmt.Errorf("agent state %s contains the working directory; run the profile command from outside that root", path)
+	}
+	return nil
+}
+
+func (s *Service) hostScope(harness string) (workload.AgentPaths, []Root, error) {
+	paths, err := workload.ResolveProfileScope(harness, s.options.Account.Home, s.options.Workspace, s.options.Environment)
+	if err != nil {
+		return workload.AgentPaths{}, nil, err
+	}
+	var roots []Root
+	for _, mount := range paths.Mounts {
+		if err := workload.ValidateAgentStatePath(mount.Source, s.options.Account.Home, s.options.CooperDir); err != nil {
+			return paths, nil, err
+		}
+		parent, err := workload.ResolvedPath(filepath.Dir(mount.Source))
+		if err != nil {
+			return paths, nil, err
+		}
+		path := filepath.Join(parent, filepath.Base(mount.Source))
+		if err := s.checkWorkspaceOutside(path); err != nil {
+			return paths, nil, err
+		}
+		roots = append(roots, Root{ID: mount.ID, Target: mount.Target, HostPath: path, Kind: mount.Kind})
+	}
+	for position, root := range roots {
+		for _, other := range roots[position+1:] {
+			if containsPath(root.HostPath, other.HostPath) || containsPath(other.HostPath, root.HostPath) {
+				return paths, nil, errors.New("profile roots overlap; use separate complete state roots")
+			}
+		}
+	}
+	return paths, roots, checkHostExecutable(harness, roots)
 }
 
 func (s *Service) checkProfile(profile Manifest) error {
-	if err := s.checkProfilePaths(profile); err != nil {
+	if err := validateManifest(profile); err != nil {
+		return err
+	}
+	if profile.Account != s.options.Account {
+		return errors.New("profile belongs to a different host account or home")
+	}
+	if err := s.checkRootOwnership(newIndex(), profile.Harness, profile.Roots); err != nil {
 		return err
 	}
 	policy, err := workload.AgentStatePolicy(profile.Harness)
@@ -133,80 +168,91 @@ func (s *Service) checkProfile(profile Manifest) error {
 		return err
 	}
 	if profile.Policy != policy {
-		return errors.New("profile state-root rules changed; refresh this account from its host state with 'cooper save'")
+		return errors.New("profile root rules changed; the stored data was retained")
 	}
-	expected, err := workload.ResolveAgentScope(profile.Harness, profile.Account.Home, s.options.Workspace, profile.PathEnvironment)
+	paths, err := workload.ResolveProfileScope(profile.Harness, profile.Account.Home, s.options.Workspace, profile.PathEnvironment)
 	if err != nil {
 		return err
 	}
-	if len(expected.Mounts) != len(profile.Roots) || !reflect.DeepEqual(expected.Environment, profile.Environment) {
-		return errors.New("profile path settings do not match the state-root catalog")
+	if len(paths.Mounts) != len(profile.Roots) || !reflect.DeepEqual(paths.Environment, profile.Environment) {
+		return errors.New("profile path settings do not match the root catalog")
 	}
-	for position, mount := range expected.Mounts {
+	for position, mount := range paths.Mounts {
 		root := profile.Roots[position]
-		if root.ID != mount.ID || root.Target != mount.Target || root.Kind != mount.Kind {
-			return errors.New("profile paths do not match this working directory; use the original path settings or absolute path overrides")
+		parent, err := workload.ResolvedPath(filepath.Dir(mount.Target))
+		if err != nil {
+			return err
+		}
+		if root.ID != mount.ID || root.Target != mount.Target || root.Kind != mount.Kind || root.HostPath != filepath.Join(parent, filepath.Base(mount.Target)) {
+			return errors.New("profile state paths changed; restore the original path settings")
+		}
+		if err := workload.ValidateAgentStatePath(root.HostPath, profile.Account.Home, s.options.CooperDir); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func (s *Service) checkProfilePaths(profile Manifest) error {
-	if err := validateManifest(profile); err != nil {
-		return err
+func sibling(root Root, id string) string { return root.HostPath + ".cooper-" + id }
+
+func sourcePath(state index, profile Manifest, root Root) string {
+	if state.Hosts[profile.Harness].ProfileID == profile.ID {
+		return root.HostPath
 	}
-	if profile.Account != s.options.Account {
-		return errors.New("profile belongs to a different host account or home")
-	}
+	return sibling(root, profile.ID)
+}
+
+func profilePaths(state index, profile Manifest) []string {
+	paths := make([]string, 0, len(profile.Roots))
 	for _, root := range profile.Roots {
-		for _, path := range []string{root.Target, root.HostPath} {
-			if err := workload.ValidateAgentStatePath(path, profile.Account.Home, s.options.CooperDir); err != nil {
+		paths = append(paths, sourcePath(state, profile, root))
+	}
+	return paths
+}
+
+func (s *Service) checkUse(ctx context.Context, state index, profiles ...Manifest) error {
+	var paths []string
+	for _, profile := range profiles {
+		for _, path := range profilePaths(state, profile) {
+			if err := s.checkWorkspaceOutside(path); err != nil {
 				return err
 			}
+			if err := checkRootMounts(path); err != nil {
+				return err
+			}
+			paths = append(paths, path)
 		}
 	}
-	return nil
+	return s.options.Guard.Check(ctx, paths)
 }
 
 func (s *Service) List(ctx context.Context) ([]Summary, error) {
-	if managed, err := s.usesManaged(); err != nil {
-		return nil, err
-	} else if managed {
-		return s.managedList(ctx)
-	}
-	lock, err := statelock.Acquire(ctx, false)
-	if err != nil {
-		return nil, err
-	}
-	defer lock.Close()
-	root, err := s.open(false)
+	store, lock, state, err := s.locked(ctx, false, false)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	defer root.Close()
-	if err := requireCopyMode(root); err != nil {
-		return nil, err
-	}
-	state, err := readIndex(root)
-	if err != nil {
-		return nil, err
-	}
+	defer store.Close()
+	defer lock.Close()
 	var result []Summary
 	for _, profile := range state.Profiles {
-		host := state.Hosts[profile.Harness]
-		if err := s.checkProfilePaths(profile); err != nil {
+		if err := s.checkProfile(profile); err != nil {
 			return nil, err
 		}
-		usageErr := s.options.Guard.Check(ctx, []string{filepath.Join(s.storePath(), dataPath(profile))})
+		useErr := s.options.Guard.Check(ctx, profilePaths(state, profile))
 		var issue *Issue
-		if usageErr != nil && (!errors.As(usageErr, &issue) || issue.Kind != StateInUse) {
-			return nil, usageErr
+		if useErr != nil && (!errors.As(useErr, &issue) || issue.Kind != StateInUse) {
+			return nil, useErr
 		}
+		credentials, err := s.readCredentials(store, profile)
+		if err != nil {
+			return nil, err
+		}
+		mismatch := profile.Identity.Key != "" && s.checkIdentity(ctx, state, profile, credentials) != nil
 		result = append(result, Summary{ID: profile.ID, Harness: profile.Harness, Name: profile.Name, Account: profile.Identity.Label,
-			Saved: profile.Saved, Loaded: host.ProfileID == profile.ID, Pending: profile.Identity.Key == "", InUse: usageErr != nil})
+			Saved: profile.Saved, Loaded: state.Hosts[profile.Harness].ProfileID == profile.ID, Pending: profile.Identity.Key == "", InUse: useErr != nil, Mismatch: mismatch})
 	}
 	sort.Slice(result, func(a, b int) bool {
 		if result[a].Harness != result[b].Harness {
@@ -217,101 +263,27 @@ func (s *Service) List(ctx context.Context) ([]Summary, error) {
 	return result, nil
 }
 
-func (s *Service) Save(ctx context.Context, request SaveRequest) (Result, error) {
-	if managed, err := s.usesManaged(); err != nil {
-		return Result{}, err
-	} else if managed {
-		return s.managedSave(ctx, request)
+// OpenCode can install its executable below the root that a fresh profile
+// replaces. Preserve the command needed to sign in to the new account.
+func checkHostExecutable(harness string, roots []Root) error {
+	if harness != "opencode" {
+		return nil
 	}
-	if err := validateConflictChoice(request.ConflictChoice); err != nil {
-		return Result{}, err
-	}
-	paths, roots, err := s.hostScope(request.Harness)
-	if err != nil {
-		return Result{}, err
-	}
-	lock, err := statelock.Acquire(ctx, true)
-	if err != nil {
-		return Result{}, err
-	}
-	defer lock.Close()
-	store, err := s.open(true)
-	if err != nil {
-		return Result{}, err
-	}
-	defer store.Close()
-	if err := requireCopyMode(store); err != nil {
-		return Result{}, err
-	}
-	state, err := readIndex(store)
-	if err != nil {
-		return Result{}, err
-	}
-	if err := s.recoverTransaction(ctx, store, &state); err != nil {
-		return Result{}, err
-	}
-	paths, roots, err = s.hostScope(request.Harness)
-	if err != nil {
-		return Result{}, err
-	}
-	return s.save(ctx, store, &state, request, paths, roots)
-}
-
-func (s *Service) Delete(ctx context.Context, harness, name string) error {
-	if managed, err := s.usesManaged(); err != nil {
-		return err
-	} else if managed {
-		return s.managedDelete(ctx, harness, name)
-	}
-	if err := ValidateName(name); err != nil {
-		return err
-	}
-	lock, err := statelock.Acquire(ctx, true)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	store, err := s.open(false)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	if err := requireCopyMode(store); err != nil {
-		return err
-	}
-	state, err := readIndex(store)
-	if err != nil {
-		return err
-	}
-	if err := s.recoverTransaction(ctx, store, &state); err != nil {
-		return err
-	}
-	profile := state.byName(harness, name)
-	if profile == nil {
-		return fmt.Errorf("profile %s/%s does not exist", harness, name)
-	}
-	if state.Hosts[harness].ProfileID == profile.ID {
-		return &Issue{Kind: StateInUse, Message: "load another profile before deleting the profile selected on the host"}
-	}
-	path := filepath.Join("harnesses", harness, profile.ID)
-	if err := privatePath(store, path, false); err != nil {
-		return err
-	}
-	if err := s.options.Guard.Check(ctx, []string{filepath.Join(s.storePath(), path)}); err != nil {
-		return err
-	}
-	// Remove the index entry before data. A crash can leave unreferenced data,
-	// but must not leave a profile that points to already deleted credentials.
-	id := profile.ID
-	kept := make([]Manifest, 0, len(state.Profiles)-1)
-	for _, candidate := range state.Profiles {
-		if candidate.ID != id {
-			kept = append(kept, candidate)
+	for _, root := range roots {
+		if root.ID != "opencode-compat" {
+			continue
+		}
+		path := filepath.Join(root.HostPath, "bin", "opencode")
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
+			return fmt.Errorf("OpenCode executable %s is inside a profile root; move it outside the state roots before saving", path)
 		}
 	}
-	state.Profiles = kept
-	if err := s.publish(store, state); err != nil {
-		return err
-	}
-	return removeTree(store, path)
+	return nil
 }

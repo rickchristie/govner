@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 // treeDigest records content, names, kinds, and permission bits. It excludes
@@ -73,8 +74,9 @@ func copyTree(ctx context.Context, source, target string) error {
 	defer output.Close()
 	base := filepath.Base(target)
 	type directory struct {
-		name string
-		mode fs.FileMode
+		name     string
+		mode     fs.FileMode
+		modified time.Time
 	}
 	var directories []directory
 	err = visitTree(ctx, input, filepath.Base(source), ".", func(root *os.Root, name, relative string, info fs.FileInfo) error {
@@ -84,7 +86,7 @@ func copyTree(ctx context.Context, source, target string) error {
 			if err := output.Mkdir(destination, 0o700); err != nil {
 				return err
 			}
-			directories = append(directories, directory{destination, permissionMode(info.Mode())})
+			directories = append(directories, directory{destination, permissionMode(info.Mode()), info.ModTime()})
 			return nil
 		case info.Mode()&os.ModeSymlink != 0:
 			link, err := root.Readlink(name)
@@ -103,6 +105,9 @@ func copyTree(ctx context.Context, source, target string) error {
 	// are valid state and must not make a complete copy fail halfway through.
 	for index := len(directories) - 1; index >= 0; index-- {
 		dir := directories[index]
+		if err := output.Chtimes(dir.name, dir.modified, dir.modified); err != nil {
+			return err
+		}
 		if err := output.Chmod(dir.name, dir.mode); err != nil {
 			return err
 		}
@@ -125,8 +130,9 @@ func copyRegular(ctx context.Context, input *os.Root, name string, info fs.FileI
 	}
 	_, copyErr := io.Copy(target, &contextReader{ctx: ctx, reader: source})
 	modeErr := target.Chmod(permissionMode(info.Mode()))
+	timeErr := output.Chtimes(destination, info.ModTime(), info.ModTime())
 	syncErr := target.Sync()
-	return errors.Join(copyErr, modeErr, syncErr, target.Close())
+	return errors.Join(copyErr, modeErr, timeErr, syncErr, target.Close())
 }
 
 type treeVisitor func(*os.Root, string, string, fs.FileInfo) error

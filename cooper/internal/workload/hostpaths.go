@@ -8,11 +8,10 @@ import (
 	"strings"
 
 	"github.com/rickchristie/govner/cooper/internal/hostpath"
-	"github.com/rickchristie/govner/cooper/internal/profilelink"
 )
 
-// ValidateAgentStatePath checks a complete state root before profile copying
-// or replacement. It applies the same protected path rules as runtime mounts.
+// ValidateAgentStatePath checks a complete state root before registration or
+// replacement. It applies the same protected path rules as runtime mounts.
 func ValidateAgentStatePath(path, home, cooperDir string) error {
 	if err := validateHomeBoundary(path, home, "agent state"); err != nil {
 		return err
@@ -85,13 +84,6 @@ func ValidateHostOwnedPath(hostPath, cooperDir string) error {
 	if strings.TrimSpace(cooperDir) == "" {
 		return errors.New("cooper-owned directory is required")
 	}
-	// Only the exact registered host alias can overlap durable profile data.
-	// Full configuration removal separately refuses any profiles entry.
-	if _, managed, err := profilelink.Resolve(hostPath, cooperDir); err != nil {
-		return err
-	} else if managed {
-		return nil
-	}
 	hostAbs, err := filepath.Abs(hostPath)
 	if err != nil {
 		return fmt.Errorf("make host-owned path absolute: %w", err)
@@ -128,35 +120,3 @@ func hostStateOverlapError(hostPath, cooperDir string) error {
 // Profile rollback moves whole roots, so an unchanged link can be temporarily
 // dangling. Walking upward with EvalSymlinks would lose that link's target.
 func resolveExistingPath(path string) (string, error) { return hostpath.Resolve(path) }
-
-// ValidateManagedHostPath checks the public side of a registered alias. Its
-// final entry can be absent during recovery, but its parent cannot enter the
-// store or a protected path. Exact profile ownership is checked separately.
-func ValidateManagedHostPath(path, home, cooperDir string) error {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return errors.New("managed host path must be clean and absolute")
-	}
-	if err := validateHomeBoundary(path, home, "managed state"); err != nil {
-		return err
-	}
-	parent, err := resolveExistingPath(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	public := filepath.Join(parent, filepath.Base(path))
-	cooper, err := resolveExistingPath(cooperDir)
-	if err != nil {
-		return err
-	}
-	for _, candidate := range []string{path, public} {
-		if pathsOverlap(candidate, cooperDir) || pathsOverlap(candidate, cooper) {
-			return hostStateOverlapError(candidate, cooper)
-		}
-		for _, protected := range protectedStatePaths {
-			if pathsOverlap(candidate, protected) {
-				return fmt.Errorf("managed state overlaps protected path %s", protected)
-			}
-		}
-	}
-	return nil
-}

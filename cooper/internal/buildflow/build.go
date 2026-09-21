@@ -31,6 +31,8 @@ type Options struct {
 
 type imageBuildFunc func(name, dockerfilePath, contextDir string, buildArgs map[string]string, noCache bool) (<-chan string, <-chan error)
 
+const hostAuthStepName = "Preparing host authentication..."
+
 var preparationStepNames = []string{
 	"Resolving tool versions...",
 	"Generating templates...",
@@ -53,7 +55,7 @@ type plan struct {
 // templates and staged the CA files. Build updates only the built-state fields
 // on the owned configuration as each image succeeds. Keeping this boundary
 // explicit lets interactive callers finish their deterministic preparation UI
-// before profile setup and the slower Docker phase start streaming output.
+// before host authentication and the slower Docker phase start streaming output.
 type Prepared struct {
 	cfg        *config.Config
 	cooperDir  string
@@ -277,7 +279,7 @@ func stagePrepared(
 	}, nil
 }
 
-// StepNames returns the profile setup and Docker image steps that Build executes.
+// StepNames returns the host authentication and Docker image steps.
 func (p *Prepared) StepNames() []string {
 	if p == nil {
 		return nil
@@ -285,7 +287,7 @@ func (p *Prepared) StepNames() []string {
 	return p.plan.buildStepNames()
 }
 
-// Build sets up profile storage, executes the Docker phase, and streams every combined
+// Build prepares host authentication, builds images, and streams each combined
 // stdout/stderr line through Options.OnOutput and Options.Out.
 func (p *Prepared) Build(opts Options) error {
 	if p == nil {
@@ -305,12 +307,9 @@ func (p *Prepared) Build(opts Options) error {
 		report(0, err)
 		return err
 	}
-	// Host authentication setup can be needed to validate an existing profile.
+	// Host authentication setup does not move or register profile state.
+	emitOutput(opts, hostAuthStepName)
 	if err := p.prepareHostAuth(opts, account.Home); err != nil {
-		report(0, err)
-		return err
-	}
-	if err := p.prepareProfiles(opts, account.Home); err != nil {
 		report(0, err)
 		return err
 	}
@@ -400,7 +399,7 @@ func buildPlan(cfg *config.Config, cooperDir string) (plan, error) {
 
 func (p plan) buildStepNames() []string {
 	steps := []string{
-		profileStepName,
+		hostAuthStepName,
 		"Building proxy image...",
 		"Building base image...",
 	}

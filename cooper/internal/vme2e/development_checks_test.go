@@ -193,7 +193,7 @@ func (f *developmentFixture) parity() {
 			selected = agent
 		}
 	}
-	f.prepareManagedParity()
+	f.prepareProfileParity()
 	writeFile(f.t, filepath.Join(f.run.Workspace, "parity-workspace"), selected.name+"\n")
 	writeNativeProbe(f.t, selected.name, f.run.Workspace)
 	if f.tool == "codex" {

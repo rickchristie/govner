@@ -73,6 +73,9 @@ func SelectID(ctx context.Context, cooperDir, workspace, home, harness, id strin
 // CheckHost prevents an inner workload's partial mount and process view from
 // authorizing replacement of the physical host's state roots.
 func CheckHost() error {
+	if err := profiles.Supported(); err != nil {
+		return err
+	}
 	outer, err := vmcontext.Load()
 	if err != nil {
 		return err

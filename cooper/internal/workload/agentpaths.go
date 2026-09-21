@@ -11,8 +11,6 @@ import (
 	"strconv"
 
 	"golang.org/x/text/unicode/norm"
-
-	"github.com/rickchristie/govner/cooper/internal/profilelink"
 )
 
 // AgentStatePolicy changes when a supported root rule changes. A saved view
@@ -123,6 +121,23 @@ func ResolveAgentScope(tool, home, launchDir string, values map[string]string) (
 		return AgentPaths{}, fmt.Errorf("profiles do not support harness %q", tool)
 	}
 	return resolveAgentPaths(tool, home, launchDir, values, true)
+}
+
+// Global skills are mounted in both execution modes but never moved with an
+// account. Filtering by catalog ID also preserves configured root rules.
+func ResolveProfileScope(tool, home, launchDir string, values map[string]string) (AgentPaths, error) {
+	paths, err := ResolveAgentScope(tool, home, launchDir, values)
+	if err != nil {
+		return AgentPaths{}, err
+	}
+	var roots []MountSpec
+	for _, root := range paths.Mounts {
+		if root.ID != "shared-agents" {
+			roots = append(roots, root)
+		}
+	}
+	paths.Mounts = roots
+	return paths, nil
 }
 
 func resolveAgentPaths(tool, home, launchDir string, values map[string]string, includeAbsent bool) (AgentPaths, error) {
@@ -317,10 +332,7 @@ func resolveStateBase(base, home, launchDir string, values, environment map[stri
 	}
 	path = filepath.Clean(path)
 	if base == "codex" {
-		resolved, owner, _, err := profilelink.Locate(path)
-		if err == nil && owner == "" {
-			resolved, err = filepath.EvalSymlinks(path)
-		}
+		resolved, err := filepath.EvalSymlinks(path)
 		if includeAbsent && os.IsNotExist(err) {
 			resolved, err = resolveExistingPath(path)
 		}
@@ -388,19 +400,13 @@ func removeCoveredStateMounts(mounts []MountSpec) []MountSpec {
 // private environment; production callers supply HostPathEnvironment.
 func ResolveMountInput(in MountInput) (MountInput, error) {
 	if in.Agent != nil {
-		agent, err := ResolveManagedPaths(*in.Agent, in.CooperDir)
-		in.Agent = &agent
-		return in, err
+		return in, nil
 	}
 	values := make(map[string]string, len(in.Environment)+1)
 	for name, value := range in.Environment {
 		values[name] = value
 	}
 	agent, err := ResolveAgentPaths(in.ToolName, in.HomeDir, in.WorkspaceDir, values)
-	if err != nil {
-		return in, err
-	}
-	agent, err = ResolveManagedPaths(agent, in.CooperDir)
 	if err != nil {
 		return in, err
 	}

@@ -1,6 +1,7 @@
 package profilemanager
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -80,6 +81,12 @@ func processUsage(ctx context.Context, roots []string) error {
 // Existing open files therefore also block switches. Native process discovery
 // below still catches a known harness before it opens its first state file.
 func openStateUse(ctx context.Context, base string, pid int, roots []string) error {
+	if path, err := os.Readlink(filepath.Join(base, "cwd")); err == nil && stateContains(roots, path) {
+		return processInUse(pid, "working-directory")
+	}
+	if err := mappedStateUse(ctx, base, pid, roots); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(filepath.Join(base, "fd"))
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 		return nil
@@ -108,11 +115,55 @@ func openStateUse(ctx context.Context, base string, pid int, roots []string) err
 		if !filepath.IsAbs(path) {
 			continue
 		}
-		for _, root := range roots {
-			if contains(root, path) {
-				return &profiles.Issue{Kind: profiles.StateInUse, Message: fmt.Sprintf("process %d has profile state open; stop it before changing profiles", pid)}
-			}
+		if stateContains(roots, path) {
+			return &profiles.Issue{Kind: profiles.StateInUse, Message: fmt.Sprintf("process %d has profile state open; stop it before changing profiles", pid)}
 		}
 	}
 	return nil
+}
+
+func stateContains(roots []string, path string) bool {
+	path = strings.TrimSuffix(path, " (deleted)")
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	for _, root := range roots {
+		if contains(root, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// A database can keep a mapping after it closes the file descriptor. Check
+// mappings as well as descriptors, but do not claim to detect idle apps or
+// processes hidden by /proc permissions. User confirmation is still required.
+func mappedStateUse(ctx context.Context, base string, pid int, roots []string) error {
+	file, err := os.Open(filepath.Join(base, "maps"))
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		line := scanner.Text()
+		for range 5 {
+			end := strings.IndexAny(line, " \t")
+			if end < 0 {
+				line = ""
+				break
+			}
+			line = strings.TrimLeft(line[end:], " \t")
+		}
+		if stateContains(roots, line) {
+			return processInUse(pid, "memory-mapped")
+		}
+	}
+	return scanner.Err()
 }

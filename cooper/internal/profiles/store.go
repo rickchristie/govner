@@ -8,14 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"syscall"
 	"unicode"
 
-	"github.com/rickchristie/govner/cooper/internal/profilelink"
 	"github.com/rickchristie/govner/cooper/internal/workload"
 )
 
@@ -23,9 +24,8 @@ var profileName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,39}$`)
 var storedID = regexp.MustCompile(`^[a-f0-9]{24}$`)
 var contentDigest = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
-// index is the only authority for profiles and host selections. A save writes
-// a new data generation and atomically publishes this small index. It never
-// removes a good profile before the replacement copy is complete.
+// The index is the only authority for profiles and host selections. Directory
+// contents stay in place. Publishing a transaction ID commits its root moves.
 type index struct {
 	Schema          int                      `json:"schema"`
 	Profiles        []Manifest               `json:"profiles"`
@@ -90,36 +90,33 @@ func (i *index) put(profile Manifest) {
 }
 
 func readIndex(root *os.Root) (index, error) {
-	managed, err := profilelink.Managed(root)
-	if err != nil {
-		return index{}, err
-	}
-	if managed {
-		view, err := profilelink.Read(root)
-		if err != nil {
-			return index{}, err
-		}
-		return viewIndex(view)
-	}
 	var state index
-	err = readJSON(root, "index.json", &state)
+	err := readJSON(root, "index.json", &state)
 	if errors.Is(err, os.ErrNotExist) {
+		entries, listErr := fs.ReadDir(root.FS(), ".")
+		if listErr != nil {
+			return index{}, listErr
+		}
+		if len(entries) != 0 {
+			return index{}, errors.New("profile index is missing; existing data was retained")
+		}
 		return newIndex(), nil
 	}
 	if err != nil {
-		return index{}, fmt.Errorf("read profile index: %w", err)
+		return index{}, fmt.Errorf("read profile index: %w; old copy and symlink stores are unsupported and were retained", err)
 	}
 	return validateIndex(state)
 }
 
 func validateIndex(state index) (index, error) {
 	if state.Schema != Schema || state.Hosts == nil {
-		return index{}, errors.New("unsupported or incomplete profile index")
+		return index{}, errors.New("unsupported or incomplete profile index; old copy and symlink stores are unsupported and were retained")
 	}
 	if state.LastTransaction != "" && !storedID.MatchString(state.LastTransaction) {
 		return index{}, errors.New("profile index has an invalid transaction ID")
 	}
 	ids, names, identities := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	scopes := map[string]Manifest{}
 	for _, profile := range state.Profiles {
 		if err := validateManifest(profile); err != nil {
 			return index{}, err
@@ -130,10 +127,25 @@ func validateIndex(state index) (index, error) {
 			return index{}, errors.New("profile index has a duplicate ID, name, or account mapping")
 		}
 		ids[profile.ID], names[name], identities[identity] = true, true, true
+		if previous, ok := scopes[profile.Harness]; ok {
+			if len(previous.Roots) != len(profile.Roots) || previous.Account != profile.Account || !reflect.DeepEqual(previous.PathEnvironment, profile.PathEnvironment) {
+				return index{}, errors.New("profile paths differ within one harness")
+			}
+			for position, root := range profile.Roots {
+				other := previous.Roots[position]
+				if root.ID != other.ID || root.Target != other.Target || root.HostPath != other.HostPath || root.Kind != other.Kind || root.Parent != other.Parent {
+					return index{}, errors.New("profile roots differ within one harness")
+				}
+			}
+		}
+		scopes[profile.Harness] = profile
+		if _, ok := state.Hosts[profile.Harness]; !ok {
+			return index{}, errors.New("profile harness has no host selection")
+		}
 	}
 	for harness, host := range state.Hosts {
 		profile := state.byID(host.ProfileID)
-		if profile == nil || profile.Harness != harness || host.Pending != (profile.Identity.Key == "") || !contentDigest.MatchString(host.BaseDigest) || (host.RecoveryID != "" && !storedID.MatchString(host.RecoveryID)) {
+		if profile == nil || profile.Harness != harness || host.Pending != (profile.Identity.Key == "") {
 			return index{}, errors.New("profile index has an invalid host selection")
 		}
 	}
@@ -141,14 +153,11 @@ func validateIndex(state index) (index, error) {
 }
 
 func validateManifest(profile Manifest) error {
-	if profile.CredentialRevision != "" && !storedID.MatchString(profile.CredentialRevision) {
+	if !storedID.MatchString(profile.CredentialRevision) {
 		return errors.New("profile has an invalid credential revision")
 	}
-	if profile.Schema != Schema || !storedID.MatchString(profile.ID) || !storedID.MatchString(profile.Generation) {
+	if profile.Schema != Schema || !storedID.MatchString(profile.ID) {
 		return errors.New("profile has an invalid schema or storage identity")
-	}
-	if profile.PreviousGeneration != "" && (!storedID.MatchString(profile.PreviousGeneration) || profile.PreviousGeneration == profile.Generation) {
-		return errors.New("profile has an invalid recovery generation")
 	}
 	if err := ValidateName(profile.Name); err != nil {
 		return err
@@ -164,8 +173,8 @@ func validateManifest(profile Manifest) error {
 			return errors.New("profile has an invalid account identity")
 		}
 	}
-	if len(profile.Roots) == 0 || !contentDigest.MatchString(profile.Policy) || !contentDigest.MatchString(profile.Digest) {
-		return errors.New("profile has an invalid root policy or content digest")
+	if len(profile.Roots) == 0 || !contentDigest.MatchString(profile.Policy) {
+		return errors.New("profile has an invalid root policy")
 	}
 	ids := map[string]bool{}
 	for _, root := range profile.Roots {
@@ -181,15 +190,8 @@ func validateManifest(profile Manifest) error {
 				return errors.New("profile has an invalid state path")
 			}
 		}
-		seen := map[string]bool{}
-		for _, alias := range root.Aliases {
-			if _, err := profilelink.CanonicalStore(alias, profile.Harness, profile.ID, root.ID); err != nil || root.Kind != workload.Directory || seen[alias] {
-				return errors.New("profile has an invalid canonical root path")
-			}
-			if err := workload.ValidateCanonicalTarget(alias, profile.Account.Home); err != nil {
-				return err
-			}
-			seen[alias] = true
+		if root.ID == "shared-agents" || root.Parent.Inode == 0 || root.Present != (root.Entry.Inode != 0) || (root.Kind == workload.Directory && !root.Present) {
+			return errors.New("profile has an invalid root identity or includes global skills")
 		}
 	}
 	for position, root := range profile.Roots {
@@ -200,10 +202,6 @@ func validateManifest(profile Manifest) error {
 		}
 	}
 	return nil
-}
-
-func dataPath(profile Manifest) string {
-	return filepath.Join("harnesses", profile.Harness, profile.ID, profile.Generation)
 }
 
 // Private paths below the anchored store cannot contain symlink components.

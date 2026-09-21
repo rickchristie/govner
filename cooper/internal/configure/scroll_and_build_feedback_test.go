@@ -96,13 +96,13 @@ func TestConfigureProgramEnablesTerminalMouseReporting(t *testing.T) {
 
 func TestBuildFeedbackStreamsAndScrollsInsideFixedFrame(t *testing.T) {
 	m := newBuildFeedbackModel([]string{
-		"Setting up live profiles...",
+		"Preparing host authentication...",
 		"Building proxy image...",
 		"Building base image...",
 	})
 	m.Update(tea.WindowSizeMsg{Width: 88, Height: 12})
-	if header := ansi.Strip(m.header()); !strings.Contains(header, "Setting up live profiles") || !strings.Contains(header, "0/3") {
-		t.Fatalf("header did not show profile setup before images: %q", header)
+	if header := ansi.Strip(m.header()); !strings.Contains(header, "Preparing host authentication") || !strings.Contains(header, "0/3") {
+		t.Fatalf("header did not show host authentication before images: %q", header)
 	}
 	for i := range 30 {
 		m.Update(dockerBuildLineMsg{Line: fmt.Sprintf("\x1b[32m#%02d docker output\x1b[0m\r\a", i)})
@@ -143,7 +143,7 @@ func TestBuildFeedbackStreamsAndScrollsInsideFixedFrame(t *testing.T) {
 
 	m.Update(dockerBuildStepFinishedMsg{Index: 0})
 	if header := ansi.Strip(m.header()); !strings.Contains(header, "1/3") || !strings.Contains(header, "Building proxy image") {
-		t.Fatalf("header did not advance after profile setup: %q", header)
+		t.Fatalf("header did not advance after host authentication: %q", header)
 	}
 }
 

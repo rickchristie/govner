@@ -1,4 +1,4 @@
-// Package profiles owns complete harness state copies and account switching.
+// Package profiles owns complete harness state roots and account switching.
 // The CLI and TUI call the same service. Execution boundaries receive only a
 // validated selection; they never implement their own save or load policy.
 package profiles
@@ -12,7 +12,14 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/workload"
 )
 
-const Schema = 1
+const Schema = 3
+
+// FileID identifies an entry without reading its contents. Parent identities
+// keep a recovery operation from following a replaced ancestor directory.
+type FileID struct {
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
+}
 
 // Identity describes local credential identity. It does not assert that a
 // remote service currently accepts the credentials. Key contains no token.
@@ -27,14 +34,13 @@ type Root struct {
 	HostPath string            `json:"host_path"`
 	Kind     workload.PathKind `json:"kind"`
 	Present  bool              `json:"present"`
-	Aliases  []string          `json:"canonical_paths,omitempty"`
+	Parent   FileID            `json:"parent"`
+	Entry    FileID            `json:"entry"`
 }
 
 type Manifest struct {
 	Schema             int                 `json:"schema"`
 	ID                 string              `json:"id"`
-	Generation         string              `json:"generation"`
-	PreviousGeneration string              `json:"previous_generation,omitempty"`
 	Policy             string              `json:"policy"`
 	Harness            string              `json:"harness"`
 	Name               string              `json:"name"`
@@ -45,66 +51,52 @@ type Manifest struct {
 	Roots              []Root              `json:"roots"`
 	PathEnvironment    map[string]string   `json:"path_environment"`
 	Environment        []workload.EnvVar   `json:"environment"`
-	Digest             string              `json:"digest"`
 	CredentialRevision string              `json:"credential_revision,omitempty"`
 }
 
 type HostSelection struct {
-	ProfileID  string `json:"profile_id"`
-	BaseDigest string `json:"base_digest"`
-	Pending    bool   `json:"pending"`
-	RecoveryID string `json:"recovery_id,omitempty"`
-}
-
-type HostRoot struct {
-	Path, Harness, Profile string
-	Selected               bool
+	ProfileID string `json:"profile_id"`
+	Pending   bool   `json:"pending"`
 }
 
 type Summary struct {
 	ID, Harness, Name, Account string
 	Saved                      time.Time
 	Loaded, Pending, InUse     bool
-	Managed, Mixed, Mismatch   bool
-	HostRoots                  []HostRoot
+	Mismatch                   bool
 }
 
 type SaveRequest struct {
 	Harness string
-	// NewName is permitted only for an unmapped account. It cannot name an
-	// existing destination or override the detected account mapping.
-	NewName        string
-	ConflictChoice ConflictChoice
 }
 
 type LoadRequest struct {
-	Harness, Name, NewName string
-	ConflictChoice         ConflictChoice
+	Harness, Name string
+	Confirmed     bool
+	// Interactive confirmation names the outgoing profile. Re-prompt when
+	// another Cooper command selected a different profile while the user read.
+	ExpectedProfileID string
 }
 
-type ConflictChoice string
-
-const (
-	KeepHost  ConflictChoice = "host"
-	KeepSaved ConflictChoice = "saved"
-)
+type RestoreRequest struct {
+	Harness, Name, Backup string
+	Confirmed             bool
+	ExpectedProfileID     string
+}
 
 type Result struct {
 	Saved, Loaded, Recovery     string
 	Warning                     string
 	Created, Pending, Unchanged bool
-	Managed                     bool
 }
 
 type IssueKind string
 
 const (
-	NameRequired    IssueKind = "name-required"
-	IdentityUnknown IssueKind = "identity-unknown"
-	AccountConflict IssueKind = "account-conflict"
-	StateConflict   IssueKind = "state-conflict"
-	StateInUse      IssueKind = "state-in-use"
-	MixedState      IssueKind = "mixed-state"
+	IdentityUnknown      IssueKind = "identity-unknown"
+	AccountConflict      IssueKind = "account-conflict"
+	StateInUse           IssueKind = "state-in-use"
+	ConfirmationRequired IssueKind = "confirmation-required"
 )
 
 // Issue is a domain result that needs an explicit user action. UI code uses
@@ -112,6 +104,7 @@ const (
 type Issue struct {
 	Kind              IssueKind
 	Message, Recovery string
+	ProfileID         string
 }
 
 func (e *Issue) Error() string {

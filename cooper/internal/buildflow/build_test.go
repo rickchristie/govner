@@ -44,7 +44,7 @@ func TestStepNamesSplitPreparationFromDockerBuilds(t *testing.T) {
 		}
 	}
 	wantBuilds := []string{
-		profileStepName,
+		hostAuthStepName,
 		"Building proxy image...",
 		"Building base image...",
 		"Building claude image...",
@@ -113,7 +113,7 @@ func TestPreparedBuildStreamsOutputAndReportsEachImage(t *testing.T) {
 		t.Fatalf("completed steps = %v, want [0 1 2 3]", completed)
 	}
 	for _, want := range []string{
-		profileStepName,
+		hostAuthStepName,
 		"Building proxy image...",
 		docker.GetImageProxy() + " stdout",
 		docker.GetImageProxy() + " stderr",
@@ -205,7 +205,7 @@ func TestStageFinishesSavedInputsWithoutRepeatingPreparation(t *testing.T) {
 			t.Fatalf("staged file %s missing: %v", path, err)
 		}
 	}
-	if got := prepared.StepNames(); !reflect.DeepEqual(got, []string{profileStepName, "Building proxy image...", "Building base image..."}) {
+	if got := prepared.StepNames(); !reflect.DeepEqual(got, []string{hostAuthStepName, "Building proxy image...", "Building base image..."}) {
 		t.Fatalf("prepared Docker steps = %v", got)
 	}
 }

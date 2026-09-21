@@ -7,8 +7,8 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/profiles"
 )
 
-// Use a physical workspace below the selected root. Every public and
-// historical path must enforce the same hook limits after startup and restart.
+// Use a physical workspace below the selected root. The workspace and public
+// state path must enforce the same hook limits after startup and restart.
 func (f *developmentFixture) prepareProfileWorktreeHooks(selection profiles.Selection) (string, string) {
 	for _, mount := range selection.Paths.Mounts {
 		if mount.ID != f.tool+"-state" {
@@ -21,7 +21,7 @@ func (f *developmentFixture) prepareProfileWorktreeHooks(selection profiles.Sele
 			f.t.Fatal(err)
 		}
 		var paths []string
-		for _, root := range append([]string{mount.Target}, mount.CanonicalPaths...) {
+		for _, root := range []string{mount.Target, mount.Source} {
 			paths = append(paths, shellQuote(filepath.Join(root, "worktrees", "project")))
 		}
 		script := "for project in " + strings.Join(paths, " ") + `; do
@@ -51,6 +51,6 @@ for hooks in /cooper/mounts/*/.git/hooks /cooper/mounts/*/worktrees/project/.git
     if touch "$hooks/export-write" 2>/dev/null; then echo "writable export: $hooks"; exit 1; fi
     count=$((count + 1))
 done
-test "$count" -ge 3
+test "$count" -ge 2
 `)
 }

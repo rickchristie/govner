@@ -11,11 +11,10 @@ import (
 
 // Watch the actual history inode. A copy hook alone would not detect a full
 // digest pass, which would still make switching depend on history size.
-func TestManagedSaveLoadDoesNotOpenHistory(t *testing.T) {
+func TestSaveLoadDoesNotOpenHistory(t *testing.T) {
 	f := newFixture(t)
 	f.write(".codex/account", "personal")
 	f.save("codex")
-	f.migrate()
 	f.load("codex", "Work")
 	f.write(".codex/account", "work")
 	f.write(".codex/sessions/history", "a native session")
@@ -29,7 +28,7 @@ func TestManagedSaveLoadDoesNotOpenHistory(t *testing.T) {
 	if _, err := unix.InotifyAddWatch(watch, path, unix.IN_OPEN|unix.IN_ACCESS); err != nil {
 		t.Fatal(err)
 	}
-	// First prove that this filesystem reports a read through the host alias.
+	// First prove that this filesystem reports a read through the host path.
 	if _, err := os.ReadFile(path); err != nil {
 		t.Fatal(err)
 	}

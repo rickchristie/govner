@@ -93,10 +93,9 @@ var configureCmd = &cobra.Command{
 var buildCmd = &cobra.Command{
 	Use:   "build",
 	Short: "Build proxy and CLI container images",
-	Long: `Sets up live profile storage on Linux, then builds the proxy and CLI container images.
-Existing saved profiles are converted automatically. Original state is retained for
-recovery. Stop agents and related Cooper sessions before the first conversion.
-Later builds check the live store without copying history.`,
+	Long: `Builds the proxy and CLI container images.
+Build does not set up, move, or convert account profiles.
+Use 'cooper save <harness>' to register the current Linux account profile.`,
 	RunE: runBuild,
 }
 
@@ -225,7 +224,7 @@ func init() {
 
 	tuiTestCmd.Flags().StringVar(&tuiTestScreen, "screen", "",
 		"Jump to a specific screen: runtimes, profiles, monitor, history, squid-logs, bridge, runtime, ports, loading, configure, build")
-	tuiTestCmd.Flags().StringVar(&tuiTestProfileScenario, "profile-scenario", "populated", "Profile fixture: populated, empty, unmapped, conflict, busy, or error")
+	tuiTestCmd.Flags().StringVar(&tuiTestProfileScenario, "profile-scenario", "populated", "Profile fixture: populated, empty, mismatch, busy, or error")
 }
 
 func main() {

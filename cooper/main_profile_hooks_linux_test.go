@@ -16,7 +16,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/usercontext"
 )
 
-func TestManagedProfileWorktreeHooksAreReadOnly(t *testing.T) {
+func TestProfileWorktreeHooksAreReadOnly(t *testing.T) {
 	driver, workspace := setupCLIBarrelEnvTest(t, func(cfg *config.Config) {
 		for index := range cfg.AITools {
 			cfg.AITools[index].Enabled = cfg.AITools[index].Name == "codex"
@@ -57,9 +57,6 @@ func TestManagedProfileWorktreeHooksAreReadOnly(t *testing.T) {
 	if _, err := service.Save(t.Context(), profiles.SaveRequest{Harness: "codex"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Migrate(t.Context(), ""); err != nil {
-		t.Fatal(err)
-	}
 	selection, err := service.Select(t.Context(), "codex", "Default")
 	if err != nil {
 		t.Fatal(err)
@@ -69,15 +66,8 @@ func TestManagedProfileWorktreeHooksAreReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths := []string{project}
-	for _, mount := range selection.Paths.Mounts {
-		if mount.ID == "codex-state" {
-			for _, alias := range mount.CanonicalPaths {
-				paths = append(paths, filepath.Join(alias, "worktrees", "project"))
-			}
-		}
-	}
-	// Each launch must protect the public path and all recorded physical
-	// paths. Writable workspace files rule out missing paths or denied users.
+	// Each launch must protect the public path. Writable workspace files rule
+	// out missing paths or denied users as the reason hook writes fail.
 	const script = `set -eu
 for project do
     test "$(cat "$project/.git/hooks/kept")" = hook-ok

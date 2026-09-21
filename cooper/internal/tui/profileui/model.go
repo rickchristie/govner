@@ -24,9 +24,8 @@ type formKind int
 const (
 	formNone formKind = iota
 	formLoad
-	formName
 	formDelete
-	formConflict
+	formConfirm
 	formDetails
 )
 
@@ -34,6 +33,7 @@ type form struct {
 	Kind    formKind
 	Name    string
 	Error   string
+	Prompt  string
 	Pending ProfileActionCompletedMsg
 	Content components.ScrollableContent
 }
@@ -72,8 +72,8 @@ func (m *Model) Update(message tea.Msg) (theme.SubModel, tea.Cmd) {
 	case ProfileActionCompletedMsg:
 		return m.actionCompleted(message)
 	case tea.MouseMsg:
-		if m.form.Kind == formDetails {
-			m.form.Content.HandleMouse(message, m.detailsFrame(m.width, m.height).BodyHeight())
+		if m.form.Kind == formDetails || m.form.Kind == formConfirm {
+			m.form.Content.HandleMouse(message, m.textFrame(m.width, m.height).BodyHeight())
 			return m, nil
 		}
 		if !m.ModalActive() && !m.busy {
@@ -152,7 +152,7 @@ func (m *Model) key(key tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 	case "d":
 		if item := m.list.Selected(); item != nil {
 			profile := item.Data.(profiles.Summary)
-			if profile.Loaded || profile.Mixed || profile.InUse {
+			if profile.Loaded || profile.InUse {
 				m.message, m.failed = "Load another profile and stop its sessions before deletion.", true
 				return m, nil
 			}
@@ -167,14 +167,25 @@ func (m *Model) formKey(key tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 		m.form = form{}
 		return m, nil
 	}
-	if m.form.Kind == formConflict {
-		return m.conflictKey(key)
+	if m.form.Kind == formConfirm {
+		if key.String() == "y" || key.String() == "Y" {
+			pending := m.form.Pending
+			pending.Load.Confirmed = true
+			return m.start(pending)
+		}
+		if key.String() == "enter" || key.String() == "n" || key.String() == "N" {
+			m.form = form{}
+			m.message, m.failed = "Canceled. No profile was changed.", false
+			return m, nil
+		}
+		m.form.Content.HandleKey(key, m.textFrame(m.width, m.height).BodyHeight())
+		return m, nil
 	}
 	if m.form.Kind == formDetails {
 		if key.String() == "enter" {
 			m.form = form{}
 		} else {
-			m.form.Content.HandleKey(key, m.detailsFrame(m.width, m.height).BodyHeight())
+			m.form.Content.HandleKey(key, m.textFrame(m.width, m.height).BodyHeight())
 		}
 		return m, nil
 	}
@@ -196,30 +207,12 @@ func (m *Model) formKey(key tea.KeyMsg) (theme.SubModel, tea.Cmd) {
 		if m.form.Kind == formLoad {
 			return m.start(ProfileActionCompletedMsg{Action: "load", Load: profiles.LoadRequest{Harness: m.harness, Name: name}})
 		}
-		pending := m.form.Pending
-		pending.Save.NewName, pending.Load.NewName = name, name
-		return m.start(pending)
 	default:
 		if entry := components.TextEntryFromKeyMsg(key, nil); entry != "" && len(m.form.Name)+len(entry) <= 40 {
 			m.form.Name += entry
 		}
 	}
 	return m, nil
-}
-
-func (m *Model) conflictKey(key tea.KeyMsg) (theme.SubModel, tea.Cmd) {
-	var choice profiles.ConflictChoice
-	switch key.String() {
-	case "h":
-		choice = profiles.KeepHost
-	case "s":
-		choice = profiles.KeepSaved
-	default:
-		return m, nil
-	}
-	pending := m.form.Pending
-	pending.Save.ConflictChoice, pending.Load.ConflictChoice = choice, choice
-	return m.start(pending)
 }
 
 func (m *Model) start(request ProfileActionCompletedMsg) (theme.SubModel, tea.Cmd) {
@@ -249,10 +242,9 @@ func (m *Model) actionCompleted(message ProfileActionCompletedMsg) (theme.SubMod
 		var issue *profiles.Issue
 		if errors.As(message.Err, &issue) {
 			switch issue.Kind {
-			case profiles.NameRequired:
-				m.form = form{Kind: formName, Pending: message}
-			case profiles.StateConflict:
-				m.form = form{Kind: formConflict, Pending: message}
+			case profiles.ConfirmationRequired:
+				message.Load.ExpectedProfileID = issue.ProfileID
+				m.form = form{Kind: formConfirm, Pending: message, Prompt: issue.Message}
 			}
 		}
 		return m, nil
@@ -270,11 +262,7 @@ func resultText(message ProfileActionCompletedMsg) string {
 	result := message.Result
 	var parts []string
 	if result.Saved != "" {
-		if result.Managed {
-			parts = append(parts, "Validated live profile "+result.Saved+".")
-		} else {
-			parts = append(parts, "Saved "+result.Saved+".")
-		}
+		parts = append(parts, "Checked live profile "+result.Saved+".")
 	}
 	if result.Loaded != "" {
 		parts = append(parts, "Loaded "+result.Loaded+" on the host.")

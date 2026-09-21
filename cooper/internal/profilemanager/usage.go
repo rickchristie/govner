@@ -21,6 +21,12 @@ import (
 type HostUsage struct{}
 
 func (HostUsage) Check(ctx context.Context, paths []string) error {
+	if err := profiles.Supported(); err != nil {
+		return err
+	}
+	if len(paths) == 0 {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	resolved := make([]string, 0, len(paths))

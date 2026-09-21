@@ -28,7 +28,7 @@ type dockerBuildFinishedMsg struct {
 
 type dockerBuildCloseMsg struct{}
 
-// buildFeedbackModel is presentation-only state for profile setup and image builds.
+// buildFeedbackModel is presentation-only state for host setup and image builds.
 // Execution stays in buildflow; this model receives typed facts and
 // renders a fixed frame around a scrollable combined stdout/stderr viewport.
 type buildFeedbackModel struct {
@@ -57,7 +57,7 @@ func newBuildFeedbackModel(steps []string) *buildFeedbackModel {
 // scrolling behavior without running Docker.
 func NewBuildFeedbackPreviewModel() tea.Model {
 	m := newBuildFeedbackModel([]string{
-		"Setting up live profiles...",
+		"Preparing host authentication...",
 		"Building proxy image...",
 		"Building base image...",
 		"Building claude image...",
@@ -67,8 +67,8 @@ func NewBuildFeedbackPreviewModel() tea.Model {
 	m.completed = 2
 	m.current = 2
 	sample := []string{
-		"Setting up live profiles...",
-		"Live profile storage is ready.",
+		"Preparing host authentication...",
+		"Host authentication is ready.",
 		"#0 building with \"default\" instance using docker driver",
 		"",
 		"#1 [internal] load build definition from Dockerfile",

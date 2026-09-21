@@ -3,10 +3,9 @@ package profiles
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+	"runtime"
 	"testing"
 
 	"github.com/rickchristie/govner/cooper/internal/usercontext"
@@ -21,10 +20,17 @@ type fixture struct {
 
 func newFixture(t testing.TB) fixture {
 	t.Helper()
-	base := t.TempDir()
+	if runtime.GOOS != "linux" {
+		t.Skip("profiles are Linux-only")
+	}
+	return fixtureAt(t, t.TempDir())
+}
+
+func fixtureAt(t testing.TB, base string) fixture {
+	t.Helper()
 	home, workspace := filepath.Join(base, "home"), filepath.Join(base, "workspace")
 	for _, path := range []string{home, workspace} {
-		if err := os.Mkdir(path, 0o700); err != nil {
+		if err := os.MkdirAll(path, 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -42,28 +48,33 @@ func newFixture(t testing.TB) fixture {
 		return Identity{}, errors.New("no identity root")
 	})
 	service := New(Options{CooperDir: filepath.Join(home, ".cooper"), Workspace: workspace,
-		Account:     usercontext.Account{Name: "tester", Group: "tester", UID: 1000, GID: 1000, Home: home},
+		Account:     usercontext.Account{Name: "tester", Group: "tester", UID: os.Getuid(), GID: os.Getgid(), Home: home},
 		Environment: map[string]string{}, CredentialNames: func(string) []string { return []string{"TEST_API_KEY"} },
 		Reader: reader, Guard: GuardFunc(func(context.Context, []string) error { return nil })})
-	return fixture{t: t, service: service, home: home}
+	return fixture{t, service, home}
 }
 
 func (f fixture) write(relative, content string) {
 	f.t.Helper()
 	path := filepath.Join(f.home, relative)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		f.t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		f.t.Fatal(err)
 	}
 }
 
 func (f fixture) read(relative string) string {
 	f.t.Helper()
-	data, err := os.ReadFile(filepath.Join(f.home, relative))
+	return readFile(f.t, filepath.Join(f.home, relative))
+}
+
+func readFile(t testing.TB, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
-		f.t.Fatal(err)
+		t.Fatal(err)
 	}
 	return string(data)
 }
@@ -79,7 +90,7 @@ func (f fixture) save(harness string) Result {
 
 func (f fixture) load(harness, name string) Result {
 	f.t.Helper()
-	result, err := f.service.Load(context.Background(), LoadRequest{Harness: harness, Name: name})
+	result, err := f.service.Load(context.Background(), LoadRequest{Harness: harness, Name: name, Confirmed: true})
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -100,15 +111,20 @@ func (f fixture) state() index {
 	return state
 }
 
-func (f fixture) profilePath(name, root, child string) string {
+func (f fixture) profilePath(name, id, child string) string {
 	f.t.Helper()
 	state := f.state()
 	for _, profile := range state.Profiles {
-		if profile.Name == name {
-			return filepath.Join(f.service.storePath(), dataPath(profile), "roots", root, child)
+		if profile.Name != name {
+			continue
+		}
+		for _, root := range profile.Roots {
+			if root.ID == id {
+				return filepath.Join(sourcePath(state, profile, root), child)
+			}
 		}
 	}
-	f.t.Fatal("profile does not exist", name)
+	f.t.Fatal("profile root does not exist", name, id)
 	return ""
 }
 
@@ -121,14 +137,28 @@ func requireIssue(t *testing.T, err error, kind IssueKind) *Issue {
 	return issue
 }
 
-func TestSaveLoadRoundTrip(t *testing.T) {
+func inode(t testing.TB, path string) FileID {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fileID(info)
+}
+
+func TestSaveLoadPreservesCompleteRootsAndInodes(t *testing.T) {
 	f := newFixture(t)
 	f.write(".claude/account", "personal")
 	f.write(".claude/sessions/first", "personal session")
 	f.write(".claude.json", "personal settings")
+	directory, history, settings := inode(t, filepath.Join(f.home, ".claude")), inode(t, filepath.Join(f.home, ".claude/sessions/first")), inode(t, filepath.Join(f.home, ".claude.json"))
+	f.service.copy = func(context.Context, string, string) error { t.Fatal("save or switch copied state"); return nil }
 	first := f.save("claude")
 	if first.Saved != "Default" || !first.Created {
 		t.Fatalf("first save: %+v", first)
+	}
+	if inode(t, filepath.Join(f.home, ".claude")) != directory {
+		t.Fatal("registration replaced the root")
 	}
 	f.write(".claude/sessions/later", "later personal session")
 	loaded := f.load("claude", "Work")
@@ -144,228 +174,148 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if !f.load("claude", "work").Unchanged {
 		t.Fatal("same empty profile was replaced")
 	}
+	if inode(t, f.profilePath("Default", "claude-state", "")) != directory {
+		t.Fatal("outgoing directory was copied")
+	}
 	f.write(".claude/account", "enterprise")
 	f.write(".claude/sessions/work", "work session")
-	if result := f.save("claude"); result.Saved != "Work" {
-		t.Fatalf("pending save: %+v", result)
+	if f.save("claude").Saved != "Work" {
+		t.Fatal("pending account was not bound")
 	}
-	f.write(".claude/sessions/later", "later work session")
 	f.load("claude", "default")
 	if f.read(".claude/account") != "personal" || f.read(".claude/sessions/later") != "later personal session" || f.read(".claude.json") != "personal settings" {
-		t.Fatal("personal state was not restored")
+		t.Fatal("personal state changed")
 	}
-	if _, err := os.Stat(filepath.Join(f.home, ".claude/sessions/work")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("work-only file remained")
+	if inode(t, filepath.Join(f.home, ".claude/sessions/first")) != history || inode(t, filepath.Join(f.home, ".claude.json")) != settings {
+		t.Fatal("switch replaced an inode")
 	}
 	f.load("claude", "WORK")
-	if f.read(".claude/account") != "enterprise" || f.read(".claude/sessions/later") != "later work session" {
-		t.Fatal("work state was not restored")
+	if f.read(".claude/sessions/work") != "work session" {
+		t.Fatal("work state changed")
 	}
-	if err := f.service.Delete(context.Background(), "claude", "Default"); err != nil {
+	if err := f.service.Delete(t.Context(), "claude", "Default"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.service.Delete(context.Background(), "claude", "Work"); err == nil {
-		t.Fatal("deleted host selection")
+	if err := f.service.Delete(t.Context(), "claude", "Work"); err == nil {
+		t.Fatal("deleted selected profile")
 	}
 }
 
-func TestAccountMappingCannotSelectWrongDestination(t *testing.T) {
+func TestConfirmationDoesNotHoldLockOrOverrideUse(t *testing.T) {
+	f := newFixture(t)
+	f.write(".codex/account", "personal")
+	f.save("codex")
+	before := readFile(t, filepath.Join(f.service.storePath(), "index.json"))
+	_, err := f.service.Load(t.Context(), LoadRequest{Harness: "codex", Name: "Work"})
+	issue := requireIssue(t, err, ConfirmationRequired)
+	if readFile(t, filepath.Join(f.service.storePath(), "index.json")) != before {
+		t.Fatal("prompt changed the index")
+	}
+	f.load("codex", "Other") // Another command can proceed while a prompt is open.
+	_, err = f.service.Load(t.Context(), LoadRequest{Harness: "codex", Name: "Work", Confirmed: true, ExpectedProfileID: issue.ProfileID})
+	requireIssue(t, err, ConfirmationRequired)
+	f.service.options.Guard = GuardFunc(func(context.Context, []string) error { return &Issue{Kind: StateInUse, Message: "fixture busy"} })
+	_, err = f.service.Load(t.Context(), LoadRequest{Harness: "codex", Name: "Work", Confirmed: true})
+	requireIssue(t, err, StateInUse)
+}
+
+func TestAccountChangesCannotOverwriteAnotherProfile(t *testing.T) {
 	f := newFixture(t)
 	f.write(".codex/account", "personal")
 	f.save("codex")
 	f.load("codex", "Work")
 	f.write(".codex/account", "personal")
-	_, err := f.service.Save(context.Background(), SaveRequest{Harness: "codex"})
+	_, err := f.service.Save(t.Context(), SaveRequest{Harness: "codex"})
 	requireIssue(t, err, AccountConflict)
-	f.write(".codex/account", "enterprise")
+	f.write(".codex/account", "work")
 	f.save("codex")
-	_, err = f.service.Save(context.Background(), SaveRequest{Harness: "codex", NewName: "Default"})
-	if err == nil {
-		t.Fatal("explicit name overwrote another profile")
-	}
-	f.write(".codex/account", "third-account")
-	_, err = f.service.Save(context.Background(), SaveRequest{Harness: "codex"})
-	requireIssue(t, err, NameRequired)
-	_, err = f.service.Save(context.Background(), SaveRequest{Harness: "codex", NewName: "default"})
-	if err == nil {
-		t.Fatal("case-insensitive duplicate accepted")
-	}
-	result, err := f.service.Save(context.Background(), SaveRequest{Harness: "codex", NewName: "Playground"})
-	if err != nil || result.Saved != "Playground" {
-		t.Fatalf("new account: %+v %v", result, err)
-	}
-	state := f.state()
-	if state.byName("codex", "Default").Identity.Key != "personal" {
-		t.Fatal("Default mapping changed")
+	f.write(".codex/account", "unexpected")
+	_, err = f.service.Save(t.Context(), SaveRequest{Harness: "codex"})
+	requireIssue(t, err, AccountConflict)
+	_, err = f.service.Load(t.Context(), LoadRequest{Harness: "codex", Name: "Default", Confirmed: true})
+	requireIssue(t, err, AccountConflict)
+	if f.read(".codex/account") != "unexpected" {
+		t.Fatal("mismatched state was changed")
 	}
 }
 
-func TestUnverifiedLoginPreservesState(t *testing.T) {
+func TestGlobalAgentsDoNotSwitch(t *testing.T) {
 	f := newFixture(t)
-	f.write(".codex/account", "personal")
-	f.save("codex")
-	if err := os.Remove(filepath.Join(f.home, ".codex/account")); err != nil {
-		t.Fatal(err)
-	}
-	f.write(".codex/session", "session after logout")
-	_, err := f.service.Load(context.Background(), LoadRequest{Harness: "codex", Name: "Work"})
-	issue := requireIssue(t, err, IdentityUnknown)
-	if issue.Recovery == "" {
-		t.Fatal("unverified state was not preserved")
-	}
-	data, err := os.ReadFile(filepath.Join(issue.Recovery, "roots", "codex-state", "session"))
-	if err != nil || string(data) != "session after logout" {
-		t.Fatalf("recovery: %q %v", data, err)
-	}
-	if f.read(".codex/session") != "session after logout" {
-		t.Fatal("host was replaced")
-	}
-}
-
-func TestSavedRuntimeChangesAndConflicts(t *testing.T) {
-	for _, both := range []bool{false, true} {
-		t.Run(fmt.Sprint("both-", both), func(t *testing.T) {
-			f := newFixture(t)
-			f.write(".codex/account", "personal")
-			f.write(".codex/session", "base")
-			f.save("codex")
-			profileSession := f.profilePath("Default", "codex-state", "session")
-			if err := os.WriteFile(profileSession, []byte("runtime change"), 0o600); err != nil {
-				t.Fatal(err)
+	f.write(".agents/skills/shared/SKILL.md", "global skill")
+	global := inode(t, filepath.Join(f.home, ".agents"))
+	for _, harness := range []string{"codex", "grok"} {
+		f.write("."+harness+"/account", "personal")
+		f.save(harness)
+		f.load(harness, "Work")
+		if inode(t, filepath.Join(f.home, ".agents")) != global {
+			t.Fatal("global skills moved")
+		}
+		if f.read(".agents/skills/shared/SKILL.md") != "global skill" {
+			t.Fatal("global skills changed")
+		}
+		selection, err := f.service.Select(t.Context(), harness, "Default")
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, mount := range selection.Paths.Mounts {
+			if mount.ID == "shared-agents" {
+				found = true
+				if mount.Source != filepath.Join(f.home, ".agents") || mount.Ownership != workload.HostState {
+					t.Fatal("global mount is not host state")
+				}
 			}
-			if both {
-				f.write(".codex/session", "host change")
-			}
-			_, err := f.service.Load(context.Background(), LoadRequest{Harness: "codex", Name: "Default"})
-			if both {
-				requireIssue(t, err, StateConflict)
-				if f.read(".codex/session") != "host change" {
-					t.Fatal("host conflict was overwritten")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if f.read(".codex/session") != "runtime change" {
-				t.Fatal("saved runtime change was lost")
-			}
-		})
-	}
-}
-
-func TestLoadRollsBackEveryRenameFailure(t *testing.T) {
-	for step := 1; step <= 8; step++ {
-		for _, after := range []bool{false, true} {
-			t.Run(fmt.Sprintf("step-%d-after-%v", step, after), func(t *testing.T) {
-				f := newFixture(t)
-				for _, relative := range []string{".codex/account", ".agents/state", ".claude-plugin/state", ".cursor-plugin/state"} {
-					f.write(relative, "personal")
-				}
-				f.save("codex")
-				_, roots, err := f.service.hostScope("codex")
-				if err != nil {
-					t.Fatal(err)
-				}
-				before, err := digestRoots(context.Background(), roots, hostSource, f.service.credentials("codex"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				calls := 0
-				f.service.rename = func(root *os.Root, from, to string) error {
-					calls++
-					if calls == step && !after {
-						return errors.New("injected rename failure")
-					}
-					if err := root.Rename(from, to); err != nil {
-						return err
-					}
-					if calls == step && after {
-						return errors.New("injected rename failure")
-					}
-					return nil
-				}
-				_, err = f.service.Load(context.Background(), LoadRequest{Harness: "codex", Name: "Work"})
-				if err == nil {
-					t.Fatal("fault did not stop load")
-				}
-				actual, err := digestRoots(context.Background(), roots, hostSource, f.service.credentials("codex"))
-				if err != nil || before != actual {
-					t.Fatalf("rollback changed state: %s %s %v", before, actual, err)
-				}
-				state := f.state()
-				if state.byID(state.Hosts["codex"].ProfileID).Name != "Default" {
-					t.Fatal("failed load changed selected profile")
-				}
-			})
+		}
+		if !found {
+			t.Fatal("global mount missing")
 		}
 	}
 }
 
-func TestInterruptedLoadRecoversOnNextCommand(t *testing.T) {
-	for step := 1; step <= 8; step++ {
-		t.Run(fmt.Sprint(step), func(t *testing.T) {
+func TestRootAndStoreGuards(t *testing.T) {
+	for _, kind := range []string{"root-link", "workspace", "binary", "old-copy", "old-symlink"} {
+		t.Run(kind, func(t *testing.T) {
 			f := newFixture(t)
-			for _, relative := range []string{".codex/account", ".agents/state", ".claude-plugin/state", ".cursor-plugin/state"} {
-				f.write(relative, "personal")
-			}
-			f.service.options.Environment["CODEX_HOME"] = filepath.Join(f.home, ".codex")
-			f.save("codex")
-			calls := 0
-			f.service.rename = func(root *os.Root, from, to string) error {
-				if err := root.Rename(from, to); err != nil {
-					return err
+			harness := "codex"
+			f.write(".codex/account", "personal")
+			switch kind {
+			case "root-link":
+				path := filepath.Join(f.home, ".codex")
+				if err := os.Rename(path, path+"-original"); err != nil {
+					t.Fatal(err)
 				}
-				calls++
-				if calls == step {
-					panic("simulated process exit")
+				if err := os.Symlink(path+"-original", path); err != nil {
+					t.Fatal(err)
 				}
-				return nil
+			case "workspace":
+				f.service.options.Workspace = filepath.Join(f.home, ".codex")
+			case "binary":
+				harness = "opencode"
+				f.write(".opencode/bin/opencode", "binary")
+				if err := os.Chmod(filepath.Join(f.home, ".opencode/bin/opencode"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			case "old-copy":
+				f.write(".cooper/profiles/index.json", `{"schema":1,"profiles":[],"hosts":{}}`)
+			case "old-symlink":
+				f.write(".cooper/profiles/managed.json", `{"schema":2}`)
 			}
-			func() {
-				defer func() {
-					if recover() == nil {
-						t.Error("process exit was not injected")
-					}
-				}()
-				_, _ = f.service.Load(context.Background(), LoadRequest{Harness: "codex", Name: "Work"})
-			}()
-			f.service = New(f.service.options)
-			f.save("codex")
-			if f.read(".codex/account") != "personal" || f.read(".agents/state") != "personal" {
-				t.Fatal("interrupted load lost outgoing state")
-			}
-			if _, err := os.Stat(filepath.Join(f.service.storePath(), transactionFile)); !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("journal remained after recovery")
+			if _, err := f.service.Save(t.Context(), SaveRequest{Harness: harness}); err == nil {
+				t.Fatal("unsafe or old state was accepted")
 			}
 		})
 	}
 }
 
-func TestLoadChecksEnvironmentAndUsageBeforeReplacement(t *testing.T) {
-	f := newFixture(t)
-	f.write(".codex/account", "personal")
-	f.save("codex")
-	f.service.options.Environment["TEST_API_KEY"] = "do-not-print-this-secret"
-	_, err := f.service.Load(context.Background(), LoadRequest{Harness: "codex", Name: "Work"})
-	if err == nil || !strings.Contains(err.Error(), "unset TEST_API_KEY") || strings.Contains(err.Error(), "do-not-print") {
-		t.Fatalf("credential check: %v", err)
-	}
-	delete(f.service.options.Environment, "TEST_API_KEY")
-	f.service.options.Guard = GuardFunc(func(context.Context, []string) error {
-		return &Issue{Kind: StateInUse, Message: "fixture runtime uses this state"}
-	})
-	_, err = f.service.Load(context.Background(), LoadRequest{Harness: "codex", Name: "Work"})
-	requireIssue(t, err, StateInUse)
-	if f.read(".codex/account") != "personal" {
-		t.Fatal("busy host was replaced")
-	}
-}
-
 func TestProfileNamesRejectPathsAndControls(t *testing.T) {
-	for _, name := range []string{"", "../work", "/tmp/work", "work/personal", "a\nb", "a\x00b", "1work", strings.Repeat("a", 41)} {
+	for _, name := range []string{"", "../Work", ".hidden", "Work/More", "Work\n", "bad name"} {
 		if ValidateName(name) == nil {
-			t.Errorf("accepted %q", name)
+			t.Fatalf("accepted %q", name)
+		}
+	}
+	for _, name := range []string{"Default", "work-2", "Work_3"} {
+		if err := ValidateName(name); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

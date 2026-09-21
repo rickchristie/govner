@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -34,6 +35,67 @@ func TestLiveHostHarnessBlocksItsRoots(t *testing.T) {
 	}
 	if err := processUsage(t.Context(), []string{t.TempDir()}); err != nil {
 		t.Fatalf("unrelated host roots were blocked: %v", err)
+	}
+}
+
+func TestProcessStateChild(t *testing.T) {
+	kind, path := os.Getenv("COOPER_PROCESS_FIXTURE_KIND"), os.Getenv("COOPER_PROCESS_FIXTURE_PATH")
+	if kind == "" {
+		t.Skip("process fixture")
+	}
+	if kind == "cwd" {
+		if err := os.Chdir(path); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		file, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mapping, err := syscall.Mmap(int(file.Fd()), 0, 4096, syscall.PROT_READ, syscall.MAP_SHARED)
+		file.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer syscall.Munmap(mapping)
+	}
+	os.Stdout.Write([]byte("ready"))
+	os.Stdin.Read(make([]byte, 1))
+}
+
+func TestWorkingDirectoryAndClosedFileMappingBlockSwitch(t *testing.T) {
+	for _, kind := range []string{"cwd", "mapping"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			path := root
+			if kind == "mapping" {
+				path = filepath.Join(root, "state with spaces")
+				if err := os.WriteFile(path, make([]byte, 4096), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command := exec.Command(os.Args[0], "-test.run=^TestProcessStateChild$")
+			command.Env = append(os.Environ(), "COOPER_PROCESS_FIXTURE_KIND="+kind, "COOPER_PROCESS_FIXTURE_PATH="+path)
+			input, err := command.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := command.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { input.Close(); command.Wait() }()
+			if _, err := io.ReadFull(output, make([]byte, 5)); err != nil {
+				t.Fatal(err)
+			}
+			var issue *profiles.Issue
+			if err := processUsage(t.Context(), []string{root}); !errors.As(err, &issue) || issue.Kind != profiles.StateInUse {
+				t.Fatalf("%s use not found: %v", kind, err)
+			}
+		})
 	}
 }
 
