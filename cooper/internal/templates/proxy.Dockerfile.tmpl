@@ -34,12 +34,27 @@ RUN mkdir -p /etc/ssl/certs && cat /usr/local/share/ca-certificates/cooper-paren
 
 # Build Squid from source with selective TLS inspection support
 # Alpine's squid package may not include --enable-ssl-crtd, so we build from source.
-RUN apk add --no-cache \
-    build-base \
-    openssl-dev \
-    perl \
-    linux-headers \
-    curl
+# A dropped proxied package stream can make apk report a file I/O error. Retry
+# the complete transaction so nested Cooper builds recover from that short
+# network failure. Keep each connection and the total attempt count bounded.
+RUN set -eu; \
+    attempt=1; \
+    max_attempts=5; \
+    while ! apk add --no-cache --timeout 60 \
+        build-base \
+        openssl-dev \
+        perl \
+        linux-headers \
+        curl; do \
+      if [ "$attempt" -ge "$max_attempts" ]; then \
+        echo "Alpine package install failed after $attempt attempts" >&2; \
+        exit 1; \
+      fi; \
+      delay=$((attempt * 2)); \
+      echo "Alpine package install attempt $attempt/$max_attempts failed; retrying in ${delay}s" >&2; \
+      sleep "$delay"; \
+      attempt=$((attempt + 1)); \
+    done
 
 ARG SQUID_VERSION=6.12
 RUN curl --fail --show-error --silent --location --http1.1 --retry 5 --retry-all-errors \
@@ -77,14 +92,26 @@ RUN mkdir -p /etc/ssl/certs && cat /usr/local/share/ca-certificates/cooper-paren
 {{end}}
 
 # Install runtime dependencies
-RUN apk add --no-cache \
-    openssl \
-    libstdc++ \
-    logrotate \
-    bash \
-    socat \
-    jq \
-    ca-certificates
+RUN set -eu; \
+    attempt=1; \
+    max_attempts=5; \
+    while ! apk add --no-cache --timeout 60 \
+        openssl \
+        libstdc++ \
+        logrotate \
+        bash \
+        socat \
+        jq \
+        ca-certificates; do \
+      if [ "$attempt" -ge "$max_attempts" ]; then \
+        echo "Alpine package install failed after $attempt attempts" >&2; \
+        exit 1; \
+      fi; \
+      delay=$((attempt * 2)); \
+      echo "Alpine package install attempt $attempt/$max_attempts failed; retrying in ${delay}s" >&2; \
+      sleep "$delay"; \
+      attempt=$((attempt + 1)); \
+    done
 
 {{if .HasParentCA -}}
 # Refresh the bundle now that ca-certificates is installed.

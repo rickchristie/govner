@@ -1234,6 +1234,14 @@ func TestRenderProxyDockerfile(t *testing.T) {
 
 	// Should have Alpine base
 	assertContains(t, result, "alpine:3.21")
+	if got := strings.Count(result, "max_attempts=5"); got != 2 {
+		t.Fatalf("Alpine package retry blocks = %d, want 2", got)
+	}
+	if got := strings.Count(result, "apk add --no-cache --timeout 60"); got != 2 {
+		t.Fatalf("bounded Alpine package installs = %d, want 2", got)
+	}
+	assertContains(t, result, "Alpine package install failed after $attempt attempts")
+	assertContains(t, result, "retrying in ${delay}s")
 
 	// Should have socat installed
 	assertContains(t, result, "socat")
