@@ -224,6 +224,12 @@ relay fails closed. HTTP/HTTPS port eligibility is not a general network grant.
 The guest Docker daemon, builds, containers, and nested Cooper proxy all use
 the same outer policy.
 
+Each relay stream has a two-minute idle limit shared by both directions.
+Successful reads or writes refresh both endpoints, so an active download does
+not expire because no new request bytes arrive. Traffic cannot extend the
+fixed 30-minute connection lifetime. These limits retain bounded resource use
+without cutting off one-way downloads or uploads.
+
 Virtiofs exports only approved roots. Soft UID/GID mapping maps guest file
 operations to the invoking host user. Read-only limits are enforced on the
 host side. The guest manifest is read-only. Guest Docker belongs to the guest;

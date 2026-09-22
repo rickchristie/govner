@@ -219,24 +219,57 @@ func (s Server) handle(connection net.Conn) {
 		return
 	}
 	defer target.Close()
-	_ = target.SetDeadline(deadline)
-	copyBoth(&boundedConnection{Conn: connection, idle: maxConnectionIdle, expires: deadline}, &boundedConnection{Conn: target, idle: maxConnectionIdle, expires: deadline})
+	copyBounded(connection, target, maxConnectionIdle, deadline)
+}
+
+func copyBounded(left, right net.Conn, idle time.Duration, expires time.Time) {
+	activity := &connectionActivity{left: left, right: right, idle: idle, expires: expires}
+	activity.refresh()
+	copyBoth(&boundedConnection{Conn: left, activity: activity}, &boundedConnection{Conn: right, activity: activity})
+}
+
+// Both directions share an idle deadline. A large download can keep receiving
+// data without sending another request; its blocked request read must stay
+// open. The fixed lifetime still limits streams with continuous traffic.
+type connectionActivity struct {
+	mu          sync.Mutex
+	left, right net.Conn
+	idle        time.Duration
+	expires     time.Time
+}
+
+func (a *connectionActivity) refresh() {
+	// Serialize both deadline updates so an older activity event cannot
+	// replace a newer deadline while the copy directions run concurrently.
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	deadline := time.Now().Add(a.idle)
+	if deadline.After(a.expires) {
+		deadline = a.expires
+	}
+	_ = a.left.SetDeadline(deadline)
+	_ = a.right.SetDeadline(deadline)
 }
 
 type boundedConnection struct {
 	net.Conn
-	idle    time.Duration
-	expires time.Time
+	activity *connectionActivity
 }
 
 func (c *boundedConnection) Read(data []byte) (int, error) {
-	_ = c.SetReadDeadline(c.nextDeadline())
-	return c.Conn.Read(data)
+	count, err := c.Conn.Read(data)
+	if count > 0 {
+		c.activity.refresh()
+	}
+	return count, err
 }
 
 func (c *boundedConnection) Write(data []byte) (int, error) {
-	_ = c.SetWriteDeadline(c.nextDeadline())
-	return c.Conn.Write(data)
+	count, err := c.Conn.Write(data)
+	if count > 0 {
+		c.activity.refresh()
+	}
+	return count, err
 }
 
 func (c *boundedConnection) CloseWrite() error {
@@ -244,14 +277,6 @@ func (c *boundedConnection) CloseWrite() error {
 		return closer.CloseWrite()
 	}
 	return c.Conn.Close()
-}
-
-func (c *boundedConnection) nextDeadline() time.Time {
-	idleDeadline := time.Now().Add(c.idle)
-	if idleDeadline.Before(c.expires) {
-		return idleDeadline
-	}
-	return c.expires
 }
 
 func (l *serviceLimits) acquire(service string) bool {
