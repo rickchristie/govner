@@ -202,6 +202,20 @@ func TestGatewayRejectsWrongNonceAndUnknownGuestService(t *testing.T) {
 		t.Fatal("gateway kept an unknown guest service open")
 	}
 	unknown.Close()
+	desktop, err := guest.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	desktopHeader := vmproto.NewHeader(vmproto.ServiceDesktop, "guest-desktop")
+	desktopHeader.Nonce = "correct-nonce"
+	if err := vmproto.WriteHeader(desktop, desktopHeader); err != nil {
+		t.Fatal(err)
+	}
+	_ = desktop.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := desktop.Read(make([]byte, 1)); err == nil {
+		t.Fatal("guest opened a host desktop relay")
+	}
+	desktop.Close()
 
 	invalidForward, err := guest.OpenStream()
 	if err != nil {
@@ -225,6 +239,9 @@ func TestGatewayRejectsWrongNonceAndUnknownGuestService(t *testing.T) {
 	}
 	if !isRelayService("forward:8080") || isRelayService("forward:0") || isRelayService("forward:70000") || isRelayService("host:22") {
 		t.Fatal("relay service classification is unsafe")
+	}
+	if isRelayService(vmproto.ServiceDesktop) || !isControlService(vmproto.ServiceDesktop) {
+		t.Fatal("desktop streams must start from the host control channel only")
 	}
 
 	cancel()

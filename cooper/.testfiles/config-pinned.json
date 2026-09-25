@@ -10,7 +10,8 @@
     {"name": "codex", "enabled": true, "mode": "pin", "pinned_version": "0.117.0"},
     {"name": "opencode", "enabled": true, "mode": "pin", "pinned_version": "1.3.7"},
     {"name": "grok", "enabled": true, "mode": "pin", "pinned_version": "1.0.4"},
-    {"name": "antigravity", "enabled": true, "mode": "pin", "pinned_version": "1.2.2"}
+    {"name": "antigravity", "enabled": true, "mode": "pin", "pinned_version": "1.2.2"},
+    {"name": "chatgpt", "enabled": true, "mode": "pin", "pinned_version": "26.917.71314"}
   ],
   "whitelisted_domains": [
     {"domain": ".anthropic.com", "include_subdomains": true, "source": "default"},

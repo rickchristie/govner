@@ -669,7 +669,10 @@ func (a *CooperApp) RestartWorkload(id string) error {
 	if isVM {
 		return nil
 	}
-	return a.rotateClipboardToken(id)
+	if err := a.rotateClipboardToken(id); err != nil {
+		return err
+	}
+	return docker.StartDesktop(context.Background(), a.cfg, a.cooperDir, id)
 }
 
 // ListWorkloads returns proxy, CLI, and VM identities.

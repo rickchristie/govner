@@ -10,7 +10,8 @@
     {"name": "codex", "enabled": true, "mode": "mirror", "host_version": "0.117.0"},
     {"name": "opencode", "enabled": true, "mode": "mirror", "host_version": "1.3.7"},
     {"name": "grok", "enabled": true, "mode": "mirror", "host_version": "1.0.4"},
-    {"name": "antigravity", "enabled": true, "mode": "mirror"}
+    {"name": "antigravity", "enabled": true, "mode": "mirror"},
+    {"name": "chatgpt", "enabled": true, "mode": "mirror", "host_version": "26.917.71314"}
   ],
   "whitelisted_domains": [
     {"domain": ".anthropic.com", "include_subdomains": true, "source": "default"},

@@ -757,9 +757,10 @@ fi
 printf 'SELF_HOST_BUILD_OK\n'
 
 # Docker-backed packages share one lock. Run packages in sequence so a package
-# does not spend its timeout waiting for another cold image build. Keep an
-# explicit per-package bound above Go's short default test timeout.
-if ! env -u COOPER_RUN_VM_E2E -u COOPER_NESTED_HARNESS -u COOPER_VM_DEV_MODE go test -C ./cooper -p=1 ./... -count=1 -timeout=30m >/tmp/self-host-go-test.log 2>&1; then
+# does not spend its timeout waiting for another cold image build. The command
+# package also rebuilds the desktop image after cleanup. Its cold VM run reached
+# the old 30-minute limit during that rebuild, so use the host suite's bound.
+if ! env -u COOPER_RUN_VM_E2E -u COOPER_NESTED_HARNESS -u COOPER_VM_DEV_MODE go test -C ./cooper -p=1 ./... -count=1 -timeout=60m >/tmp/self-host-go-test.log 2>&1; then
     tail -n 2000 /tmp/self-host-go-test.log >&2
     exit 53
 fi
@@ -966,6 +967,7 @@ func builtInAgents(homeDir string) []builtInAgent {
 		}},
 		{name: "copilot", targets: []stateTarget{stateDir(".copilot"), stateDir(".cache/copilot")}},
 		{name: "codex", targets: []stateTarget{stateDir(".codex"), stateDir(".agents"), stateDir(".claude-plugin"), stateDir(".cursor-plugin")}},
+		{name: "chatgpt", targets: []stateTarget{stateDir(".codex"), stateDir(".config/Codex"), stateDir(".cache/Codex"), stateDir(".agents"), stateDir(".claude-plugin"), stateDir(".cursor-plugin")}},
 		{name: "opencode", targets: []stateTarget{
 			stateDir(".cache/opencode"),
 			stateDir(".config/opencode"),
@@ -1392,6 +1394,9 @@ func appendSelfHostDomains(cfg *config.Config) {
 		// every agent. Include the native Antigravity install hosts as well.
 		antigravity.ManifestHost,
 		"storage.googleapis.com",
+		// ChatGPT is disabled in the outer fixture, but the nested test suite
+		// must read its package index and download the official desktop app.
+		"persistent.oaistatic.com",
 	} {
 		cfg.WhitelistedDomains = append(cfg.WhitelistedDomains, config.DomainEntry{Domain: domain, Source: "user"})
 	}
@@ -1568,7 +1573,7 @@ func readFile(t *testing.T, path string) string {
 // Tests must not follow host agent path overrides into real credentials.
 func clearAgentStatePaths(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "COPILOT_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "AGY_ADC_AUTH", "GOOGLE_APPLICATION_CREDENTIALS"} {
+	for _, name := range []string{"CODEX_HOME", "CODEX_ELECTRON_USER_DATA_PATH", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "COPILOT_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "AGY_ADC_AUTH", "GOOGLE_APPLICATION_CREDENTIALS"} {
 		t.Setenv(name, "")
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)

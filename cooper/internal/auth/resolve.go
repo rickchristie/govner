@@ -36,6 +36,9 @@ var toolTokenDefs = map[string][]tokenDef{
 	"codex": {
 		{envVars: []string{"OPENAI_API_KEY"}, outputName: "OPENAI_API_KEY"},
 	},
+	"chatgpt": {
+		{envVars: []string{"OPENAI_API_KEY"}, outputName: "OPENAI_API_KEY"},
+	},
 	// opencode: no additional token needed. Uses GH_TOKEN from copilot if both enabled.
 	"opencode": {},
 	// grok: the normal auth store is in the mounted Grok state root. Keep API

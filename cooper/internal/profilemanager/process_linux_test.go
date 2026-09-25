@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ func TestLiveHostHarnessBlocksItsRoots(t *testing.T) {
 	defer func() { _ = command.Process.Kill(); _ = command.Wait() }()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		err := processUsage(t.Context(), []string{filepath.Join(home, ".codex")})
+		err := processStateUse(t.Context(), filepath.Join("/proc", strconv.Itoa(command.Process.Pid)), command.Process.Pid, []string{filepath.Join(home, ".codex")})
 		var issue *profiles.Issue
 		if errors.As(err, &issue) && issue.Kind == profiles.StateInUse {
 			break
@@ -33,7 +34,7 @@ func TestLiveHostHarnessBlocksItsRoots(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if err := processUsage(t.Context(), []string{t.TempDir()}); err != nil {
+	if err := processStateUse(t.Context(), filepath.Join("/proc", strconv.Itoa(command.Process.Pid)), command.Process.Pid, []string{t.TempDir()}); err != nil {
 		t.Fatalf("unrelated host roots were blocked: %v", err)
 	}
 }
@@ -43,7 +44,11 @@ func TestProcessStateChild(t *testing.T) {
 	if kind == "" {
 		t.Skip("process fixture")
 	}
-	if kind == "cwd" {
+	if kind == "nondumpable" {
+		if _, _, err := syscall.RawSyscall(syscall.SYS_PRCTL, 4, 0, 0); err != 0 { // PR_SET_DUMPABLE
+			t.Fatal(err)
+		}
+	} else if kind == "cwd" {
 		if err := os.Chdir(path); err != nil {
 			t.Fatal(err)
 		}
@@ -61,6 +66,45 @@ func TestProcessStateChild(t *testing.T) {
 	}
 	os.Stdout.Write([]byte("ready"))
 	os.Stdin.Read(make([]byte, 1))
+}
+
+func TestNonDumpableProcessStillChecksKnownHarness(t *testing.T) {
+	for _, name := range []string{"service", "chatgpt"} {
+		t.Run(name, func(t *testing.T) {
+			command := exec.Command(os.Args[0], "-test.run=^TestProcessStateChild$")
+			command.Args[0] = name
+			command.Env = append(os.Environ(), "COOPER_PROCESS_FIXTURE_KIND=nondumpable")
+			input, err := command.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := command.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { input.Close(); command.Wait() }()
+			if _, err := io.ReadFull(output, make([]byte, 5)); err != nil {
+				t.Fatal(err)
+			}
+			base := filepath.Join("/proc", strconv.Itoa(command.Process.Pid))
+			if _, err := os.ReadFile(filepath.Join(base, "environ")); !errors.Is(err, os.ErrPermission) {
+				t.Skip("this account can inspect non-dumpable processes")
+			}
+			if err := openStateUse(t.Context(), base, command.Process.Pid, []string{t.TempDir()}); err != nil {
+				t.Fatalf("unreadable extra file check must defer to the harness check: %v", err)
+			}
+			err = processStateUse(t.Context(), filepath.Join("/proc", strconv.Itoa(command.Process.Pid)), command.Process.Pid, []string{t.TempDir()})
+			if name == "service" && err != nil {
+				t.Fatalf("unrelated service: %v", err)
+			}
+			if name == "chatgpt" && err == nil {
+				t.Fatal("unreadable ChatGPT environment was accepted")
+			}
+		})
+	}
 }
 
 func TestWorkingDirectoryAndClosedFileMappingBlockSwitch(t *testing.T) {
@@ -92,7 +136,7 @@ func TestWorkingDirectoryAndClosedFileMappingBlockSwitch(t *testing.T) {
 				t.Fatal(err)
 			}
 			var issue *profiles.Issue
-			if err := processUsage(t.Context(), []string{root}); !errors.As(err, &issue) || issue.Kind != profiles.StateInUse {
+			if err := processStateUse(t.Context(), filepath.Join("/proc", strconv.Itoa(command.Process.Pid)), command.Process.Pid, []string{root}); !errors.As(err, &issue) || issue.Kind != profiles.StateInUse {
 				t.Fatalf("%s use not found: %v", kind, err)
 			}
 		})
@@ -122,7 +166,7 @@ func TestUnknownWriterWithOpenStateBlocksSwitch(t *testing.T) {
 	if _, err := io.ReadFull(output, ready); err != nil {
 		t.Fatal(err)
 	}
-	if err := processUsage(t.Context(), []string{root}); err == nil {
+	if err := processStateUse(t.Context(), filepath.Join("/proc", strconv.Itoa(command.Process.Pid)), command.Process.Pid, []string{root}); err == nil {
 		t.Fatal("unknown writer was ignored")
 	}
 }

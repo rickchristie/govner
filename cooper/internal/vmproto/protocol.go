@@ -29,6 +29,8 @@ const (
 	ServiceDiagnostic = "diagnostic"
 	ServiceProxy      = "proxy"
 	ServiceBridge     = "bridge"
+	// Desktop is host-initiated only. It is never an outbound relay service.
+	ServiceDesktop = "desktop"
 )
 
 // Header starts each logical stream.

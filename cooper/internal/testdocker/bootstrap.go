@@ -376,6 +376,14 @@ func ensureTestImagesLocked(name string) error {
 	); err != nil {
 		return fmt.Errorf("build shared base image: %w", err)
 	}
+	logf(name, "building shared desktop base image %q", docker.GetImageDesktopBase())
+	if err := docker.BuildImage(
+		docker.GetImageDesktopBase(),
+		filepath.Join(buildDir, "base", "desktop.Dockerfile"),
+		filepath.Join(buildDir, "base"), uidGidArgs, false,
+	); err != nil {
+		return fmt.Errorf("build shared desktop base image: %w", err)
+	}
 
 	for _, tool := range sharedBuiltToolNames() {
 		toolDir := filepath.Join(buildDir, "cli", tool.Name)
@@ -507,6 +515,7 @@ func sharedImagesUpToDate(fingerprint string) (bool, string, error) {
 	requiredImages := []string{
 		docker.GetImageProxy(),
 		docker.GetImageBase(),
+		docker.GetImageDesktopBase(),
 	}
 	for _, tool := range sharedBuiltToolNames() {
 		requiredImages = append(requiredImages, docker.GetImageCLI(tool.Name))
@@ -537,6 +546,7 @@ func buildFingerprint(root string) (string, error) {
 		filepath.Join(root, ".testfiles", "config-pinned.json"),
 		filepath.Join(root, "internal", "clipboard"),
 		filepath.Join(root, "internal", "config"),
+		filepath.Join(root, "internal", "chatgpt"),
 		filepath.Join(root, "internal", "templates"),
 		filepath.Join(root, "internal", "aclsrc"),
 		filepath.Join(root, "internal", "x11src"),
@@ -666,6 +676,7 @@ func sharedBuiltToolNames() []sharedToolSpec {
 		{Name: "opencode"},
 		{Name: "grok"},
 		{Name: "antigravity"},
+		{Name: "chatgpt"},
 	}
 }
 

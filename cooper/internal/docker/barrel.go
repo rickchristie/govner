@@ -188,6 +188,9 @@ func StartBarrelWithProfile(cfg *config.Config, workspaceDir, cooperDir, homeDir
 		"--label", "cooper.clipboard-mode=" + clipboardMode,
 		"--label", "cooper.mount-plan=" + digest,
 	}
+	if aitool.IsDesktop(toolName) {
+		args = append(args, "--hostname", workload.DesktopHostname(name))
+	}
 	if selection.ID != "" {
 		args = append(args, "--label", "cooper.profile-id="+selection.ID, "--label", "cooper.profile="+selection.Name)
 	}

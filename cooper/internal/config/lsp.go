@@ -55,7 +55,10 @@ var (
 var (
 	goplsLatestURL = "https://proxy.golang.org/golang.org/x/tools/gopls/@latest"
 	pyPIBaseURL    = "https://pypi.org/pypi"
+	pyPIRetrySleep = time.Sleep
 )
+
+const pyPIRequestMaxAttempts = 3
 
 type goModuleLatestResponse struct {
 	Version string `json:"Version"`
@@ -122,7 +125,7 @@ func ResolvePyPIPackageVersionMetadata(packageName, version string) (PyPIPackage
 		url = fmt.Sprintf("%s/%s/%s/json", pyPIBaseURL, packageName, version)
 	}
 
-	body, err := httpGet(url)
+	body, err := pyPIGet(url)
 	if err != nil {
 		return PyPIPackageMetadata{}, fmt.Errorf("failed to fetch PyPI package %q metadata: %w", packageName, err)
 	}
@@ -136,6 +139,27 @@ func ResolvePyPIPackageVersionMetadata(packageName, version string) (PyPIPackage
 		Version:        resp.Info.Version,
 		RequiresPython: resp.Info.RequiresPython,
 	}, nil
+}
+
+// A PyPI connection can close before its metadata response is complete. Retry
+// these reads before a build starts. Do not retry invalid successful metadata
+// or definitive HTTP errors such as a missing package version.
+func pyPIGet(url string) ([]byte, error) {
+	var lastErr error
+	for attempt := 1; attempt <= pyPIRequestMaxAttempts; attempt++ {
+		body, err := httpGet(url)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+		if !retryableHTTPError(err) {
+			return nil, err
+		}
+		if attempt < pyPIRequestMaxAttempts {
+			pyPIRetrySleep(time.Duration(attempt) * time.Second)
+		}
+	}
+	return nil, fmt.Errorf("PyPI request failed after %d attempts: %w", pyPIRequestMaxAttempts, lastErr)
 }
 
 // RefreshDesiredToolVersions refreshes the concrete desired top-level tool
@@ -161,6 +185,9 @@ func RefreshDesiredToolVersions(cfg *Config, opts DesiredVersionRefreshOptions) 
 			return warnings, err
 		}
 		if err := resolveAntigravityReleases(&cfg.AITools[i]); err != nil {
+			return warnings, err
+		}
+		if err := resolveChatGPTReleases(&cfg.AITools[i]); err != nil {
 			return warnings, err
 		}
 		if warning != "" {

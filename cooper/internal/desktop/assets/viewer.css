@@ -1,0 +1,21 @@
+:root { color-scheme: dark; font: 14px system-ui, sans-serif; background: #171614; color: #eee7da; }
+* { box-sizing: border-box; }
+body { margin: 0; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 10px 14px; border-bottom: 1px solid #444035; background: #22201b; }
+strong { color: #ffbb79; font-size: 16px; white-space: nowrap; }
+strong span { color: #c2b8a4; font-weight: 400; }
+#status { color: #b9c5aa; font-size: 12px; }
+nav { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+button { font: inherit; color: #f5e5cf; background: #343028; border: 1px solid #575044; border-radius: 5px; padding: 6px 10px; cursor: pointer; }
+button:hover:enabled { border-color: #ffbb79; background: #474034; }
+button:focus-visible { outline: 2px solid #ffbb79; outline-offset: 2px; }
+button:disabled { opacity: .45; cursor: default; }
+#screen { flex: 1; min-height: 0; overflow: hidden; background: #101010; }
+#message { position: absolute; top: 70px; left: 50%; transform: translateX(-50%); max-width: min(90vw, 640px); padding: 18px 24px; background: #29251e; border: 1px solid #716047; border-radius: 8px; box-shadow: 0 8px 40px #0008; }
+#message[hidden] { display: none; }
+dialog { width: min(640px, 95vw); border: 1px solid #716047; border-radius: 8px; padding: 22px; background: #24211b; }
+dialog::backdrop { background: #0009; }
+h1 { font-size: 20px; margin-top: 0; }
+textarea { width: 100%; resize: vertical; color: #eee7da; background: #151412; border: 1px solid #716047; border-radius: 4px; font: 14px ui-monospace, monospace; padding: 10px; }
+.actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+@media (max-width: 640px) { header { gap: 8px; } nav { width: 100%; margin: 0; } button { font-size: 12px; } }

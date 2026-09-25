@@ -44,6 +44,10 @@ func (reader Reader) Read(ctx context.Context, harness string, mounts []workload
 	switch harness {
 	case "codex":
 		identity, err = view.codex()
+	case "chatgpt":
+		// The app can have a different login from its local Codex engine.
+		// Engine auth alone cannot authorize replacement of desktop state.
+		return profiles.Identity{}, errUnknown
 	case "claude":
 		identity, err = view.claude()
 	case "copilot":

@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/vmcontext"
 	"github.com/rickchristie/govner/cooper/internal/vmproto"
 	"github.com/rickchristie/govner/cooper/internal/workload"
@@ -188,6 +189,9 @@ func (d *dockerRuntime) loadAndStartAgent(ctx context.Context, log io.Writer) er
 		"--mount", workload.DockerBindMount(filepath.Join(d.manifest.HomeDir, ".docker"), filepath.Join(d.manifest.HomeDir, ".docker"), false),
 		"--mount", "type=bind,src=/run/cooper/vm-context.json,dst=/run/cooper/vm-context.json,readonly",
 	}
+	if aitool.IsDesktop(d.manifest.ToolName) {
+		args = append(args, "--hostname", workload.DesktopHostname(d.manifest.RuntimeID))
+	}
 	if d.manifest.Depth == 1 {
 		kvmGID, err := deviceGID("/dev/kvm")
 		if err != nil {
@@ -311,6 +315,11 @@ exec "$real" "$@"
 }
 
 func (d *dockerRuntime) stopAgent(ctx context.Context) {
+	if aitool.IsDesktop(d.manifest.ToolName) {
+		stopCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
+		_ = dockerCommand(stopCtx, nil, io.Discard, io.Discard, "exec", d.manifest.AgentContainer, "/opt/cooper/bin/cooper-desktop-stop")
+		cancel()
+	}
 	_ = dockerCommand(ctx, nil, io.Discard, io.Discard, "rm", "-f", d.manifest.AgentContainer)
 }
 

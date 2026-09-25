@@ -49,6 +49,7 @@ var stagingStepNames = []string{
 type plan struct {
 	enabledAITools []string
 	customImages   []string
+	desktop        bool
 }
 
 // Prepared is the stable build plan produced after Cooper has generated all
@@ -344,6 +345,16 @@ func (p *Prepared) Build(opts Options) error {
 	report(2, nil)
 
 	step := 3
+	if p.plan.desktop {
+		emitOutput(opts, "Building desktop base image...")
+		if err := buildImage(opts, docker.GetImageDesktopBase(), filepath.Join(p.baseDir, "desktop.Dockerfile"), p.baseDir, uidGidArgs, opts.NoCache); err != nil {
+			err = fmt.Errorf("build desktop base image: %w", err)
+			report(step, err)
+			return err
+		}
+		report(step, nil)
+		step++
+	}
 	for _, toolName := range p.plan.enabledAITools {
 		toolDir := filepath.Join(p.cliDir, toolName)
 		dockerfile := filepath.Join(toolDir, "Dockerfile")
@@ -383,10 +394,12 @@ func (p *Prepared) Build(opts Options) error {
 func buildPlan(cfg *config.Config, cooperDir string) (plan, error) {
 	cliDir := filepath.Join(cooperDir, "cli")
 	var enabledAITools []string
+	desktop := false
 	if cfg != nil {
 		for _, tool := range cfg.AITools {
 			if tool.Enabled {
 				enabledAITools = append(enabledAITools, tool.Name)
+				desktop = desktop || aitool.IsDesktop(tool.Name)
 			}
 		}
 	}
@@ -394,7 +407,7 @@ func buildPlan(cfg *config.Config, cooperDir string) (plan, error) {
 	if err != nil {
 		return plan{}, err
 	}
-	return plan{enabledAITools: enabledAITools, customImages: customImages}, nil
+	return plan{enabledAITools: enabledAITools, customImages: customImages, desktop: desktop}, nil
 }
 
 func (p plan) buildStepNames() []string {
@@ -402,6 +415,9 @@ func (p plan) buildStepNames() []string {
 		hostAuthStepName,
 		"Building proxy image...",
 		"Building base image...",
+	}
+	if p.desktop {
+		steps = append(steps, "Building desktop base image...")
 	}
 	for _, toolName := range p.enabledAITools {
 		steps = append(steps, fmt.Sprintf("Building %s image...", toolName))

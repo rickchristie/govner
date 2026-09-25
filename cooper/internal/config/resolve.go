@@ -14,8 +14,8 @@ import (
 )
 
 // httpClient is the shared HTTP client for all version resolution requests.
-// Its timeout applies per request. Official Go calls add their bounded retry
-// policy below; unrelated registries retain the existing one-request behavior.
+// Its timeout applies per request. Go and PyPI metadata calls have bounded
+// retries; other registries retain the existing one-request behavior.
 var httpClient = &http.Client{
 	Timeout: 10 * time.Second,
 }
@@ -69,6 +69,8 @@ func ResolveLatestVersion(toolName string) (string, error) {
 		return ResolveGrokLatest()
 	case "antigravity":
 		return resolveAntigravityLatest()
+	case "chatgpt":
+		return resolveChatGPTLatest()
 	default:
 		return "", fmt.Errorf("unknown tool for version resolution: %q", toolName)
 	}
@@ -94,6 +96,8 @@ func ValidateVersion(toolName, version string) (bool, error) {
 		return validateGrokVersion(version)
 	case "antigravity":
 		return validateAntigravityVersion(version)
+	case "chatgpt":
+		return validateChatGPTVersion(version)
 	default:
 		return false, fmt.Errorf("unknown tool for version validation: %q", toolName)
 	}
@@ -462,7 +466,7 @@ func (e *httpStatusError) Error() string {
 	return fmt.Sprintf("HTTP %d from %s", e.status, e.url)
 }
 
-func retryableOfficialGoError(err error) bool {
+func retryableHTTPError(err error) bool {
 	var statusErr *httpStatusError
 	if !errors.As(err, &statusErr) {
 		// Transport failures and response-body read failures are transient.
@@ -483,7 +487,7 @@ func officialGoGet(url string) ([]byte, error) {
 			return body, nil
 		}
 		lastErr = err
-		if !retryableOfficialGoError(err) {
+		if !retryableHTTPError(err) {
 			return nil, err
 		}
 		if attempt < officialGoRequestMaxAttempts {
@@ -510,7 +514,7 @@ func officialGoHeadStatus(url string) (int, error) {
 		}
 
 		lastErr = err
-		if !retryableOfficialGoError(err) {
+		if !retryableHTTPError(err) {
 			return 0, err
 		}
 		if attempt < officialGoRequestMaxAttempts {

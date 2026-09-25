@@ -16,6 +16,9 @@ var credentialNames = map[string][]string{
 }
 
 func CredentialNames(harness string) []string {
+	if harness == "chatgpt" {
+		harness = "codex"
+	}
 	names := append([]string(nil), credentialNames[harness]...)
 	sort.Strings(names)
 	return names

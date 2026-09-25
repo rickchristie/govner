@@ -278,6 +278,8 @@ func acceptHostStreams(ctx context.Context, session *yamux.Session, manifest vmp
 			stream.Close()
 		case vmproto.ServiceExec:
 			go runExecStream(ctx, stream, manifest, header)
+		case vmproto.ServiceDesktop:
+			go serveDesktop(ctx, stream, manifest)
 		case vmproto.ServiceReload:
 			if err := relay.reload(header.ForwardPorts); err != nil {
 				_ = vmproto.WriteFrame(stream, vmproto.Frame{Type: vmproto.FrameError, Data: []byte(err.Error())})

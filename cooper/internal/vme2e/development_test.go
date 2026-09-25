@@ -80,6 +80,9 @@ func TestVMDevelopment(t *testing.T) {
 	if mode == "profiles" {
 		valid = (selection == "codex" || selection == "antigravity")
 	}
+	if mode == "desktop" {
+		valid = selection == "chatgpt"
+	}
 	if mode == "lifecycle" {
 		valid = contains([]string{"restart", "resources", "relay", "agent"}, selection)
 	}
@@ -89,7 +92,7 @@ func TestVMDevelopment(t *testing.T) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	f := &developmentFixture{t: t, ctx: ctx, root: filepath.Join(repositoryRoot(t), "cooper"), mode: mode, selection: selection, tool: vmTestTool, report: map[string]any{}, lifetimes: map[string]bool{}}
-	if mode == "prepare-agent" || mode == "parity" || mode == "profiles" {
+	if mode == "prepare-agent" || mode == "parity" || mode == "profiles" || mode == "desktop" {
 		f.tool = selection
 	}
 	f.binary = filepath.Join(f.root, "cooper")
@@ -164,6 +167,8 @@ func TestVMDevelopment(t *testing.T) {
 		f.parity()
 	case "profiles":
 		f.profiles()
+	case "desktop":
+		f.desktop()
 	}
 	if err := ctx.Err(); err != nil {
 		t.Fatal(err)

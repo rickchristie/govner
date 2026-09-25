@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
@@ -843,6 +844,11 @@ func (m Manager) Restart(ctx context.Context, runtimeID string) (Runtime, error)
 	if err != nil {
 		_ = clipboard.RemoveTokenFile(m.CooperDir, runtimeID)
 		return Runtime{}, err
+	}
+	if aitool.IsDesktop(restarted.ToolName) {
+		if err := m.StartDesktop(ctx, restarted); err != nil {
+			return restarted, fmt.Errorf("VM restarted but its desktop did not start: %w", err)
+		}
 	}
 	return restarted, nil
 }

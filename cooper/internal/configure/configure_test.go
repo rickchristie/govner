@@ -506,7 +506,7 @@ func TestNewAICLIModelRepairsDisabledOffModeBeforeEnable(t *testing.T) {
 func TestNewAICLIModel_DefaultToolList(t *testing.T) {
 	m := newAICLIModel(nil)
 
-	expected := map[string]bool{"claude": true, "copilot": true, "codex": true, "opencode": true, "grok": true, "antigravity": true}
+	expected := map[string]bool{"claude": true, "copilot": true, "codex": true, "opencode": true, "grok": true, "antigravity": true, "chatgpt": true}
 	for _, tool := range m.tools {
 		if _, ok := expected[tool.name]; !ok {
 			t.Errorf("unexpected tool %q in default AI tools", tool.name)

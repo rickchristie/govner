@@ -9,6 +9,7 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/antigravity"
+	"github.com/rickchristie/govner/cooper/internal/chatgpt"
 )
 
 // VersionMode controls how a tool's version is resolved.
@@ -86,6 +87,7 @@ type ToolConfig struct {
 	// Antigravity archive URLs contain opaque build IDs. Keep the resolved
 	// records with the version so later builds do not fetch a moving manifest.
 	AntigravityReleases []antigravity.Release `json:"antigravity_releases,omitempty"`
+	ChatGPTReleases     []chatgpt.Release     `json:"chatgpt_releases,omitempty"`
 }
 
 // RefreshContainerVersion sets ContainerVersion based on the version mode
@@ -186,6 +188,9 @@ var HostVersionDetector = DetectHostVersion
 // DetectHostVersion runs the appropriate command to detect the installed
 // version of a tool on the host machine. Returns the parsed semver string.
 func DetectHostVersion(toolName string) (string, error) {
+	if toolName == "chatgpt" {
+		return chatgpt.HostVersion()
+	}
 	args, ok := hostVersionCommand(toolName)
 	if !ok {
 		return "", fmt.Errorf("unknown tool: %q", toolName)

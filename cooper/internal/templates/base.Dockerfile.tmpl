@@ -16,7 +16,16 @@ COPY x11-bridge-src/ /build/
 WORKDIR /build
 RUN go build -o /cooper-x11-bridge .
 
+{{- if .Desktop}}
 {{- if .HasGo}}
+FROM golang:{{.GoVersion}}-bookworm AS desktop-go
+{{- end}}
+FROM debian:trixie-slim
+{{- if .HasGo}}
+COPY --from=desktop-go /usr/local/go /usr/local/go
+ENV PATH=/usr/local/go/bin:$PATH
+{{- end}}
+{{- else if .HasGo}}
 FROM golang:{{.GoVersion}}-bookworm
 {{- else}}
 FROM debian:bookworm-slim
@@ -56,7 +65,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-freefont-ttf \
     fonts-liberation \
     fonts-noto-color-emoji \
+{{- if .Desktop}}
+    libasound2t64 \
+{{- else}}
     libasound2 \
+{{- end}}
     libatk-bridge2.0-0 \
     libatk1.0-0 \
     libatspi2.0-0 \

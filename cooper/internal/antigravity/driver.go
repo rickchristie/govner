@@ -3,13 +3,24 @@ package antigravity
 import "strings"
 
 // The native executable has no Go module metadata. Its compiled browser cache
-// path names the required Playwright driver. Read that dependency from the
-// selected binary so a harness upgrade does not need a Cooper version entry.
+// path names the required Playwright driver in releases that use it. Read that
+// dependency from the selected binary so an upgrade does not need a version
+// entry. New releases without Playwright must not install an arbitrary driver.
 const driverVersionScript = `#!/bin/sh
 set -eu
 if [ "$#" -ne 1 ]; then
     echo 'Usage: agy-driver-version <native-executable>' >&2
     exit 2
+fi
+if LC_ALL=C grep -aqE 'ms-playwright-go|playwright-go|PLAYWRIGHT_DRIVER_PATH|PLAYWRIGHT_NODEJS_PATH' -- "$1"; then
+    :
+else
+    status=$?
+    if [ "$status" -ne 1 ]; then
+        exit "$status"
+    fi
+    printf 'none\n'
+    exit 0
 fi
 paths=$(LC_ALL=C grep -aoE '\.cache/ms-playwright-go/[0-9]+\.[0-9]+\.[0-9]+' -- "$1" | sort -u)
 if [ -z "$paths" ] || [ "$(printf '%s\n' "$paths" | wc -l)" -ne 1 ]; then

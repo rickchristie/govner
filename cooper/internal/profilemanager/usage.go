@@ -99,6 +99,9 @@ func contains(parent, child string) bool {
 func harnessName(args []string) string {
 	for _, arg := range args[:min(3, len(args))] {
 		base := filepath.Base(arg)
+		if base == "chatgpt" || base == "ChatGPT" || base == "Codex" {
+			return "chatgpt"
+		}
 		// Gemini CLI and the Antigravity desktop product share .gemini with
 		// agy. Their presence must also block replacement of that root.
 		if base == "agy" || base == "antigravity" || base == "gemini" || strings.Contains(arg, "/@google/gemini-cli/") {

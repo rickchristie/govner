@@ -15,12 +15,12 @@ import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-AGENTS = {"claude", "copilot", "codex", "opencode", "grok", "antigravity"}
+AGENTS = {"claude", "copilot", "codex", "opencode", "grok", "antigravity", "chatgpt"}
 LIFECYCLES = {"restart", "resources", "relay", "agent"}
 PACKAGES = ["vm", "vmhost", "vmguest", "vmproto", "vmrelay", "vmstate", "vmcontext",
             "vmpayload", "workload", "runtimefs", "launch", "auth", "config",
             "templates", "clipboard", "usercontext", "vmdev", "profiles",
-            "profileauth", "profilemanager", "statelock", "aitool", "antigravity", "hostpath"]
+            "profileauth", "profilemanager", "statelock", "aitool", "antigravity", "hostpath", "chatgpt", "desktop"]
 
 DOCKER_GUARD = '''#!/bin/sh
 case "$1:$2" in
@@ -39,11 +39,13 @@ def parse_args(args):
         return args[0], ""
     if len(args) == 2 and args[0] in {"prepare-agent", "parity"} and args[1] in AGENTS:
         return tuple(args)
+    if args == ["desktop", "chatgpt"]:
+        return tuple(args)
     if len(args) == 2 and args[0] == "profiles" and args[1] in {"codex", "antigravity"}:
         return tuple(args)
     if len(args) == 2 and args[0] == "lifecycle" and args[1] in LIFECYCLES:
         return tuple(args)
-    raise ValueError("usage: cooper/test-vm-dev.sh [unit|prepare|smoke|mounts|lifecycle restart|resources|relay|agent|prepare-agent AGENT|parity AGENT|profiles codex|antigravity|clean|clean-cache]")
+    raise ValueError("usage: cooper/test-vm-dev.sh [unit|prepare|smoke|mounts|lifecycle restart|resources|relay|agent|prepare-agent AGENT|parity AGENT|desktop chatgpt|profiles codex|antigravity|clean|clean-cache]")
 
 
 def source_file(relative):
@@ -57,7 +59,7 @@ def source_digest(root):
     def visit(directory):
         for path in sorted(directory.iterdir()):
             if path.is_dir() and not path.is_symlink():
-                if not path.name.startswith(".") and path.name != "__pycache__":
+                if not path.name.startswith(".") and path.name not in {"__pycache__", "node_modules", "test-results"}:
                     visit(path)
                 continue
             relative = path.relative_to(root).as_posix()
@@ -102,6 +104,10 @@ def main(args):
               "log": str(log_path), "physical_ssd_writes": {"status": "unavailable",
               "reason": "No physical-host device window was measured. Archive and qcow2 bytes are logical work, not SSD or NAND writes."}}
     env = os.environ.copy()
+    if mode == "desktop":
+        # The VM fixture changes HOME to protect host state. Browser binaries
+        # remain read-only test tools under the caller's normal cache path.
+        env.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path.home() / ".cache" / "ms-playwright"))
     for name in ("COOPER_RUN_VM_E2E", "COOPER_NESTED_HARNESS"):
         env.pop(name, None)
     env.update(COOPER_VM_DEV_MODE=mode, COOPER_VM_DEV_SELECTION=selection,
@@ -134,7 +140,7 @@ def main(args):
                 if python_check.returncode:
                     status = python_check.returncode
                     return python_check.returncode
-            elif mode in {"smoke", "mounts", "lifecycle", "parity"}:
+            elif mode in {"smoke", "mounts", "lifecycle", "parity", "desktop"}:
                 # A cache miss must be an error. Guard all host Docker calls,
                 # including calls outside vm.Manager, against hidden image work.
                 real_docker = shutil.which("docker")

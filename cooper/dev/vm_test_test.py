@@ -34,6 +34,7 @@ class VMDevelopmentCommands(unittest.TestCase):
         self.assertNotIn("./internal/docker", command)
 
     def test_finite_commands(self):
+        self.assertEqual(vm_test.parse_args(["desktop", "chatgpt"]), ("desktop", "chatgpt"))
         for mode in ("prepare-agent", "parity"):
             for agent in vm_test.AGENTS:
                 self.assertEqual(vm_test.parse_args([mode, agent]), (mode, agent))
@@ -45,6 +46,17 @@ class VMDevelopmentCommands(unittest.TestCase):
                      ["smoke", "-run", ".*"], ["clean", "/home"], ["lifecycle", "all"]):
             with self.assertRaises(ValueError):
                 vm_test.parse_args(args)
+
+    def test_browser_dependencies_do_not_change_source_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "dev").mkdir()
+            (root / "dev" / "desktop_browser.cjs").write_text("fixture")
+            before = vm_test.source_digest(root)
+            modules = root / "dev" / "node_modules"
+            modules.mkdir()
+            (modules / "native-library").symlink_to("unavailable")
+            self.assertEqual(before, vm_test.source_digest(root))
 
     def test_source_and_report(self):
         with tempfile.TemporaryDirectory() as directory:

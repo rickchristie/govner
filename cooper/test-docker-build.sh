@@ -54,6 +54,8 @@ run_build_test() {
     test_dir=$(setup_test_dir "$mode")
 
     local base_image="${prefix}cooper-base"
+    local desktop_image="${prefix}cooper-desktop-base"
+    local chatgpt_image="${prefix}cooper-cli-chatgpt"
     local claude_image="${prefix}cooper-cli-claude"
     local copilot_image="${prefix}cooper-cli-copilot"
     local codex_image="${prefix}cooper-cli-codex"
@@ -233,7 +235,7 @@ run_build_test() {
     # The build account must agree across the shell, environment, and passwd.
     local expected_identity actual_identity
     expected_identity="$(id -un):$(id -gn):$(id -u):$(id -g):${HOME}"
-    for account_image in "$base_image" "$claude_image" "$copilot_image" "$codex_image" "$opencode_image" "$grok_image" "$antigravity_image"; do
+    for account_image in "$base_image" "$claude_image" "$copilot_image" "$codex_image" "$opencode_image" "$grok_image" "$antigravity_image" "$desktop_image" "$chatgpt_image"; do
         actual_identity=$(docker run --rm --entrypoint "" "$account_image" sh -lc '
             set -eu
             test "$USER" = "$(id -un)"
@@ -474,6 +476,41 @@ run_build_test() {
         fail "${mode}: opencode image COOPER_CLI_TOOL='${opencode_cli_tool}' (expected 'opencode')"
     fi
 
+    # Check the official desktop package and its full-access engine without
+    # loading host state or sending a model request to an external service.
+    if docker run --rm --network none --entrypoint bash "$chatgpt_image" -c '
+        set -eu
+        test "$(command -v chatgpt)" = /opt/cooper/bin/chatgpt
+        test "$(chatgpt --version)" = "$1"
+        package_dir=$(dirname "$(readlink -f "$(command -v chatgpt)")")
+        test "$(jq -r .version "$package_dir/resources/linux-package-metadata.json")" = "$1"
+        test "$COOPER_CLI_TOOL" = chatgpt
+        test "$COOPER_DESKTOP" = 1
+        test "$COOPER_CLIPBOARD_MODE" = x11
+        test "$CODEX_CLI_PATH" = /opt/cooper/desktop/core.sh
+        test -x /usr/bin/Xtigervnc
+        test -x /usr/bin/chromium
+        test -x /usr/bin/xterm
+        test -w /var/lib/cooper/desktop
+        ! command -v claude
+    ' fixture "$(get_tool_version ai_tools chatgpt)"; then
+        pass "${mode}: ChatGPT package, desktop, and engine settings are exact"
+    else
+        fail "${mode}: ChatGPT image contract failed"
+    fi
+    if docker run --rm --network none --entrypoint node \
+        -v "${SCRIPT_DIR}/dev/desktop_core.mjs:/tmp/desktop_core.mjs:ro" \
+        "$chatgpt_image" /tmp/desktop_core.mjs; then
+        pass "${mode}: ChatGPT engine writes workspace and state without approval"
+    else
+        fail "${mode}: ChatGPT full-access engine fixture failed"
+    fi
+    if base_run which chatgpt &>/dev/null || claude_run which chatgpt &>/dev/null; then
+        fail "${mode}: ChatGPT binary is present in another tool image"
+    else
+        pass "${mode}: ChatGPT executable is confined to its selected image"
+    fi
+
     # Check the real native client without external credentials or model use.
     if docker run --rm --network none --entrypoint "" "$antigravity_image" bash -c '
         set -eu
@@ -485,7 +522,11 @@ run_build_test() {
         test "$COOPER_CLIPBOARD_MODE" = x11
         test "$AGY_CLI_DISABLE_AUTO_UPDATE" = true
         driver_version=$(/opt/cooper/libexec/agy-driver-version /opt/cooper/libexec/agy)
-        test "$(node "$PLAYWRIGHT_DRIVER_PATH/package/cli.js" --version)" = "Version $driver_version"
+        if [ "$driver_version" = none ]; then
+            test ! -e "$PLAYWRIGHT_DRIVER_PATH"
+        else
+            test "$(node "$PLAYWRIGHT_DRIVER_PATH/package/cli.js" --version)" = "Version $driver_version"
+        fi
         ! command -v claude
     ' fixture "$(get_tool_version ai_tools antigravity)"; then
         pass "${mode}: Antigravity native version, helper, and runtime settings are exact"
@@ -847,6 +888,8 @@ cleanup_test() {
     docker rmi -f "${prefix}cooper-cli-opencode" 2>/dev/null || true
     docker rmi -f "${prefix}cooper-cli-grok" 2>/dev/null || true
     docker rmi -f "${prefix}cooper-cli-antigravity" 2>/dev/null || true
+    docker rmi -f "${prefix}cooper-cli-chatgpt" 2>/dev/null || true
+    docker rmi -f "${prefix}cooper-desktop-base" 2>/dev/null || true
     docker rmi -f "${prefix}cooper-cli-my-custom" 2>/dev/null || true
 
     rm -rf "$test_dir"

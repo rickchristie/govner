@@ -8,8 +8,8 @@ import (
 
 func TestDefinitionsOrderAndUniqueness(t *testing.T) {
 	defs := Definitions()
-	wantNames := []string{"claude", "copilot", "codex", "opencode", "grok", "antigravity"}
-	wantDisplay := []string{"Claude Code", "Copilot CLI", "Codex CLI", "OpenCode", "Grok Build", "Antigravity CLI"}
+	wantNames := []string{"claude", "copilot", "codex", "opencode", "grok", "antigravity", "chatgpt"}
+	wantDisplay := []string{"Claude Code", "Copilot CLI", "Codex CLI", "OpenCode", "Grok Build", "Antigravity CLI", "ChatGPT"}
 
 	if len(defs) != len(wantNames) {
 		t.Fatalf("len(Definitions()) = %d, want %d", len(defs), len(wantNames))
@@ -60,7 +60,7 @@ func TestNamesMatchesDefinitions(t *testing.T) {
 }
 
 func TestLookupAndIsBuiltin(t *testing.T) {
-	for _, name := range []string{"claude", "copilot", "codex", "opencode", "grok", "antigravity"} {
+	for _, name := range []string{"claude", "copilot", "codex", "opencode", "grok", "antigravity", "chatgpt"} {
 		def, ok := Lookup(name)
 		if !ok {
 			t.Fatalf("Lookup(%q) = false, want true", name)

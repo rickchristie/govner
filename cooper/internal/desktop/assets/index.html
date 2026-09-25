@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cooper desktop</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/assets/viewer.css">
+  <script type="module" src="/assets/viewer.js"></script>
+</head>
+<body>
+  <header>
+    <strong>Cooper <span>desktop</span></strong>
+    <span id="status" role="status">Connecting…</span>
+    <nav aria-label="Desktop controls">
+      <button id="app" disabled>ChatGPT</button>
+      <button id="terminal" disabled>Terminal</button>
+      <button id="clipboard" disabled>Clipboard</button>
+      <button id="fullscreen">Full screen</button>
+      <button id="reconnect">Reconnect</button>
+    </nav>
+  </header>
+  <main id="screen" aria-label="Guest desktop"></main>
+  <p id="message">Opening your desktop…</p>
+  <dialog id="clipboard-dialog">
+    <h1>Desktop clipboard</h1>
+    <p>Paste text here to send it to the desktop.</p>
+    <textarea id="clipboard-text" aria-label="Clipboard text" rows="8"></textarea>
+    <p>For an image, copy it on this computer, select Use host image, then paste in the app.</p>
+    <div class="actions"><button id="clipboard-close">Close</button><button id="clipboard-image" disabled>Use host image</button><button id="clipboard-copy">Copy to this computer</button><button id="clipboard-send">Send to desktop</button></div>
+  </dialog>
+</body>
+</html>

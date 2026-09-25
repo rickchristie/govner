@@ -119,7 +119,7 @@ func (m *saveModel) view(width, height int) string {
 
 	// AI tools summary.
 	aiSummary := toolSummary(m.cfg.AITools)
-	content += " " + labelStyle.Render("AI CLI Tools:       ") + valueStyle.Render(aiSummary) + "\n"
+	content += " " + labelStyle.Render("AI Tools:           ") + valueStyle.Render(aiSummary) + "\n"
 
 	// Whitelist summary.
 	defaultCount, userCount := 0, 0

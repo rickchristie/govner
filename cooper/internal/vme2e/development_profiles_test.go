@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,8 +20,10 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/vm"
 )
 
-// Parity uses registered public host state; profiles() covers inactive state.
-// Both use the existing VM start limits and fabricated local credentials.
+// Parity uses registered public host state when account identity is supported;
+// profiles() covers inactive state. ChatGPT must refuse registration because
+// its engine login does not prove the desktop account identity.
+// These checks use the existing VM start limits and fabricated credentials.
 func (f *developmentFixture) prepareProfileParity() {
 	environment := map[string]string{}
 	for _, name := range profileauth.CredentialNames(f.tool) {
@@ -33,7 +36,7 @@ func (f *developmentFixture) prepareProfileParity() {
 	case "antigravity":
 		writeFile(f.t, filepath.Join(f.home, ".gemini/antigravity-cli/settings.json"), `{"modelProvider":"gemini"}`)
 		environment["GEMINI_API_KEY"] = "cooper-fake-key"
-	case "codex":
+	case "codex", "chatgpt":
 		writeFile(f.t, filepath.Join(f.home, ".codex/auth.json"), `{"auth_mode":"apikey","OPENAI_API_KEY":"cooper-fake-key"}`)
 	case "claude":
 		environment["ANTHROPIC_API_KEY"] = "cooper-fake-key"
@@ -59,7 +62,16 @@ func (f *developmentFixture) prepareProfileParity() {
 		Environment: environment, CredentialNames: profileauth.CredentialNames, Reader: profileauth.Reader{},
 		// The outer development VM mounts the parent of these disposable roots.
 		Guard: profiles.GuardFunc(func(context.Context, []string) error { return nil })})
-	if _, err := service.Save(f.ctx, profiles.SaveRequest{Harness: f.tool}); err != nil {
+	_, err = service.Save(f.ctx, profiles.SaveRequest{Harness: f.tool})
+	if f.tool == "chatgpt" {
+		var issue *profiles.Issue
+		if !errors.As(err, &issue) || issue.Kind != profiles.IdentityUnknown {
+			f.t.Fatalf("desktop profile registration must reject unknown identity: %v", err)
+		}
+		f.report["desktop_profile_identity_refused"] = true
+		return
+	}
+	if err != nil {
 		f.t.Fatal(err)
 	}
 	f.report["registered_host_state"] = true

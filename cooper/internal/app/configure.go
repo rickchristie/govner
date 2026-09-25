@@ -118,14 +118,16 @@ func (a *ConfigureApp) SetProgrammingTools(tools []config.ToolConfig) {
 func (a *ConfigureApp) SetAITools(tools []config.ToolConfig) {
 	updated := config.CloneConfig(&config.Config{AITools: tools}).AITools
 	for i := range updated {
-		if len(updated[i].AntigravityReleases) != 0 {
-			continue
-		}
 		for _, previous := range a.cfg.AITools {
 			if previous.Name == updated[i].Name {
 				// The TUI edits version choices. It does not own resolved archive
 				// metadata. Preserve those records for the next strict refresh.
-				updated[i].AntigravityReleases = slices.Clone(previous.AntigravityReleases)
+				if len(updated[i].AntigravityReleases) == 0 {
+					updated[i].AntigravityReleases = slices.Clone(previous.AntigravityReleases)
+				}
+				if len(updated[i].ChatGPTReleases) == 0 {
+					updated[i].ChatGPTReleases = slices.Clone(previous.ChatGPTReleases)
+				}
 				break
 			}
 		}

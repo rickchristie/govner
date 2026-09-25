@@ -45,6 +45,8 @@ func GetImageProxy() string { return imagePrefix + defaultImageProxy }
 // content-addressable storage (no disk duplication of base layers).
 func GetImageBase() string { return imagePrefix + defaultImageBase }
 
+func GetImageDesktopBase() string { return imagePrefix + "cooper-desktop-base" }
+
 // GetImageCLI returns the CLI tool image name for a given tool (with prefix).
 // Each tool gets its own image (cooper-cli-claude, cooper-cli-codex, etc.).
 // Changing one tool's Dockerfile only rebuilds that image; siblings are untouched.

@@ -7,6 +7,10 @@ import (
 	"path/filepath"
 )
 
+// Chromium narrows its filesystem with chroot inside a new user namespace.
+// Seccomp must allow that call even though the outer container has no
+// CAP_SYS_CHROOT. The kernel still checks capability in the calling namespace.
+//
 //go:embed seccomp-bwrap.json
 var seccompProfile []byte
 

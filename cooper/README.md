@@ -53,6 +53,7 @@ requirements; `./cooper/dev/setup.sh` can set up KVM access.
 | `opencode` | OpenCode: `opencode` |
 | `grok` | Grok Build: `grok` |
 | `antigravity` | Antigravity CLI: `agy` (experimental) |
+| `chatgpt` | ChatGPT desktop: `chatgpt` |
 
 Select tools in `cooper configure`. Mirror uses the detected host version,
 Latest resolves the upstream release, and Pin uses the version you specify.
@@ -67,6 +68,36 @@ For a custom tool, put a Dockerfile based on `cooper-base` in
 `~/.cooper/cli/<name>/`, build, then run `cooper cli <name>`.
 Cooper does not overwrite custom directories. Built-in names are reserved;
 rename a conflicting custom directory first.
+
+### ChatGPT desktop
+
+Select **ChatGPT (desktop)** in `cooper configure`, choose Mirror, Latest, or
+Pin, then run `cooper build`. Build installs the official Linux package and
+its desktop dependencies in a separate image. It does not install the app on
+the host or include your login in the image.
+
+With `cooper up` running, start from your project:
+
+```sh
+cooper vm chatgpt
+```
+
+Cooper opens a private local browser viewer with ChatGPT already running.
+Use its **Terminal** button for a shell in the same workspace. You can also
+type `chatgpt` in that terminal. Closing the viewer leaves the app and VM
+running. Run the command again to reconnect; use Runtimes to stop it.
+`cooper cli chatgpt` uses the same desktop in a Docker barrel when the host
+permits the native app's user namespace sandbox.
+
+The bundled engine starts with full access and no approval prompts inside
+the workload. Existing tasks can retain their explicit permission settings;
+select Full access in the app when needed. In VM mode this includes its own
+Docker daemon. The workspace and selected state are writable. Cooper's proxy
+and mount limits still apply.
+Close any host app that uses the same desktop state before launch. Linux
+keyring cookies require an unlocked host Secret Service. Named ChatGPT
+account profiles cannot yet verify the desktop account identity. See
+[desktop use, state, and verification](docs/desktop.md) for details.
 
 ### Grok
 

@@ -514,11 +514,11 @@ func (m *model) updateProgramming(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) updateAICLI(msg tea.Msg) (tea.Model, tea.Cmd) {
-	result := m.aicli.update(msg)
+	result, cmd := m.aicli.update(msg)
 	if result == toolScreenBack {
 		m.navigateTo(ScreenWelcome)
 	}
-	return m, nil
+	return m, cmd
 }
 
 func (m *model) updateWhitelist(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -591,7 +591,7 @@ func newWelcomeModel(existing bool) welcomeModel {
 	return welcomeModel{
 		items: []welcomeItem{
 			{label: "Programming Tools", desc: "Go, Node.js, Python"},
-			{label: "AI CLI Tools", desc: "Claude Code, Copilot, Codex, OpenCode, Grok Build"},
+			{label: "AI Tools", desc: "CLI tools and the ChatGPT desktop app"},
 			{label: "Proxy Whitelist", desc: "Domain whitelist for network access"},
 			{label: "Port Forwarding to Host", desc: "Route container ports to host services"},
 			{label: "Proxy Settings", desc: "Proxy port, bridge port"},

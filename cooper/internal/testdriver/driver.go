@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/buildflow"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
@@ -427,6 +428,9 @@ func (d *Driver) BuildConfiguredImages(out io.Writer) error {
 	for _, tool := range d.cfg.AITools {
 		if tool.Enabled {
 			imageNames = append(imageNames, docker.GetImageCLI(tool.Name))
+			if aitool.IsDesktop(tool.Name) {
+				imageNames = append(imageNames, docker.GetImageDesktopBase())
+			}
 		}
 	}
 	customNames, err := buildflow.DiscoverCustomImageNames(filepath.Join(d.cooperDir, "cli"))

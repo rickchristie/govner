@@ -16,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/alertsound"
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/bridge"
@@ -818,9 +819,13 @@ func runCLI(cmd *cobra.Command, args []string) error {
 	if _, err := runtimefs.SyncTimezoneFile(cooperDir, containerName); err != nil {
 		return fmt.Errorf("sync barrel timezone: %w", err)
 	}
+	oneShot := cliOneShot
+	if aitool.IsDesktop(toolName) && oneShot == "" {
+		oneShot = "cooper-desktop-start"
+	}
 	preparedSession, warnings, err := launch.PrepareSession(launch.SessionRequest{
 		Config: cfg, CooperDir: cooperDir, RuntimeID: containerName,
-		ToolName: toolName, WorkspaceDir: workspaceDir, OneShot: cliOneShot,
+		ToolName: toolName, WorkspaceDir: workspaceDir, OneShot: oneShot,
 		State: &selection,
 	})
 	if errors.Is(err, profileauth.ErrAntigravitySetupRequired) {
@@ -891,6 +896,18 @@ func runCLI(cmd *cobra.Command, args []string) error {
 	}
 	if err := docker.ExecBarrel(containerName, preparedSession.Command, preparedSession.Environment, preparedSession.Interactive); err != nil {
 		return fmt.Errorf("exec barrel: %w", err)
+	}
+	if aitool.IsDesktop(toolName) && cliOneShot == "" {
+		executable, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		viewerURL, err := docker.OpenDesktopViewer(cmd.Context(), containerName, executable, cooperDir)
+		if err != nil {
+			return err
+		}
+		showDesktopViewer(cmd, viewerURL, "Stop the barrel from Runtimes in cooper up.")
+		return nil
 	}
 
 	if preparedSession.Interactive {
@@ -975,7 +992,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		}
 	}
 	// Remove base and proxy images.
-	for _, img := range []string{docker.GetImageBase(), docker.GetImageProxy()} {
+	for _, img := range []string{docker.GetImageDesktopBase(), docker.GetImageBase(), docker.GetImageProxy()} {
 		exists, err := docker.ImageExists(img)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  Warning: could not check image %s: %v\n", img, err)
@@ -1200,6 +1217,19 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Rebuild tool images.
+	for _, tool := range cfg.AITools {
+		if !tool.Enabled || tool.Mode == config.ModeOff || !aitool.IsDesktop(tool.Name) {
+			continue
+		}
+		if !baseChanged && !toolsChanged[tool.Name] {
+			continue
+		}
+		fmt.Fprintln(os.Stderr, "Rebuilding desktop base image...")
+		if err := docker.BuildImage(docker.GetImageDesktopBase(), filepath.Join(baseDir, "desktop.Dockerfile"), baseDir, account.BuildArgs(), false); err != nil {
+			return fmt.Errorf("rebuild desktop base image: %w", err)
+		}
+		break
+	}
 	// If base changed, ALL tool images need rebuilding (FROM changed).
 	// If only specific tools changed, only those images rebuild.
 	if baseChanged {
@@ -1276,6 +1306,10 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 }
 
 // runTUITest launches the Cooper TUI with mock data for visual QA.
+func newConfigurePreviewProgram() *tea.Program {
+	return tea.NewProgram(configure.NewAIToolsPreviewModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
+}
+
 func runTUITest(cmd *cobra.Command, args []string) error {
 	cfg := config.DefaultConfig()
 
@@ -1353,11 +1387,8 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 			fmt.Println("To see it, run: cooper up (with Docker running).")
 			return nil
 		case "configure":
-			testCA, caErr := app.NewConfigureApp("/tmp/cooper-test")
-			if caErr != nil {
-				return caErr
-			}
-			_, err := configure.Run(testCA)
+			p := newConfigurePreviewProgram()
+			_, err := p.Run()
 			return err
 		case "build", "build-feedback":
 			preview := configure.NewBuildFeedbackPreviewModel()

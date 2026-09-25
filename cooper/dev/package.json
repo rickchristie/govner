@@ -1,0 +1,8 @@
+{
+  "name": "cooper-desktop-checks",
+  "private": true,
+  "description": "Browser assertions for the prepared Cooper desktop VM fixture",
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

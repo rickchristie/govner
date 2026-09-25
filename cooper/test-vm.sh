@@ -43,8 +43,8 @@ if [ ! -s "$PREPARED_BASE" ]; then
     exit 1
 fi
 
-# The matrix runs before a self-host test with two separate 30-minute inner
-# bounds. Keep the suite bound above their combined valid execution time.
+# The matrix runs before the full nested Go suite and the depth-two VM check.
+# Keep a whole-suite bound as well as their separate package and startup limits.
 COOPER_RUN_VM_E2E=1 \
 COOPER_VM_PREPARED_BASE="$PREPARED_BASE" \
 COOPER_VM_BINARY="$REPO_ROOT/cooper/cooper" \

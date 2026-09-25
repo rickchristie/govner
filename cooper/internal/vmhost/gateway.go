@@ -258,7 +258,7 @@ func (g *Gateway) handleControl(ctx context.Context, connection net.Conn) {
 			return
 		}
 	}
-	if header.Service != vmproto.ServiceHealth && header.Service != vmproto.ServiceExec && header.Service != vmproto.ServiceReload && header.Service != vmproto.ServiceDoctor && header.Service != vmproto.ServiceShutdown {
+	if !isControlService(header.Service) {
 		_ = vmproto.WriteFrame(connection, vmproto.Frame{Type: vmproto.FrameError, Data: []byte("control service is not allowed")})
 		return
 	}
@@ -286,6 +286,16 @@ func (g *Gateway) handleControl(ctx context.Context, connection net.Conn) {
 		return
 	}
 	copyBoth(connection, stream)
+}
+
+func isControlService(service string) bool {
+	switch service {
+	case vmproto.ServiceHealth, vmproto.ServiceExec, vmproto.ServiceReload,
+		vmproto.ServiceDoctor, vmproto.ServiceShutdown, vmproto.ServiceDesktop:
+		return true
+	default:
+		return false
+	}
 }
 
 func (g *Gateway) writeStartingHealth(connection io.Writer) {

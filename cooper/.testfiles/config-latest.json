@@ -10,7 +10,8 @@
     {"name": "codex", "enabled": true, "mode": "latest"},
     {"name": "opencode", "enabled": true, "mode": "latest"},
     {"name": "grok", "enabled": true, "mode": "latest"},
-    {"name": "antigravity", "enabled": true, "mode": "latest"}
+    {"name": "antigravity", "enabled": true, "mode": "latest"},
+    {"name": "chatgpt", "enabled": true, "mode": "latest"}
   ],
   "whitelisted_domains": [
     {"domain": ".anthropic.com", "include_subdomains": true, "source": "default"},

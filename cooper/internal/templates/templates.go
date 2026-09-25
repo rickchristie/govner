@@ -32,6 +32,7 @@ var errAccessDenied []byte
 
 // baseDockerfileData holds template data for the base image Dockerfile.
 type baseDockerfileData struct {
+	Desktop      bool
 	HasParentCA  bool
 	HasGo        bool
 	GoVersion    string
@@ -208,6 +209,16 @@ func buildBaseDockerfileData(cfg *config.Config, implicit []config.ImplicitToolC
 
 // RenderBaseDockerfile renders the base image Dockerfile from config.
 func RenderBaseDockerfile(cfg *config.Config, implicit []config.ImplicitToolConfig) (string, error) {
+	return renderBaseDockerfile(cfg, implicit, false)
+}
+
+// RenderDesktopBaseDockerfile keeps the supported desktop distribution in an
+// optional image. Terminal builds retain their current base and cache layers.
+func RenderDesktopBaseDockerfile(cfg *config.Config, implicit []config.ImplicitToolConfig) (string, error) {
+	return renderBaseDockerfile(cfg, implicit, true)
+}
+
+func renderBaseDockerfile(cfg *config.Config, implicit []config.ImplicitToolConfig, desktop bool) (string, error) {
 	tmpl, err := template.ParseFS(templateFS, "base.Dockerfile.tmpl")
 	if err != nil {
 		return "", fmt.Errorf("failed to parse base Dockerfile template: %w", err)
@@ -216,6 +227,10 @@ func RenderBaseDockerfile(cfg *config.Config, implicit []config.ImplicitToolConf
 	data, err := buildBaseDockerfileData(cfg, implicit)
 	if err != nil {
 		return "", fmt.Errorf("failed to build base Dockerfile data: %w", err)
+	}
+	data.Desktop = desktop
+	if desktop {
+		data.HasCodex = true
 	}
 
 	var buf strings.Builder
@@ -363,6 +378,9 @@ func RenderCLIToolDockerfile(cfg *config.Config, toolName string) (string, error
 	def, ok := aitool.Lookup(toolName)
 	if !ok {
 		return "", fmt.Errorf("unknown AI tool: %s", toolName)
+	}
+	if toolName == "chatgpt" {
+		return renderChatGPTDockerfile(cfg)
 	}
 
 	version := getToolVersion(cfg.AITools, toolName)
@@ -605,6 +623,15 @@ func WriteAllTemplates(baseDir, cliDir string, cfg *config.Config, implicit []co
 	if err := os.WriteFile(filepath.Join(baseDir, "Dockerfile"), []byte(baseDockerfile), 0644); err != nil {
 		return fmt.Errorf("failed to write base Dockerfile: %w", err)
 	}
+	if isToolEnabled(cfg.AITools, "chatgpt") {
+		desktopBase, err := RenderDesktopBaseDockerfile(cfg, implicit)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(baseDir, "desktop.Dockerfile"), []byte(desktopBase), 0644); err != nil {
+			return fmt.Errorf("write desktop base Dockerfile: %w", err)
+		}
+	}
 	if err := os.WriteFile(filepath.Join(baseDir, "setup-account.sh"), setupAccountScript, 0755); err != nil {
 		return fmt.Errorf("write account setup: %w", err)
 	}
@@ -654,6 +681,11 @@ func WriteAllTemplates(baseDir, cliDir string, cfg *config.Config, implicit []co
 		}
 		if err := os.WriteFile(filepath.Join(toolDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
 			return fmt.Errorf("failed to write %s Dockerfile: %w", tool.Name, err)
+		}
+		if tool.Name == "chatgpt" {
+			if err := writeDesktopFiles(toolDir); err != nil {
+				return err
+			}
 		}
 	}
 

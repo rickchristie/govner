@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/launch"
@@ -35,10 +36,12 @@ var (
 var vmCmd = &cobra.Command{
 	Use:   "vm [tool-name] [profile]",
 	Short: "Launch an AI tool in a secure VM with its own Docker daemon",
-	Long: `Launches the selected AI CLI in a KVM virtual machine. It uses the same
+	Long: `Launches the selected AI tool in a KVM virtual machine. It uses the same
 workspace, selected-agent state, tools, proxy, clipboard, and settings as
 cooper cli. The guest has its own Docker daemon and has no network device.
+For a desktop tool, Cooper opens a private viewer with the app running.
 
+  cooper vm chatgpt
   cooper vm codex
   cooper vm codex Work
   cooper vm claude -c "go test ./..."
@@ -49,6 +52,26 @@ cooper cli. The guest has its own Docker daemon and has no network device.
   cooper vm prepare`,
 	Args: cobra.MaximumNArgs(2),
 	RunE: runVM,
+}
+
+var desktopViewerCmd = &cobra.Command{
+	Use: "__desktop-viewer vm|cli runtime-id", Hidden: true, Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		_, cooperDir, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		switch args[0] {
+		case "vm":
+			return vm.ServeDesktopViewer(ctx, cooperDir, args[1])
+		case "cli":
+			return docker.ServeDesktopViewer(ctx, cooperDir, args[1])
+		default:
+			return errors.New("unknown desktop runtime kind")
+		}
+	},
 }
 
 var vmSupervisorCmd = &cobra.Command{
@@ -104,7 +127,7 @@ func initVMCommands() {
 	vmRelayCmd.Flags().String("socket", "/cooper/relay/relay.sock", "Relay Unix socket")
 	vmRelayCmd.Flags().String("policy", "/cooper/policy.json", "Relay policy path")
 	vmRelayCmd.Flags().String("log", "", "Relay lifecycle log path")
-	rootCmd.AddCommand(vmCmd, vmSupervisorCmd, vmGuestCmd, vmRelayCmd)
+	rootCmd.AddCommand(vmCmd, vmSupervisorCmd, vmGuestCmd, vmRelayCmd, desktopViewerCmd)
 }
 
 func runVM(cmd *cobra.Command, args []string) error {
@@ -219,9 +242,13 @@ func runVM(cmd *cobra.Command, args []string) error {
 	if _, err := runtimefs.SyncTimezoneFile(cooperDir, runtimeID); err != nil {
 		return fmt.Errorf("sync VM timezone: %w", err)
 	}
+	oneShot := vmOneShot
+	if aitool.IsDesktop(toolName) && oneShot == "" {
+		oneShot = "cooper-desktop-start"
+	}
 	preparedSession, warnings, err := launch.PrepareSession(launch.SessionRequest{
 		Config: cfg, CooperDir: cooperDir, RuntimeID: runtimeID,
-		ToolName: toolName, WorkspaceDir: workspaceDir, OneShot: vmOneShot,
+		ToolName: toolName, WorkspaceDir: workspaceDir, OneShot: oneShot,
 		State: &selection,
 	})
 	if errors.Is(err, profileauth.ErrAntigravitySetupRequired) {
@@ -259,7 +286,22 @@ func runVM(cmd *cobra.Command, args []string) error {
 	if err := stateLock.Close(); err != nil {
 		return err
 	}
-	return executeVMSession(cmd.Context(), manager, runtime, preparedSession)
+	if err := executeVMSession(cmd.Context(), manager, runtime, preparedSession); err != nil {
+		return err
+	}
+	if !aitool.IsDesktop(toolName) || vmOneShot != "" {
+		return nil
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	viewerURL, err := vm.OpenDesktopViewer(cmd.Context(), runtime, executable, cooperDir)
+	if err != nil {
+		return err
+	}
+	showDesktopViewer(cmd, viewerURL, fmt.Sprintf("Use 'cooper vm stop %s' to stop it.", runtime.ID))
+	return nil
 }
 
 func runVMDoctor(ctx context.Context, cfg *config.Config, cooperDir string) error {

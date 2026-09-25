@@ -24,6 +24,8 @@ cooper/.test-e2e-home/
 cooper/.e2e-workspace/
 cooper/.e2e-*-config/
 cooper/.tmp/
+cooper/dev/node_modules/
+cooper/dev/test-results/
 .cooper-vm-self-host-*/
 
 .scratch/

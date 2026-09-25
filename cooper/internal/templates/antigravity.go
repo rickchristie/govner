@@ -54,12 +54,16 @@ RUN %s
 
 # Read the driver required by this exact native executable. Old native
 # releases use a driver CDN that returns 404, so install it through npm.
+# Releases without this dependency do not need a Playwright driver.
 # These executables are image-owned; a shared macOS cache must not hide them.
 RUN %s
-RUN agy_driver_version=$(/opt/cooper/libexec/agy-driver-version /opt/cooper/libexec/agy) \
-    && npm install --prefix /opt/cooper/agy-playwright --ignore-scripts --no-audit --no-fund "playwright@$agy_driver_version" \
-    && ln -s node_modules/playwright /opt/cooper/agy-playwright/package \
-    && test "$(node /opt/cooper/agy-playwright/package/cli.js --version)" = "Version $agy_driver_version"
+RUN set -eu; \
+    agy_driver_version=$(/opt/cooper/libexec/agy-driver-version /opt/cooper/libexec/agy); \
+    if [ "$agy_driver_version" != none ]; then \
+      npm install --prefix /opt/cooper/agy-playwright --ignore-scripts --no-audit --no-fund "playwright@$agy_driver_version"; \
+      ln -s node_modules/playwright /opt/cooper/agy-playwright/package; \
+      test "$(node /opt/cooper/agy-playwright/package/cli.js --version)" = "Version $agy_driver_version"; \
+    fi
 `, amd.URL, amd.SHA512, arm.URL, arm.SHA512, version,
 		antigravity.FileWrapperCommand("/opt/cooper/libexec/agy", "/opt/cooper/bin/agy"),
 		antigravity.DriverVersionCommand("/opt/cooper/libexec/agy-driver-version")), nil

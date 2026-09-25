@@ -211,6 +211,7 @@ func main() {
 	cookieFile := flag.String("cookie-file", "", "path to file containing hex cookie for X auth")
 	bridgeURL := flag.String("bridge-url", "", "host bridge URL (e.g., http://127.0.0.1:4343)")
 	tokenFile := flag.String("token-file", "", "path to clipboard token file")
+	yieldToApps := flag.Bool("yield-to-apps", false, "allow desktop copy and paste; SIGUSR1 restores the host image clipboard")
 	flag.Parse()
 
 	if *display == "" || *cookieFile == "" || *bridgeURL == "" || *tokenFile == "" {
@@ -298,6 +299,9 @@ func main() {
 	// Set up graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	if *yieldToApps {
+		signal.Notify(sigCh, syscall.SIGUSR1)
+	}
 	defer signal.Stop(sigCh)
 
 	// HTTP client for bridge requests.
@@ -313,6 +317,16 @@ func main() {
 	for {
 		select {
 		case sig := <-sigCh:
+			if sig == syscall.SIGUSR1 {
+				// The desktop viewer can restore the image source after the
+				// user has copied text or an image inside the guest.
+				var claimErr error
+				ownershipTime, claimErr = claimClipboard(conn, wid, a.clipboard)
+				if claimErr != nil {
+					log.Printf("x11-bridge: restore clipboard failed: %v", claimErr)
+				}
+				continue
+			}
 			log.Printf("x11-bridge: received %v, shutting down", sig)
 			return
 
@@ -334,6 +348,11 @@ func main() {
 				handleSelectionRequest(conn, e, a, ownershipTime, httpClient, *bridgeURL, *tokenFile, transfers)
 
 			case xproto.SelectionClearEvent:
+				if *yieldToApps {
+					// A GUI desktop needs ordinary copy and paste between apps.
+					// Do not replace a new selection with the host image source.
+					continue
+				}
 				// Another application took CLIPBOARD ownership. Reclaim it.
 				log.Printf("x11-bridge: lost CLIPBOARD ownership, reclaiming")
 				var reclaimErr error

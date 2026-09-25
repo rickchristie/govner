@@ -4,12 +4,14 @@
 package launch
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
 
 	"github.com/rickchristie/govner/cooper/internal/auth"
 	"github.com/rickchristie/govner/cooper/internal/barrelenv"
+	"github.com/rickchristie/govner/cooper/internal/chatgpt"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/names"
 	"github.com/rickchristie/govner/cooper/internal/profiles"
@@ -64,6 +66,20 @@ func PrepareSession(request SessionRequest) (*Session, []string, error) {
 	tokens, err := sessionTokens(request)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve tokens: %w", err)
+	}
+	if request.ToolName == "chatgpt" && request.State != nil {
+		directory, err := desktopStateDirectory(request.State.Paths)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := chatgpt.CheckHostInstance(directory); err != nil {
+			return nil, nil, err
+		}
+		key, err := chatgpt.CookieKey(context.Background(), directory)
+		if err != nil {
+			return nil, nil, err
+		}
+		tokens = append(tokens, auth.TokenResult{Name: chatgpt.CookieKeyEnvironment, Value: key, Source: "keyring"})
 	}
 	if err := checkAntigravityAuth(request, tokens); err != nil {
 		return nil, nil, err

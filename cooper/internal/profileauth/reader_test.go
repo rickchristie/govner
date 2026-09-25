@@ -100,6 +100,14 @@ func TestCodexIdentitySurvivesRefreshAndSeparatesWorkspaces(t *testing.T) {
 	}
 }
 
+func TestChatGPTDoesNotUseEngineIdentityForDesktopReplacement(t *testing.T) {
+	f := newAuthFixture(t, "chatgpt")
+	f.write("codex-state", "auth.json", map[string]any{"OPENAI_API_KEY": "synthetic-engine-key"})
+	if _, err := (Reader{}).Read(context.Background(), "chatgpt", f.mounts, f.env); err == nil {
+		t.Fatal("engine credentials authorized desktop profile replacement")
+	}
+}
+
 func TestClaudeReadsLoginPairAndRejectsLoggedOutMetadata(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		t.Skip("macOS prefers keychain authentication")

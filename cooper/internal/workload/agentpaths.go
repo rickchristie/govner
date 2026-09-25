@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 
 	"golang.org/x/text/unicode/norm"
 )
@@ -56,6 +57,14 @@ var agentStatePaths = map[string][]StatePath{
 		{ID: "claude-marketplace", Base: "home", Path: ".claude-plugin", Kind: Directory},
 		{ID: "cursor-marketplace", Base: "home", Path: ".cursor-plugin", Kind: Directory},
 	},
+	"chatgpt": {
+		{ID: "codex-state", Base: "codex", Kind: Directory},
+		{ID: "chatgpt-desktop", Base: "chatgpt-desktop", Kind: Directory},
+		{ID: "chatgpt-cache", Base: "chatgpt-cache", Kind: Directory},
+		{ID: "shared-agents", Base: "home", Path: ".agents", Kind: Directory},
+		{ID: "claude-marketplace", Base: "home", Path: ".claude-plugin", Kind: Directory},
+		{ID: "cursor-marketplace", Base: "home", Path: ".cursor-plugin", Kind: Directory},
+	},
 	"opencode": {
 		{ID: "opencode-cache", Base: "XDG_CACHE_HOME", Path: "opencode", Kind: Directory},
 		{ID: "opencode-config", Base: "XDG_CONFIG_HOME", Path: "opencode", Kind: Directory},
@@ -80,6 +89,7 @@ var agentStatePaths = map[string][]StatePath{
 
 var pathEnvironmentNames = []string{
 	"CODEX_HOME", "GROK_HOME", "CLAUDE_CONFIG_DIR",
+	"CODEX_ELECTRON_USER_DATA_PATH",
 	"COPILOT_HOME", "COPILOT_CACHE_HOME",
 	"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
 	"OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_DB",
@@ -213,6 +223,42 @@ func resolveAgentPaths(tool, home, launchDir string, values map[string]string, i
 func resolveStateBase(base, home, launchDir string, values, environment map[string]string, includeAbsent bool) (string, error) {
 	var name, fallback string
 	switch base {
+	case "chatgpt-desktop":
+		path := strings.TrimSpace(values["CODEX_ELECTRON_USER_DATA_PATH"])
+		if path == "" {
+			configRoot, err := resolveStateBase("XDG_CONFIG_HOME", home, launchDir, values, environment, includeAbsent)
+			if err != nil {
+				return "", err
+			}
+			path = filepath.Join(configRoot, "Codex")
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(launchDir, path)
+		}
+		path = filepath.Clean(path)
+		environment["CODEX_ELECTRON_USER_DATA_PATH"] = path
+		return path, nil
+	case "chatgpt-cache":
+		// Chromium maps profiles below the XDG config root to the same
+		// relative cache path. A profile outside that root keeps its cache
+		// inside the profile. The common mount filter removes that duplicate.
+		desktop, err := resolveStateBase("chatgpt-desktop", home, launchDir, values, environment, includeAbsent)
+		if err != nil {
+			return "", err
+		}
+		configRoot, err := resolveStateBase("XDG_CONFIG_HOME", home, launchDir, values, environment, includeAbsent)
+		if err != nil {
+			return "", err
+		}
+		relative, err := filepath.Rel(configRoot, desktop)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return desktop, nil
+		}
+		cacheRoot, err := resolveStateBase("XDG_CACHE_HOME", home, launchDir, values, environment, includeAbsent)
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(cacheRoot, relative), nil
 	case "antigravity-adc":
 		enabled, _ := strconv.ParseBool(values["AGY_ADC_AUTH"])
 		if !enabled {

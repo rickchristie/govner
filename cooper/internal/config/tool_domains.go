@@ -27,6 +27,16 @@ func antigravityDefaultDomains() []DomainEntry {
 	return entries
 }
 
+// The desktop package and first-party sign-in assets use these hosts. The
+// shared defaults already cover openai.com and chatgpt.com. New websites and
+// third-party identity providers still use the normal domain approval flow.
+func chatgptDefaultDomains() []DomainEntry {
+	return []DomainEntry{
+		{Domain: "persistent.oaistatic.com", Source: "default"},
+		{Domain: "cdn.oaistatic.com", Source: "default"},
+	}
+}
+
 func (c *Config) reconcileToolDefaultDomains() {
 	groups := []struct {
 		tool    string
@@ -34,6 +44,7 @@ func (c *Config) reconcileToolDefaultDomains() {
 	}{
 		{"grok", grokDefaultDomains()},
 		{"antigravity", antigravityDefaultDomains()},
+		{"chatgpt", chatgptDefaultDomains()},
 	}
 	enabled := map[string]bool{}
 	for _, tool := range c.AITools {

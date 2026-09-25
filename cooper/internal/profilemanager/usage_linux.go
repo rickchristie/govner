@@ -33,45 +33,52 @@ func processUsage(ctx context.Context, roots []string) error {
 		if err != nil || !ownedProcess(info) {
 			continue
 		}
-		base := filepath.Join("/proc", entry.Name())
-		if err := openStateUse(ctx, base, pid, roots); err != nil {
+		if err := processStateUse(ctx, filepath.Join("/proc", entry.Name()), pid, roots); err != nil {
 			return err
 		}
-		command, err := os.ReadFile(filepath.Join(base, "cmdline"))
-		if err != nil {
-			continue
-		} // The process may have exited.
-		harness := harnessName(strings.Split(string(command), "\x00"))
-		if harness == "" {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(base, "environ"))
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
+	}
+	return nil
+}
+
+// processStateUse checks one process so fixtures do not depend on other host apps.
+func processStateUse(ctx context.Context, base string, pid int, roots []string) error {
+	if err := openStateUse(ctx, base, pid, roots); err != nil {
+		return err
+	}
+	command, err := os.ReadFile(filepath.Join(base, "cmdline"))
+	if err != nil {
+		return nil
+	} // The process may have exited.
+	harness := harnessName(strings.Split(string(command), "\x00"))
+	if harness == "" {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(base, "environ"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return processInUse(pid, harness)
+	}
+	env := processFields(data)
+	home, workspace := env["HOME"], env["PWD"]
+	if current, err := os.Readlink(filepath.Join(base, "cwd")); err == nil {
+		workspace = current
+	}
+	if !filepath.IsAbs(home) || !filepath.IsAbs(workspace) {
+		return processInUse(pid, harness)
+	}
+	paths, err := workload.ResolveAgentScope(harness, home, workspace, env)
+	if err != nil {
+		return processInUse(pid, harness)
+	}
+	for _, mount := range paths.Mounts {
+		path, err := workload.ResolvedPath(mount.Source)
 		if err != nil {
 			return processInUse(pid, harness)
 		}
-		env := processFields(data)
-		home, workspace := env["HOME"], env["PWD"]
-		if current, err := os.Readlink(filepath.Join(base, "cwd")); err == nil {
-			workspace = current
-		}
-		if !filepath.IsAbs(home) || !filepath.IsAbs(workspace) {
+		if overlapsAny(path, roots) {
 			return processInUse(pid, harness)
-		}
-		paths, err := workload.ResolveAgentScope(harness, home, workspace, env)
-		if err != nil {
-			return processInUse(pid, harness)
-		}
-		for _, mount := range paths.Mounts {
-			path, err := workload.ResolvedPath(mount.Source)
-			if err != nil {
-				return processInUse(pid, harness)
-			}
-			if overlapsAny(path, roots) {
-				return processInUse(pid, harness)
-			}
 		}
 	}
 	return nil
@@ -105,7 +112,13 @@ func openStateUse(ctx context.Context, base string, pid int, roots []string) err
 			return err
 		}
 		path, err := os.Readlink(filepath.Join(base, "fd", entry.Name()))
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+			continue
+		}
+		if errors.Is(err, os.ErrPermission) {
+			// A non-dumpable service can expose fd names but hide each link.
+			// Apply the same rule as an unreadable fd directory above. Known
+			// harnesses still require a readable environment in processUsage.
 			continue
 		}
 		if err != nil {

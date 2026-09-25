@@ -25,6 +25,8 @@ type Definition struct {
 	HostVersionCommand []string
 	AutoApproveArgs    string
 	ClipboardMode      string
+	// Desktop selects a graphical workload and the local desktop viewer.
+	Desktop bool
 	// HomeDirs are paths relative to the account home that the image must create
 	// before runtime mounts attach (for example ".grok").
 	HomeDirs []string
@@ -89,6 +91,19 @@ var definitions = []Definition{
 		ClipboardMode:      ClipboardX11,
 		HomeDirs:           []string{".gemini"},
 	},
+	{
+		Name:               "chatgpt",
+		DisplayName:        "ChatGPT",
+		HostVersionCommand: []string{"chatgpt", "--version"},
+		ClipboardMode:      ClipboardX11,
+		Desktop:            true,
+		HomeDirs:           []string{".codex", ".config/Codex", ".cache/Codex"},
+	},
+}
+
+func IsDesktop(name string) bool {
+	definition, ok := Lookup(name)
+	return ok && definition.Desktop
 }
 
 // Executable separates the stable Cooper identity from the native command.

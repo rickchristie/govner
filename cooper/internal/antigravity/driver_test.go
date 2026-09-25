@@ -16,7 +16,9 @@ func TestDriverVersionUsesSelectedBinary(t *testing.T) {
 		{"new dependency", "\x00.cache/ms-playwright-go/2.14.6OtherText\x00", "2.14.6"},
 		{"repeated path", ".cache/ms-playwright-go/1.57.0\x00.cache/ms-playwright-go/1.57.0", "1.57.0"},
 		{"unrelated version", "native 9.1.0\x00.cache/ms-playwright-go/1.62.1\x001.57.0", "1.62.1"},
-		{"missing", "native 9.1.0\x001.57.0", ""},
+		{"no Playwright dependency", "native 9.1.0\x001.57.0\x00chrome-devtools-mcp@latest", "none"},
+		{"missing path", "PLAYWRIGHT_DRIVER_PATH\x001.57.0", ""},
+		{"unknown path", "github.com/playwright-community/playwright-go\x001.57.0", ""},
 		{"incomplete", ".cache/ms-playwright-go/1.57", ""},
 		{"ambiguous", ".cache/ms-playwright-go/1.57.0\x00.cache/ms-playwright-go/1.62.1", ""},
 	} {
@@ -42,5 +44,16 @@ func TestDriverVersionUsesSelectedBinary(t *testing.T) {
 				t.Fatalf("dependency = %q, %v; want %s", output, err, test.version)
 			}
 		})
+	}
+}
+
+func TestDriverVersionRejectsMissingBinary(t *testing.T) {
+	directory := t.TempDir()
+	helper := filepath.Join(directory, "driver-version")
+	if output, err := exec.Command("sh", "-c", DriverVersionCommand(helper)).CombinedOutput(); err != nil {
+		t.Fatalf("install helper: %v: %s", err, output)
+	}
+	if output, err := exec.Command(helper, filepath.Join(directory, "missing")).CombinedOutput(); err == nil {
+		t.Fatalf("missing binary accepted: %s", output)
 	}
 }

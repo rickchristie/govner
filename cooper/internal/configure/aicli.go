@@ -7,15 +7,31 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/rickchristie/govner/cooper/internal/aitool"
+	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/tableutil"
 	"github.com/rickchristie/govner/cooper/internal/tui/theme"
 )
 
-// aicliModel manages the AI CLI Tools screen.
+type toolVersions interface {
+	DetectHostVersion(string) (string, error)
+	ValidateVersion(string, string) (bool, error)
+}
+
+type toolVersionCheckedMsg struct {
+	request int
+	version string
+	valid   bool
+	err     error
+}
+
+// aicliModel manages CLI and desktop version choices through one tool table.
 type aicliModel struct {
-	tools  []toolEntry
-	cursor int
+	tools           []toolEntry
+	cursor          int
+	versions        toolVersions
+	versionRequest  int
+	checkingVersion bool
 
 	// Detail view state.
 	inDetail     bool
@@ -41,11 +57,15 @@ func defaultAITools() []toolEntry {
 }
 
 func newAICLIModel(existing []config.ToolConfig) aicliModel {
+	return newAIToolsModel(existing, app.ToolVersions{})
+}
+
+func newAIToolsModel(existing []config.ToolConfig, versions toolVersions) aicliModel {
 	tools := defaultAITools()
 
 	// Detect host versions.
 	for i := range tools {
-		v, err := config.DetectHostVersion(tools[i].name)
+		v, err := versions.DetectHostVersion(tools[i].name)
 		if err == nil {
 			tools[i].hostVersion = v
 		}
@@ -94,15 +114,42 @@ func newAICLIModel(existing []config.ToolConfig) aicliModel {
 
 	return aicliModel{
 		tools:    tools,
+		versions: versions,
 		pinInput: newTextInput("e.g., 1.0.5", 30),
 	}
 }
 
-func (m *aicliModel) update(msg tea.Msg) toolScreenResult {
+func (m *aicliModel) update(msg tea.Msg) (toolScreenResult, tea.Cmd) {
+	if result, ok := msg.(toolVersionCheckedMsg); ok {
+		if result.request != m.versionRequest || !m.checkingVersion {
+			return toolScreenNone, nil
+		}
+		m.checkingVersion = false
+		switch {
+		case result.err != nil:
+			m.pinError = fmt.Sprintf("Version check failed: %v", result.err)
+		case !result.valid:
+			m.pinError = fmt.Sprintf("Version %s was not found", result.version)
+		default:
+			m.tools[m.cursor].pinVersion = result.version
+			m.tools[m.cursor].mode = config.ModePin
+			m.pinInput.Blur()
+			m.pinError = ""
+		}
+		return toolScreenNone, nil
+	}
+	if m.checkingVersion {
+		if key, ok := msg.(tea.KeyMsg); ok && key.String() == "esc" {
+			m.checkingVersion = false
+			m.versionRequest++
+			m.pinError = ""
+		}
+		return toolScreenNone, nil
+	}
 	if m.inDetail {
 		return m.updateDetail(msg)
 	}
-	return m.updateList(msg)
+	return m.updateList(msg), nil
 }
 
 func (m *aicliModel) updateList(msg tea.Msg) toolScreenResult {
@@ -153,42 +200,36 @@ func (m *aicliModel) updateList(msg tea.Msg) toolScreenResult {
 	return toolScreenNone
 }
 
-func (m *aicliModel) updateDetail(msg tea.Msg) toolScreenResult {
+func (m *aicliModel) updateDetail(msg tea.Msg) (toolScreenResult, tea.Cmd) {
 	tool := &m.tools[m.cursor]
 
 	// If pin mode is selected and pin input is focused, route keys there.
-	if m.detailCursor == 2 && m.pinInput.focused {
+	if m.detailModeAtCursor() == config.ModePin && m.pinInput.focused {
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			switch msg.String() {
 			case "esc":
 				m.pinInput.Blur()
-				return toolScreenNone
+				return toolScreenNone, nil
 			case "enter":
 				v := m.pinInput.Value()
 				if v == "" {
 					m.pinError = "Version cannot be empty"
-					return toolScreenNone
+					return toolScreenNone, nil
 				}
-				valid, err := config.ValidateVersion(tool.name, v)
-				if err != nil {
-					m.pinError = fmt.Sprintf("Validation error: %v", err)
-					return toolScreenNone
+				m.pinError = "Checking version... (Esc cancels)"
+				m.checkingVersion = true
+				m.versionRequest++
+				request, name, versions := m.versionRequest, tool.name, m.versions
+				return toolScreenNone, func() tea.Msg {
+					valid, err := versions.ValidateVersion(name, v)
+					return toolVersionCheckedMsg{request: request, version: v, valid: valid, err: err}
 				}
-				if !valid {
-					m.pinError = fmt.Sprintf("Invalid version: %s not found", v)
-					return toolScreenNone
-				}
-				m.pinError = ""
-				tool.pinVersion = v
-				tool.mode = config.ModePin
-				m.pinInput.Blur()
-				return toolScreenNone
 			default:
 				m.pinInput.handleKeyMsg(msg)
 			}
 		}
-		return toolScreenNone
+		return toolScreenNone, nil
 	}
 
 	switch msg := msg.(type) {
@@ -231,7 +272,7 @@ func (m *aicliModel) updateDetail(msg tea.Msg) toolScreenResult {
 			m.inDetail = false
 		}
 	}
-	return toolScreenNone
+	return toolScreenNone, nil
 }
 
 func (m *aicliModel) view(width, height int) string {
@@ -244,12 +285,12 @@ func (m *aicliModel) view(width, height int) string {
 
 func (m *aicliModel) viewList(width, height int) string {
 	breadcrumb := breadcrumbStyle().Render(theme.BarrelEmoji+" Configure > ") +
-		lipgloss.NewStyle().Foreground(theme.ColorAmber).Bold(true).Render("AI CLI Tools")
+		lipgloss.NewStyle().Foreground(theme.ColorAmber).Bold(true).Render("AI Tools")
 
 	header := breadcrumb
 
 	description := lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(
-		" Select AI CLI tools to install in containers. Toggle on/off, select to configure.")
+		" Select CLI and desktop apps to install with cooper build.")
 
 	onStyle := lipgloss.NewStyle().Foreground(theme.ColorProof)
 	offStyle := lipgloss.NewStyle().Foreground(theme.ColorFaded)
@@ -300,7 +341,11 @@ func (m *aicliModel) viewList(width, height int) string {
 			}
 		}
 
-		tbl.AddRow(toggle, t.displayName, status, builtVer, hostVer, newVer, modeStr)
+		name := t.displayName
+		if aitool.IsDesktop(t.name) {
+			name += " (desktop)"
+		}
+		tbl.AddRow(toggle, name, status, builtVer, hostVer, newVer, modeStr)
 	}
 
 	// Render header and separator with the same left margin as data rows.
@@ -344,7 +389,7 @@ func (m *aicliModel) viewList(width, height int) string {
 
 func (m *aicliModel) viewDetail(width, height int) string {
 	t := m.tools[m.cursor]
-	breadcrumb := breadcrumbStyle().Render(theme.BarrelEmoji+" Configure > AI CLI Tools > ") +
+	breadcrumb := breadcrumbStyle().Render(theme.BarrelEmoji+" Configure > AI Tools > ") +
 		lipgloss.NewStyle().Foreground(theme.ColorAmber).Bold(true).Render(t.displayName)
 
 	header := breadcrumb
@@ -378,6 +423,9 @@ func (m *aicliModel) viewDetail(width, height int) string {
 	latestDesc := "Install latest from npm"
 	if t.name == "grok" {
 		latestDesc = "Install latest from xAI CLI channel"
+	}
+	if t.name == "chatgpt" {
+		latestDesc = "Install the official Linux desktop package"
 	}
 	modes = append(modes, modeOption{"Latest", latestDesc, config.ModeLatest})
 	if t.hostVersion != "" {
@@ -416,6 +464,11 @@ func (m *aicliModel) viewDetail(width, height int) string {
 
 	inner += fmt.Sprintf("  Host version:      %s\n",
 		lipgloss.NewStyle().Foreground(theme.ColorLinen).Render(displayOrDash(t.hostVersion)))
+	if aitool.IsDesktop(t.name) {
+		inner += "\n  cooper vm chatgpt opens the app in a local viewer.\n" +
+			"  The desktop has a terminal (Ctrl+Alt+T).\n" +
+			"  Tasks have full access to the workspace and mounted state.\n"
+	}
 
 	inner += "\n"
 	inner += lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(

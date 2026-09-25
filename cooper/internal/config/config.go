@@ -209,10 +209,12 @@ func CloneConfig(cfg *Config) *Config {
 	cp.ProgrammingTools = append([]ToolConfig(nil), cfg.ProgrammingTools...)
 	for i := range cp.ProgrammingTools {
 		cp.ProgrammingTools[i].AntigravityReleases = slices.Clone(cfg.ProgrammingTools[i].AntigravityReleases)
+		cp.ProgrammingTools[i].ChatGPTReleases = slices.Clone(cfg.ProgrammingTools[i].ChatGPTReleases)
 	}
 	cp.AITools = append([]ToolConfig(nil), cfg.AITools...)
 	for i := range cp.AITools {
 		cp.AITools[i].AntigravityReleases = slices.Clone(cfg.AITools[i].AntigravityReleases)
+		cp.AITools[i].ChatGPTReleases = slices.Clone(cfg.AITools[i].ChatGPTReleases)
 	}
 	cp.ImplicitTools = append([]ImplicitToolConfig(nil), cfg.ImplicitTools...)
 	cp.WhitelistedDomains = append([]DomainEntry(nil), cfg.WhitelistedDomains...)

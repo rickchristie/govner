@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <theme><name>Clearlooks</name><titleLayout>NLIMC</titleLayout></theme>
+  <focus><focusNew>yes</focusNew><followMouse>no</followMouse></focus>
+  <keyboard>
+    <keybind key="A-Tab"><action name="NextWindow"/></keybind>
+    <keybind key="A-F4"><action name="Close"/></keybind>
+    <keybind key="C-A-t"><action name="Execute"><command>/opt/cooper/desktop/terminal.sh</command></action></keybind>
+    <keybind key="C-A-c"><action name="Execute"><command>chatgpt</command></action></keybind>
+    <keybind key="C-A-i"><action name="Execute"><command>/opt/cooper/desktop/image.sh</command></action></keybind>
+  </keyboard>
+  <mouse>
+    <context name="Desktop"><mousebind button="Right" action="Press"><action name="ShowMenu"><menu>root-menu</menu></action></mousebind></context>
+    <context name="Titlebar"><mousebind button="Left" action="Drag"><action name="Move"/></mousebind><mousebind button="Left" action="DoubleClick"><action name="ToggleMaximize"/></mousebind></context>
+    <context name="Close"><mousebind button="Left" action="Click"><action name="Close"/></mousebind></context>
+  </mouse>
+  <menu><file>/opt/cooper/desktop/menu.xml</file></menu>
+</openbox_config>

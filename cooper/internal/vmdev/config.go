@@ -12,6 +12,7 @@ const TestAgent = "vm-test-agent"
 // resolving or building every other supported agent.
 var AgentVersions = map[string]string{
 	"claude": "2.1.87", "copilot": "1.0.12", "codex": "0.117.0", "opencode": "1.3.7", "grok": "1.0.4", "antigravity": "1.2.7",
+	"chatgpt": "26.917.71314",
 }
 
 func ConfigFor(tool string) (*config.Config, error) {

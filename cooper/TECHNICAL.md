@@ -32,6 +32,7 @@ without a Cooper release. Do not copy only known auth or history files.
 | --- | --- |
 | Claude | `CLAUDE_CONFIG_DIR` or `~/.claude`; optional global config file. Explicit empty override means the workspace, unlike an unset value. |
 | Codex | `CODEX_HOME` or `~/.codex`; `~/.agents`, `~/.claude-plugin`, and `~/.cursor-plugin`. Explicit CODEX_HOME must exist and is canonicalized. |
+| ChatGPT | Codex roots plus the complete desktop profile (`CODEX_ELECTRON_USER_DATA_PATH`, or XDG config `/Codex`) and its Chromium cache. A profile below XDG config maps to the same relative path below XDG cache; an outside profile contains its own cache. |
 | Copilot | `COPILOT_HOME` or `~/.copilot`, effective cache root, and legacy XDG roots only when their variables are explicit and COPILOT_HOME is absent. |
 | OpenCode | Effective XDG config/data/state/cache roots with `/opencode`; `~/.opencode`; explicit config directory/file and custom database parent. Mount the database parent for WAL files; `:memory:` adds no root. |
 | Grok | Non-empty `GROK_HOME`, otherwise `~/.grok`; shared `~/.agents`. Preserve the effective host setting, including relative-path semantics. |
@@ -240,6 +241,25 @@ depth 2 receives no KVM device or CPU virtualization flags; managed depth 3 is
 refused. This is not a universal ban on guest root running an unmanaged VMM.
 All nested work remains inside the outer network and filesystem limits.
 
+### Desktop display
+
+Desktop display streams start only from the host control socket. The guest
+cannot request that service through the network relay. The guest handler
+connects only to the selected workload's fixed display port. QEMU still has
+no NIC and no host display or session-bus socket.
+
+The local viewer binds IPv4 loopback, requires a random capability, and checks
+Host, Origin, and cross-site requests before opening a display stream. The
+capability enters through a URL fragment and stays in the viewer tab's
+session storage. Requests use an authorization header or a WebSocket protocol
+value, which Cooper removes before connecting to the guest. Cookies would
+expose the capability across local ports. Each viewer owns one runtime
+identity and stops when it ends. The
+host binary embeds reviewed noVNC assets. It never serves guest HTML or
+JavaScript in the host browser; only the authenticated WebSocket reaches the
+guest. This prevents guest web content from bypassing the guest network
+boundary through the host browser. See [desktop.md](docs/desktop.md).
+
 ### Assets and limits
 
 Guest Ubuntu/Docker assets have pinned sizes and SHA256 hashes. Preparation
@@ -332,9 +352,11 @@ retains the wrapper so it does not silently change future login mode.
 Release metadata resolves opaque per-architecture archive URLs and SHA512
 digests. Freeze those in build inputs. The native binary is under
 `/opt/cooper/libexec/agy`, with its launcher under `/opt/cooper/bin`.
-Read the required Playwright driver version from the selected binary and
-install that exact official driver/Node runtime. Do not use the host browser
-cache or silently update the native binary at runtime.
+When the selected binary uses Playwright, read its required driver version
+and install that exact official driver/Node runtime. Releases without this
+dependency do not need a driver. Missing or ambiguous version data in a binary
+that uses Playwright is a build error; do not select a default driver. Do not
+use the host browser cache or silently update the native binary at runtime.
 
 Ordinary ADC uses the parent of `GOOGLE_APPLICATION_CREDENTIALS`, resolved
 relative to the workspace, or default `~/.config/gcloud`. It does not use
@@ -415,6 +437,7 @@ time for a given UID.
 | `lifecycle agent` | Agent replacement lifecycle | 2 |
 | `prepare-agent <agent>` | Prepare one real built-in tool | Preparation can need one |
 | `parity <agent>` | Selected tool version, account, paths, state, and writes | 1 |
+| `desktop chatgpt` | Real app, browser viewer, input, resize, reconnect, full access, guest Docker, and restart | 2 |
 | `profiles codex` or `profiles antigravity` | Profile mounts, credentials, restart, restore, hooks, cleanup | 2 |
 | `clean` | Remove owned unused runtime/image resources | 0 |
 | `clean-cache` | Explicitly remove unused prepared cache | 0 |
@@ -430,6 +453,15 @@ Example for a profile change:
 Repeat the matching prepare/parity/profile commands for Antigravity when its
 state or credentials change. Test pins are in
 [internal/vmdev/config.go](internal/vmdev/config.go).
+
+For desktop changes, run `prepare-agent chatgpt`, `parity chatgpt`, then
+`desktop chatgpt`. Install the browser fixture with `npm ci --prefix
+cooper/dev` and `npm exec --prefix cooper/dev -- playwright install chromium`.
+`NODE_PATH` can select an existing Playwright installation;
+`COOPER_DESKTOP_BROWSER_PATH` can select an installed Chromium executable.
+The fixture uses an empty home, a private synthetic keyring, and local model responses. It does not sign
+in to a real account or make a paid model request. Screenshots and its report
+are written under `/tmp`.
 
 Runtime commands require prepared inputs and cannot build, download, or export
 a host image. One guest archive import per new VM is expected. Stale source,
@@ -474,16 +506,31 @@ fixtures test presentation, not real runtime behavior. Follow
 
 ### Release gate
 
+Build metadata reads retry temporary Go and PyPI connection or HTTP failures
+within a fixed attempt limit. Invalid metadata and missing package versions
+still fail immediately. This prevents a short response interruption from
+discarding a build without changing the selected version or registry.
+
 Run the full VM gate only before a release, on the physical Linux host:
 
 ```sh
 timeout 120m ./cooper/test-vm.sh > /tmp/cooper-vm-gate.txt 2>&1
 ```
 
-The outer bound includes the agent matrix and two separate 30-minute inner
-self-host bounds. Do not use this gate as a routine development or cost
-baseline. Passing a prepared profile does not replace it. A failed download
-or unavailable prerequisite means the affected gate has not passed.
+The Go gate has a 105-minute whole-suite bound inside the 120-minute command
+bound. The nested Go suite uses the same 60-minute package limit as the host
+suite: its command tests rebuild the desktop image after cleanup, and a cold
+VM run reached the old 30-minute limit during that rebuild. The depth-two
+test keeps its separate 30-minute bound. Do not use this gate as a routine
+development or cost baseline. Passing a prepared profile does not replace it.
+A failed download or unavailable prerequisite means the affected gate has
+not passed.
+
+The self-host fixture selects Codex for its outer VM, but the nested Go suite
+builds every agent. Its explicit build-domain list must include each agent's
+package hosts, including ChatGPT's `persistent.oaistatic.com`. Keep these as
+exact user rules in the fixture so config reload does not remove hosts for
+agents that are disabled in the outer VM.
 
 After all required checks, run the release preview from the repository root:
 

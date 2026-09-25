@@ -56,6 +56,9 @@ cleanup_container() {
   fi
   SHUTDOWN_IN_PROGRESS=1
   rm -f "$COOPER_READY_FILE"
+  if [ "${COOPER_DESKTOP:-0}" = 1 ]; then
+    timeout 6s /opt/cooper/bin/cooper-desktop-stop || true
+  fi
   stop_pid "$MAIN_PID"
   stop_pid "$X11_BRIDGE_SUPERVISOR_PID"
   stop_pid "$XVFB_PID"
@@ -153,11 +156,18 @@ start_shared_xvfb() {
   echo -n "$COOKIE" > "$COOKIE_HEX_FILE"
   chmod 0600 "$COOKIE_HEX_FILE" 2>/dev/null || true
 
-  Xvfb ":${DISPLAY_NUM}" \
-    -screen 0 1920x1080x24 \
-    -auth "$XAUTH_FILE" \
-    -listen tcp \
-    -nolisten unix >/tmp/xvfb.log 2>&1 &
+  if [ "${COOPER_DESKTOP:-0}" = 1 ]; then
+    Xtigervnc ":${DISPLAY_NUM}" \
+      -geometry 1600x1000 -depth 24 -SecurityTypes None \
+      -localhost yes -rfbport 5900 -AlwaysShared \
+      -auth "$XAUTH_FILE" -listen tcp -nolisten unix >/tmp/xvfb.log 2>&1 &
+  else
+    Xvfb ":${DISPLAY_NUM}" \
+      -screen 0 1920x1080x24 \
+      -auth "$XAUTH_FILE" \
+      -listen tcp \
+      -nolisten unix >/tmp/xvfb.log 2>&1 &
+  fi
   XVFB_PID=$!
 
   export DISPLAY="$DISPLAY_ADDR"
@@ -348,16 +358,27 @@ fi
 # Xvfb and xauth are already set up by start_shared_xvfb above.
 if [ "$CLIP_MODE" = "x11" ] || [ "$CLIP_MODE" = "auto" ]; then
   # Start X11 clipboard bridge with auto-restart supervisor.
-  # The bridge must stay running as the CLIPBOARD selection owner.
+  # The image source must stay available. Desktop mode yields ownership to
+  # app selections until the user requests the host image again.
   # Xvfb and xauth are already set up by start_shared_xvfb above.
   if command -v cooper-x11-bridge >/dev/null 2>&1; then
     (
       while true; do
+        bridge_args=()
+        if [ "${COOPER_DESKTOP:-0}" = 1 ]; then
+          bridge_args+=(--yield-to-apps)
+        fi
         cooper-x11-bridge \
+          "${bridge_args[@]}" \
           --display "$DISPLAY_ADDR" \
           --cookie-file "/var/lib/cooper/clipboard/cookie" \
           --bridge-url "${COOPER_CLIPBOARD_BRIDGE_URL}" \
-          --token-file "${COOPER_CLIPBOARD_TOKEN_FILE}" >>/tmp/x11-bridge.log 2>&1
+          --token-file "${COOPER_CLIPBOARD_TOKEN_FILE}" >>/tmp/x11-bridge.log 2>&1 &
+        bridge_pid=$!
+        if [ "${COOPER_DESKTOP:-0}" = 1 ]; then
+          printf '%s\n' "$bridge_pid" >/var/lib/cooper/desktop/clipboard.pid
+        fi
+        wait "$bridge_pid"
         # If bridge exits, wait briefly and restart (crash recovery).
         sleep 1
       done
