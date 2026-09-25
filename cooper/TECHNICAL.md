@@ -260,6 +260,13 @@ JavaScript in the host browser; only the authenticated WebSocket reaches the
 guest. This prevents guest web content from bypassing the guest network
 boundary through the host browser. See [desktop.md](docs/desktop.md).
 
+The noVNC pako files are stored under `dependencies/`, with their upstream
+contents and hashes. The viewer maps upstream `vendor/` import URLs to this
+directory. Go removes directories named `vendor` from published module
+archives, even when their files are JavaScript. A checkout build can hide
+this packaging error. Desktop tests reject these paths and check every
+upstream asset through the viewer's HTTP handler.
+
 ### Assets and limits
 
 Guest Ubuntu/Docker assets have pinned sizes and SHA256 hashes. Preparation
@@ -544,6 +551,13 @@ explicit release authority. Keep the private
 `/tmp/cooper-release-tag-message.*` file until its printed `git tag -F` step
 has completed. The commands use the Cooper module tag prefix, `origin`, and
 non-force pushes. They also check the exact remote refs and module version.
+
+Check the downloaded module archive and install it to a temporary `GOBIN`
+before declaring the release complete. Verify all embedded desktop files
+against the tested source, then run the desktop package tests from the
+downloaded source. This checks the actual distribution, including files that
+Go can omit from a module archive. Version 0.7.0 is retracted because its
+module archive omitted the noVNC pako dependency; 0.7.1 repairs that layout.
 
 Keep full logs and the project path visible in development commands. The
 [repository permission policy](../.codex/hooks/README.md) explains the reviewed

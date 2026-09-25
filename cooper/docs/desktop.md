@@ -41,6 +41,10 @@ cooper vm stop <runtime-id>
 After a VM restart, run `cooper vm chatgpt` again to open its new private link.
 A link from the old VM lifetime loses access.
 
+Cooper 0.7.0 installed through `go install` has incomplete viewer assets.
+Update to 0.7.1 or later, then stop the ChatGPT runtime and start it again.
+An existing viewer keeps the old Cooper binary until its runtime stops.
+
 `cooper vm chatgpt -c 'command'` runs a command without opening the viewer.
 `cooper cli chatgpt` uses the same image and viewer in a Docker barrel. A host
 that blocks unprivileged user namespaces can refuse the native app sandbox;

@@ -2,6 +2,9 @@ module github.com/rickchristie/govner/cooper
 
 go 1.25.0
 
+// The desktop viewer dependencies are missing from this module archive.
+retract v0.7.0
+
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
