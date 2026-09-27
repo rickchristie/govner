@@ -232,8 +232,17 @@ independent backup first. Ordinary runtime/cache cleanup preserves profiles.
 
 Do not rename profile siblings by hand or separate them from
 `~/.cooper/profiles` metadata. Use one store for a given set of roots.
-Old 0.5.0/0.5.1 copy and symlink stores are rejected without changes. Build and
-configure's Save & Build do not set up, move, or convert profiles.
+Before launch or a profile command, Cooper retires old schema-1 copy stores.
+It moves the complete store to `~/.cooper/profiles-copy-backup-<id>` and prints
+that path. Saved profile names are removed from use. Live agent directories,
+login, and sessions stay in place. Run `cooper save <tool>` to register the
+current account again. The retained directory contains the old copies and
+recovery data; configuration cleanup will not delete it.
+
+This reset requires a complete readable copy index, no unfinished operation,
+and no live state path into the store. Symlink stores and unknown formats still
+require manual review. Build and configure's Save & Build do not set up, move,
+or convert profiles.
 
 ## Network and host access
 
@@ -333,6 +342,10 @@ credential-free unit test.
   directories, and overlapping roots.
 - A session is missing: use the same absolute workspace and state settings,
   and stop the first process before resuming.
+- `read profile index` after an upgrade from the old copy format: the next
+  launch resets checked old registrations and retains their store as described
+  above. Do not delete live agent directories or change the schema number by
+  hand.
 - Build failure: retain the concrete error and log. In Save & Build, scrolling
   pauses log follow; End resumes it. Repeated network failures need a download
   check, not a new profile conversion.

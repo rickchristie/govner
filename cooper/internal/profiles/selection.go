@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strings"
 
 	"github.com/rickchristie/govner/cooper/internal/statelock"
 	"github.com/rickchristie/govner/cooper/internal/workload"
@@ -184,6 +185,15 @@ func CanRemoveUnusedStore(cooperDir string) bool {
 		return false
 	}
 	defer store.Close()
+	entries, err := fs.ReadDir(store.FS(), ".")
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), copyBackupPrefix) {
+			return false
+		}
+	}
 	if err := privatePath(store, "profiles", false); errors.Is(err, os.ErrNotExist) {
 		return true
 	} else if err != nil {
@@ -198,7 +208,7 @@ func CanRemoveUnusedStore(cooperDir string) bool {
 	if err != nil || len(state.Profiles) != 0 {
 		return false
 	}
-	entries, err := fs.ReadDir(root.FS(), ".")
+	entries, err = fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		return false
 	}

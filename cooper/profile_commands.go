@@ -20,6 +20,49 @@ func init() {
 	rootCmd.AddCommand(newSaveCommand(), newLoadCommand(), newProfilesCommand())
 }
 
+// Repair old copy metadata before startup takes a shared state lock. This
+// command boundary excludes build and configure, which must not set up profiles.
+func prepareProfileStore(cmd *cobra.Command, args []string) error {
+	top := cmd
+	for top.Parent() != nil && top.Parent() != rootCmd {
+		top = top.Parent()
+	}
+	switch top.Name() {
+	case "cli", "vm", "up", "save", "load", "profiles":
+	default:
+		return nil
+	}
+	if top.Name() == "cli" && (len(args) == 0 || args[0] == "list") {
+		return nil
+	}
+	if top.Name() == "vm" {
+		if len(args) == 0 {
+			return nil
+		}
+		switch args[0] {
+		case "list", "doctor", "prepare", "stop":
+			return nil
+		}
+	}
+	// A workload has only a partial view of host paths. It cannot authorize
+	// a store reset. Its normal launch checks still reject unsupported data.
+	if err := profilemanager.CheckHost(); err != nil {
+		return nil
+	}
+	service, err := hostProfileService()
+	if err != nil {
+		return err
+	}
+	backup, err := service.RetireOldCopies(cmd.Context())
+	if err != nil {
+		return err
+	}
+	if backup != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Removed old copied profiles from use. Backup: %s\nLive agent state is unchanged. Use cooper save <harness> to register it.\n", backup)
+	}
+	return nil
+}
+
 func newSaveCommand() *cobra.Command {
 	command := &cobra.Command{Use: "save <harness>", Short: "Save host state to the profile for the current account", Args: cobra.ExactArgs(1),
 		Long: "Register or check the selected Linux account profile without copying history.\nThe first profile is Default. Load a new empty profile before changing accounts.\nSave is not a backup. Use profiles backup for an independent copy."}

@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "profiles": [
+    {
+      "schema": 1,
+      "id": "111111111111111111111111",
+      "generation": "222222222222222222222222",
+      "previous_generation": "333333333333333333333333",
+      "policy": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "harness": "antigravity",
+      "name": "Default",
+      "account": {"name": "tester", "group": "tester", "uid": 1000, "gid": 1000, "home": "/old-home"},
+      "identity": {"key": "fixture-account", "label": "Fixture"},
+      "created": "2026-09-01T00:00:00Z",
+      "saved": "2026-09-02T00:00:00Z",
+      "roots": [
+        {"id": "antigravity-state", "target": "/old-home/.gemini", "host_path": "/old-home/.gemini", "kind": "directory", "present": true}
+      ],
+      "path_environment": {},
+      "environment": [],
+      "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "hosts": {
+    "antigravity": {
+      "profile_id": "111111111111111111111111",
+      "base_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "pending": false,
+      "recovery_id": "444444444444444444444444"
+    }
+  },
+  "last_transaction": "555555555555555555555555"
+}

@@ -200,7 +200,7 @@ func init() {
 		}
 		docker.SetRuntimeNamespace(runtimeNamespace)
 		docker.SetImagePrefix(imagePrefix)
-		return nil
+		return prepareProfileStore(cmd, args)
 	}
 
 	cliCmd.Flags().StringVarP(&cliOneShot, "command", "c", "",
@@ -1056,11 +1056,10 @@ func removeCooperConfigDir(cooperDir string) error {
 		return err
 	}
 	defer lock.Close()
-	// Build creates an empty live store even before the first saved account.
-	// Only that exact unused layout is disposable. Account copies, recovery,
-	// unknown entries, and redirected stores remain protected user data.
+	// Only an unused store is disposable. Account copies, retained old stores,
+	// recovery, unknown entries, and redirected stores remain protected data.
 	if !profiles.CanRemoveUnusedStore(cooperDir) {
-		return errors.New("Cooper directory contains profile data; move its profiles directory to a safe location before configuration cleanup")
+		return errors.New("Cooper directory contains profile data; move its profiles and profiles-copy-backup-* directories to a safe location before configuration cleanup")
 	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {

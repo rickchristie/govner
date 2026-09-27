@@ -67,9 +67,21 @@ no requirements file. Preserve host behavior settings.
 
 ## Profiles
 
-Profiles are Linux-only. There is no migration from the old copy or symlink
-formats. Reject those stores and leave their data intact. Build and Save &
-Build have no profile setup step.
+Profiles are Linux-only. There is no account migration from the old copy or
+symlink formats. Before runtime startup or profile commands take their locks,
+the physical-host command hook retires a checked schema-1 copy store with an
+exclusive state lock. It renames the complete `profiles` directory to a unique
+`profiles-copy-backup-<id>` sibling with no replacement, then syncs the parent.
+An absent store is a valid empty selection, so the reset needs no second write.
+This removes obsolete registrations without choosing between a saved copy
+and newer live history. First save can register the live account again.
+
+Check private metadata, known store entries, recorded host paths, current agent
+paths, root mounts, and the store inode before the rename. An unfinished
+transaction, a path into the store, a symlink store, or an unknown format must
+stop the reset. Do not scan or copy history. Retained stores block configuration
+deletion even before a new profile store exists. Build and Save & Build have
+no profile setup or reset step.
 
 ### Storage and account binding
 
