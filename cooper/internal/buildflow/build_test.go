@@ -2,6 +2,7 @@ package buildflow
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,45 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 )
+
+func TestRunSavedRetainsInputFailure(t *testing.T) {
+	dir := t.TempDir()
+	err := RunSaved(dir, Options{})
+	if err == nil || !strings.Contains(err.Error(), "Build log:") {
+		t.Fatalf("input failure has no log: %v", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(dir, "logs", "build.log"))
+	if readErr != nil || !strings.Contains(string(data), "failed to read config file") {
+		t.Fatalf("input failure was not saved: %v", readErr)
+	}
+}
+
+func TestRunRetainsPreparationAndDockerFailure(t *testing.T) {
+	dir := t.TempDir()
+	cause := errors.New("APT failed with code 100")
+	builder := func(string, string, string, map[string]string, bool) (<-chan string, <-chan error) {
+		lines := make(chan string, 1)
+		errs := make(chan error, 1)
+		lines <- "E: package download failed"
+		close(lines)
+		errs <- cause
+		close(errs)
+		return lines, errs
+	}
+	err := Run(config.DefaultConfig(), dir, Options{imageBuild: builder})
+	if !errors.Is(err, cause) {
+		t.Fatalf("build cause was lost: %v", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(dir, "logs", "build.log"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, line := range []string{"Resolving tool versions", "Staging CA files", "E: package download failed", cause.Error()} {
+		if !strings.Contains(string(data), line) {
+			t.Fatalf("build log is missing %q", line)
+		}
+	}
+}
 
 func TestStepNamesSplitPreparationFromDockerBuilds(t *testing.T) {
 	cooperDir := t.TempDir()

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/antigravity"
+	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/testdocker"
 	"github.com/rickchristie/govner/cooper/internal/vm"
@@ -31,8 +32,13 @@ func TestAntigravityCommandsReportSetupWithoutStartingRuntime(t *testing.T) {
 	// A bus address selects the desktop setup check without opening a keyring.
 	// Only this temporary home can supply native state or wrapper records.
 	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/cooper-test-absent-bus")
+	version, err := config.DetectHostVersion("antigravity")
+	if err != nil {
+		t.Fatal(err)
+	}
 	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "agy"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	// The auth fixture must still report the version installed in its image.
+	if err := os.WriteFile(filepath.Join(bin, "agy"), []byte("#!/bin/sh\nprintf '%s\\n' '"+version+"'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))

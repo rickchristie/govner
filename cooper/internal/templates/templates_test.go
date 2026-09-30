@@ -21,12 +21,12 @@ func testConfig() *config.Config {
 			{Name: "python", Enabled: true, PinnedVersion: "3.12"},
 		},
 		AITools: []config.ToolConfig{
-			{Name: "claude", Enabled: true},
-			{Name: "copilot", Enabled: true},
-			{Name: "codex", Enabled: true},
-			{Name: "opencode", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.3.7"},
-			{Name: "grok", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.0.4"},
-			{Name: "antigravity", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.2.2", AntigravityReleases: antigravity.KnownReleases("1.2.2")},
+			{Name: "claude", Enabled: true, Mode: config.ModeMirror, HostVersion: "2.1.87"},
+			{Name: "copilot", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.0.12"},
+			{Name: "codex", Enabled: true, Mode: config.ModeMirror, HostVersion: "0.117.0"},
+			{Name: "opencode", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.3.7"},
+			{Name: "grok", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.0.4"},
+			{Name: "antigravity", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.2.2", AntigravityReleases: antigravity.KnownReleases("1.2.2")},
 		},
 		WhitelistedDomains: []config.DomainEntry{
 			{Domain: ".anthropic.com", IncludeSubdomains: true, Source: "default"},
@@ -53,7 +53,7 @@ func minimalConfig() *config.Config {
 			{Name: "go", Enabled: true, PinnedVersion: "1.24.10"},
 		},
 		AITools: []config.ToolConfig{
-			{Name: "claude", Enabled: true},
+			{Name: "claude", Enabled: true, Mode: config.ModeMirror, HostVersion: "2.1.87"},
 		},
 		WhitelistedDomains: []config.DomainEntry{
 			{Domain: ".anthropic.com", IncludeSubdomains: true, Source: "default"},
@@ -316,7 +316,7 @@ func TestRenderBaseDockerfile_BubblewrapForCodex(t *testing.T) {
 	cfg := &config.Config{
 		ProgrammingTools: []config.ToolConfig{},
 		AITools: []config.ToolConfig{
-			{Name: "codex", Enabled: true},
+			{Name: "codex", Enabled: true, Mode: config.ModeMirror, HostVersion: "0.117.0"},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -569,7 +569,7 @@ func TestRenderBaseDockerfile_RuntimeDepsIncluded(t *testing.T) {
 	cfg := &config.Config{
 		ProgrammingTools: []config.ToolConfig{},
 		AITools: []config.ToolConfig{
-			{Name: "codex", Enabled: true},
+			{Name: "codex", Enabled: true, Mode: config.ModeMirror, HostVersion: "0.117.0"},
 			{Name: "opencode", Enabled: true},
 		},
 		ProxyPort:  3128,
@@ -594,7 +594,7 @@ func TestRenderBaseDockerfile_RuntimeDepsExcluded(t *testing.T) {
 	cfg := &config.Config{
 		ProgrammingTools: []config.ToolConfig{},
 		AITools: []config.ToolConfig{
-			{Name: "claude", Enabled: true},
+			{Name: "claude", Enabled: true, Mode: config.ModeMirror, HostVersion: "2.1.87"},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -626,7 +626,7 @@ func TestRenderBaseDockerfile_RuntimeDepsExcluded(t *testing.T) {
 func TestRenderCLIToolDockerfile_Claude(t *testing.T) {
 	cfg := &config.Config{
 		AITools: []config.ToolConfig{
-			{Name: "claude", Enabled: true},
+			{Name: "claude", Enabled: true, Mode: config.ModeMirror, HostVersion: "2.1.87"},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -649,10 +649,10 @@ func TestRenderCLIToolDockerfile_Claude(t *testing.T) {
 	assertContains(t, result, "$HOME/.claude")
 }
 
-func TestRenderCLIToolDockerfile_ClaudeVersionPinned(t *testing.T) {
+func TestRenderCLIToolDockerfile_ClaudeHostVersion(t *testing.T) {
 	cfg := &config.Config{
 		AITools: []config.ToolConfig{
-			{Name: "claude", Enabled: true, PinnedVersion: "2.1.87"},
+			{Name: "claude", Enabled: true, HostVersion: "2.1.87"},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -676,7 +676,7 @@ func TestRenderCLIToolDockerfile_Copilot(t *testing.T) {
 			{Name: "node", Enabled: true, PinnedVersion: "22.12.0"},
 		},
 		AITools: []config.ToolConfig{
-			{Name: "copilot", Enabled: true},
+			{Name: "copilot", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.0.12"},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -691,10 +691,10 @@ func TestRenderCLIToolDockerfile_Copilot(t *testing.T) {
 	assertContains(t, result, "COOPER_CLI_TOOL=copilot")
 }
 
-func TestRenderCLIToolDockerfile_CopilotVersionPinned(t *testing.T) {
+func TestRenderCLIToolDockerfile_CopilotHostVersion(t *testing.T) {
 	cfg := &config.Config{
 		AITools: []config.ToolConfig{
-			{Name: "copilot", Enabled: true, PinnedVersion: "1.0.12"},
+			{Name: "copilot", Enabled: true, HostVersion: "1.0.12"},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -711,7 +711,7 @@ func TestRenderCLIToolDockerfile_CopilotVersionPinned(t *testing.T) {
 func TestRenderCLIToolDockerfile_Codex(t *testing.T) {
 	cfg := &config.Config{
 		AITools: []config.ToolConfig{
-			{Name: "codex", Enabled: true},
+			{Name: "codex", Enabled: true, Mode: config.ModeMirror, HostVersion: "0.117.0"},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -726,10 +726,10 @@ func TestRenderCLIToolDockerfile_Codex(t *testing.T) {
 	assertContains(t, result, "COOPER_CLI_TOOL=codex")
 }
 
-func TestRenderCLIToolDockerfile_CodexVersionPinned(t *testing.T) {
+func TestRenderCLIToolDockerfile_CodexHostVersion(t *testing.T) {
 	cfg := &config.Config{
 		AITools: []config.ToolConfig{
-			{Name: "codex", Enabled: true, PinnedVersion: "0.117.0"},
+			{Name: "codex", Enabled: true, HostVersion: "0.117.0"},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -746,7 +746,7 @@ func TestRenderCLIToolDockerfile_CodexVersionPinned(t *testing.T) {
 func TestRenderCLIToolDockerfile_OpenCode(t *testing.T) {
 	cfg := &config.Config{
 		AITools: []config.ToolConfig{
-			{Name: "opencode", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.3.7"},
+			{Name: "opencode", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.3.7"},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -770,10 +770,10 @@ func TestRenderCLIToolDockerfile_OpenCode(t *testing.T) {
 	assertNotContains(t, result, "opencode.ai/install")
 }
 
-func TestRenderCLIToolDockerfile_OpenCodeVersionPinned(t *testing.T) {
+func TestRenderCLIToolDockerfile_OpenCodeHostVersion(t *testing.T) {
 	cfg := &config.Config{
 		AITools: []config.ToolConfig{
-			{Name: "opencode", Enabled: true, PinnedVersion: "1.3.7"},
+			{Name: "opencode", Enabled: true, HostVersion: "1.3.7"},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -792,15 +792,15 @@ func TestRenderCLIToolDockerfile_OpenCodeVersionPinned(t *testing.T) {
 
 func TestRenderCLIToolDockerfile_OpenCodeEmptyVersion(t *testing.T) {
 	cfg := &config.Config{
-		AITools:   []config.ToolConfig{{Name: "opencode", Enabled: true, Mode: config.ModeLatest}},
+		AITools:   []config.ToolConfig{{Name: "opencode", Enabled: true, Mode: config.ModeMirror}},
 		ProxyPort: 3128,
 	}
 	_, err := RenderCLIToolDockerfile(cfg, "opencode")
 	if err == nil {
 		t.Fatal("expected empty OpenCode version to fail")
 	}
-	if !strings.Contains(err.Error(), "resolved version") {
-		t.Fatalf("error = %v, want resolved version", err)
+	if !strings.Contains(err.Error(), "detected host version") {
+		t.Fatalf("error = %v, want detected host version", err)
 	}
 }
 
@@ -833,7 +833,7 @@ func TestRenderCLIToolDockerfile_UnknownTool(t *testing.T) {
 func TestRenderCLIToolDockerfile_UsesCorrectBaseImage(t *testing.T) {
 	cfg := &config.Config{
 		AITools: []config.ToolConfig{
-			{Name: "claude", Enabled: true},
+			{Name: "claude", Enabled: true, Mode: config.ModeMirror, HostVersion: "2.1.87"},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -851,8 +851,8 @@ func TestRenderCLIToolDockerfile_UsesCorrectBaseImage(t *testing.T) {
 func TestRenderCLIToolDockerfile_Grok(t *testing.T) {
 	cfg := &config.Config{
 		AITools: []config.ToolConfig{
-			{Name: "grok", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.0.4"},
-			{Name: "antigravity", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.2.2", AntigravityReleases: antigravity.KnownReleases("1.2.2")},
+			{Name: "grok", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.0.4"},
+			{Name: "antigravity", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.2.2", AntigravityReleases: antigravity.KnownReleases("1.2.2")},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -889,15 +889,15 @@ func TestRenderCLIToolDockerfile_Grok(t *testing.T) {
 
 func TestRenderCLIToolDockerfile_GrokEmptyVersion(t *testing.T) {
 	cfg := &config.Config{
-		AITools:   []config.ToolConfig{{Name: "grok", Enabled: true, Mode: config.ModeLatest}},
+		AITools:   []config.ToolConfig{{Name: "grok", Enabled: true, Mode: config.ModeMirror}},
 		ProxyPort: 3128,
 	}
 	_, err := RenderCLIToolDockerfile(cfg, "grok")
 	if err == nil {
 		t.Fatal("expected empty Grok version to fail")
 	}
-	if !strings.Contains(err.Error(), "resolved version") {
-		t.Fatalf("error = %v, want resolved version", err)
+	if !strings.Contains(err.Error(), "detected host version") {
+		t.Fatalf("error = %v, want detected host version", err)
 	}
 }
 
@@ -1034,7 +1034,7 @@ func TestRenderEntrypoint_ConfigDriven(t *testing.T) {
 	// not baked into the template. Verify the config-driven approach.
 	cfg := &config.Config{
 		AITools: []config.ToolConfig{
-			{Name: "claude", Enabled: true},
+			{Name: "claude", Enabled: true, Mode: config.ModeMirror, HostVersion: "2.1.87"},
 		},
 		PortForwardRules: []config.PortForwardRule{
 			{ContainerPort: 8000, HostPort: 8000, Description: "dev-ports", IsRange: true, RangeEnd: 8010},
@@ -1705,7 +1705,7 @@ func TestIsToolEnabled(t *testing.T) {
 
 func TestGetToolVersion(t *testing.T) {
 	tools := []config.ToolConfig{
-		{Name: "go", Enabled: true, PinnedVersion: "1.24.10"},
+		{Name: "go", Enabled: true, HostVersion: "1.24.10"},
 		{Name: "python", Enabled: true, HostVersion: "3.12.1"},
 		{Name: "node", Enabled: true},
 	}

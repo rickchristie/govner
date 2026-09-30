@@ -9,51 +9,71 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/config"
 )
 
-type desktopVersions struct {
-	err   error
-	calls int
-}
-
-func (*desktopVersions) DetectHostVersion(string) (string, error) {
-	return "", errors.New("not installed")
-}
-func (v *desktopVersions) ValidateVersion(name, version string) (bool, error) {
-	v.calls++
-	return name == "chatgpt" && version == "26.917.71314", v.err
-}
-
-func TestDesktopPinChecksVersionWithoutBlockingInput(t *testing.T) {
-	versions := &desktopVersions{}
-	m := newAIToolsModel([]config.ToolConfig{{Name: "chatgpt", Enabled: true, Mode: config.ModeLatest}}, versions)
-	m.cursor = len(m.tools) - 1
+func TestAIToolsScrollChangesOnlyInUpdate(t *testing.T) {
+	m := newAIToolsModel(nil, desktopVersions{version: "1.2.3"})
+	m.update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	for i := 1; i < len(m.tools); i++ {
+		m.update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if m.scrollOffset == 0 {
+		t.Fatal("selection did not scroll into view")
+	}
+	before := m.scrollOffset
+	view := m.view(80, 10)
+	if m.scrollOffset != before || !strings.Contains(view, "ChatGPT") {
+		t.Fatal("view changed scroll state or hid the selected tool")
+	}
+	m.update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	before = m.scrollOffset
+	m.view(80, 10)
+	if m.scrollOffset != before {
+		t.Fatal("view reset manual scrolling")
+	}
 	m.update(tea.KeyMsg{Type: tea.KeyEnter})
-	m.update(tea.KeyMsg{Type: tea.KeyDown}) // No host version: Pin follows Latest.
-	m.update(tea.KeyMsg{Type: tea.KeyEnter})
-	m.pinInput.SetValue("26.917.71314")
-	_, command := m.update(tea.KeyMsg{Type: tea.KeyEnter})
-	if command == nil || !m.checkingVersion || versions.calls != 0 {
-		t.Fatal("version request was not deferred")
+	m.update(tea.KeyMsg{Type: tea.KeyPgDown})
+	before = m.detailScrollOffset
+	if before == 0 {
+		t.Fatal("detail view did not scroll")
 	}
-	m.update(command())
-	if m.pinInput.focused || m.checkingVersion || m.tools[m.cursor].pinVersion != "26.917.71314" {
-		t.Fatalf("pin result was not applied: %+v", m.tools[m.cursor])
-	}
-	if view := m.viewDetail(100, 35); !strings.Contains(view, "official Linux desktop package") || !strings.Contains(view, "cooper vm chatgpt") {
-		t.Fatal("desktop setup instructions are missing")
+	m.view(80, 10)
+	if m.detailScrollOffset != before {
+		t.Fatal("detail view changed scroll state")
 	}
 }
 
-func TestDesktopPinCancelIgnoresLateResult(t *testing.T) {
-	m := newAIToolsModel(nil, &desktopVersions{})
+type desktopVersions struct{ version string }
+
+func (v desktopVersions) DetectHostVersion(string) (string, error) {
+	if v.version == "" {
+		return "", errors.New("not installed")
+	}
+	return v.version, nil
+}
+
+func TestAIToolsUseOnlyLiveHostVersions(t *testing.T) {
+	for _, mode := range []config.VersionMode{config.ModeLatest, config.ModePin, config.ModeMirror} {
+		m := newAIToolsModel([]config.ToolConfig{{Name: "chatgpt", Enabled: true, Mode: mode, PinnedVersion: "old", HostVersion: "old", ContainerVersion: "old"}}, desktopVersions{version: "26.928.20755"})
+		m.cursor = len(m.tools) - 1
+		m.update(tea.KeyMsg{Type: tea.KeyEnter})
+		m.update(tea.KeyMsg{Type: tea.KeyDown})
+		m.update(tea.KeyMsg{Type: tea.KeyEnter})
+		tool := m.toToolConfigs()[m.cursor]
+		if tool.Mode != config.ModeMirror || tool.HostVersion != "26.928.20755" || tool.PinnedVersion != "" || tool.ContainerVersion != "old" {
+			t.Fatalf("wrong tool state: %+v", tool)
+		}
+		view := m.viewDetail(100, 35)
+		if strings.Contains(view, "Version Mode") || !strings.Contains(view, "official Linux desktop package") || !strings.Contains(view, "cooper vm chatgpt") {
+			t.Fatal("wrong desktop instructions")
+		}
+	}
+}
+
+func TestMissingHostToolCannotUseSavedVersion(t *testing.T) {
+	m := newAIToolsModel([]config.ToolConfig{{Name: "chatgpt", HostVersion: "26.928.20755"}}, desktopVersions{})
 	m.cursor = len(m.tools) - 1
-	m.inDetail = true
-	m.detailCursor = 1
-	m.pinInput.Focus()
-	m.pinInput.SetValue("26.917.71314")
-	_, command := m.update(tea.KeyMsg{Type: tea.KeyEnter})
-	m.update(tea.KeyMsg{Type: tea.KeyEsc})
-	m.update(command())
-	if m.tools[m.cursor].pinVersion != "" || m.checkingVersion {
-		t.Fatal("canceled result changed the selected version")
+	m.update(tea.KeyMsg{Type: tea.KeySpace})
+	tool := m.toToolConfigs()[m.cursor]
+	if tool.Enabled || tool.HostVersion != "" {
+		t.Fatalf("missing host tool accepted: %+v", tool)
 	}
 }

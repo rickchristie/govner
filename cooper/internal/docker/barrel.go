@@ -105,14 +105,17 @@ func StartBarrelWithHomeDir(cfg *config.Config, workspaceDir, cooperDir, homeDir
 }
 
 func StartBarrelWithProfile(cfg *config.Config, workspaceDir, cooperDir, homeDir, toolName, profileID string) error {
+	if !filepath.IsAbs(homeDir) {
+		return errors.New("barrel host home directory must be absolute")
+	}
+	if err := ValidateImageVersion(toolName); err != nil {
+		return err
+	}
 	lock, err := statelock.Acquire(context.Background(), false)
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
-	if !filepath.IsAbs(homeDir) {
-		return errors.New("barrel host home directory must be absolute")
-	}
 	if err := ValidateImageAccount(GetImageCLI(toolName), homeDir); err != nil {
 		return err
 	}
@@ -289,6 +292,9 @@ func BarrelMatchesHost(name string, cfg *config.Config, workspace, cooperDir, ho
 }
 
 func BarrelMatchesProfile(name string, cfg *config.Config, workspace, cooperDir, home, tool, profileID string) (bool, error) {
+	if err := ValidateImageVersion(tool); err != nil {
+		return false, err
+	}
 	if err := ValidateImageAccount(GetImageCLI(tool), home); err != nil {
 		return false, err
 	}

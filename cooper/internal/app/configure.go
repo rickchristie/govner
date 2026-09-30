@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/rickchristie/govner/cooper/internal/aitool"
+	"github.com/rickchristie/govner/cooper/internal/buildlog"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/templates"
 )
@@ -316,4 +317,9 @@ func (a *ConfigureApp) IsExisting() bool {
 // CooperDir returns the path to the cooper configuration directory.
 func (a *ConfigureApp) CooperDir() string {
 	return a.cooperDir
+}
+
+// OpenBuildLog starts the log before configuration preparation can fail.
+func (a *ConfigureApp) OpenBuildLog() (*buildlog.Log, error) {
+	return buildlog.Open(a.cooperDir)
 }

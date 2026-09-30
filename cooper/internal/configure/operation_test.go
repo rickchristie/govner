@@ -1,6 +1,7 @@
 package configure
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +14,51 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/buildflow"
 	"github.com/rickchristie/govner/cooper/internal/config"
 )
+
+func TestConfigureBuildRetainsPreparationFailure(t *testing.T) {
+	dir := t.TempDir()
+	ca, err := app.NewConfigureApp(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := config.HostVersionDetector
+	t.Cleanup(func() { config.HostVersionDetector = old })
+	config.HostVersionDetector = func(string) (string, error) { return "", errors.New("host tool missing") }
+	cfg := config.DefaultConfig()
+	cfg.AITools = []config.ToolConfig{{Name: "claude", Enabled: true, Mode: config.ModeMirror}}
+	log, err := ca.OpenBuildLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, prepared, err := executeRequestedPreparation(ca, cfg, saveModel{saveRequested: true, buildRequested: true}, log, nil)
+	if prepared != nil || err == nil {
+		t.Fatal("missing host tool reached image build")
+	}
+	if err = log.Finish(err); err == nil || !strings.Contains(err.Error(), log.Path) {
+		t.Fatal("failure did not include the log path")
+	}
+	data, err := os.ReadFile(log.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "Resolving tool versions") || !strings.Contains(string(data), "host tool missing") {
+		t.Fatal("preparation error was not recorded")
+	}
+}
+
+func TestSaveActionSelectionControlsEnter(t *testing.T) {
+	m := newSaveModel(config.DefaultConfig(), "", "", nil)
+	m.update(tea.KeyMsg{Type: tea.KeyRight})
+	m.update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.saveRequested || m.buildRequested {
+		t.Fatal("Save Config started a build")
+	}
+	m = newSaveModel(config.DefaultConfig(), "", "", nil)
+	m.update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.saveRequested || !m.buildRequested {
+		t.Fatal("Save & Build did not request a build")
+	}
+}
 
 func TestSaveModelSaveOnlyDefersDiskWrites(t *testing.T) {
 	cooperDir := t.TempDir()
@@ -48,7 +94,7 @@ func TestExecuteRequestedActionSaveOnlyReportsAllSaveSteps(t *testing.T) {
 	}
 
 	var reported []int
-	warnings, prepared, err := executeRequestedPreparation(ca, config.DefaultConfig(), saveModel{saveRequested: true}, func(step int, stepErr error) {
+	warnings, prepared, err := executeRequestedPreparation(ca, config.DefaultConfig(), saveModel{saveRequested: true}, nil, func(step int, stepErr error) {
 		if stepErr != nil {
 			t.Fatalf("step %d returned unexpected error: %v", step, stepErr)
 		}

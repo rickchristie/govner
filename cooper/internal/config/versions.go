@@ -1,11 +1,13 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/antigravity"
@@ -179,7 +181,7 @@ var programmingToolVersionCommands = map[string][]string{
 }
 
 // execCommand is a package-level variable to allow test mocking.
-var execCommand = exec.Command
+var execCommand = exec.CommandContext
 
 // HostVersionDetector is the shared host-version hook used by higher-level
 // refresh flows. Tests override it to avoid depending on the real host.
@@ -196,7 +198,10 @@ func DetectHostVersion(toolName string) (string, error) {
 		return "", fmt.Errorf("unknown tool: %q", toolName)
 	}
 
-	cmd := execCommand(args[0], args[1:]...)
+	// A hung host CLI must not block a build or launch without a limit.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := execCommand(ctx, args[0], args[1:]...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("failed to detect %s version: %w", toolName, err)

@@ -210,8 +210,12 @@ func (f *developmentFixture) parity() {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	if !strings.Contains(cliOutput, developmentAgentVersions[f.tool]) {
-		f.t.Fatalf("prepared %s version differs from pin %s: %s", f.tool, developmentAgentVersions[f.tool], cliOutput)
+	hostVersion, err := config.DetectHostVersion(f.tool)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if !strings.Contains(cliOutput, hostVersion) {
+		f.t.Fatalf("prepared %s version differs from host %s: %s", f.tool, hostVersion, cliOutput)
 	}
 	if err := f.driver.StopBarrel(barrel.Name); err != nil {
 		f.t.Fatal(err)

@@ -21,6 +21,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/launch"
 	"github.com/rickchristie/govner/cooper/internal/profilemanager"
 	"github.com/rickchristie/govner/cooper/internal/statelock"
 	"github.com/rickchristie/govner/cooper/internal/usercontext"
@@ -136,7 +137,7 @@ func (m Manager) Start(ctx context.Context, request StartRequest) (Runtime, erro
 	if err := m.checkImageAccount(ctx, imageSource); err != nil {
 		return Runtime{}, err
 	}
-	requestedImageID, err := inspectImageID(ctx, imageSource, m.Runner)
+	requestedImageID, err := inspectToolImageID(ctx, imageSource, request.ToolName, m.Runner)
 	if err != nil {
 		return Runtime{}, err
 	}
@@ -342,6 +343,10 @@ func (m Manager) checkImageAccount(ctx context.Context, imageRef string) error {
 }
 
 func inspectImageID(ctx context.Context, imageRef string, runner CommandRunner) (string, error) {
+	return inspectToolImageID(ctx, imageRef, "", runner)
+}
+
+func inspectToolImageID(ctx context.Context, imageRef, tool string, runner CommandRunner) (string, error) {
 	data, err := runnerOrSystem(runner).Output(ctx, "docker", "image", "inspect", imageRef)
 	if err != nil {
 		return "", fmt.Errorf("inspect agent image %s: %w", imageRef, err)
@@ -362,6 +367,9 @@ func inspectImageID(ctx context.Context, imageRef string, runner CommandRunner) 
 		return "", fmt.Errorf("agent image %s does not support Cooper VM sessions; run 'cooper build' to rebuild it", imageRef)
 	}
 	imageID := strings.TrimSpace(images[0].ID)
+	if err := launch.CheckImageVersion(tool, images[0].Config.Labels); err != nil {
+		return "", err
+	}
 	if !validImageID(imageID) {
 		return "", fmt.Errorf("agent image %s has invalid ID %q", imageRef, imageID)
 	}
@@ -828,6 +836,9 @@ func (m Manager) Restart(ctx context.Context, runtimeID string) (Runtime, error)
 	// Restart also uses the recorded image ID, not a tag that can move between
 	// the first launch and the restart.
 	request.ImageID = metadata.ImageID
+	if _, err := inspectToolImageID(ctx, request.ImageID, request.ToolName, m.Runner); err != nil {
+		return Runtime{}, err
+	}
 	if _, err := m.imageArchive(ctx, request.ImageID); err != nil {
 		return Runtime{}, err
 	}

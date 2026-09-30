@@ -1,8 +1,8 @@
 #!/bin/bash
 # Integration test for Cooper's Docker build process (multi-image architecture).
-# Tests mirror, latest, and pinned configurations.
+# Tests programming tool Mirror, Latest, and Pin settings. AI tools always mirror.
 #
-# Prerequisites: Docker Engine running, Go installed.
+# Prerequisites: Docker Engine running, Go and all built-in AI tools installed on the host.
 # Usage: ./test-docker-build.sh [mirror|latest|pinned|all]
 #
 # Each mode creates isolated images with a test prefix to avoid
@@ -300,6 +300,24 @@ run_build_test() {
         local tool_type=$1 tool_name=$2
         jq -r ".${tool_type}[] | select(.name==\"${tool_name}\" and .enabled) | .enabled" "${test_dir}/config.json"
     }
+
+    # Launch checks use image labels, not config that can change after a build.
+    local tool label_tool label_version expected_version
+    for tool in claude copilot codex opencode grok antigravity chatgpt; do
+        label_tool=$(docker image inspect --format '{{index .Config.Labels "cooper.ai-tool"}}' "${prefix}cooper-cli-${tool}")
+        label_version=$(docker image inspect --format '{{index .Config.Labels "cooper.ai-version"}}' "${prefix}cooper-cli-${tool}")
+        expected_version=$(get_tool_version ai_tools "$tool")
+        if [ "$label_tool" = "$tool" ] && [ "$label_version" = "$expected_version" ] && [ -n "$expected_version" ]; then
+            pass "${mode}: ${tool} image records the host version ${expected_version}"
+        else
+            fail "${mode}: ${tool} image version labels do not match its build input"
+        fi
+    done
+    if [ -s "${test_dir}/logs/build.log" ] && grep -q 'Build complete.' "${test_dir}/logs/build.log"; then
+        pass "${mode}: build output was saved"
+    else
+        fail "${mode}: saved build output is missing"
+    fi
 
     # Helper to assert exact version match.
     assert_version() {

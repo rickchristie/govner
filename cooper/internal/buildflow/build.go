@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"github.com/rickchristie/govner/cooper/internal/aitool"
+	"github.com/rickchristie/govner/cooper/internal/buildlog"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
 	"github.com/rickchristie/govner/cooper/internal/templates"
@@ -27,6 +28,8 @@ type Options struct {
 	// imageBuild is injectable only inside this package's tests; callers use
 	// the production Docker boundary.
 	imageBuild imageBuildFunc
+	// Log is optional. Configure supplies the log opened before saving.
+	Log *buildlog.Log
 }
 
 type imageBuildFunc func(name, dockerfilePath, contextDir string, buildArgs map[string]string, noCache bool) (<-chan string, <-chan error)
@@ -91,13 +94,23 @@ func StepNames(cfg *config.Config, cooperDir string) ([]string, error) {
 
 // Run performs the full proxy/base/CLI image build used by `cooper build`
 // and by configure's Save & Build flow.
-func Run(cfg *config.Config, cooperDir string, opts Options) error {
+func Run(cfg *config.Config, cooperDir string, opts Options) (result error) {
+	if opts.Log == nil {
+		log, err := buildlog.Open(cooperDir)
+		if err != nil {
+			return err
+		}
+		opts.Log = log
+		defer func() { result = log.Finish(result) }()
+	}
+	emitOutput(opts, "Build log: "+opts.Log.Path)
 	stepNames, err := StepNames(cfg, cooperDir)
 	if err != nil {
 		return err
 	}
 	preparationCount := len(preparationStepNames)
 	prepared, err := Prepare(cfg, cooperDir, Options{
+		Log:      opts.Log,
 		Out:      opts.Out,
 		OnOutput: opts.OnOutput,
 		OnProgress: func(step int, _ int, name string, stepErr error) {
@@ -110,6 +123,7 @@ func Run(cfg *config.Config, cooperDir string, opts Options) error {
 		return err
 	}
 	return prepared.Build(Options{
+		Log:      opts.Log,
 		NoCache:  opts.NoCache,
 		Out:      opts.Out,
 		OnOutput: opts.OnOutput,
@@ -120,6 +134,21 @@ func Run(cfg *config.Config, cooperDir string, opts Options) error {
 		},
 		imageBuild: opts.imageBuild,
 	})
+}
+
+// RunSaved opens the log before reading config so input errors are retained too.
+func RunSaved(cooperDir string, opts Options) (result error) {
+	log, err := buildlog.Open(cooperDir)
+	if err != nil {
+		return err
+	}
+	defer func() { result = log.Finish(result) }()
+	opts.Log = log
+	cfg, err := config.LoadConfig(filepath.Join(cooperDir, "config.json"))
+	if err != nil {
+		return err
+	}
+	return Run(cfg, cooperDir, opts)
 }
 
 // Prepare performs every deterministic filesystem and configuration step
@@ -153,7 +182,11 @@ func Prepare(cfg *config.Config, cooperDir string, opts Options) (*Prepared, err
 
 	// Step 0: resolve desired versions and implicit tooling before rendering templates.
 	emitOutput(opts, "Resolving tool versions...")
-	if _, err := config.RefreshDesiredToolVersions(cfg, config.DesiredVersionRefreshOptions{AllowStaleFallback: false}); err != nil {
+	warnings, err := config.RefreshDesiredToolVersions(cfg, config.DesiredVersionRefreshOptions{AllowStaleFallback: false})
+	for _, warning := range warnings {
+		emitOutput(opts, warning)
+	}
+	if err != nil {
 		err = fmt.Errorf("resolve desired tool versions: %w", err)
 		report(0, err)
 		return nil, err
@@ -444,6 +477,9 @@ func buildImage(opts Options, name, dockerfilePath, contextDir string, buildArgs
 }
 
 func emitOutput(opts Options, line string) {
+	if opts.Log != nil {
+		opts.Log.Line(line)
+	}
 	if opts.Out != nil {
 		fmt.Fprintln(opts.Out, line)
 	}

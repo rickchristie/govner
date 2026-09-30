@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rickchristie/govner/cooper/internal/aitool"
 	"github.com/rickchristie/govner/cooper/internal/buildflow"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
@@ -26,8 +27,6 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/vm"
 	"github.com/rickchristie/govner/cooper/internal/vmdev"
 )
-
-var developmentAgentVersions = vmdev.AgentVersions
 
 type developmentManifest struct {
 	Schema                           int
@@ -75,7 +74,7 @@ func TestVMDevelopment(t *testing.T) {
 	selection := os.Getenv("COOPER_VM_DEV_SELECTION")
 	valid := mode == "unit" || mode == "prepare" || mode == "smoke" || mode == "mounts" || mode == "clean" || mode == "clean-cache"
 	if mode == "prepare-agent" || mode == "parity" {
-		_, valid = developmentAgentVersions[selection]
+		valid = aitool.IsBuiltin(selection)
 	}
 	if mode == "profiles" {
 		valid = (selection == "codex" || selection == "antigravity")

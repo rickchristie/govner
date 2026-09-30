@@ -161,7 +161,10 @@ func SHMSizeValid(s string) bool {
 
 // SaveConfig saves configuration to a JSON file with indentation.
 func SaveConfig(path string, cfg *Config) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	snapshot := *cfg
+	snapshot.AITools = slices.Clone(cfg.AITools)
+	snapshot.MirrorAITools()
+	data, err := json.MarshalIndent(&snapshot, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}

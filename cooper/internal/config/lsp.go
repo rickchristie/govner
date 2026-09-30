@@ -169,7 +169,7 @@ func RefreshDesiredToolVersions(cfg *Config, opts DesiredVersionRefreshOptions) 
 		return nil, fmt.Errorf("refresh desired tool versions: nil config")
 	}
 
-	var warnings []string
+	warnings := cfg.MirrorAITools()
 	for i := range cfg.ProgrammingTools {
 		warning, err := refreshDesiredToolVersion(&cfg.ProgrammingTools[i], opts)
 		if err != nil {
@@ -180,7 +180,8 @@ func RefreshDesiredToolVersions(cfg *Config, opts DesiredVersionRefreshOptions) 
 		}
 	}
 	for i := range cfg.AITools {
-		warning, err := refreshDesiredToolVersion(&cfg.AITools[i], opts)
+		// Shared host state requires a live version, even for Save Config.
+		warning, err := refreshDesiredToolVersion(&cfg.AITools[i], DesiredVersionRefreshOptions{})
 		if err != nil {
 			return warnings, err
 		}
@@ -206,6 +207,7 @@ func RefreshDesiredToolVersionsBestEffort(cfg *Config, timeout time.Duration) ma
 	}
 
 	deadline := time.Now().Add(timeout)
+	cfg.MirrorAITools()
 	errs := map[string]error{}
 	for i := range cfg.ProgrammingTools {
 		bestEffortRefreshTool(&cfg.ProgrammingTools[i], deadline, errs)
@@ -722,6 +724,9 @@ func refreshDesiredToolVersion(tool *ToolConfig, opts DesiredVersionRefreshOptio
 		return "", nil
 	case ModeMirror:
 		hostVersion, err := HostVersionDetector(tool.Name)
+		if err == nil && strings.TrimSpace(hostVersion) == "" {
+			err = fmt.Errorf("host version is empty")
+		}
 		if err != nil {
 			if opts.AllowStaleFallback && strings.TrimSpace(tool.HostVersion) != "" {
 				return fmt.Sprintf("Warning: could not detect host %s version (%v). Using last-known host version %s for template generation. Run 'cooper build' or 'cooper update' on the intended host to refresh.", tool.Name, err, tool.HostVersion), nil

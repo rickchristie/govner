@@ -31,7 +31,7 @@ func SourceDigest(root string) (string, error) {
 			return err
 		}
 		if entry.IsDir() {
-			if relative != "." && (strings.HasPrefix(entry.Name(), ".") || entry.Name() == "__pycache__") {
+			if relative != "." && (strings.HasPrefix(entry.Name(), ".") || entry.Name() == "__pycache__" || entry.Name() == "node_modules" || entry.Name() == "test-results") {
 				return filepath.SkipDir
 			}
 			return nil

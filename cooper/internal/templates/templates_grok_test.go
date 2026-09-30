@@ -12,7 +12,7 @@ import (
 func TestWriteAllTemplates_GrokRemovesObsoletePolicyAndPreservesOtherFiles(t *testing.T) {
 	cfg := &config.Config{
 		AITools: []config.ToolConfig{
-			{Name: "grok", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.0.4"},
+			{Name: "grok", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.0.4"},
 		},
 		ProxyPort:  3128,
 		BridgePort: 4343,
@@ -49,7 +49,7 @@ func TestWriteAllTemplates_GrokRemovesObsoletePolicyAndPreservesOtherFiles(t *te
 
 func TestWriteAllTemplates_RemovesObsoleteGrokPolicyWhenDisabled(t *testing.T) {
 	cfg := &config.Config{
-		AITools:    []config.ToolConfig{{Name: "grok", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.0.4"}},
+		AITools:    []config.ToolConfig{{Name: "grok", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.0.4"}},
 		ProxyPort:  3128,
 		BridgePort: 4343,
 	}
@@ -80,7 +80,7 @@ func TestValidateBuiltinOutputDirsUnmanagedConflict(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(grokDir, "Dockerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{AITools: []config.ToolConfig{{Name: "grok", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.0.4"}}}
+	cfg := &config.Config{AITools: []config.ToolConfig{{Name: "grok", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.0.4"}}}
 	err := ValidateBuiltinOutputDirs(cliDir)
 	if err == nil {
 		t.Fatal("expected unmanaged grok conflict")

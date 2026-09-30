@@ -309,15 +309,34 @@ hash before use. Keep the bundled
 
 ## Build and agent integration
 
-Resolve Mirror, Latest, and Pin to exact inputs before template rendering.
-There is no version allowlist. Reject missing requested artifacts rather than
-substitute Latest. Keep network clients bounded and injectable.
+AI tools always resolve the live host version before template rendering.
+Remove saved AI Latest and Pin choices with a notice. Do not use stale host
+versions when detection fails. Programming tools retain Mirror, Latest, and
+Pin. Reject missing artifacts without selecting a different version.
+Keep network clients bounded and injectable.
+ChatGPT host detection reads package metadata without starting the desktop app.
+It follows symlinks and simple launcher scripts with a literal absolute `exec`
+path. It rejects unknown wrapper logic instead of guessing another installation.
+
+AI images record `cooper.ai-tool` and `cooper.ai-version` labels. CLI creation
+and reuse, VM creation and reuse, and VM restart compare these labels with
+live host detection before the workload can write shared state. Old images
+without labels require a rebuild. Custom images retain their own policy.
+Restart checks the recorded image before stopping the existing VM.
+
+Build, Update, and Configure's Save & Build open `logs/build.log` before
+preparation. A per-config lock prevents concurrent builds from mixing output.
+The log streams directly
+to disk with private permissions and retains full Docker output. A new build
+moves the prior log to `build.previous.log` and replaces the older previous log.
+Keep at most two build log files. Log write errors are reported;
+a failed build includes its log path. No environment dump is added.
 
 Desired and built values in `config.json` include tool versions, implicit
-language servers, and the base Node runtime. Save Only can reuse built implicit
+language servers, and the base Node runtime. Save Config can reuse built implicit
 versions only when the relevant desired runtime still matches. Update always
 regenerates and reloads proxy configuration, even if no image rebuild is needed.
-Initial configure enables detected AI tools in Mirror mode.
+Configure enables detected AI tools and shows host and built versions.
 
 The Go language-server build uses the official module proxy and checksum
 database. Bounded retries preserve completed downloads but do not disable
@@ -417,7 +436,9 @@ timeout 90m ./cooper/test-docker-build.sh all > /tmp/cooper-docker-build.txt 2>&
 go build -C ./cooper -o ./cooper . > /tmp/cooper-build.txt 2>&1
 ```
 
-The full Go suite includes Docker-backed packages. Cross-process bootstrap
+The full Go suite includes Docker-backed packages. Install the built-in AI
+tools on the host before these image checks; AI images use their host versions
+in all three programming-tool modes. Cross-process bootstrap
 locks protect shared test images. `GOFLAGS=-p=1` can avoid package lock waits
 without changing coverage. Do not claim an excluded package set passed the
 full suite.
@@ -470,8 +491,8 @@ Example for a profile change:
 ```
 
 Repeat the matching prepare/parity/profile commands for Antigravity when its
-state or credentials change. Test pins are in
-[internal/vmdev/config.go](internal/vmdev/config.go).
+state or credentials change. Agent preparation uses the live host version.
+Its saved manifest records the version used by subsequent checks.
 
 For desktop changes, run `prepare-agent chatgpt`, `parity chatgpt`, then
 `desktop chatgpt`. Install the browser fixture with `npm ci --prefix

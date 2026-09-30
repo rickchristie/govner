@@ -80,14 +80,19 @@ const (
 // Dockerfile and context directory. Build arguments are passed as --build-arg
 // flags. Output is streamed to stderr for visibility during builds.
 func BuildImage(name, dockerfilePath, contextDir string, buildArgs map[string]string, noCache bool) error {
+	return BuildImageWithWriter(name, dockerfilePath, contextDir, buildArgs, noCache, os.Stderr)
+}
+
+// BuildImageWithWriter retains command output for callers with a build log.
+func BuildImageWithWriter(name, dockerfilePath, contextDir string, buildArgs map[string]string, noCache bool, out io.Writer) error {
 	args, err := buildDockerArgs(name, dockerfilePath, contextDir, buildArgs, noCache)
 	if err != nil {
 		return err
 	}
 
 	cmd := exec.Command("docker", args...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = out
+	cmd.Stderr = out
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("docker build %s failed: %w", name, err)

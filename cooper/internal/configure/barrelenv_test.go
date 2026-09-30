@@ -17,8 +17,8 @@ func TestWelcomeMenuIncludesBarrelEnvironment(t *testing.T) {
 	if got := m.welcome.items[5].label; got != "Barrel Environment" {
 		t.Fatalf("welcome.items[5].label = %q, want %q", got, "Barrel Environment")
 	}
-	if got := m.welcome.items[6].label; got != "Save & Build" {
-		t.Fatalf("welcome.items[6].label = %q, want %q", got, "Save & Build")
+	if got := m.welcome.items[6].label; got != "Save Configuration" {
+		t.Fatalf("welcome.items[6].label = %q, want %q", got, "Save Configuration")
 	}
 }
 

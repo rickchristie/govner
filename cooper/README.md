@@ -55,12 +55,18 @@ requirements; `./cooper/dev/setup.sh` can set up KVM access.
 | `antigravity` | Antigravity CLI: `agy` (experimental) |
 | `chatgpt` | ChatGPT desktop: `chatgpt` |
 
-Select tools in `cooper configure`. Mirror uses the detected host version,
-Latest resolves the upstream release, and Pin uses the version you specify.
-Unavailable versions fail; Cooper does not silently replace a pin with Latest.
-Run `cooper update` after host upgrades or version changes.
+Use **Save Configuration** in the menu, then **Save Config** (`s`) to save
+without building, or **Save & Build** to build now.
 
-Go, Node.js, and Python are optional programming tools. Their standard language
+Select tools in `cooper configure`. All AI tools use the exact detected host
+version because they share host settings and history. Install each tool on the
+host first. Older AI Latest and Pin settings are changed to Mirror when saved.
+Cooper checks the image version before CLI and VM launch. After a host tool
+update, run `cooper build` before starting another session. An unavailable host
+version fails; Cooper does not use a different release.
+
+Go, Node.js, and Python are optional programming tools. They retain Mirror,
+Latest, and Pin version choices. Their standard language
 servers are included: `gopls`, TypeScript with `typescript-language-server`,
 and Pyright with `python-lsp-server`.
 
@@ -71,8 +77,8 @@ rename a conflicting custom directory first.
 
 ### ChatGPT desktop
 
-Select **ChatGPT (desktop)** in `cooper configure`, choose Mirror, Latest, or
-Pin, then run `cooper build`. Build installs the official Linux package and
+Install ChatGPT on the host. Select **ChatGPT (desktop)** in `cooper configure`,
+then run `cooper build`. Build installs the matching official Linux package and
 its desktop dependencies in a separate image. It does not install the app on
 the host or include your login in the image.
 
@@ -312,7 +318,7 @@ is unavailable, Cooper disables it and reports a warning.
 
 | Command | Use |
 | --- | --- |
-| `cooper configure` | Edit settings; Save Only or Save & Build |
+| `cooper configure` | Edit settings; Save Config or Save & Build |
 | `cooper build [--clean]` | Build images; `--clean` disables Docker build cache |
 | `cooper update` | Refresh templates, reload proxy rules, and rebuild changed images |
 | `cooper up` / `cooper down` | Start the control panel / stop runtime resources |
@@ -346,7 +352,11 @@ credential-free unit test.
   launch resets checked old registrations and retains their store as described
   above. Do not delete live agent directories or change the schema number by
   hand.
-- Build failure: retain the concrete error and log. In Save & Build, scrolling
+- Build failure: send `~/.cooper/logs/build.log`. `cooper build`, `cooper update`,
+  and Configure's Save & Build save the full output, including preparation errors.
+  The next build retains it as `build.previous.log`. Cooper keeps at most two
+  build log files. With `--config`, logs are under that
+  configuration directory. In Save & Build, scrolling
   pauses log follow; End resumes it. Repeated network failures need a download
   check, not a new profile conversion.
 - Logs: command logs and `access.log` are in `~/.cooper/logs/`;

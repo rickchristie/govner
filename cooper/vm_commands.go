@@ -207,6 +207,9 @@ func runVM(cmd *cobra.Command, args []string) error {
 	if !exists {
 		return fmt.Errorf("no image found for %q. Run 'cooper build' first", toolName)
 	}
+	if err := docker.ValidateImageVersion(toolName); err != nil {
+		return err
+	}
 	clipboardMode, err := docker.ToolClipboardMode(toolName)
 	if err != nil {
 		return err

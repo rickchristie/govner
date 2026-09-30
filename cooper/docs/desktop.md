@@ -7,8 +7,8 @@ browser. The desktop and all app processes run inside the VM.
 ## Install and open
 
 1. Run `cooper configure`. In **AI Tools**, enable **ChatGPT (desktop)**.
-2. Select **Mirror**, **Latest**, or **Pin**, then save and build. You can also
-   run `cooper build` after saving.
+2. Cooper uses the version installed on the host. Open **Save Configuration**
+   and select **Save & Build**, or **Save Config** followed by `cooper build`.
 3. Keep `cooper up` running. From the project directory, run:
 
    ```sh
@@ -53,16 +53,21 @@ not disable the app sandbox to get past a host kernel policy.
 
 ## Versions and build cost
 
-**Mirror** reads the installed Linux package metadata without starting the
-host app. **Latest** resolves the current official package index. **Pin**
-keeps the requested official version, including an older package that has
-left the moving index. There is no version allowlist.
+Cooper reads the installed host package metadata without starting the app.
+It builds that exact version and checks it before each CLI or VM launch.
+After a host app update, run `cooper build` before starting another session.
+Older Latest and Pin settings are changed to Mirror when saved.
 
 Cooper saves the exact package path, architecture, size, and index SHA256 for
 both amd64 and arm64 before building. For older packages without an index
 record, it checks the exact official HTTPS path and size. The build checks
-package name, architecture, and version in all cases. An unavailable pin
-fails; it never changes to Latest. Rebuild to update the installed app.
+package name, architecture, and version in all cases. An unavailable host
+version fails; it never changes to another release.
+
+Build output is saved to `~/.cooper/logs/build.log`, including builds started
+from Configure. The error screen shows the path. The next build retains the
+previous output as `build.previous.log`. Send this log when reporting a build
+failure so the package manager error remains available after the screen closes.
 
 The desktop needs a browser, fonts, window manager, private session bus, and
 display server. These packages use a separate Debian desktop base. Users who

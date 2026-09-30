@@ -7,6 +7,7 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/buildflow"
+	"github.com/rickchristie/govner/cooper/internal/buildlog"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/tui/loading"
 )
@@ -25,7 +26,16 @@ func requestedPreparationStepNames(save saveModel) []string {
 	return append(steps, buildflow.StagingStepNames()...)
 }
 
-func runRequestedActionWithLoading(ca *app.ConfigureApp, cfg *config.Config, save saveModel) ([]string, error) {
+func runRequestedActionWithLoading(ca *app.ConfigureApp, cfg *config.Config, save saveModel) (warnings []string, resultErr error) {
+	var log *buildlog.Log
+	if save.buildRequested {
+		var err error
+		log, err = ca.OpenBuildLog()
+		if err != nil {
+			return nil, err
+		}
+		defer func() { resultErr = log.Finish(resultErr) }()
+	}
 	stepNames := requestedPreparationStepNames(save)
 	steps := make([]loading.LoadingStep, len(stepNames))
 	for i, stepName := range stepNames {
@@ -49,7 +59,7 @@ func runRequestedActionWithLoading(ca *app.ConfigureApp, cfg *config.Config, sav
 
 	resultCh := make(chan configurePreparationResult, 1)
 	go func() {
-		warnings, prepared, runErr := executeRequestedPreparation(ca, cfg, save, func(idx int, stepErr error) {
+		warnings, prepared, runErr := executeRequestedPreparation(ca, cfg, save, log, func(idx int, stepErr error) {
 			if stepErr != nil {
 				p.Send(loading.StepErrorMsg{Index: idx, Err: stepErr})
 				return
@@ -84,16 +94,22 @@ func runRequestedActionWithLoading(ca *app.ConfigureApp, cfg *config.Config, sav
 		return result.warnings, result.err
 	}
 	if result.prepared != nil {
-		if err := runPreparedBuildWithFeedback(result.prepared, save.cleanBuildRequested); err != nil {
+		if err := runPreparedBuildWithFeedback(result.prepared, save.cleanBuildRequested, log); err != nil {
 			return result.warnings, err
 		}
 	}
 	return result.warnings, nil
 }
 
-func executeRequestedPreparation(ca *app.ConfigureApp, cfg *config.Config, save saveModel, report func(step int, err error)) ([]string, *buildflow.Prepared, error) {
+func executeRequestedPreparation(ca *app.ConfigureApp, cfg *config.Config, save saveModel, log *buildlog.Log, report func(step int, err error)) ([]string, *buildflow.Prepared, error) {
 	syncConfigureApp(ca, cfg)
 	saveProgress := func(step int, total int, name string, stepErr error) {
+		if log != nil {
+			log.Line(name)
+			if stepErr != nil {
+				log.Line(stepErr.Error())
+			}
+		}
 		if report != nil {
 			report(step, stepErr)
 		}
@@ -108,6 +124,11 @@ func executeRequestedPreparation(ca *app.ConfigureApp, cfg *config.Config, save 
 	} else {
 		warnings, err = ca.SaveWithProgress(saveProgress)
 	}
+	if log != nil {
+		for _, warning := range warnings {
+			log.Line(warning)
+		}
+	}
 	if err != nil {
 		return warnings, nil, err
 	}
@@ -116,6 +137,7 @@ func executeRequestedPreparation(ca *app.ConfigureApp, cfg *config.Config, save 
 	}
 	buildOffset := len(app.SaveStepNames())
 	prepared, prepareErr := buildflow.Stage(ca.Config(), ca.CooperDir(), implicit, buildflow.Options{
+		Log: log,
 		OnProgress: func(step int, total int, name string, stepErr error) {
 			if report != nil {
 				report(buildOffset+step, stepErr)
@@ -125,13 +147,15 @@ func executeRequestedPreparation(ca *app.ConfigureApp, cfg *config.Config, save 
 	return warnings, prepared, prepareErr
 }
 
-func runPreparedBuildWithFeedback(prepared *buildflow.Prepared, noCache bool) error {
+func runPreparedBuildWithFeedback(prepared *buildflow.Prepared, noCache bool, log *buildlog.Log) error {
 	model := newBuildFeedbackModel(prepared.StepNames())
+	model.logPath = log.Path
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	resultCh := make(chan error, 1)
 	go func() {
 		buildErr := prepared.Build(buildflow.Options{
+			Log:     log,
 			NoCache: noCache,
 			OnOutput: func(line string) {
 				p.Send(dockerBuildLineMsg{Line: line})

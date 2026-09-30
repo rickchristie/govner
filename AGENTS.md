@@ -30,7 +30,7 @@ Read README.md of the project before starting.
 ## Cooper
 
 ### Design
-- Support Mirror, Latest, and Pin for every harness without a version allowlist.
+- AI tools always mirror the live host version. Do not offer Latest or Pin for AI tools. Keep Mirror, Latest, and Pin for programming tools. Reject AI image and host version differences before CLI or VM launch; require a rebuild.
 - Cooper supports the complete host state directories of all built-in CLI agents (e.g. `~/.grok`, `~/.codex`).
   Each `cooper cli [agent]` or `cooper vm [agent]` session mounts only the state directories of the selected agent.
   Mount the complete selected state read-write. This includes auth, sessions, all configs, conversation history, auto-memory, and future state.

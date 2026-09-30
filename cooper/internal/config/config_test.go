@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -551,7 +552,7 @@ func TestSaveAndLoadConfig(t *testing.T) {
 	original.BridgePort = 9090
 	original.ProxyAlertSound = true
 	original.AITools = []ToolConfig{
-		{Name: "claude", Enabled: true, Mode: ModeLatest},
+		{Name: "claude", Enabled: true, Mode: ModeMirror},
 	}
 
 	if err := SaveConfig(path, original); err != nil {
@@ -844,7 +845,7 @@ func TestDetectHostVersionGo(t *testing.T) {
 	origExecCommand := execCommand
 	defer func() { execCommand = origExecCommand }()
 
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	execCommand = func(_ context.Context, name string, args ...string) *exec.Cmd {
 		return exec.Command("echo", "go version go1.22.5 linux/amd64")
 	}
 
@@ -861,7 +862,7 @@ func TestDetectHostVersionNode(t *testing.T) {
 	origExecCommand := execCommand
 	defer func() { execCommand = origExecCommand }()
 
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	execCommand = func(_ context.Context, name string, args ...string) *exec.Cmd {
 		return exec.Command("echo", "v20.11.0")
 	}
 
@@ -878,7 +879,7 @@ func TestDetectHostVersionPython(t *testing.T) {
 	origExecCommand := execCommand
 	defer func() { execCommand = origExecCommand }()
 
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	execCommand = func(_ context.Context, name string, args ...string) *exec.Cmd {
 		return exec.Command("echo", "Python 3.12.1")
 	}
 
@@ -895,7 +896,7 @@ func TestDetectHostVersionClaude(t *testing.T) {
 	origExecCommand := execCommand
 	defer func() { execCommand = origExecCommand }()
 
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	execCommand = func(_ context.Context, name string, args ...string) *exec.Cmd {
 		return exec.Command("echo", "1.0.12")
 	}
 

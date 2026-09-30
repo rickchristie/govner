@@ -19,9 +19,9 @@ func TestSaveScreenFixedFrameScrollsWithKeyboardAndMouse(t *testing.T) {
 	const width, height = 90, 12
 
 	initial := m.view(width, height)
-	assertFixedScreen(t, initial, height, []string{"Configure > ", "Save & Build"}, "Enter Build")
+	assertFixedScreen(t, initial, height, []string{"Configure > ", "Save Configuration"}, "Enter Select")
 	if m.lastMaxScroll <= 0 {
-		t.Fatalf("Save & Build body should overflow at height %d", height)
+		t.Fatalf("Save Configuration body should overflow at height %d", height)
 	}
 
 	m.update(tea.KeyMsg{Type: tea.KeyDown})
@@ -29,7 +29,7 @@ func TestSaveScreenFixedFrameScrollsWithKeyboardAndMouse(t *testing.T) {
 		t.Fatalf("down key offset = %d, want 1", m.scrollOffset)
 	}
 	afterKey := m.view(width, height)
-	assertFixedScreen(t, afterKey, height, []string{"Configure > ", "Save & Build"}, "Enter Build")
+	assertFixedScreen(t, afterKey, height, []string{"Configure > ", "Save Configuration"}, "Enter Select")
 	if afterKey == initial {
 		t.Fatal("down key did not change the visible middle section")
 	}
@@ -39,7 +39,19 @@ func TestSaveScreenFixedFrameScrollsWithKeyboardAndMouse(t *testing.T) {
 		t.Fatalf("mouse wheel did not advance body offset: %d", m.scrollOffset)
 	}
 	afterMouse := m.view(width, height)
-	assertFixedScreen(t, afterMouse, height, []string{"Configure > ", "Save & Build"}, "Enter Build")
+	assertFixedScreen(t, afterMouse, height, []string{"Configure > ", "Save Configuration"}, "Enter Select")
+}
+
+func TestSaveActionsFitEightyColumns(t *testing.T) {
+	m := newSaveModel(config.DefaultConfig(), t.TempDir(), "", nil)
+	view := ansi.Strip(m.view(80, 24))
+	lines := strings.Split(view, "\n")
+	footer := lines[len(lines)-1]
+	for _, action := range []string{"Enter Select", "s Save Config", "c Clean", "Esc"} {
+		if !strings.Contains(footer, action) {
+			t.Fatalf("save footer hides %q: %s", action, footer)
+		}
+	}
 }
 
 func TestWelcomeScreenUsesFixedScrollableFrame(t *testing.T) {

@@ -135,24 +135,11 @@ func opencodeReleaseTag(version string) string {
 	return "v" + version
 }
 
-// getToolVersion returns the pinned or host version for a tool, or empty string if not found.
+// getToolVersion returns the exact host version selected for an AI image.
 func getToolVersion(tools []config.ToolConfig, name string) string {
-	for _, t := range tools {
-		if strings.EqualFold(t.Name, name) && t.Enabled {
-			switch t.Mode {
-			case config.ModeMirror:
-				return t.HostVersion
-			case config.ModePin, config.ModeLatest:
-				return t.PinnedVersion
-			default:
-				if t.PinnedVersion != "" {
-					return t.PinnedVersion
-				}
-				if t.HostVersion != "" {
-					return t.HostVersion
-				}
-				return ""
-			}
+	for _, tool := range tools {
+		if strings.EqualFold(tool.Name, name) && tool.Enabled {
+			return tool.HostVersion
 		}
 	}
 	return ""
@@ -384,6 +371,9 @@ func RenderCLIToolDockerfile(cfg *config.Config, toolName string) (string, error
 	}
 
 	version := getToolVersion(cfg.AITools, toolName)
+	if version == "" {
+		return "", fmt.Errorf("%s needs a detected host version; run cooper build", toolName)
+	}
 	var installCmds string
 	var err error
 	if toolName == "antigravity" {

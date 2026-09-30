@@ -40,7 +40,7 @@ func TestAntigravityNativeImageContract(t *testing.T) {
 	}
 }
 
-func TestAntigravityAcceptsSelectedVersionsInEveryMode(t *testing.T) {
+func TestAntigravityUsesHostVersionWithLegacyModes(t *testing.T) {
 	for _, version := range []string{"1.2.2", "1.2.7", "24.7.3"} {
 		for _, mode := range []config.VersionMode{config.ModeMirror, config.ModeLatest, config.ModePin} {
 			t.Run(version+"/"+mode.String(), func(t *testing.T) {
@@ -50,7 +50,7 @@ func TestAntigravityAcceptsSelectedVersionsInEveryMode(t *testing.T) {
 					releases[index].URL = strings.Replace(releases[index].URL, "/1.2.2-", "/"+version+"-", 1)
 				}
 				cfg := &config.Config{AITools: []config.ToolConfig{{Name: "antigravity", Enabled: true,
-					Mode: mode, HostVersion: version, PinnedVersion: version, AntigravityReleases: releases}}}
+					Mode: mode, HostVersion: version, PinnedVersion: "9.9.9", AntigravityReleases: releases}}}
 				text, err := RenderCLIToolDockerfile(cfg, "antigravity")
 				if err != nil {
 					t.Fatal(err)
@@ -73,9 +73,9 @@ func TestAntigravityRenderRejectsIncompleteOrUntrustedInputs(t *testing.T) {
 		func(tool *config.ToolConfig) {
 			tool.AntigravityReleases = append(tool.AntigravityReleases, tool.AntigravityReleases[0])
 		},
-		func(tool *config.ToolConfig) { tool.PinnedVersion = "1.2.3" },
+		func(tool *config.ToolConfig) { tool.HostVersion = "1.2.3" },
 	} {
-		tool := config.ToolConfig{Name: "antigravity", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.2.2", AntigravityReleases: antigravity.KnownReleases("1.2.2")}
+		tool := config.ToolConfig{Name: "antigravity", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.2.2", AntigravityReleases: antigravity.KnownReleases("1.2.2")}
 		change(&tool)
 		if _, err := RenderCLIToolDockerfile(&config.Config{AITools: []config.ToolConfig{tool}}, "antigravity"); err == nil {
 			t.Fatalf("unsafe image inputs accepted: %#v", tool)

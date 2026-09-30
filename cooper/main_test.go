@@ -194,7 +194,7 @@ func TestCollectUpdatePlan(t *testing.T) {
 		}
 	})
 
-	t.Run("ai latest mismatch rebuilds only changed tool", func(t *testing.T) {
+	t.Run("AI host mismatch rebuilds only changed tool", func(t *testing.T) {
 		cfg := &config.Config{
 			BaseNodeVersion: config.DefaultBaseNodeVersion,
 			AITools: []config.ToolConfig{
@@ -204,7 +204,7 @@ func TestCollectUpdatePlan(t *testing.T) {
 		}
 		prevLatest := config.LatestVersionResolver
 		prevHost := config.HostVersionDetector
-		config.LatestVersionResolver = func(name string) (string, error) {
+		config.HostVersionDetector = func(name string) (string, error) {
 			switch name {
 			case "codex":
 				return "0.2.0", nil
@@ -214,7 +214,7 @@ func TestCollectUpdatePlan(t *testing.T) {
 				return "", fmt.Errorf("unexpected tool %s", name)
 			}
 		}
-		config.HostVersionDetector = func(name string) (string, error) { return "", fmt.Errorf("unexpected host lookup for %s", name) }
+		config.LatestVersionResolver = func(name string) (string, error) { return "", fmt.Errorf("unexpected latest lookup for %s", name) }
 		defer func() {
 			config.LatestVersionResolver = prevLatest
 			config.HostVersionDetector = prevHost
@@ -234,8 +234,8 @@ func TestCollectUpdatePlan(t *testing.T) {
 		if plan.toolsChanged["claude"] {
 			t.Fatalf("did not expect claude rebuild, got %+v", plan.toolsChanged)
 		}
-		if got := cfg.AITools[0].PinnedVersion; got != "0.2.0" {
-			t.Fatalf("PinnedVersion = %q, want 0.2.0", got)
+		if got := cfg.AITools[0].HostVersion; got != "0.2.0" {
+			t.Fatalf("HostVersion = %q, want 0.2.0", got)
 		}
 	})
 
@@ -889,8 +889,8 @@ func TestRunUpdateReloadsRunningProxyAfterGrokIsDisabled(t *testing.T) {
 		cfg.AITools = []config.ToolConfig{{
 			Name:             "grok",
 			Enabled:          true,
-			Mode:             config.ModePin,
-			PinnedVersion:    "1.0.4",
+			Mode:             config.ModeMirror,
+			HostVersion:      "1.0.4",
 			ContainerVersion: "1.0.4",
 		}}
 		cfg.BaseNodeVersion = config.DefaultBaseNodeVersion

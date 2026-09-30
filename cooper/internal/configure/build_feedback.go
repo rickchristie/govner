@@ -41,6 +41,7 @@ type buildFeedbackModel struct {
 	done      bool
 	err       error
 	preview   bool
+	logPath   string
 	rawLines  []string
 	viewport  components.ScrollableContent
 }
@@ -64,6 +65,7 @@ func NewBuildFeedbackPreviewModel() tea.Model {
 		"Building codex image...",
 	})
 	m.preview = true
+	m.logPath = "/home/example/.cooper/logs/build.log"
 	m.completed = 2
 	m.current = 2
 	sample := []string{
@@ -216,7 +218,11 @@ func (m *buildFeedbackModel) header() string {
 	meta := lipgloss.NewStyle().Foreground(theme.ColorDusty).Render(
 		"  " + progress + "  •  combined stdout/stderr",
 	)
-	return breadcrumb + "\n " + statusStyle.Render(status) + meta
+	header := breadcrumb + "\n " + statusStyle.Render(status) + meta
+	if m.logPath != "" {
+		header += "\n" + ansi.Hardwrap(" Log: "+m.logPath, max(1, m.width), true)
+	}
+	return header
 }
 
 func (m *buildFeedbackModel) footer() string {

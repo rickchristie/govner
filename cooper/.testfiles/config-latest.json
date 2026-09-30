@@ -5,13 +5,13 @@
     {"name": "python", "enabled": true, "mode": "latest"}
   ],
   "ai_tools": [
-    {"name": "claude", "enabled": true, "mode": "latest"},
-    {"name": "copilot", "enabled": true, "mode": "latest"},
-    {"name": "codex", "enabled": true, "mode": "latest"},
-    {"name": "opencode", "enabled": true, "mode": "latest"},
-    {"name": "grok", "enabled": true, "mode": "latest"},
-    {"name": "antigravity", "enabled": true, "mode": "latest"},
-    {"name": "chatgpt", "enabled": true, "mode": "latest"}
+    {"name": "claude", "enabled": true, "mode": "mirror"},
+    {"name": "copilot", "enabled": true, "mode": "mirror"},
+    {"name": "codex", "enabled": true, "mode": "mirror"},
+    {"name": "opencode", "enabled": true, "mode": "mirror"},
+    {"name": "grok", "enabled": true, "mode": "mirror"},
+    {"name": "antigravity", "enabled": true, "mode": "mirror"},
+    {"name": "chatgpt", "enabled": true, "mode": "mirror"}
   ],
   "whitelisted_domains": [
     {"domain": ".anthropic.com", "include_subdomains": true, "source": "default"},

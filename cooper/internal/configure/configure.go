@@ -264,6 +264,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.aicli.update(msg)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -338,7 +339,7 @@ func (m *model) isTextInputActive() bool {
 	case ScreenProgramming:
 		return m.programming.pinInput.focused
 	case ScreenAICLI:
-		return m.aicli.pinInput.focused
+		return false
 	case ScreenWhitelist:
 		if m.whitelist.modal.active {
 			return true
@@ -414,7 +415,7 @@ func (m *model) viewChangesModal() string {
 	}
 
 	inner += "\n"
-	inner += "  " + hintStyle.Render("Go to Save & Build to apply these changes.") + "\n\n"
+	inner += "  " + hintStyle.Render("Go to Save Configuration to apply these changes.") + "\n\n"
 	inner += "  " + lipgloss.NewStyle().Foreground(theme.ColorProof).Render("[Enter] OK")
 
 	return boxStyle.Render(inner)
@@ -596,7 +597,7 @@ func newWelcomeModel(existing bool) welcomeModel {
 			{label: "Port Forwarding to Host", desc: "Route container ports to host services"},
 			{label: "Proxy Settings", desc: "Proxy port, bridge port"},
 			{label: "Barrel Environment", desc: "Global env vars for every cooper cli session"},
-			{label: "Save & Build", desc: "Write config, build images"},
+			{label: "Save Configuration", desc: "Save config, or save and build images"},
 		},
 	}
 }

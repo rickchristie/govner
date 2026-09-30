@@ -487,27 +487,27 @@ func TestRefreshDesiredToolVersionsCanonicalizesPinnedVersion(t *testing.T) {
 
 	var validatedVersion string
 	VersionValidator = func(toolName, version string) (bool, error) {
-		if toolName != "grok" {
-			t.Fatalf("validated tool = %q, want grok", toolName)
+		if toolName != "go" {
+			t.Fatalf("validated tool = %q, want go", toolName)
 		}
 		validatedVersion = version
 		return true, nil
 	}
-	cfg := &Config{AITools: []ToolConfig{{
-		Name:          "grok",
+	cfg := &Config{ProgrammingTools: []ToolConfig{{
+		Name:          "go",
 		Enabled:       true,
 		Mode:          ModePin,
-		PinnedVersion: "  1.0.4  ",
+		PinnedVersion: "  1.24.10  ",
 	}}}
 
 	if _, err := RefreshDesiredToolVersions(cfg, DesiredVersionRefreshOptions{}); err != nil {
 		t.Fatalf("RefreshDesiredToolVersions() error = %v", err)
 	}
-	if validatedVersion != "1.0.4" {
-		t.Fatalf("validated version = %q, want 1.0.4", validatedVersion)
+	if validatedVersion != "1.24.10" {
+		t.Fatalf("validated version = %q, want 1.24.10", validatedVersion)
 	}
-	if cfg.AITools[0].PinnedVersion != "1.0.4" {
-		t.Fatalf("stored pinned version = %q, want 1.0.4", cfg.AITools[0].PinnedVersion)
+	if cfg.ProgrammingTools[0].PinnedVersion != "1.24.10" {
+		t.Fatalf("stored pinned version = %q, want 1.24.10", cfg.ProgrammingTools[0].PinnedVersion)
 	}
 }
 

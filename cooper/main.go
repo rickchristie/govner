@@ -21,6 +21,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/app"
 	"github.com/rickchristie/govner/cooper/internal/bridge"
 	"github.com/rickchristie/govner/cooper/internal/buildflow"
+	"github.com/rickchristie/govner/cooper/internal/buildlog"
 	"github.com/rickchristie/govner/cooper/internal/clipboard"
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/configure"
@@ -224,7 +225,7 @@ func init() {
 	initVMCommands()
 
 	tuiTestCmd.Flags().StringVar(&tuiTestScreen, "screen", "",
-		"Jump to a specific screen: runtimes, profiles, monitor, history, squid-logs, bridge, runtime, ports, loading, configure, build")
+		"Jump to a specific screen: runtimes, profiles, monitor, history, squid-logs, bridge, runtime, ports, loading, configure, save, build")
 	tuiTestCmd.Flags().StringVar(&tuiTestProfileScenario, "profile-scenario", "populated", "Profile fixture: populated, empty, mismatch, busy, or error")
 }
 
@@ -312,11 +313,11 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 var buildClean bool
 
 func runBuild(cmd *cobra.Command, args []string) error {
-	cfg, cooperDir, err := loadConfig()
+	cooperDir, err := resolveCooperDir()
 	if err != nil {
 		return err
 	}
-	return buildflow.Run(cfg, cooperDir, buildflow.Options{NoCache: buildClean, Out: os.Stderr})
+	return buildflow.RunSaved(cooperDir, buildflow.Options{NoCache: buildClean, Out: os.Stderr})
 }
 
 func updateProgrammingToolContainerVersions(cfg *config.Config) {
@@ -775,6 +776,9 @@ func runCLI(cmd *cobra.Command, args []string) error {
 	if !exists {
 		return fmt.Errorf("no image found for '%s'. Run 'cooper build' first", toolName)
 	}
+	if err := docker.ValidateImageVersion(toolName); err != nil {
+		return err
+	}
 
 	// 3. Check proxy is running.
 	running, err := docker.IsProxyRunning()
@@ -1088,7 +1092,11 @@ func collectUpdatePlan(cfg *config.Config, cliDir string, out io.Writer) (update
 	}
 
 	plan := updatePlan{toolsChanged: map[string]bool{}}
-	if _, err := config.RefreshDesiredToolVersions(cfg, config.DesiredVersionRefreshOptions{AllowStaleFallback: false}); err != nil {
+	notices, err := config.RefreshDesiredToolVersions(cfg, config.DesiredVersionRefreshOptions{AllowStaleFallback: false})
+	for _, notice := range notices {
+		fmt.Fprintln(out, notice)
+	}
+	if err != nil {
 		return plan, err
 	}
 
@@ -1146,15 +1154,26 @@ func collectUpdatePlan(cfg *config.Config, cliDir string, out io.Writer) (update
 	return plan, nil
 }
 
-func runUpdate(cmd *cobra.Command, args []string) error {
-	cfg, cooperDir, err := loadConfig()
+func runUpdate(cmd *cobra.Command, args []string) (result error) {
+	cooperDir, err := resolveCooperDir()
+	if err != nil {
+		return err
+	}
+	log, err := buildlog.Open(cooperDir)
+	if err != nil {
+		return err
+	}
+	defer func() { result = log.Finish(result) }()
+	out := io.MultiWriter(os.Stderr, log)
+	fmt.Fprintln(out, "Build log: "+log.Path)
+	cfg, err := config.LoadConfig(filepath.Join(cooperDir, "config.json"))
 	if err != nil {
 		return err
 	}
 	baseDir := filepath.Join(cooperDir, "base")
 	cliDir := filepath.Join(cooperDir, "cli")
 
-	plan, err := collectUpdatePlan(cfg, cliDir, os.Stderr)
+	plan, err := collectUpdatePlan(cfg, cliDir, out)
 	if err != nil {
 		return fmt.Errorf("collect update plan: %w", err)
 	}
@@ -1169,12 +1188,12 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	toolsChanged := plan.toolsChanged
 
 	if !baseChanged && len(toolsChanged) == 0 {
-		fmt.Fprintln(os.Stderr, "All tool versions match. No rebuild needed.")
+		fmt.Fprintln(out, "All tool versions match. No rebuild needed.")
 	}
 
 	// Always regenerate templates. A save-only selection or whitelist change can
 	// need a proxy reload even when no image version changed.
-	fmt.Fprintln(os.Stderr, "Regenerating templates...")
+	fmt.Fprintln(out, "Regenerating templates...")
 	if err := templates.WriteAllTemplates(baseDir, cliDir, cfg, plan.targetImplicit); err != nil {
 		return fmt.Errorf("write templates: %w", err)
 	}
@@ -1195,14 +1214,14 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	// Rebuild the base if programming tools or implicit tooling changed.
 	if baseChanged {
-		fmt.Fprintln(os.Stderr, "Rebuilding base image...")
+		fmt.Fprintln(out, "Rebuilding base image...")
 		baseDockerfile := filepath.Join(baseDir, "Dockerfile")
 		account, err := usercontext.Current()
 		if err != nil {
 			return err
 		}
 		buildArgs := account.BuildArgs()
-		if err := docker.BuildImage(docker.GetImageBase(), baseDockerfile, baseDir, buildArgs, false); err != nil {
+		if err := docker.BuildImageWithWriter(docker.GetImageBase(), baseDockerfile, baseDir, buildArgs, false, out); err != nil {
 			return fmt.Errorf("rebuild base image: %w", err)
 		}
 		// Persist base built state before rebuilding children. If a later child
@@ -1223,8 +1242,8 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		if !baseChanged && !toolsChanged[tool.Name] {
 			continue
 		}
-		fmt.Fprintln(os.Stderr, "Rebuilding desktop base image...")
-		if err := docker.BuildImage(docker.GetImageDesktopBase(), filepath.Join(baseDir, "desktop.Dockerfile"), baseDir, account.BuildArgs(), false); err != nil {
+		fmt.Fprintln(out, "Rebuilding desktop base image...")
+		if err := docker.BuildImageWithWriter(docker.GetImageDesktopBase(), filepath.Join(baseDir, "desktop.Dockerfile"), baseDir, account.BuildArgs(), false, out); err != nil {
 			return fmt.Errorf("rebuild desktop base image: %w", err)
 		}
 		break
@@ -1239,8 +1258,8 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 			toolDir := filepath.Join(cliDir, tool.Name)
 			imageName := docker.GetImageCLI(tool.Name)
 			dockerfile := filepath.Join(toolDir, "Dockerfile")
-			fmt.Fprintf(os.Stderr, "Rebuilding %s image...\n", tool.Name)
-			if err := docker.BuildImage(imageName, dockerfile, toolDir, nil, false); err != nil {
+			fmt.Fprintf(out, "Rebuilding %s image...\n", tool.Name)
+			if err := docker.BuildImageWithWriter(imageName, dockerfile, toolDir, nil, false, out); err != nil {
 				return fmt.Errorf("rebuild %s: %w", tool.Name, err)
 			}
 			// Keep each successful child image reflected in built state even if a
@@ -1254,8 +1273,8 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 			toolDir := filepath.Join(cliDir, name)
 			imageName := docker.GetImageCLI(name)
 			dockerfile := filepath.Join(toolDir, "Dockerfile")
-			fmt.Fprintf(os.Stderr, "Rebuilding custom image %s...\n", name)
-			if err := docker.BuildImage(imageName, dockerfile, toolDir, nil, false); err != nil {
+			fmt.Fprintf(out, "Rebuilding custom image %s...\n", name)
+			if err := docker.BuildImageWithWriter(imageName, dockerfile, toolDir, nil, false, out); err != nil {
 				return fmt.Errorf("rebuild custom image %s: %w", name, err)
 			}
 		}
@@ -1264,8 +1283,8 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 			toolDir := filepath.Join(cliDir, name)
 			imageName := docker.GetImageCLI(name)
 			dockerfile := filepath.Join(toolDir, "Dockerfile")
-			fmt.Fprintf(os.Stderr, "Rebuilding %s image...\n", name)
-			if err := docker.BuildImage(imageName, dockerfile, toolDir, nil, false); err != nil {
+			fmt.Fprintf(out, "Rebuilding %s image...\n", name)
+			if err := docker.BuildImageWithWriter(imageName, dockerfile, toolDir, nil, false, out); err != nil {
 				return fmt.Errorf("rebuild %s: %w", name, err)
 			}
 			// Tool-only rebuilds also persist incrementally so the saved config keeps
@@ -1290,7 +1309,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("check proxy before Squid reconfigure: %w", err)
 	}
 	if proxyRunning {
-		fmt.Fprintln(os.Stderr, "Hot-reloading Squid configuration...")
+		fmt.Fprintln(out, "Hot-reloading Squid configuration...")
 		if err := docker.ReconfigureSquid(); err != nil {
 			stopErr := docker.StopProxy()
 			if stopErr != nil {
@@ -1300,7 +1319,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, "Update complete.")
+	fmt.Fprintln(out, "Update complete.")
 	return nil
 }
 
@@ -1320,8 +1339,8 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 		{Name: "rust", Enabled: false, Mode: config.ModeOff},
 	}
 	cfg.AITools = []config.ToolConfig{
-		{Name: "claude", Enabled: true, Mode: config.ModeLatest, ContainerVersion: "1.0.18", HostVersion: "1.0.18"},
-		{Name: "copilot", Enabled: true, Mode: config.ModeLatest, ContainerVersion: "0.7.2", HostVersion: "0.7.2"},
+		{Name: "claude", Enabled: true, Mode: config.ModeMirror, ContainerVersion: "1.0.18", HostVersion: "1.0.18"},
+		{Name: "copilot", Enabled: true, Mode: config.ModeMirror, ContainerVersion: "0.7.2", HostVersion: "0.7.2"},
 		{Name: "codex", Enabled: false, Mode: config.ModeOff},
 		{Name: "opencode", Enabled: false, Mode: config.ModeOff},
 		{Name: "grok", Enabled: false, Mode: config.ModeOff},
@@ -1394,8 +1413,11 @@ func runTUITest(cmd *cobra.Command, args []string) error {
 			p := tea.NewProgram(preview, tea.WithAltScreen(), tea.WithMouseCellMotion())
 			_, err := p.Run()
 			return err
+		case "save":
+			_, err := tea.NewProgram(configure.NewSavePreviewModel(), tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
+			return err
 		default:
-			return fmt.Errorf("unknown screen: %s\nAvailable: runtimes, profiles, monitor, history, squid-logs, bridge, runtime, ports, loading, configure, build", tuiTestScreen)
+			return fmt.Errorf("unknown screen: %s\nAvailable: runtimes, profiles, monitor, history, squid-logs, bridge, runtime, ports, loading, configure, save, build", tuiTestScreen)
 		}
 	}
 

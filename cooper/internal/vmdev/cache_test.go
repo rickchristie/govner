@@ -41,6 +41,8 @@ func TestSourceDigestIncludesDirtyAndNewInputs(t *testing.T) {
 	write(".test-tmp/cache/value", "ignored")
 	write("README.md", "ignored")
 	write("cooper", "generated binary")
+	write("dev/node_modules/playwright/index.js", "installed browser fixture")
+	write("dev/test-results/report.json", "generated browser report")
 	if digest() != previous {
 		t.Fatal("generated state changed source digest")
 	}

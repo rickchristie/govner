@@ -424,7 +424,7 @@ func TestNewAICLIModel_NoExisting_AutoEnable(t *testing.T) {
 
 func TestNewAICLIModel_ExistingConfig_Preserved(t *testing.T) {
 	existing := []config.ToolConfig{
-		{Name: "claude", Enabled: true, Mode: config.ModeLatest},
+		{Name: "claude", Enabled: true, Mode: config.ModeMirror},
 		{Name: "codex", Enabled: false, Mode: config.ModeOff},
 	}
 
@@ -443,8 +443,8 @@ func TestNewAICLIModel_ExistingConfig_Preserved(t *testing.T) {
 	if !claudeTool.enabled {
 		t.Error("expected claude to be enabled per existing config")
 	}
-	if claudeTool.mode != config.ModeLatest {
-		t.Errorf("expected claude mode=latest, got %v", claudeTool.mode)
+	if claudeTool.mode != config.ModeMirror {
+		t.Errorf("expected claude mode=mirror, got %v", claudeTool.mode)
 	}
 
 	var codexTool *toolEntry
@@ -474,8 +474,8 @@ func TestNewAICLIModel_ExistingConfig_Preserved(t *testing.T) {
 	if grokTool.enabled {
 		t.Error("existing config must gain Grok disabled")
 	}
-	if grokTool.mode != config.ModeLatest {
-		t.Errorf("migrated Grok mode = %v, want latest", grokTool.mode)
+	if grokTool.mode != config.ModeMirror {
+		t.Errorf("migrated Grok mode = %v, want mirror", grokTool.mode)
 	}
 	if grokTool.displayName != "Grok Build" {
 		t.Errorf("grok displayName = %q", grokTool.displayName)
@@ -490,13 +490,13 @@ func TestNewAICLIModelRepairsDisabledOffModeBeforeEnable(t *testing.T) {
 		if m.tools[i].name != "grok" {
 			continue
 		}
-		if m.tools[i].mode != config.ModeLatest {
-			t.Fatalf("repaired Grok mode = %v, want latest", m.tools[i].mode)
+		if m.tools[i].mode != config.ModeMirror {
+			t.Fatalf("repaired Grok mode = %v, want mirror", m.tools[i].mode)
 		}
 		m.cursor = i
 		m.updateList(tea.KeyMsg{Type: tea.KeySpace})
-		if !m.tools[i].enabled || m.tools[i].mode != config.ModeLatest {
-			t.Fatalf("enabled Grok = %+v, want enabled latest", m.tools[i])
+		if m.tools[i].enabled || m.tools[i].mode != config.ModeMirror {
+			t.Fatalf("enabled Grok = %+v, want disabled mirror", m.tools[i])
 		}
 		return
 	}
@@ -665,34 +665,12 @@ func TestModeToIndex(t *testing.T) {
 	}
 }
 
-func TestAiModeToIndex(t *testing.T) {
-	// AI tools: Latest=0, Mirror=1, Pin=2.
-	if aiModeToIndex(config.ModeLatest) != 0 {
-		t.Error("ModeLatest should map to 0 for AI tools")
-	}
-	if aiModeToIndex(config.ModeMirror) != 1 {
-		t.Error("ModeMirror should map to 1 for AI tools")
-	}
-	if aiModeToIndex(config.ModePin) != 2 {
-		t.Error("ModePin should map to 2 for AI tools")
-	}
-}
-
 func TestModeMatchesIndex(t *testing.T) {
 	if !modeMatchesIndex(config.ModeMirror, 0) {
 		t.Error("ModeMirror should match index 0")
 	}
 	if modeMatchesIndex(config.ModeLatest, 0) {
 		t.Error("ModeLatest should not match index 0")
-	}
-}
-
-func TestAiModeMatchesIndex(t *testing.T) {
-	if !aiModeMatchesIndex(config.ModeLatest, 0) {
-		t.Error("ModeLatest should match index 0 for AI")
-	}
-	if aiModeMatchesIndex(config.ModeMirror, 0) {
-		t.Error("ModeMirror should not match index 0 for AI")
 	}
 }
 
@@ -746,8 +724,8 @@ func TestToToolConfigs_AICLI(t *testing.T) {
 	}
 
 	copilotConfig := configs[1]
-	if copilotConfig.PinnedVersion != "0.7.2" {
-		t.Errorf("copilot in pin mode should have PinnedVersion=0.7.2, got %q", copilotConfig.PinnedVersion)
+	if copilotConfig.PinnedVersion != "" || copilotConfig.Mode != config.ModeMirror {
+		t.Errorf("AI config must use the host version: %+v", copilotConfig)
 	}
 }
 
@@ -921,82 +899,6 @@ func TestProgrammingModel_PinAlwaysAvailable(t *testing.T) {
 // Mirror / Latest mode selection logic — aicliModel
 // ---------------------------------------------------------------------------
 
-func TestAICLIModel_NoHostVersion_MirrorNotAvailable(t *testing.T) {
-	m := aicliModel{
-		tools: []toolEntry{
-			{name: "claude", displayName: "Claude Code", hostVersion: ""},
-		},
-		cursor: 0,
-	}
-
-	modes := m.detailModes()
-
-	for _, mode := range modes {
-		if mode == config.ModeMirror {
-			t.Error("Mirror should NOT be available for AI tool when hostVersion is empty")
-		}
-	}
-
-	hasLatest := false
-	hasPin := false
-	for _, mode := range modes {
-		if mode == config.ModeLatest {
-			hasLatest = true
-		}
-		if mode == config.ModePin {
-			hasPin = true
-		}
-	}
-	if !hasLatest {
-		t.Error("Latest should be in detailModes() for AI tool when hostVersion is empty")
-	}
-	if !hasPin {
-		t.Error("Pin should be in detailModes() for AI tool when hostVersion is empty")
-	}
-}
-
-func TestAICLIModel_WithHostVersion_MirrorAvailable(t *testing.T) {
-	m := aicliModel{
-		tools: []toolEntry{
-			{name: "claude", displayName: "Claude Code", hostVersion: "2.0.0"},
-		},
-		cursor: 0,
-	}
-
-	modes := m.detailModes()
-
-	hasMirror := false
-	for _, mode := range modes {
-		if mode == config.ModeMirror {
-			hasMirror = true
-		}
-	}
-	if !hasMirror {
-		t.Error("Mirror should be available for AI tool when hostVersion is set")
-	}
-}
-
-func TestAICLIModel_NoHostVersion_DefaultIsNotMirror(t *testing.T) {
-	m := aicliModel{
-		tools: []toolEntry{
-			{name: "claude", displayName: "Claude Code", hostVersion: ""},
-		},
-		cursor: 0,
-	}
-
-	// Simulate the auto-enable logic from newAICLIModel with len(existing)==0.
-	for i := range m.tools {
-		if m.tools[i].hostVersion != "" {
-			m.tools[i].enabled = true
-			m.tools[i].mode = config.ModeMirror
-		}
-	}
-
-	if m.tools[0].mode == config.ModeMirror {
-		t.Error("AI tool with empty hostVersion should NOT default to ModeMirror")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // detailCursorForMode mapping tests
 // ---------------------------------------------------------------------------
@@ -1058,70 +960,6 @@ func TestAICLIModel_MirrorUsesLiveHostVersion(t *testing.T) {
 	configs := m.toToolConfigs()
 	if configs[0].HostVersion != "2.1.90" {
 		t.Errorf("expected HostVersion=2.1.90, got %q", configs[0].HostVersion)
-	}
-}
-
-func TestAICLIModel_MergeDoesNotOverwriteLiveHostVersion(t *testing.T) {
-	// The merge in newAICLIModel should NOT overwrite live-detected host
-	// version with stale config value.
-	//
-	// We simulate this by building tools with a "live" hostVersion, then
-	// merging with existing config that has a different HostVersion.
-	tools := []toolEntry{
-		{name: "claude", displayName: "Claude Code", hostVersion: "2.1.90"},
-	}
-
-	existing := []config.ToolConfig{
-		{Name: "claude", Enabled: true, Mode: config.ModeMirror, HostVersion: "2.1.89"},
-	}
-
-	// Apply the same merge logic as newAICLIModel.
-	for _, tc := range existing {
-		for i := range tools {
-			if tools[i].name == tc.Name {
-				tools[i].enabled = tc.Enabled
-				tools[i].mode = tc.Mode
-				// Only use config's HostVersion if live detection failed.
-				if tools[i].hostVersion == "" && tc.HostVersion != "" {
-					tools[i].hostVersion = tc.HostVersion
-				}
-				break
-			}
-		}
-	}
-
-	// Live-detected version should win.
-	if tools[0].hostVersion != "2.1.90" {
-		t.Errorf("hostVersion should be 2.1.90 (live), got %q", tools[0].hostVersion)
-	}
-}
-
-func TestAICLIModel_MergeFallsBackToConfigWhenDetectionFails(t *testing.T) {
-	// When live detection fails (hostVersion is empty), the merge should
-	// use the config's HostVersion as a fallback.
-	tools := []toolEntry{
-		{name: "claude", displayName: "Claude Code", hostVersion: ""}, // detection failed
-	}
-
-	existing := []config.ToolConfig{
-		{Name: "claude", Enabled: true, Mode: config.ModeMirror, HostVersion: "2.1.89"},
-	}
-
-	for _, tc := range existing {
-		for i := range tools {
-			if tools[i].name == tc.Name {
-				tools[i].enabled = tc.Enabled
-				tools[i].mode = tc.Mode
-				if tools[i].hostVersion == "" && tc.HostVersion != "" {
-					tools[i].hostVersion = tc.HostVersion
-				}
-				break
-			}
-		}
-	}
-
-	if tools[0].hostVersion != "2.1.89" {
-		t.Errorf("hostVersion should fall back to config value 2.1.89, got %q", tools[0].hostVersion)
 	}
 }
 

@@ -2672,12 +2672,12 @@ func TestCooperApp_PerToolDockerfiles(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	cfg.AITools = []config.ToolConfig{
-		{Name: "claude", Enabled: true},
-		{Name: "copilot", Enabled: true},
-		{Name: "codex", Enabled: true},
-		{Name: "opencode", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.3.7"},
-		{Name: "grok", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.0.4"},
-		{Name: "antigravity", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.2.2", AntigravityReleases: antigravity.KnownReleases("1.2.2")},
+		{Name: "claude", Enabled: true, Mode: config.ModeMirror, HostVersion: "2.1.87"},
+		{Name: "copilot", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.0.12"},
+		{Name: "codex", Enabled: true, Mode: config.ModeMirror, HostVersion: "0.117.0"},
+		{Name: "opencode", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.3.7"},
+		{Name: "grok", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.0.4"},
+		{Name: "antigravity", Enabled: true, Mode: config.ModeMirror, HostVersion: "1.2.2", AntigravityReleases: antigravity.KnownReleases("1.2.2")},
 	}
 
 	// Render per-tool Dockerfiles and verify they reference the base image.

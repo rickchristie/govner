@@ -20,7 +20,7 @@ const (
 	saveQuit
 )
 
-// saveModel manages the Save & Build screen.
+// saveModel manages the configuration save actions.
 type saveModel struct {
 	cfg                 *config.Config
 	cooperDir           string
@@ -56,7 +56,7 @@ func (m *saveModel) update(msg tea.Msg) saveResult {
 			return saveBack
 		case "enter":
 			m.saveRequested = true
-			m.buildRequested = true
+			m.buildRequested = m.focusBtn == 0
 			return saveQuit
 		case "s":
 			m.saveRequested = true
@@ -101,7 +101,7 @@ func (m *saveModel) update(msg tea.Msg) saveResult {
 
 func (m *saveModel) view(width, height int) string {
 	breadcrumb := breadcrumbStyle().Render(theme.BarrelEmoji+" Configure > ") +
-		lipgloss.NewStyle().Foreground(theme.ColorAmber).Bold(true).Render("Save & Build")
+		lipgloss.NewStyle().Foreground(theme.ColorAmber).Bold(true).Render("Save Configuration")
 
 	header := breadcrumb
 
@@ -177,7 +177,7 @@ func (m *saveModel) view(width, height int) string {
 	actionBox := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
 		BorderForeground(theme.ColorOakLight).
-		Padding(1, 2).
+		Padding(0, 2).
 		Width(min(72, width-4))
 
 	saveBuildBtn := lipgloss.NewStyle().Foreground(theme.ColorProof).Bold(true).
@@ -185,12 +185,16 @@ func (m *saveModel) view(width, height int) string {
 	cleanBuildBtn := lipgloss.NewStyle().Foreground(theme.ColorFlame).
 		Render("[c Clean Build]")
 	saveOnlyBtn := lipgloss.NewStyle().Foreground(theme.ColorAmber).
-		Render("[s Save Only]")
+		Render("[s Save Config]")
 	cancelBtn := lipgloss.NewStyle().Foreground(theme.ColorDusty).
 		Render("[Esc Cancel]")
 
 	boxWidth := min(66, width-12)
-	inner := center("Save configuration and build images?", boxWidth) + "\n\n" +
+	if m.focusBtn == 1 {
+		saveBuildBtn = lipgloss.NewStyle().Foreground(theme.ColorDusty).Render("[Save & Build]")
+		saveOnlyBtn = lipgloss.NewStyle().Foreground(theme.ColorProof).Bold(true).Render("[Enter Save Config]")
+	}
+	inner := center("Save configuration now, or save and build images.", boxWidth) + "\n\n" +
 		center(saveBuildBtn+"   "+cleanBuildBtn, boxWidth) + "\n" +
 		center(saveOnlyBtn+"   "+cancelBtn, boxWidth)
 
@@ -199,9 +203,11 @@ func (m *saveModel) view(width, height int) string {
 	footer := " " + helpBar(
 		"["+theme.IconArrowUp+theme.IconArrowDown+" Scroll]",
 		"[PgUp/PgDn]",
-		"[Enter Build]",
+		"[Left/Right Action]",
+	) + "\n " + helpBar(
+		"[Enter Select]",
+		"[s Save Config]",
 		"[c Clean]",
-		"[s Save]",
 		"[Esc]",
 	)
 

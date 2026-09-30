@@ -1,12 +1,14 @@
 package vmdev
 
 import (
-	"github.com/rickchristie/govner/cooper/internal/config"
 	"testing"
+
+	"github.com/rickchristie/govner/cooper/internal/aitool"
+	"github.com/rickchristie/govner/cooper/internal/config"
 )
 
 func TestPreparationSelectsExactlyOneAgent(t *testing.T) {
-	for agent, version := range AgentVersions {
+	for _, agent := range aitool.Names() {
 		cfg, err := ConfigFor(agent)
 		if err != nil {
 			t.Fatal(err)
@@ -15,8 +17,8 @@ func TestPreparationSelectsExactlyOneAgent(t *testing.T) {
 			t.Fatalf("%s would prepare unrelated tools: %#v", agent, cfg)
 		}
 		selected := cfg.AITools[0]
-		if selected.Name != agent || !selected.Enabled || selected.Mode != config.ModePin || selected.PinnedVersion != version {
-			t.Fatalf("selected agent was not pinned: %#v", selected)
+		if selected.Name != agent || !selected.Enabled || selected.Mode != config.ModeMirror || selected.PinnedVersion != "" {
+			t.Fatalf("selected agent does not mirror the host: %#v", selected)
 		}
 	}
 	cfg, err := ConfigFor(TestAgent)

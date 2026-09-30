@@ -2412,10 +2412,10 @@ func run() error {
 		// bind mount at runtime.
 		command = "exec /opt/cooper/bin/opencode"
 	case "codex":
-		// Keep this clipboard test independent of Codex onboarding and online
-		// startup work. The pinned image contains this model, and Cooper uses
-		// the same allow-all flag for a normal Codex session.
-		command = "exec /opt/cooper/npm/bin/codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.4 -c check_for_update_on_startup=false -c features.plugins=false -C /tmp"
+		// Use the mirrored CLI's default model. A fixed model can trigger a
+		// retirement dialog in a newer host version and block the paste check.
+		// Cooper uses the same allow-all flag for a normal Codex session.
+		command = "exec /opt/cooper/npm/bin/codex --dangerously-bypass-approvals-and-sandbox -c check_for_update_on_startup=false -c features.plugins=false -C /tmp"
 	default:
 		return fmt.Errorf("unsupported tool %q", *tool)
 	}
@@ -2437,8 +2437,11 @@ func run() error {
 	isReady := func(snapshot tuidriver.Snapshot) bool {
 		screen := snapshot.String()
 		if *tool == "codex" {
+			// Newer versions draw the prompt before the model is ready. Wait
+			// for the model status line so startup does not discard Ctrl-V.
 			return strings.Contains(screen, "OpenAI Codex") &&
-				strings.Contains(screen, "model:")
+				(strings.Contains(screen, "model:") ||
+					(strings.Contains(screen, "permissions:") && strings.Contains(screen, " · /tmp")))
 		}
 		return strings.Contains(screen, "Ask anything")
 	}
@@ -2868,8 +2871,8 @@ else
 fi
 
 # Seed only the isolated E2E state mount. Trusting /tmp avoids a local
-# onboarding screen that uses an alternate terminal buffer. The pinned model
-# and disabled online startup work keep this test focused on clipboard paste.
+# onboarding screen that uses an alternate terminal buffer. Use the mirrored
+# CLI's default model and disable unrelated online startup work.
 # The TUI never submits a prompt, so the fake key cannot incur API usage.
 if barrel_exec \
     'printf "%s\n" "[projects.\"/tmp\"]" "trust_level = \"trusted\"" > "$HOME/.codex/config.toml" && printf "sk-e2e-clipboard-sanity\n" | /opt/cooper/npm/bin/codex login --with-api-key >/tmp/e2e-codex-login.log 2>&1'; then
