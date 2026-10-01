@@ -134,6 +134,9 @@ func runVM(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("specify a tool: cooper vm <tool-name>")
 	}
+	if err := vm.CheckHostSessions(cmd.Context(), args[0]); err != nil {
+		return err
+	}
 	if args[0] == "list" {
 		if len(args) != 1 {
 			return fmt.Errorf("usage: cooper vm list")
@@ -369,6 +372,9 @@ func runVMDoctor(ctx context.Context, cfg *config.Config, cooperDir string) erro
 }
 
 func executeVMSession(ctx context.Context, manager vm.Manager, runtime vm.Runtime, session *launch.Session) error {
+	if err := vm.CheckHostSessions(ctx, runtime.ToolName); err != nil {
+		return err
+	}
 	if session.Interactive {
 		fmt.Fprintf(os.Stdout, "\033]0;%s\007", session.Title)
 		defer func() {

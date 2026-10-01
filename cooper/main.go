@@ -201,6 +201,11 @@ func init() {
 		}
 		docker.SetRuntimeNamespace(runtimeNamespace)
 		docker.SetImagePrefix(imagePrefix)
+		if cmd.Name() == "vm" && len(args) > 0 {
+			if err := vm.CheckHostSessions(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+		}
 		return prepareProfileStore(cmd, args)
 	}
 

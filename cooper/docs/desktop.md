@@ -107,12 +107,26 @@ instance and removes only a proven stale lock from that host. Each Cooper
 desktop has a distinct stable hostname, so a foreign live app lock is not
 mistaken for a stale local process.
 
-To keep the host app open, select separate state explicitly before launch:
+VM mode also checks running host processes before configuration or profile
+changes, before VM startup, and on reconnect or restart. Any visible ChatGPT
+app or Codex CLI process blocks `cooper vm chatgpt`, even when custom state
+paths are selected. The refusal identifies the process and asks you to close
+all host ChatGPT apps and Codex CLI sessions. A failed process scan also
+blocks launch. Cooper does not stop these processes for you.
+
+This check protects the shared SQLite databases. The current virtiofs mount
+does not share file locks or mapped memory correctly between host and guest
+writers. A different conversation still uses the same databases. The check
+cannot prevent future host starts or detect writers in another VM. Keep
+host sessions closed until the VM stops, and do not share this state with
+another VM at the same time.
+
+To keep the host app open in CLI mode, select separate state explicitly:
 
 ```sh
 CODEX_HOME="$HOME/.codex-cooper-desktop" \
 CODEX_ELECTRON_USER_DATA_PATH="$HOME/.config/ChatGPT-Cooper" \
-cooper vm chatgpt
+cooper cli chatgpt
 ```
 
 These are persistent host directories. They start without the normal app's
@@ -168,6 +182,10 @@ Use the prepared development workflow from [TECHNICAL.md](../TECHNICAL.md#prepar
 ./cooper/test-vm-dev.sh parity chatgpt
 ./cooper/test-vm-dev.sh desktop chatgpt
 ```
+
+Run the ChatGPT runtime checks from a terminal with all host ChatGPT apps
+and Codex CLI sessions closed. The VM host process guard also applies to
+these checks.
 
 The desktop fixture uses an empty home, synthetic credentials, and local model
 responses. It starts the real package, drives the host viewer with Playwright,

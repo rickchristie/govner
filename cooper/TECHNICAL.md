@@ -43,6 +43,26 @@ Do not rewrite absolute paths in native session databases. Keep public targets
 unchanged. Do not expose other agents' private roots for session discovery.
 A child symlink does not grant access to a new outside root.
 
+ChatGPT VM launch has a host process guard in
+[internal/chatgpt/process_linux.go](internal/chatgpt/process_linux.go).
+It reads process names and launch arguments from `/proc` and refuses visible
+ChatGPT or Codex processes, including the desktop engine and installed
+launch scripts. It does not read agent state files or process environments,
+and it does not change process state.
+If Cooper cannot read a process, it refuses to start. It ignores a process
+that has exited.
+The `cooper vm chatgpt` command checks before profile or configuration work.
+The VM manager checks before start, after preparation, and before restart
+stops the old VM. Desktop startup also checks after the guest boots. The
+existing Chromium profile lock remains a separate check used by both
+execution modes.
+
+The guard is required because SQLite WAL locks and mapped shared memory do
+not stay in sync between the host and the current virtiofs guest. It applies
+to ChatGPT VM sessions even with explicit state paths. It cannot stop later
+host starts, inspect processes hidden from `/proc`, or find writers in another VM.
+Do not share the selected state with those writers while the VM is running.
+
 Validate direct paths and paths after existing links resolve. Refuse whole-home
 sources, protected sources, and overlaps with Cooper state. A Grok root and
 Cooper's configuration directory must not contain each other. Named profiles
@@ -495,7 +515,9 @@ state or credentials change. Agent preparation uses the live host version.
 Its saved manifest records the version used by subsequent checks.
 
 For desktop changes, run `prepare-agent chatgpt`, `parity chatgpt`, then
-`desktop chatgpt`. Install the browser fixture with `npm ci --prefix
+`desktop chatgpt`. Run the runtime checks from a terminal after closing all
+host ChatGPT apps and Codex CLI sessions. Their presence blocks the checks,
+even though the test uses separate state. Install the browser fixture with `npm ci --prefix
 cooper/dev` and `npm exec --prefix cooper/dev -- playwright install chromium`.
 `NODE_PATH` can select an existing Playwright installation;
 `COOPER_DESKTOP_BROWSER_PATH` can select an installed Chromium executable.

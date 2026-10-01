@@ -105,6 +105,14 @@ keyring cookies require an unlocked host Secret Service. Named ChatGPT
 account profiles cannot yet verify the desktop account identity. See
 [desktop use, state, and verification](docs/desktop.md) for details.
 
+`cooper vm chatgpt` also refuses to start if a host ChatGPT app or Codex CLI
+process is running. The error identifies the process. Close all such host
+sessions and retry. The check also applies to reconnect and restart, even
+with custom state paths. These processes share SQLite databases, whose locks
+and shared memory do not work across the current host/VM filesystem boundary.
+Keep host sessions closed until the VM stops; the launch check cannot prevent
+a new host process from starting later.
+
 ### Grok
 
 Run `grok login --oauth` on the host before launch. Cooper uses `GROK_HOME`

@@ -15,6 +15,9 @@ import (
 // StartDesktop applies the same credentials and session environment used by
 // the launch command. Restart callers must not keep a saved copy of secrets.
 func (m Manager) StartDesktop(ctx context.Context, runtime Runtime) error {
+	if err := CheckHostSessions(ctx, runtime.ToolName); err != nil {
+		return err
+	}
 	metadata, err := loadRuntimeMetadata(m.CooperDir, runtime.ID)
 	if err != nil {
 		return err
