@@ -11,7 +11,7 @@ import (
 	"github.com/rickchristie/govner/cooper/internal/templates"
 )
 
-func TestSelfHostProxyAllowsChatGPTPackagesWithCodexOnly(t *testing.T) {
+func TestSelfHostProxyAllowsBuildPackagesWithCodexOnly(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.AITools = []config.ToolConfig{{Name: "codex", Enabled: true}}
 	appendSelfHostDomains(cfg)
@@ -20,7 +20,8 @@ func TestSelfHostProxyAllowsChatGPTPackagesWithCodexOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reload applies the selected-agent domain rules. The outer Codex VM must
-	// retain the package host needed by the complete nested Go test suite.
+	// retain the package hosts needed by the complete nested Go test suite,
+	// including Squid's GitHub release URL and its download redirect.
 	reloaded, err := config.LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
@@ -33,9 +34,11 @@ func TestSelfHostProxyAllowsChatGPTPackagesWithCodexOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "\nacl allowed_domains dstdomain " + packageURL.Hostname() + "\n"
-	if !strings.Contains(rules, want) {
-		t.Fatalf("self-host proxy does not allow the ChatGPT package host %s", packageURL.Hostname())
+	for _, host := range []string{packageURL.Hostname(), "github.com", "release-assets.githubusercontent.com"} {
+		want := "\nacl allowed_domains dstdomain " + host + "\n"
+		if !strings.Contains(rules, want) {
+			t.Errorf("self-host proxy does not allow the package host %s", host)
+		}
 	}
 	if strings.Contains(rules, "\nacl allowed_domains dstdomain vm-blocked.cooper.test\n") {
 		t.Fatal("self-host proxy allows the blocked test host")

@@ -226,6 +226,13 @@ the external network and applies destination and selective TLS policy. Static
 domain rules can splice TLS; path rules and live request review require
 inspection. Unknown restricted Grok API paths fail closed.
 
+The proxy image builds Squid 6.12 from its official GitHub release asset.
+Squid [announced the move from squid-cache.org to GitHub Releases](https://ml-archives.squid-cache.org/squid-users/2025-January/027357.html)
+in January 2025. Keep the archive SHA-256 check before extraction. Use the
+uploaded release archive; GitHub's generated source archives do not include
+the `configure` script. Nested builds need both `github.com` and its download
+host, `release-assets.githubusercontent.com`.
+
 Monitor's exact-host permissions last only for one `cooper up` and apply to
 all attached workloads. Revocation affects later checks; these permissions do
 not edit persistent rules. An allowed destination can receive private data.
@@ -568,12 +575,18 @@ fixtures test presentation, not real runtime behavior. Follow
 
 ### Release gate
 
+Run the full Go, Docker-build, end-to-end, and VM suites one at a time. They
+share the agent-state lock for the host UID. Separate Docker namespaces do
+not prevent VM startup from blocking build authentication setup.
+
 Build metadata reads retry temporary Go and PyPI connection or HTTP failures
 within a fixed attempt limit. Invalid metadata and missing package versions
 still fail immediately. This prevents a short response interruption from
 discarding a build without changing the selected version or registry.
 
-Run the full VM gate only before a release, on the physical Linux host:
+Run the full VM gate only before a release, on the physical Linux host.
+Close host ChatGPT apps and Codex CLI sessions first. The desktop VM launch
+guard also applies to the test's temporary state directories.
 
 ```sh
 timeout 120m ./cooper/test-vm.sh > /tmp/cooper-vm-gate.txt 2>&1
@@ -589,10 +602,14 @@ A failed download or unavailable prerequisite means the affected gate has
 not passed.
 
 The self-host fixture selects Codex for its outer VM, but the nested Go suite
-builds every agent. Its explicit build-domain list must include each agent's
-package hosts, including ChatGPT's `persistent.oaistatic.com`. Keep these as
-exact user rules in the fixture so config reload does not remove hosts for
-agents that are disabled in the outer VM.
+builds every agent. The outer test image includes the real agent binaries
+from the shared test images so nested Mirror detection can read their
+versions. It still mounts only Codex state. The depth-two build selects only
+Codex, so the other test tools do not increase its image archive.
+The explicit build-domain list must include each agent's package hosts,
+including ChatGPT's `persistent.oaistatic.com`. Keep these as exact user rules
+in the fixture so config reload does not remove hosts for agents that are
+disabled in the outer VM.
 
 After all required checks, run the release preview from the repository root:
 

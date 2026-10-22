@@ -625,7 +625,7 @@ func TestCooperVMSelfHosting(t *testing.T) {
 	cooperBinary := requiredFile(t, "COOPER_VM_BINARY")
 	repositoryRoot := repositoryRoot(t)
 
-	lock, err := testdocker.SetupPackageNamed("vm-self-host", false)
+	lock, err := testdocker.SetupPackageNamed("vm-self-host", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -635,13 +635,20 @@ func TestCooperVMSelfHosting(t *testing.T) {
 		}
 	}()
 
+	// AI images mirror the host. Resolve Codex before the driver renders its
+	// templates; an old pinned version cannot supply that required value.
+	codexVersion, err := config.DetectHostVersion("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	driver, err := testdriver.New(testdriver.Options{
 		ImagePrefix:          outerImagePrefix,
 		DisableHostClipboard: true,
 		ConfigMutator: func(cfg *config.Config) {
 			cfg.MonitorTimeoutSecs = 1
 			cfg.ProgrammingTools = []config.ToolConfig{{Name: "go", Enabled: true, Mode: config.ModePin, PinnedVersion: "1.25.0", ContainerVersion: "1.25.0"}}
-			cfg.AITools = []config.ToolConfig{{Name: "codex", Enabled: true, Mode: config.ModePin, PinnedVersion: "0.117.0", ContainerVersion: "0.117.0"}}
+			cfg.AITools = []config.ToolConfig{{Name: "codex", Enabled: true, Mode: config.ModeMirror, HostVersion: codexVersion, ContainerVersion: codexVersion}}
 			cfg.VM = config.VMConfig{CPUs: 8, MemoryMiB: 12288, DiskGiB: 32, MaxDepth: 2, StartTimeoutS: 300, StopTimeoutS: 15}
 			appendSelfHostDomains(cfg)
 		},
@@ -664,6 +671,7 @@ func TestCooperVMSelfHosting(t *testing.T) {
 	if err := driver.BuildConfiguredImages(os.Stderr); err != nil {
 		t.Fatal(err)
 	}
+	buildSelfHostAgentImage(t, driver, codexVersion)
 	if err := (vm.InfrastructureImages{
 		CooperDir: driver.CooperDir(), Prefix: outerImagePrefix,
 		Executable: cooperBinary, Out: os.Stderr,
@@ -703,11 +711,12 @@ func TestCooperVMSelfHosting(t *testing.T) {
 	stageFile(t, preparedBase, stagedBase)
 	stageFile(t, preparedBase+".json", stagedBase+".json")
 	nestedConfig := config.DefaultConfig()
+	nestedConfig.AITools = []config.ToolConfig{{Name: "codex", Enabled: true, Mode: config.ModeMirror}}
 	nestedConfig.ProxyPort = 41281
 	nestedConfig.BridgePort = 41282
 	nestedConfig.MonitorTimeoutSecs = 1
-	// A depth-two VM imports the full Codex development image through nested
-	// virtualization. A 3.01 GB archive did not finish loading in 15 minutes
+	// A depth-two VM imports its Codex image through nested virtualization.
+	// An earlier 3.01 GB development archive did not load in 15 minutes
 	// with two CPUs, 3 GiB of memory, and a 16 GiB disk. Use the documented
 	// self-host resource profile and keep a measured, bounded cold-start wait.
 	nestedConfig.VM = config.VMConfig{CPUs: 4, MemoryMiB: 4096, DiskGiB: 24, MaxDepth: 2, StartTimeoutS: 1200, StopTimeoutS: 15}
@@ -771,8 +780,9 @@ cp %s "${HOME}/.cooper/vm/assets/schema-1/cooper-guest-base.qcow2"
 cp %s "${HOME}/.cooper/vm/assets/schema-1/cooper-guest-base.qcow2.json"
 cp %s "${HOME}/.cooper/config.json"
 chmod 0444 "${HOME}/.cooper/vm/assets/schema-1/cooper-guest-base.qcow2" "${HOME}/.cooper/vm/assets/schema-1/cooper-guest-base.qcow2.json"
-docker tag %s %s
 
+# Build a regular Codex image for depth two. The other agents in the outer
+# image are needed only by the complete Go suite.
 if ! "$self_host_binary" --config "${HOME}/.cooper" --prefix %s --runtime-namespace %s build >/tmp/self-host-docker-build.log 2>&1; then
     tail -n 300 /tmp/self-host-docker-build.log >&2
     exit 54
@@ -798,7 +808,6 @@ fi
 grep -Fq NESTED_COOPER_HARNESS_OK /tmp/self-host-nested.log
 printf 'SELF_HOST_DEPTH_TWO_OK\n'
 `, shellQuote(stagedBinary), shellQuote(stagedBase), shellQuote(stagedBase+".json"), shellQuote(stagedConfig),
-		shellQuote(docker.GetImageCLI("codex")), shellQuote(selfImagePrefix+"cooper-cli-codex"),
 		shellQuote(selfImagePrefix), shellQuote(selfNamespace),
 		shellQuote(selfImagePrefix+"cooper-proxy"), shellQuote(selfImagePrefix+"cooper-base"))
 	output := execVM(t, manager, outerRuntime, selfHostScript)
@@ -823,6 +832,52 @@ printf 'SELF_HOST_DEPTH_TWO_OK\n'
 		t.Fatal(err)
 	}
 	assertRuntimeRemoved(t, outerRuntime)
+}
+
+func buildSelfHostAgentImage(t *testing.T, driver *testdriver.Driver, codexVersion string) {
+	t.Helper()
+	account, err := usercontext.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The nested suite builds every agent in Mirror mode. Give its host the
+	// real tools from the shared test images, including ChatGPT's package and
+	// system libraries. Only Codex state is mounted when this image starts.
+	// Merge the tool files in a build stage to avoid repeated base-tool layers
+	// in the image archive that must cross the outer VM boundary.
+	desktopImage := testdocker.ImagePrefix + "cooper-cli-chatgpt"
+	codexImage := docker.GetImageCLI("codex")
+	var recipe strings.Builder
+	fmt.Fprintf(&recipe, "FROM %s AS tools\n", desktopImage)
+	for _, name := range []string{"claude", "copilot", "opencode", "grok", "antigravity"} {
+		fmt.Fprintf(&recipe, "COPY --from=%scooper-cli-%s /opt/cooper/ /opt/cooper/\n", testdocker.ImagePrefix, name)
+	}
+	fmt.Fprintf(&recipe, `COPY --from=%s /opt/cooper/ /opt/cooper/
+FROM %s
+USER root
+COPY --from=tools /opt/cooper/ /opt/cooper/
+# Go source trees cannot be merged across versions. Remove the old tree
+# before copying the outer fixture's Go and Node installations.
+RUN rm -rf /usr/local/go
+COPY --from=%s /usr/local/ /usr/local/
+COPY --from=%s /entrypoint.sh /entrypoint.sh
+COPY --from=%s /etc/cooper/account.json /etc/cooper/account.json
+ENV HOME=%q
+RUN usermod --home "$HOME" "$COOPER_USER_NAME" \
+    && install -d -m 0700 -o "$COOPER_USER_NAME" -g "$COOPER_USER_GROUP" "$HOME"
+LABEL cooper.account=%q cooper.ai-tool="codex" cooper.ai-version=%q
+ENV COOPER_CLI_TOOL=codex COOPER_CLI_EXECUTABLE=codex COOPER_CLI_AUTO_APPROVE=""
+ENV COOPER_DESKTOP=0 CODEX_CLI_PATH="" COOPER_CLIPBOARD_MODE=x11
+USER ${COOPER_USER_NAME}
+RUN GOCACHE=/tmp/cooper-go-check go build std && rm -rf /tmp/cooper-go-check
+RUN claude --version && copilot --version && codex --version \
+    && opencode --version && grok --version && agy --version \
+    && test -s /usr/lib/chatgpt/resources/linux-package-metadata.json
+`, codexImage, desktopImage, codexImage, codexImage, codexImage, account.Home, account.Label(), codexVersion)
+	if err := driver.BuildCustomToolImage("codex", recipe.String()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func assertHostFileOwner(t *testing.T, path string, uid, gid int) {
@@ -1385,7 +1440,8 @@ func appendSelfHostDomains(cfg *config.Config) {
 		"dl-cdn.alpinelinux.org",
 		"deb.debian.org",
 		"nodejs.org",
-		"www.squid-cache.org",
+		// Squid release archives use GitHub and its release asset host below.
+		"github.com",
 		"claude.ai",
 		"downloads.claude.ai",
 		"release-assets.githubusercontent.com",

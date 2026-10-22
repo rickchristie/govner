@@ -1226,7 +1226,10 @@ func TestRenderProxyDockerfile(t *testing.T) {
 	// Squid must include support for selective TLS inspection.
 	assertContains(t, result, "--enable-ssl-crtd")
 	assertContains(t, result, "--with-openssl")
-	assertContains(t, result, "https://www.squid-cache.org/Versions/v6/squid-${SQUID_VERSION}.tar.xz")
+	assertContains(t, result, "ARG SQUID_VERSION=6.12")
+	assertContains(t, result, `squid_tag="SQUID_$(printf '%s' "$SQUID_VERSION" | tr . _)"`)
+	assertContains(t, result, "https://github.com/squid-cache/squid/releases/download/${squid_tag}/squid-${SQUID_VERSION}.tar.xz")
+	assertNotContains(t, result, "www.squid-cache.org/Versions/")
 	assertContains(t, result, "f3df3abb2603a513266f24a5d4699a9f0d76b9f554d1848b67f9c51cd3b3cb50")
 
 	// Should have security_file_certgen for dynamic cert generation

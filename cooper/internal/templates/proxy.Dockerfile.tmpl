@@ -57,9 +57,12 @@ RUN set -eu; \
     done
 
 ARG SQUID_VERSION=6.12
-RUN curl --fail --show-error --silent --location --http1.1 --retry 5 --retry-all-errors \
+# Squid moved release archives to GitHub. Use the release asset because GitHub's
+# generated source archives do not include the configure script.
+RUN squid_tag="SQUID_$(printf '%s' "$SQUID_VERSION" | tr . _)" && \
+    curl --fail --show-error --silent --location --http1.1 --retry 5 --retry-all-errors \
         -o /tmp/squid-${SQUID_VERSION}.tar.xz \
-        "https://www.squid-cache.org/Versions/v6/squid-${SQUID_VERSION}.tar.xz" && \
+        "https://github.com/squid-cache/squid/releases/download/${squid_tag}/squid-${SQUID_VERSION}.tar.xz" && \
     echo "f3df3abb2603a513266f24a5d4699a9f0d76b9f554d1848b67f9c51cd3b3cb50  /tmp/squid-${SQUID_VERSION}.tar.xz" | sha256sum -c && \
     mkdir -p /tmp/squid-build && \
     cd /tmp/squid-build && \
