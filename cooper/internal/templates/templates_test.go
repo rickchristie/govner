@@ -1,7 +1,9 @@
 package templates
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -421,6 +423,69 @@ func TestRenderBaseDockerfile_InstallsImplicitTools(t *testing.T) {
 	assertContains(t, result, "typescript@")
 	assertContains(t, result, "pyright@")
 	assertContains(t, result, "python-lsp-server==")
+}
+
+func TestPythonLSPInstallRetriesAreBounded(t *testing.T) {
+	cfg := testConfig()
+	result, err := RenderBaseDockerfile(cfg, resolveImplicitForTest(t, cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, block, ok := strings.Cut(result, "# python-lsp-server follows")
+	if !ok {
+		t.Fatal("Python LSP install block is missing")
+	}
+	_, block, ok = strings.Cut(block, "\nRUN ")
+	if !ok {
+		t.Fatal("Python LSP install command is missing")
+	}
+	block, _, _ = strings.Cut(block, "\n\n")
+	block = strings.ReplaceAll(block, "\\\n", "")
+	// Execute the rendered shell with controlled install failures. This checks
+	// that retry success and exhaustion keep their correct exit status.
+	const commands = `
+pip_calls=0
+timeout() {
+    [ "$1" = --signal=TERM ] && [ "$2" = --kill-after=10s ] && [ "$3" = 2m ] || return 91
+    shift 3
+    "$@"
+}
+python3() {
+    if [ "$3" = show ]; then printf 'PIP_SHOW\n'; return 0; fi
+    case " $* " in *' --no-cache-dir '*) ;; *) return 92 ;; esac
+    case " $* " in *' python-lsp-server==1.12.0 '*) ;; *) return 93 ;; esac
+    pip_calls=$((pip_calls + 1))
+    printf 'PIP_INSTALL\n'
+    [ "$pip_calls" -gt "$COOPER_TEST_PIP_FAILURES" ]
+}
+sleep() { :; }
+pylsp() { :; }
+`
+	for _, test := range []struct {
+		name     string
+		failures int
+		attempts int
+		wantOK   bool
+	}{
+		{"first attempt", 0, 1, true},
+		{"partial downloads", 2, 3, true},
+		{"persistent failure", 9, 5, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := exec.CommandContext(t.Context(), "sh", "-c", commands+block)
+			command.Env = append(os.Environ(), fmt.Sprintf("COOPER_TEST_PIP_FAILURES=%d", test.failures))
+			output, err := command.CombinedOutput()
+			if (err == nil) != test.wantOK {
+				t.Fatalf("install exit = %v, want success %t:\n%s", err, test.wantOK, output)
+			}
+			if got := strings.Count(string(output), "PIP_INSTALL\n"); got != test.attempts {
+				t.Fatalf("install attempts = %d, want %d:\n%s", got, test.attempts, output)
+			}
+			if strings.Contains(string(output), "PIP_SHOW\n") != test.wantOK {
+				t.Fatalf("package validation ran after a failed install:\n%s", output)
+			}
+		})
+	}
 }
 
 func TestRenderBaseDockerfile_ImplicitToolsAppearBeforeRuntimeProxyEnv(t *testing.T) {

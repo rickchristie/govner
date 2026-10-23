@@ -101,7 +101,7 @@ func (m Manager) Start(ctx context.Context, request StartRequest) (Runtime, erro
 	if err := m.validate(); err != nil {
 		return Runtime{}, err
 	}
-	if err := CheckHostSessions(ctx, request.ToolName); err != nil {
+	if err := m.checkHostSessions(ctx, request); err != nil {
 		return Runtime{}, err
 	}
 	stateLock, err := statelock.Acquire(ctx, false)
@@ -232,7 +232,7 @@ func (m Manager) startLocked(ctx context.Context, request StartRequest, runtime 
 	}
 	// Preparation can take time. Refuse a host app that started during it
 	// before the guest gets access to the shared databases.
-	if err := CheckHostSessions(ctx, request.ToolName); err != nil {
+	if err := m.checkHostSessions(ctx, request); err != nil {
 		return Runtime{}, err
 	}
 	if err := os.MkdirAll(runtime.RuntimeDir, 0o700); err != nil {
@@ -310,6 +310,9 @@ func (m Manager) resolveMountPlan(request StartRequest, runtimeID string) ([]wor
 		Agent: request.profilePaths,
 	})
 	if err != nil {
+		return nil, nil, "", err
+	}
+	if err := m.checkTestStateMounts(request.ToolName, input.Agent.Mounts); err != nil {
 		return nil, nil, "", err
 	}
 	if err := workload.EnsureDirectories(input); err != nil {
@@ -836,7 +839,7 @@ func (m Manager) Restart(ctx context.Context, runtimeID string) (Runtime, error)
 		return Runtime{}, err
 	}
 	request := metadata.startRequest()
-	if err := CheckHostSessions(ctx, request.ToolName); err != nil {
+	if err := m.checkHostSessions(ctx, request); err != nil {
 		return Runtime{}, err
 	}
 	if err := m.resolveProfile(ctx, &request); err != nil {
@@ -859,7 +862,7 @@ func (m Manager) Restart(ctx context.Context, runtimeID string) (Runtime, error)
 		}
 	}
 	runtime := runtimeFor(m.CooperDir, request, metadata.Depth)
-	if err := CheckHostSessions(ctx, request.ToolName); err != nil {
+	if err := m.checkHostSessions(ctx, request); err != nil {
 		return Runtime{}, err
 	}
 	if err := m.Stop(ctx, runtime); err != nil {

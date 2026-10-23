@@ -257,10 +257,26 @@ RUN npm install -g pyright@{{.PythonPyrightVersion}} \
 {{- if .PythonPylspVersion}}
 # python-lsp-server follows the configured Python version, but Cooper still
 # installs Debian's default python3 runtime in the image.
-RUN python3 -m pip install --user "python-lsp-server=={{.PythonPylspVersion}}" \
-    --break-system-packages \
-    && command -v pylsp \
-    && python3 -m pip show python-lsp-server
+# Retry full installs because older pip versions can stop on a partial wheel
+# transfer. Keep checksum checks and use fresh downloads for each attempt.
+# Docker caches the completed layer, so this step does not need pip's cache.
+RUN set -eu; \
+    attempt=1; \
+    max_attempts=5; \
+    while ! timeout --signal=TERM --kill-after=10s 2m \
+        python3 -m pip install --user --no-cache-dir \
+        "python-lsp-server=={{.PythonPylspVersion}}" --break-system-packages; do \
+      if [ "$attempt" -ge "$max_attempts" ]; then \
+        echo "python-lsp-server install failed after $attempt attempts" >&2; \
+        exit 1; \
+      fi; \
+      delay=$((attempt * 2)); \
+      echo "python-lsp-server install attempt $attempt/$max_attempts failed; retrying in ${delay}s" >&2; \
+      sleep "$delay"; \
+      attempt=$((attempt + 1)); \
+    done; \
+    command -v pylsp; \
+    python3 -m pip show python-lsp-server
 {{- end}}
 
 # ============================================================================

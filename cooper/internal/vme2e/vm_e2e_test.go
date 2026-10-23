@@ -314,17 +314,22 @@ func TestSecureVMFeatureMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	homeDir := driver.HomeDir()
-	clearAgentStatePaths(t)
-	t.Setenv("HOME", homeDir)
-	t.Setenv("GROK_HOME", filepath.Join(homeDir, "grok-state"))
-	writeFile(t, filepath.Join(homeDir, ".gitconfig"), "[user]\n\tname = Cooper VM Test\n")
 	defer func() {
 		docker.SetRuntimeNamespace(vmE2ENamespace)
 		if err := driver.Close(); err != nil {
 			t.Errorf("close VM test driver: %v", err)
 		}
 	}()
+	homeDir := driver.HomeDir()
+	clearAgentStatePaths(t)
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GROK_HOME", filepath.Join(homeDir, "grok-state"))
+	releaseTestHome, err := vm.RegisterIsolatedTestHome(homeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseTestHome()
+	writeFile(t, filepath.Join(homeDir, ".gitconfig"), "[user]\n\tname = Cooper VM Test\n")
 	docker.SetRuntimeNamespace(vmE2ENamespace)
 
 	if err := driver.BuildCustomToolImage(vmTestTool, "FROM "+docker.GetImageBase()+"\nENV COOPER_CLI_TOOL="+vmTestTool+"\nENV COOPER_CLIPBOARD_MODE=shim\n"); err != nil {
@@ -951,6 +956,11 @@ func runBuiltInParityMatrix(t *testing.T, driver *testdriver.Driver, homeDir, pr
 		t.Run("built-in-parity-"+agent.name, func(t *testing.T) {
 			startedAgents = append(startedAgents, agent)
 			workspace := t.TempDir()
+			if agent.name == "chatgpt" {
+				// The test exception permits only paths below the registered
+				// private home, including the workspace that the guest can write.
+				workspace = filepath.Join(homeDir, "chatgpt-workspace")
+			}
 			writeFile(t, filepath.Join(workspace, "parity-workspace"), agent.name+"\n")
 			writeNativeProbe(t, agent.name, workspace)
 

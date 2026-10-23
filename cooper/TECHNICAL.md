@@ -63,6 +63,21 @@ to ChatGPT VM sessions even with explicit state paths. It cannot stop later
 host starts, inspect processes hidden from `/proc`, or find writers in another VM.
 Do not share the selected state with those writers while the VM is running.
 
+The release VM test can call `vm.RegisterIsolatedTestHome` before it writes
+fixture state. Go's `testing.Testing()` check rejects this call in a normal
+binary. Registration accepts only an empty directory owned by the current
+user with mode `0700` and no symlink parents. It exists only in the test
+process and ends before fixture cleanup. There is no CLI flag, environment
+switch, or saved setting for this exception.
+
+Each test launch rechecks the directory identity and permissions. Its
+workspace and all selected state sources and targets must be children of the
+registered home. Named profiles, symlinks, and hard-linked files are refused.
+The mount and desktop paths also check their resolved state sources. The
+normal process guard still applies to every unregistered home and to CLI
+launches. This lets the release test run while its controlling Codex session
+is open without mounting that session's live databases.
+
 Validate direct paths and paths after existing links resolve. Refuse whole-home
 sources, protected sources, and overlaps with Cooper state. A Grok root and
 Cooper's configuration directory must not contain each other. Named profiles
@@ -470,6 +485,14 @@ locks protect shared test images. `GOFLAGS=-p=1` can avoid package lock waits
 without changing coverage. Do not claim an excluded package set passed the
 full suite.
 
+Shared-lock waits count toward Go's default ten-minute package timeout. If
+that limit interrupts the full suite, repeat it with serial packages and the
+same sixty-minute limit used by the nested release tests:
+
+```sh
+go test -C ./cooper -p=1 ./... -timeout=60m > /tmp/cooper-go-test.txt 2>&1
+```
+
 The Docker matrix has `mirror`, `latest`, `pinned`, `all`, and `clean`
 modes. Mirror requires real host binaries for enabled tools, not version stubs.
 Linux shell E2E needs `ss` from iproute2. For exact test-image cleanup:
@@ -584,9 +607,17 @@ within a fixed attempt limit. Invalid metadata and missing package versions
 still fail immediately. This prevents a short response interruption from
 discarding a build without changing the selected version or registry.
 
+The Python language-server install also retries up to five times, with a
+two-minute limit per attempt. Older pip versions can treat a partial wheel
+transfer as a final checksum error. Each attempt keeps the pinned server
+version and checksum validation, and uses `--no-cache-dir` to request fresh
+downloads. Docker caches the completed install layer. A persistent failure
+still stops the build.
+
 Run the full VM gate only before a release, on the physical Linux host.
-Close host ChatGPT apps and Codex CLI sessions first. The desktop VM launch
-guard also applies to the test's temporary state directories.
+The release matrix registers its empty private home for the test-only
+exception described above. Host ChatGPT apps and Codex CLI sessions can stay
+open. A normal ChatGPT VM launch still requires those sessions to be closed.
 
 ```sh
 timeout 120m ./cooper/test-vm.sh > /tmp/cooper-vm-gate.txt 2>&1
@@ -622,7 +653,8 @@ it does not publish the release. Review and execute only those commands, with
 explicit release authority. Keep the private
 `/tmp/cooper-release-tag-message.*` file until its printed `git tag -F` step
 has completed. The commands use the Cooper module tag prefix, `origin`, and
-non-force pushes. They also check the exact remote refs and module version.
+non-force pushes. Before tagging, check that the remote version tag does not
+exist. After pushing, check its commit and the exact module version.
 
 Check the downloaded module archive and install it to a temporary `GOBIN`
 before declaring the release complete. Verify all embedded desktop files
