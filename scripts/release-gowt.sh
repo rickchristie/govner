@@ -10,6 +10,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 GOWT_DIR="$REPO_ROOT/gowt"
 
+# Publish each release from the completed main history.
+cd "$REPO_ROOT"
+if [[ "$(git symbolic-ref --quiet --short HEAD)" != "main" ]]; then
+    echo "Error: Run the release preview from main."
+    exit 1
+fi
+
 # Extract version from meta/version.go
 VERSION=$(grep -oP 'Version\s*=\s*"\K[^"]+' "$GOWT_DIR/meta/version.go")
 if [[ -z "$VERSION" ]]; then
@@ -85,8 +92,8 @@ echo "# Step 1: Create the annotated tag:"
 # following a pre-created symlink at a predictable path.
 printf 'git tag -a %q -F %q\n' "$TAG_NAME" "$TAG_MESSAGE_FILE"
 echo ""
-echo "# Step 2: Push the tag to remote:"
-printf 'git push origin %q\n' "$TAG_NAME"
+echo "# Step 2: Push main and the tag together; reject both if either update fails:"
+printf 'git push --atomic origin main %q\n' "$TAG_NAME"
 echo ""
 echo "# Step 3: Trigger Go proxy to index the new version:"
 echo "GOPROXY=https://proxy.golang.org go list -m github.com/rickchristie/govner/gowt@v$VERSION > /tmp/gowt-release-index.txt 2>&1"

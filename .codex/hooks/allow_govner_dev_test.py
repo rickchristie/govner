@@ -249,6 +249,18 @@ class AllowGovnerDevTest(unittest.TestCase):
             with self.subTest(script=script):
                 self.assertTrue(script.is_file(), f"missing reviewed script {script}")
 
+    def test_manual_scripts_are_not_auto_approved(self) -> None:
+        for script in allow_govner_dev.MANUALLY_REVIEWED_SCRIPTS:
+            relative = script.relative_to(REPO_ROOT)
+            for prefix in ("", "bash "):
+                with self.subTest(script=relative, prefix=prefix):
+                    self.assertFalse(
+                        allow_govner_dev.is_allowed(
+                            f"{prefix}./{relative} > /tmp/govner-manual-script.txt 2>&1",
+                            cwd=REPO_ROOT,
+                        )
+                    )
+
     def test_every_repository_shell_script_has_an_explicit_policy(self) -> None:
         result = subprocess.run(
             [
@@ -333,6 +345,9 @@ class AllowGovnerDevTest(unittest.TestCase):
             "cooper: VM Unit",
             "cooper: VM Prepare",
             "cooper: VM Smoke (Prepared Inputs)",
+            "cooper: Antigravity VM Prepare",
+            "cooper: Antigravity VM Parity",
+            "cooper: Antigravity VM Profiles",
         }
         manual_tasks = {"cooper: VM Release Gate (Release Only)"}
         build_tasks = {"cooper: Build", "pgflock: Build"}
@@ -442,6 +457,17 @@ class AllowGovnerDevTest(unittest.TestCase):
             dir="/tmp",
         ) as directory:
             fixture = Path(directory)
+
+            def run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    args,
+                    cwd=fixture,
+                    check=check,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+
             for project in allow_govner_dev.PROJECT_ROOTS:
                 script = REPO_ROOT / f"scripts/release-{project}.sh"
                 destination = fixture / "scripts" / script.name
@@ -456,7 +482,7 @@ class AllowGovnerDevTest(unittest.TestCase):
                 )
 
             git_commands = [
-                ["git", "init", "-q"],
+                ["git", "init", "-q", "-b", "main"],
                 ["git", "config", "user.name", "Govner Hook Test"],
                 [
                     "git",
@@ -473,14 +499,26 @@ class AllowGovnerDevTest(unittest.TestCase):
                 ],
             ]
             for command in git_commands:
-                subprocess.run(
-                    command,
-                    cwd=fixture,
-                    check=True,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
+                run(*command)
+
+            # No preview may publish unfinished branch work or detached HEAD.
+            for checkout in (("-b", "feature"), ("--detach",)):
+                run("git", "checkout", *checkout)
+                for project in allow_govner_dev.PROJECT_ROOTS:
+                    with self.subTest(project=project, checkout=checkout):
+                        result = run(
+                            "bash", f"./scripts/release-{project}.sh", check=False,
+                        )
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("Run the release preview from main", result.stdout)
+                        self.assertNotIn("git tag ", result.stdout)
+                        self.assertNotIn("git push ", result.stdout)
+                run("git", "checkout", "main")
+
+            remote = fixture / "remote.git"
+            run("git", "init", "--bare", "-q", str(remote))
+            run("git", "remote", "add", "origin", str(remote))
+            run("git", "push", "origin", "main")
 
             expected_counts = {"cooper": 7, "gowt": 3, "pgflock": 3}
             command_prefixes = (
@@ -491,14 +529,7 @@ class AllowGovnerDevTest(unittest.TestCase):
                 "GOPROXY=",
             )
             for project, expected_count in expected_counts.items():
-                result = subprocess.run(
-                    ["bash", f"./scripts/release-{project}.sh"],
-                    cwd=fixture,
-                    check=True,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
+                result = run("bash", f"./scripts/release-{project}.sh")
                 commands = [
                     line
                     for line in result.stdout.splitlines()
@@ -534,31 +565,54 @@ class AllowGovnerDevTest(unittest.TestCase):
                 )
                 self.assertNotIn("$'", tag_command)
                 tag_tokens = shlex.split(tag_command)
-                subprocess.run(
-                    tag_tokens,
-                    cwd=fixture,
-                    check=True,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
+                run(*tag_tokens)
                 tag = allow_govner_dev.project_release_tag(project)
                 self.assertIsNotNone(tag)
-                message = subprocess.run(
-                    [
-                        "git",
-                        "for-each-ref",
-                        "--format=%(contents)",
-                        f"refs/tags/{tag}",
-                    ],
-                    cwd=fixture,
-                    check=True,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                message = run(
+                    "git", "for-each-ref", "--format=%(contents)", f"refs/tags/{tag}",
                 ).stdout
                 self.assertIn('fixture subject with "quotes" and $(literal)', message)
                 Path(tag_tokens[-1]).unlink(missing_ok=True)
+
+                push_command = next(
+                    command for command in commands if command.startswith("git push ")
+                )
+                push_tokens = shlex.split(push_command)
+
+                # A concurrent main update must reject the tag as well. Without
+                # --atomic, Git can publish the tag even when main is rejected.
+                remote_commit = run(
+                    "git", "commit-tree", "HEAD^{tree}", "-p", "HEAD",
+                    "-m", f"Concurrent change before {project} release",
+                ).stdout.strip()
+                run("git", "push", "origin", f"{remote_commit}:refs/heads/main")
+                with self.subTest(project=project, push="rejected main"):
+                    rejected = run(*push_tokens, check=False)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertEqual(
+                        run("git", "-C", str(remote), "rev-parse", "main").stdout.strip(),
+                        remote_commit,
+                    )
+                    self.assertEqual(
+                        run(
+                            "git", "-C", str(remote), "show-ref", "--verify", "--quiet",
+                            f"refs/tags/{tag}", check=False,
+                        ).returncode,
+                        1,
+                    )
+
+                run("git", "merge", "--ff-only", remote_commit)
+                run("git", "commit", "--allow-empty", "-m", f"Complete {project} release")
+                with self.subTest(project=project, push="main and tag"):
+                    run(*push_tokens)
+                    self.assertEqual(
+                        run("git", "-C", str(remote), "rev-parse", "main").stdout,
+                        run("git", "rev-parse", "main").stdout,
+                    )
+                    run(
+                        "git", "-C", str(remote), "merge-base", "--is-ancestor",
+                        f"refs/tags/{tag}^{{commit}}", "main",
+                    )
 
 
 if __name__ == "__main__":

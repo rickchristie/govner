@@ -2,6 +2,7 @@
 Govner is a collection of Go development tools.
 
 # Critical Behavior
+- Keep ongoing work on branches; squash completed work to one commit, rebase onto `main`, then fast-forward and push `main` with its release tags.
 - **ALWAYS fully finish your tasks** when executing anything. Never stop to ask "would you like to continue?" or anything similar.
   You are given tasks, fully complete them, don't waste our time. Exception: Destructive actions with irreversible consequences.
 - **ALWAYS verify your work and assumptions**, don't just read the code, actually test what you're doing.

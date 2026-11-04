@@ -60,6 +60,12 @@ reviewed Cooper script.
 
 ## Release and Git boundaries
 
+Keep ongoing work on its branch. When the work is complete, squash it to one
+commit, rebase it onto `main`, and fast-forward `main` to that commit. Release
+previews require `main`. Their push command updates `main` and the release tag
+atomically, so a rejected branch update cannot leave a published tag outside
+the remote main history.
+
 The release generators are previews: they read the declared project version,
 existing tags, and Git history; write the multiline tag annotation to a
 private `mktemp` file under `/tmp`; then print shell-quoted commands. Keeping
@@ -160,7 +166,9 @@ manual/non-host script; the unit suite enforces that inventory. The
 release-generator test also creates an
 isolated Git fixture and validates every command actually printed by all three
 release scripts, including a changelog containing quotes and command-like
-text. Then update the hook and run:
+text. It rejects branch and detached previews, then uses a local bare remote
+to check that a rejected main update also rejects the release tag. Then update
+the hook and run:
 
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/govner-hook-pycache \
