@@ -3,6 +3,7 @@ package buildflow
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,7 +12,51 @@ import (
 
 	"github.com/rickchristie/govner/cooper/internal/config"
 	"github.com/rickchristie/govner/cooper/internal/docker"
+	"github.com/rickchristie/govner/cooper/internal/templates"
 )
+
+func TestPrepareCodexUpdateKeepsBuiltLanguageServers(t *testing.T) {
+	previousHost := config.HostVersionDetector
+	previousNPM := config.NPMPackageLatestResolver
+	t.Cleanup(func() {
+		config.HostVersionDetector = previousHost
+		config.NPMPackageLatestResolver = previousNPM
+	})
+	config.HostVersionDetector = func(name string) (string, error) {
+		if name == "node" {
+			return "22.12.0", nil
+		}
+		if name == "codex" {
+			return "0.2.0", nil
+		}
+		return "", fmt.Errorf("unexpected host tool %s", name)
+	}
+	config.NPMPackageLatestResolver = func(name string) (string, error) {
+		return "", fmt.Errorf("Codex update refreshed unrelated package %s", name)
+	}
+	cfg := config.DefaultConfig()
+	cfg.ProgrammingTools = []config.ToolConfig{{Name: "node", Enabled: true, Mode: config.ModeMirror, HostVersion: "22.12.0", ContainerVersion: "22.12.0"}}
+	cfg.AITools = []config.ToolConfig{{Name: "codex", Enabled: true, Mode: config.ModeMirror, HostVersion: "0.1.0", ContainerVersion: "0.1.0"}}
+	cfg.ImplicitTools = []config.ImplicitToolConfig{
+		{Name: "typescript-language-server", Kind: config.ImplicitToolKindLSP, ParentTool: "node", Binary: "typescript-language-server", ContainerVersion: "4.4.1"},
+		{Name: "typescript", Kind: config.ImplicitToolKindSupport, ParentTool: "node", Binary: "tsc", ContainerVersion: "5.8.3"},
+	}
+	before, err := templates.RenderBaseDockerfile(cfg, cfg.ImplicitTools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if _, err := Prepare(cfg, dir, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "base", "Dockerfile"))
+	if err != nil || string(after) != before {
+		t.Fatalf("Codex update changed the shared base: %v", err)
+	}
+	if cfg.AITools[0].HostVersion != "0.2.0" {
+		t.Fatal("Codex did not refresh from the live host")
+	}
+}
 
 func TestRunSavedRetainsInputFailure(t *testing.T) {
 	dir := t.TempDir()

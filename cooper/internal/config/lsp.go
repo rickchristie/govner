@@ -36,10 +36,13 @@ type DesiredVersionRefreshOptions struct {
 	AllowStaleFallback bool
 }
 
-// ImplicitToolResolveOptions controls whether implicit-tool resolution may fall
-// back to last-built versions when configure save-only is offline.
+// ImplicitToolResolveOptions controls reuse of previously built tools.
 type ImplicitToolResolveOptions struct {
+	// AllowStaleFallback permits built versions when configure save-only is offline.
 	AllowStaleFallback bool
+	// Normal builds keep working language servers when their runtime is the
+	// same. Otherwise an agent update can also rebuild the entire shared base.
+	ReuseBuiltVersions bool
 }
 
 // Test hooks for implicit-tool resolution. Higher-level tests override these so
@@ -407,9 +410,16 @@ func ResolveImplicitTools(cfg *Config) ([]ImplicitToolConfig, error) {
 	return tools, err
 }
 
-// ResolveImplicitToolsWithOptions resolves implicit tools and optionally allows
-// stale fallback to previously built implicit versions when the current desired
-// runtime still matches the built base state.
+// ResolveImplicitToolsForBuild keeps compatible built versions. Update uses
+// ResolveImplicitTools instead so an explicit update still refreshes them.
+func ResolveImplicitToolsForBuild(cfg *Config) ([]ImplicitToolConfig, error) {
+	tools, _, err := ResolveImplicitToolsWithOptions(cfg, ImplicitToolResolveOptions{ReuseBuiltVersions: true})
+	return tools, err
+}
+
+// ResolveImplicitToolsWithOptions can reuse built tools before resolution or
+// after an offline lookup fails. Both require the desired runtime to match the
+// built base state.
 func ResolveImplicitToolsWithOptions(cfg *Config, opts ImplicitToolResolveOptions) ([]ImplicitToolConfig, []string, error) {
 	if cfg == nil {
 		return nil, nil, fmt.Errorf("resolve implicit tools: nil config")
@@ -421,7 +431,7 @@ func ResolveImplicitToolsWithOptions(cfg *Config, opts ImplicitToolResolveOption
 	if goVersion, enabled, err := EffectiveProgrammingToolVersion(cfg, "go"); err != nil {
 		return nil, warnings, fmt.Errorf("resolve go implicit tools: %w", err)
 	} else if enabled {
-		version, warning, err := resolveImplicitVersionWithFallback(
+		version, warning, err := opts.resolveVersion(
 			cfg,
 			"gopls",
 			opts.AllowStaleFallback && goplsUsesLatestLookup(goVersion),
@@ -445,7 +455,7 @@ func ResolveImplicitToolsWithOptions(cfg *Config, opts ImplicitToolResolveOption
 	if nodeVersion, enabled, err := EffectiveProgrammingToolVersion(cfg, "node"); err != nil {
 		return nil, warnings, fmt.Errorf("resolve node implicit tools: %w", err)
 	} else if enabled {
-		tsLSVersion, warning, err := resolveImplicitVersionWithFallback(
+		tsLSVersion, warning, err := opts.resolveVersion(
 			cfg,
 			"typescript-language-server",
 			opts.AllowStaleFallback && tsLanguageServerUsesLatestLookup(nodeVersion),
@@ -457,7 +467,7 @@ func ResolveImplicitToolsWithOptions(cfg *Config, opts ImplicitToolResolveOption
 		if warning != "" {
 			warnings = append(warnings, warning)
 		}
-		typeScriptVersion, warning, err := resolveImplicitVersionWithFallback(
+		typeScriptVersion, warning, err := opts.resolveVersion(
 			cfg,
 			"typescript",
 			opts.AllowStaleFallback && typeScriptUsesLatestLookup(nodeVersion),
@@ -494,7 +504,7 @@ func ResolveImplicitToolsWithOptions(cfg *Config, opts ImplicitToolResolveOption
 		if err != nil {
 			return nil, warnings, fmt.Errorf("resolve python implicit tools: %w", err)
 		}
-		pyrightVersion, warning, err := resolveImplicitVersionWithFallback(
+		pyrightVersion, warning, err := opts.resolveVersion(
 			cfg,
 			"pyright",
 			opts.AllowStaleFallback && pyrightUsesLatestLookup(baseNodeVersion),
@@ -506,7 +516,7 @@ func ResolveImplicitToolsWithOptions(cfg *Config, opts ImplicitToolResolveOption
 		if warning != "" {
 			warnings = append(warnings, warning)
 		}
-		pylspVersion, warning, err := resolveImplicitVersionWithFallback(
+		pylspVersion, warning, err := opts.resolveVersion(
 			cfg,
 			"python-lsp-server",
 			opts.AllowStaleFallback && pythonLSPUsesLatestLookup(pythonVersion),
@@ -559,7 +569,7 @@ func ResolveImplicitToolsForParent(cfg *Config, parent string, opts ImplicitTool
 		if !enabled {
 			return nil, warnings, nil
 		}
-		version, warning, err := resolveImplicitVersionWithFallback(
+		version, warning, err := opts.resolveVersion(
 			cfg,
 			"gopls",
 			opts.AllowStaleFallback && goplsUsesLatestLookup(goVersion),
@@ -580,7 +590,7 @@ func ResolveImplicitToolsForParent(cfg *Config, parent string, opts ImplicitTool
 		if !enabled {
 			return nil, warnings, nil
 		}
-		tsLSVersion, warning, err := resolveImplicitVersionWithFallback(
+		tsLSVersion, warning, err := opts.resolveVersion(
 			cfg,
 			"typescript-language-server",
 			opts.AllowStaleFallback && tsLanguageServerUsesLatestLookup(nodeVersion),
@@ -592,7 +602,7 @@ func ResolveImplicitToolsForParent(cfg *Config, parent string, opts ImplicitTool
 		if warning != "" {
 			warnings = append(warnings, warning)
 		}
-		typeScriptVersion, warning, err := resolveImplicitVersionWithFallback(
+		typeScriptVersion, warning, err := opts.resolveVersion(
 			cfg,
 			"typescript",
 			opts.AllowStaleFallback && typeScriptUsesLatestLookup(nodeVersion),
@@ -620,7 +630,7 @@ func ResolveImplicitToolsForParent(cfg *Config, parent string, opts ImplicitTool
 		if err != nil {
 			return nil, warnings, fmt.Errorf("resolve python implicit tools: %w", err)
 		}
-		pyrightVersion, warning, err := resolveImplicitVersionWithFallback(
+		pyrightVersion, warning, err := opts.resolveVersion(
 			cfg,
 			"pyright",
 			opts.AllowStaleFallback && pyrightUsesLatestLookup(baseNodeVersion),
@@ -632,7 +642,7 @@ func ResolveImplicitToolsForParent(cfg *Config, parent string, opts ImplicitTool
 		if warning != "" {
 			warnings = append(warnings, warning)
 		}
-		pylspVersion, warning, err := resolveImplicitVersionWithFallback(
+		pylspVersion, warning, err := opts.resolveVersion(
 			cfg,
 			"python-lsp-server",
 			opts.AllowStaleFallback && pythonLSPUsesLatestLookup(pythonVersion),
@@ -1085,7 +1095,12 @@ func sortImplicitTools(tools []ImplicitToolConfig) {
 	})
 }
 
-func resolveImplicitVersionWithFallback(cfg *Config, toolName string, allowStaleFallback bool, strict func() (string, error)) (string, string, error) {
+func (opts ImplicitToolResolveOptions) resolveVersion(cfg *Config, toolName string, allowStaleFallback bool, strict func() (string, error)) (string, string, error) {
+	if opts.ReuseBuiltVersions {
+		if version, ok := staleImplicitFallbackVersion(cfg, toolName); ok {
+			return version, "", nil
+		}
+	}
 	version, err := strict()
 	if err == nil {
 		return version, "", nil
@@ -1097,7 +1112,7 @@ func resolveImplicitVersionWithFallback(cfg *Config, toolName string, allowStale
 	if !ok {
 		return "", "", err
 	}
-	warning := fmt.Sprintf("Warning: could not refresh implicit tool %s (%v). Using last-built version %s for template generation. Run 'cooper build' or 'cooper update' with network access to refresh.", toolName, err, fallbackVersion)
+	warning := fmt.Sprintf("Warning: could not refresh implicit tool %s (%v). Using last-built version %s for template generation. Run 'cooper update' with network access to refresh.", toolName, err, fallbackVersion)
 	return fallbackVersion, warning, nil
 }
 

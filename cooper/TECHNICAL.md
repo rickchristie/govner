@@ -366,6 +366,24 @@ live host detection before the workload can write shared state. Old images
 without labels require a rebuild. Custom images retain their own policy.
 Restart checks the recorded image before stopping the existing VM.
 
+Both Docker build entry points save input records in `.cooper-build-cache`
+beside the build context directories. Build, Update, and Save & Build compare
+these records before starting Docker build. Each record covers the rendered
+Dockerfile, complete context file contents and permissions, build arguments,
+local parent image IDs, and the explicit default platform. It excludes file
+times because template generation rewrites unchanged files. The parent IDs make
+a changed base invalidate its agent images. Save the resulting image ID only
+after a successful build and compare it before reuse. An image label alone is
+insufficient because a replacement image can inherit it. A failed build cannot
+update a record. Missing or invalid records, missing images, and replaced images
+require a build. Record write failures warn and let later calls use Docker.
+
+This is a conservative check for generated images. Extra context files can cause
+a build even when Docker ignores them. Symlinks and unsupported FROM forms fall
+back to Docker; custom images always use Docker. Registry parents that exist
+only in BuildKit's cache are tracked by their declared references. Use `--clean`
+to bypass reuse and refresh unversioned package installs.
+
 Build, Update, and Configure's Save & Build open `logs/build.log` before
 preparation. A per-config lock prevents concurrent builds from mixing output.
 The log streams directly
@@ -375,8 +393,13 @@ Keep at most two build log files. Log write errors are reported;
 a failed build includes its log path. No environment dump is added.
 
 Desired and built values in `config.json` include tool versions, implicit
-language servers, and the base Node runtime. Save Config can reuse built implicit
-versions only when the relevant desired runtime still matches. Update always
+language servers, and the base Node runtime. Build, Save Config, and Save & Build
+reuse each built implicit tool when its required runtime still matches. This
+prevents an agent-only update from also selecting new language servers and
+rebuilding the shared base. Missing records and changed runtimes still require
+resolution. The existing dependency checks include the base Node runtime for
+Pyright, even when Node is not selected as a programming tool. Update explicitly
+refreshes implicit tools. AI versions always come from the live host. Update always
 regenerates and reloads proxy configuration, even if no image rebuild is needed.
 Configure enables detected AI tools and shows host and built versions.
 

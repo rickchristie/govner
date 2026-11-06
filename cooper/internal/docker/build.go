@@ -85,9 +85,15 @@ func BuildImage(name, dockerfilePath, contextDir string, buildArgs map[string]st
 
 // BuildImageWithWriter retains command output for callers with a build log.
 func BuildImageWithWriter(name, dockerfilePath, contextDir string, buildArgs map[string]string, noCache bool, out io.Writer) error {
-	args, err := buildDockerArgs(name, dockerfilePath, contextDir, buildArgs, noCache)
+	emit := func(line string) {
+		fmt.Fprintln(out, line)
+	}
+	args, inputs, reused, err := prepareImageBuild(name, dockerfilePath, contextDir, buildArgs, noCache, emit)
 	if err != nil {
 		return err
+	}
+	if reused {
+		return nil
 	}
 
 	cmd := exec.Command("docker", args...)
@@ -97,6 +103,7 @@ func BuildImageWithWriter(name, dockerfilePath, contextDir string, buildArgs map
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("docker build %s failed: %w", name, err)
 	}
+	saveImageBuildRecord(name, contextDir, inputs, emit)
 	return nil
 }
 
@@ -111,9 +118,17 @@ func BuildImageWithOutput(name, dockerfilePath, contextDir string, buildArgs map
 	go func() {
 		defer close(errc)
 
-		args, buildErr := buildDockerArgs(name, dockerfilePath, contextDir, buildArgs, noCache)
+		emit := func(line string) {
+			lines <- line
+		}
+		args, inputs, reused, buildErr := prepareImageBuild(name, dockerfilePath, contextDir, buildArgs, noCache, emit)
 		if buildErr != nil {
 			errc <- buildErr
+			close(lines)
+			return
+		}
+		if reused {
+			errc <- nil
 			close(lines)
 			return
 		}
@@ -137,7 +152,6 @@ func BuildImageWithOutput(name, dockerfilePath, contextDir string, buildArgs map
 		// scanner limit would leave the pipe unread and could deadlock cmd.Wait.
 		readErrc := make(chan error, 1)
 		go func() {
-			defer close(lines)
 			defer pr.Close()
 			reader := bufio.NewReader(pr)
 			for {
@@ -163,6 +177,10 @@ func BuildImageWithOutput(name, dockerfilePath, contextDir string, buildArgs map
 		err := cmd.Wait()
 		pw.Close()
 		readErr := <-readErrc
+		if err == nil && readErr == nil {
+			saveImageBuildRecord(name, contextDir, inputs, emit)
+		}
+		close(lines)
 
 		if err != nil {
 			errc <- fmt.Errorf("docker build %s failed: %w", name, err)

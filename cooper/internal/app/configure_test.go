@@ -474,7 +474,7 @@ func TestConfigureApp_Save_ReturnsWarnings(t *testing.T) {
 	}
 }
 
-func TestConfigureApp_Save_ImplicitLatestFallsBackToBuiltImplicitVersion(t *testing.T) {
+func TestConfigureApp_SaveKeepsBuiltImplicitVersion(t *testing.T) {
 	stubConfigureTestResolvers(t)
 	prevGopls := config.GoplsLatestResolver
 	config.GoplsLatestResolver = func() (string, error) { return "", fmt.Errorf("offline") }
@@ -492,15 +492,19 @@ func TestConfigureApp_Save_ImplicitLatestFallsBackToBuiltImplicitVersion(t *test
 	if err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
-	if len(warnings) == 0 || !strings.Contains(strings.Join(warnings, "\n"), "could not refresh implicit tool gopls") {
-		t.Fatalf("expected implicit fallback warning, got %v", warnings)
+	if len(warnings) != 0 {
+		t.Fatalf("saved language server should not need a registry lookup: %v", warnings)
+	}
+	warnings, implicit, err := ca.SaveForBuildWithProgress(nil)
+	if err != nil || len(warnings) != 0 || len(implicit) != 1 || implicit[0].ContainerVersion != "v0.20.0" {
+		t.Fatalf("Save & Build did not retain the language server: %v, %v, %v", implicit, warnings, err)
 	}
 	baseDockerfile, err := os.ReadFile(filepath.Join(cooperDir, "base", "Dockerfile"))
 	if err != nil {
 		t.Fatalf("ReadFile(base Dockerfile): %v", err)
 	}
 	if !strings.Contains(string(baseDockerfile), "gopls@v0.20.0") {
-		t.Fatalf("expected stale implicit fallback version in Dockerfile, got:\n%s", string(baseDockerfile))
+		t.Fatalf("expected built language-server version in Dockerfile, got:\n%s", string(baseDockerfile))
 	}
 }
 

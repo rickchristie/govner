@@ -2,9 +2,48 @@ package config
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 )
+
+func TestBuildKeepsLanguageServerUntilRuntimeChangesOrUpdate(t *testing.T) {
+	previous := GoplsLatestResolver
+	t.Cleanup(func() { GoplsLatestResolver = previous })
+	lookups := 0
+	GoplsLatestResolver = func() (string, error) {
+		lookups++
+		return "v0.24.0", nil
+	}
+	cfg := &Config{
+		ProgrammingTools: []ToolConfig{{Name: "go", Enabled: true, Mode: ModePin, PinnedVersion: "1.26.0", ContainerVersion: "1.26.0"}},
+		ImplicitTools:    []ImplicitToolConfig{{Name: "gopls", Kind: ImplicitToolKindLSP, ParentTool: "go", Binary: "gopls", ContainerVersion: "v0.23.0"}},
+	}
+	tools, err := ResolveImplicitToolsForBuild(cfg)
+	if err != nil || len(tools) != 1 || tools[0].ContainerVersion != "v0.23.0" || lookups != 0 {
+		t.Fatalf("normal build refreshed a working language server: %v, %v, lookups=%d", tools, err, lookups)
+	}
+	tools, err = ResolveImplicitTools(cfg)
+	if err != nil || len(tools) != 1 || tools[0].ContainerVersion != "v0.24.0" || lookups != 1 {
+		t.Fatalf("explicit update did not refresh the language server: %v, %v, lookups=%d", tools, err, lookups)
+	}
+	cfg.ProgrammingTools[0].PinnedVersion = "1.26.1"
+	tools, err = ResolveImplicitToolsForBuild(cfg)
+	if err != nil || len(tools) != 1 || tools[0].ContainerVersion != "v0.24.0" || lookups != 2 {
+		t.Fatalf("changed runtime reused the old language server: %v, %v, lookups=%d", tools, err, lookups)
+	}
+	cfg.ProgrammingTools[0].PinnedVersion = "1.26.0"
+	cfg.ImplicitTools = nil
+	tools, err = ResolveImplicitToolsForBuild(cfg)
+	if err != nil || len(tools) != 1 || tools[0].ContainerVersion != "v0.24.0" || lookups != 3 {
+		t.Fatalf("missing record did not resolve a language server: %v, %v, lookups=%d", tools, err, lookups)
+	}
+	cfg.ProgrammingTools[0].Enabled = false
+	tools, err = ResolveImplicitToolsForBuild(cfg)
+	if err != nil || len(tools) != 0 || lookups != 3 {
+		t.Fatalf("disabled runtime retained a language server: %v, %v, lookups=%d", tools, err, lookups)
+	}
+}
 
 func TestEffectiveProgrammingToolVersion(t *testing.T) {
 	t.Run("mirror", func(t *testing.T) {
@@ -561,6 +600,12 @@ func TestResolveImplicitToolsWithOptions_UsesBuiltFallbackWhenLatestLookupsFail(
 	}
 	if versions["gopls"] != "v0.20.0" || versions["typescript-language-server"] != "4.4.1" || versions["pyright"] != "1.1.408" || versions["python-lsp-server"] != "1.14.0" {
 		t.Fatalf("unexpected fallback versions: %+v", versions)
+	}
+
+	// Normal builds reuse all five saved tools before any registry request.
+	reused, warnings, err := ResolveImplicitToolsWithOptions(cfg, ImplicitToolResolveOptions{ReuseBuiltVersions: true})
+	if err != nil || len(warnings) != 0 || !reflect.DeepEqual(reused, tools) {
+		t.Fatalf("build did not reuse compatible tools: %v, %v, %v", reused, warnings, err)
 	}
 }
 

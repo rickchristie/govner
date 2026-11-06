@@ -65,6 +65,17 @@ Cooper checks the image version before CLI and VM launch. After a host tool
 update, run `cooper build` before starting another session. An unavailable host
 version fails; Cooper does not use a different release.
 
+Build reuses each unchanged built-in image. If only Codex changes, it rebuilds
+the Codex image. A change to a shared base, programming tool, language server,
+host OS account, or certificate can also require its dependent images to build.
+Normal builds and Save & Build retain existing language-server versions when
+their programming runtimes are unchanged. Use `cooper update` to refresh these
+tools. A new or changed programming runtime resolves its compatible tools.
+The log prints `Reusing ... image` when Docker build is skipped. After an upgrade
+from a Cooper version without build input records, the first build records them;
+Docker can still reuse its existing layers. Use `cooper build --clean` to force
+all build steps, including package downloads. Custom images use Docker's cache.
+
 Go, Node.js, and Python are optional programming tools. They retain Mirror,
 Latest, and Pin version choices. Their standard language
 servers are included: `gopls`, TypeScript with `typescript-language-server`,

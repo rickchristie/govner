@@ -191,7 +191,7 @@ func Prepare(cfg *config.Config, cooperDir string, opts Options) (*Prepared, err
 		report(0, err)
 		return nil, err
 	}
-	implicit, err := config.ResolveImplicitTools(cfg)
+	implicit, err := config.ResolveImplicitToolsForBuild(cfg)
 	if err != nil {
 		err = fmt.Errorf("resolve implicit tools: %w", err)
 		report(0, err)

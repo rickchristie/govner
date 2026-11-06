@@ -851,12 +851,26 @@ DOCKERFILE
 
     # Run cooper build again with the custom image present.
     info "${mode}: Running cooper build again with custom image..."
-    if ./cooper build --config "$test_dir" --prefix "$prefix" 2>&1; then
+    local repeat_log="${test_dir}/repeat-build.log"
+    if ./cooper build --config "$test_dir" --prefix "$prefix" 2>&1 | tee "$repeat_log"; then
         pass "${mode}: cooper build with custom image succeeded"
     else
         fail "${mode}: cooper build with custom image failed"
         return
     fi
+
+    # Regenerated files have new times. Their content must still let Cooper
+    # skip unchanged built-in images when only a custom image is added.
+    local reused_image
+    for reused_image in "$proxy_image" "$base_image" "$desktop_image" \
+        "$claude_image" "$copilot_image" "$codex_image" "$opencode_image" \
+        "$grok_image" "$antigravity_image" "$chatgpt_image"; do
+        if grep -Fq "Reusing ${reused_image} image (build inputs unchanged)." "$repeat_log"; then
+            pass "${mode}: unchanged image ${reused_image} reused without Docker build"
+        else
+            fail "${mode}: unchanged image ${reused_image} was rebuilt"
+        fi
+    done
 
     # Assert custom image exists.
     if docker image inspect "$custom_image" &>/dev/null; then

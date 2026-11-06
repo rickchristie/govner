@@ -241,7 +241,10 @@ func (a *ConfigureApp) saveWithProgress(allowStaleFallback bool, onProgress func
 		report(2, err)
 		return nil, nil, err
 	}
-	implicit, implicitWarnings, err := config.ResolveImplicitToolsWithOptions(a.cfg, config.ImplicitToolResolveOptions{AllowStaleFallback: allowStaleFallback})
+	implicit, implicitWarnings, err := config.ResolveImplicitToolsWithOptions(a.cfg, config.ImplicitToolResolveOptions{
+		AllowStaleFallback: allowStaleFallback,
+		ReuseBuiltVersions: true,
+	})
 	if err != nil {
 		report(2, err)
 		return warnings, nil, err
